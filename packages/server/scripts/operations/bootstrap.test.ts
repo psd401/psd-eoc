@@ -102,6 +102,17 @@ describe('bootstrap configuration', () => {
     });
   });
 
+  test('accepts explicit empty initial-group parameters as omitted', () => {
+    expect(() =>
+      readBootstrapConfig({
+        ...validConfigEnvironment(),
+        PSD_EOC_INITIAL_ACCESS_GROUP_ID: '',
+        PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: '   ',
+        PSD_EOC_INITIAL_ACCESS_GROUP_NAME: '',
+      }),
+    ).not.toThrow();
+  });
+
   test('defaults to migrations only and accepts nothing but the two modes', () => {
     expect(
       readBootstrapConfig({

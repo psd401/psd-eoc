@@ -72,6 +72,9 @@ jobs:
       - name: Verify required configuration exists
         shell: bash
         env:
+          INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
+          INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
+          INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
           REQUIRED_SECRETS: >-
             ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
             ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
@@ -79,6 +82,7 @@ jobs:
             /psd-eoc/bootstrap/approved-identity
         run: |
           set -euo pipefail
+          bun scripts/deploy-initial-access-group.ts
           missing=0
 
           echo "Repository variables:"
@@ -197,6 +201,9 @@ jobs:
         working-directory: infra
         shell: bash
         env:
+          INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
+          INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
+          INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
           OPERATIONS_ALARM_EMAIL: ${{ secrets.OPERATIONS_ALARM_EMAIL }}
           OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.OPERATIONS_ALARM_SMS_NUMBER }}
@@ -227,6 +234,9 @@ jobs:
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
+            --parameters "$STACK_NAME:InitialAccessGroupId=$INITIAL_ACCESS_GROUP_ID" \
+            --parameters "$STACK_NAME:InitialAccessGroupEmail=$INITIAL_ACCESS_GROUP_EMAIL" \
+            --parameters "$STACK_NAME:InitialAccessGroupName=$INITIAL_ACCESS_GROUP_NAME" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:OperationsTeamAlarmEmail=$OPERATIONS_ALARM_EMAIL" \
             --parameters "$STACK_NAME:OperationsTeamAlarmSmsNumber=$OPERATIONS_ALARM_SMS_NUMBER" \
@@ -256,6 +266,7 @@ jobs:
           task_definition=$(jq -er ".\"$STACK_NAME\".BootstrapTaskDefinitionArn" "$outputs")
           subnets=$(jq -er ".\"$STACK_NAME\".BootstrapPrivateSubnetIds" "$outputs")
           security_group=$(jq -er ".\"$STACK_NAME\".BootstrapSecurityGroupId" "$outputs")
+          log_group=$(jq -er ".\"$STACK_NAME\".BootstrapLogGroupName" "$outputs")
 
           task_arn=$(aws ecs run-task \
             --cluster "$cluster" \
@@ -278,6 +289,62 @@ jobs:
             --cluster "$cluster" --tasks "$task_arn" \
             --query 'tasks[0].[stopCode,containers[0].exitCode]' --output text)
 
+          if [[ "$exit_code" != "0" ]]; then
+            {
+              echo ""
+              echo "| Migrations | |"
+              echo "|---|---|"
+              echo "| Task | \`${task_arn##*/}\` |"
+              echo "| Stop code | \`$stop_code\` |"
+              echo "| Exit code | \`$exit_code\` |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Bootstrap exited $exit_code ($stop_code). Log stream native-bootstrap/native-bootstrap/${task_arn##*/}. The application was not updated." >&2
+            exit 1
+          fi
+
+          # The task emits one bounded JSON summary after both idempotence
+          # passes. Read only this task's stream and surface the first-access
+          # outcome without copying the configured email into Actions output.
+          log_stream="native-bootstrap/native-bootstrap/${task_arn##*/}"
+          bootstrap_summary=''
+          for attempt in {1..10}; do
+            messages=$(aws logs get-log-events \
+              --log-group-name "$log_group" \
+              --log-stream-name "$log_stream" \
+              --query 'events[].message' \
+              --output json 2>/dev/null) || messages='[]'
+            bootstrap_summary=$(jq -rc --arg source_sha "$GITHUB_SHA" \
+              '.[] | fromjson? | select(.sourceSha == $source_sha and has("accessBootstrap"))' \
+              <<< "$messages" | tail -n 1)
+            [[ -n "$bootstrap_summary" ]] && break
+            sleep 3
+          done
+
+          if [[ -z "$bootstrap_summary" ]]; then
+            echo "::error::The bootstrap completed without its bounded summary. The application was not updated." >&2
+            exit 1
+          fi
+          if ! jq -e '
+            .mode == "migrate" and
+            .database.transport == "native-postgres" and
+            .database.migrationsApplied == true and
+            .database.tlsVerified == true and
+            .idempotence == {runs: 2, equivalent: true}
+          ' <<< "$bootstrap_summary" > /dev/null; then
+            echo "::error::The bootstrap summary failed validation. The application was not updated." >&2
+            exit 1
+          fi
+          access_outcome=$(jq -er '.accessBootstrap' <<< "$bootstrap_summary")
+          case "$access_outcome" in
+            created) access_summary='created on this deploy' ;;
+            already-configured) access_summary='already existed; no access history changed' ;;
+            not-configured) access_summary='intentionally omitted' ;;
+            *)
+              echo "::error::The bootstrap reported an invalid initial-access outcome. The application was not updated." >&2
+              exit 1
+              ;;
+          esac
+
           {
             echo ""
             echo "| Migrations | |"
@@ -285,12 +352,9 @@ jobs:
             echo "| Task | \`${task_arn##*/}\` |"
             echo "| Stop code | \`$stop_code\` |"
             echo "| Exit code | \`$exit_code\` |"
+            echo "| Initial access group | $access_summary |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [[ "$exit_code" != "0" ]]; then
-            echo "::error::Bootstrap exited $exit_code ($stop_code). Log stream native-bootstrap/native-bootstrap/${task_arn##*/}. The application was not updated." >&2
-            exit 1
-          fi
           echo "Migrations applied."
 
       # Phase 3 cuts the application over, now that the schema is current.
@@ -298,6 +362,9 @@ jobs:
         working-directory: infra
         shell: bash
         env:
+          INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
+          INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
+          INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
           OPERATIONS_ALARM_EMAIL: ${{ secrets.OPERATIONS_ALARM_EMAIL }}
           OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.OPERATIONS_ALARM_SMS_NUMBER }}
@@ -318,6 +385,9 @@ jobs:
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
+            --parameters "$STACK_NAME:InitialAccessGroupId=$INITIAL_ACCESS_GROUP_ID" \
+            --parameters "$STACK_NAME:InitialAccessGroupEmail=$INITIAL_ACCESS_GROUP_EMAIL" \
+            --parameters "$STACK_NAME:InitialAccessGroupName=$INITIAL_ACCESS_GROUP_NAME" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:OperationsTeamAlarmEmail=$OPERATIONS_ALARM_EMAIL" \
             --parameters "$STACK_NAME:OperationsTeamAlarmSmsNumber=$OPERATIONS_ALARM_SMS_NUMBER" \

@@ -121,6 +121,11 @@ export function readInitialAccessGroupConfiguration(
       `${GROUP_NAME_ENV} must be at most 160 characters.`,
     );
   }
+  if (displayName !== undefined && /[\0\r\n]/u.test(displayName)) {
+    throw new InitialAccessGroupConfigurationError(
+      `${GROUP_NAME_ENV} must be a single-line display name.`,
+    );
+  }
   return Object.freeze({
     googleGroupId: normalisedGroupId,
     email: email.toLowerCase(),
@@ -167,14 +172,12 @@ export async function bootstrapAccessConfiguration(
   //
   // Migration 0029 removed that blanket DELETE ban, so the premise is gone: a
   // bad row can now simply be deleted and re-seeded. And keying off "none
-  // active" is dangerous in a way the original is not. The initial-group
-  // CfnParameters are sticky — the deploy workflow never passes them, so
-  // CloudFormation carries the values an operator supplied once forward on
-  // every later deploy indefinitely. A district that deactivates its access
-  // groups on purpose, say while investigating a compromise, would then have a
-  // routine deploy silently recreate an active administrator-granting group
-  // pointed at whatever that stale parameter still names. Automation must not
-  // be able to reopen sign-in that a human closed.
+  // active" is dangerous in a way the original is not. The supported workflow
+  // now passes explicit empty parameter values when configuration is omitted,
+  // but this database guard remains the authoritative protection: a district
+  // that deactivates its access groups on purpose, say while investigating a
+  // compromise, must not have a routine deploy reopen sign-in regardless of
+  // the configuration it receives.
   const existing = await database
     .select({ id: groupSources.id })
     .from(groupSources)
@@ -234,6 +237,6 @@ export function describeBootstrapOutcome(
     case 'already-configured':
       return `Access groups already configured; ${String(outcome.activeGroupCount)} active. The initial-group configuration was ignored.`;
     case 'created':
-      return `Created the initial access group for ${outcome.email}, granting administrator. Members can sign in after the next membership sync.`;
+      return 'Created the configured initial access group, granting administrator. Members can sign in after the next membership sync.';
   }
 }
