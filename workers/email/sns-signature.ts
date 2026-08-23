@@ -6,6 +6,11 @@ import {
 
 import { TimestampSchema, UuidSchema } from '@psd-eoc/contracts';
 
+import {
+  awsPartitionSupportsRegion,
+  type SupportedAwsPartition,
+} from './aws-arn';
+
 const TOPIC_ARN_PATTERN =
   /^arn:(aws|aws-cn|aws-us-gov):sns:([a-z]{2}(?:-gov)?-[a-z]+-\d):([0-9]{12}):([A-Za-z0-9_-]{1,256})$/u;
 const CERTIFICATE_PATH_PATTERN =
@@ -68,7 +73,7 @@ export interface SnsSignatureVerificationOptions {
 
 export interface SnsTopicArn {
   readonly accountId: string;
-  readonly partition: 'aws' | 'aws-cn' | 'aws-us-gov';
+  readonly partition: SupportedAwsPartition;
   readonly region: string;
   readonly topicName: string;
 }
@@ -99,9 +104,7 @@ export function parseSnsTopicArn(expectedTopicArn: string): SnsTopicArn {
   const accountId = match?.[3];
   const topicName = match?.[4];
   if (
-    (partition !== 'aws' &&
-      partition !== 'aws-cn' &&
-      partition !== 'aws-us-gov') ||
+    !awsPartitionSupportsRegion(partition, region) ||
     region === undefined ||
     accountId === undefined ||
     topicName === undefined

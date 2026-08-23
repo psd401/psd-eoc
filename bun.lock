@@ -20,6 +20,7 @@
       "dependencies": {
         "@aws-sdk/client-sesv2": "3.883.0",
         "@aws-sdk/client-sts": "3.883.0",
+        "@psd-eoc/contracts": "workspace:*",
         "aws-cdk-lib": "2.263.0",
         "constructs": "10.8.1",
       },

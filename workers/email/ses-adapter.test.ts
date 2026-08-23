@@ -583,6 +583,15 @@ describe('SES v2 live adapter', () => {
           fromEmailAddress: 'notifications@example.invalid\nforged',
         }),
     ).toThrow(SesV2EmailAdapterError);
+    for (const fromEmailAddress of [
+      '.notifications@example.invalid',
+      'notifications.@example.invalid',
+      'notifications..ops@example.invalid',
+    ]) {
+      expect(
+        () => new SesV2EmailAdapter({ ...base, fromEmailAddress }),
+      ).toThrow(SesV2EmailAdapterError);
+    }
     expect(
       () =>
         new SesV2EmailAdapter({

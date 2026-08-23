@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import {
   JournalEntryReadProjectionSchema,
+  OrganizationNameSchema,
   type AttemptDeliveryTruthState,
   type JournalEntryReadProjection,
   type MediaContentType,
@@ -1043,11 +1044,9 @@ export async function renderEventSummaryPdf(
   organizationName: string,
 ): Promise<Uint8Array> {
   const prepared = prepareSnapshot(snapshot);
-  assertString(organizationName, 'organizationName', 320);
-  if (
-    organizationName.length > 160 ||
-    /[\p{Cc}\p{Cs}]/u.test(organizationName)
-  ) {
+  const parsedOrganizationName =
+    OrganizationNameSchema.safeParse(organizationName);
+  if (!parsedOrganizationName.success) {
     throw invalid(
       'organizationName is not printable or exceeds its safe length.',
     );
@@ -1060,7 +1059,7 @@ export async function renderEventSummaryPdf(
     displayTitle: true,
     fontLayoutCache: false,
     info: {
-      Author: organizationName,
+      Author: parsedOrganizationName.data,
       CreationDate: generatedAt,
       Creator: 'PSD EOC',
       ModDate: generatedAt,

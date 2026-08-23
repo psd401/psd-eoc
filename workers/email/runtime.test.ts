@@ -173,30 +173,50 @@ function enabledMode(
 
 describe('SES email live-pilot runtime', () => {
   test('requires a validated deployment queue and sender', () => {
-    expect(
-      () =>
-        new SesEmailRuntime({
-          ...RUNTIME_CONFIGURATION,
-          queueArn: 'not-an-arn',
-          authorizeQueueInvocation: () => true,
-        }),
-    ).toThrow(SesEmailRuntimeError);
-    expect(
-      () =>
-        new SesEmailRuntime({
-          ...RUNTIME_CONFIGURATION,
-          fromEmailAddress: 'not-an-email',
-          authorizeQueueInvocation: () => true,
-        }),
-    ).toThrow(SesEmailRuntimeError);
-    expect(
-      () =>
-        new SesEmailRuntime({
-          authorizeQueueInvocation: () => true,
-          fromEmailAddress: 'alerts@second-district.invalid',
-          queueArn: 'arn:aws:sqs:eu-west-1:111111111111:second-district-email',
-        }),
-    ).not.toThrow();
+    for (const queueArn of [
+      'not-an-arn',
+      'arn:aws-cn:sqs:us-east-1:111111111111:second-district-email',
+      'arn:aws-us-gov:sqs:eu-west-1:111111111111:second-district-email',
+      'arn:aws:sqs:cn-north-1:111111111111:second-district-email',
+    ]) {
+      expect(
+        () =>
+          new SesEmailRuntime({
+            ...RUNTIME_CONFIGURATION,
+            queueArn,
+            authorizeQueueInvocation: () => true,
+          }),
+      ).toThrow(SesEmailRuntimeError);
+    }
+    for (const fromEmailAddress of [
+      'not-an-email',
+      '.alerts@example.invalid',
+      'alerts.@example.invalid',
+      'alerts..ops@example.invalid',
+    ]) {
+      expect(
+        () =>
+          new SesEmailRuntime({
+            ...RUNTIME_CONFIGURATION,
+            fromEmailAddress,
+            authorizeQueueInvocation: () => true,
+          }),
+      ).toThrow(SesEmailRuntimeError);
+    }
+    for (const queueArn of [
+      'arn:aws:sqs:eu-west-1:111111111111:second-district-email',
+      'arn:aws-cn:sqs:cn-north-1:111111111111:second-district-email',
+      'arn:aws-us-gov:sqs:us-gov-west-1:111111111111:second-district-email',
+    ]) {
+      expect(
+        () =>
+          new SesEmailRuntime({
+            authorizeQueueInvocation: () => true,
+            fromEmailAddress: 'alerts@second-district.invalid',
+            queueArn,
+          }),
+      ).not.toThrow();
+    }
   });
 
   test('omitted mode stays dark after authenticating the exact queue invocation', async () => {

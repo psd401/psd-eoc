@@ -47,10 +47,14 @@ export default tseslint.config(
   },
   {
     files: ['packages/server/**/*.{js,mjs,ts,tsx}'],
+    settings: {
+      next: {
+        rootDir: ['packages/server', '.'],
+      },
+    },
     rules: {
       ...nextPlugin.configs.recommended.rules,
       ...nextPlugin.configs['core-web-vitals'].rules,
-      '@next/next/no-html-link-for-pages': ['error', 'packages/server/app'],
     },
   },
   {

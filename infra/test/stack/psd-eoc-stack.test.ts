@@ -24,6 +24,7 @@ import {
   SES_IDENTITY_DOMAIN,
   SES_VERIFICATION_REFERENCE,
   STACK_NAME,
+  readDeploymentIdentity,
 } from '../../src/stack/config';
 import { PsdEocStack } from '../../src/stack/psd-eoc-stack';
 import {
@@ -168,6 +169,35 @@ const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
 describe('deployment boundary', () => {
+  it('uses the canonical organization identity contract at synth time', () => {
+    const identityFor = (organizationName: string) =>
+      readDeploymentIdentity({
+        tryGetContext(key) {
+          return {
+            'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+            'psdEoc:hostedDomain': 'example.invalid',
+            'psdEoc:iosBundleId': 'invalid.example.eoc',
+            'psdEoc:organizationName': organizationName,
+          }[key];
+        },
+      });
+
+    expect(identityFor('😀'.repeat(80)).organizationName).toBe('😀'.repeat(80));
+    expect(identityFor('界'.repeat(106)).organizationName).toBe(
+      '界'.repeat(106),
+    );
+    for (const invalid of [
+      '😀'.repeat(81),
+      '界'.repeat(107),
+      'District\u202eName',
+      'District\u2028Name',
+    ]) {
+      expect(() => identityFor(invalid)).toThrow(
+        'CDK context psdEoc:organizationName',
+      );
+    }
+  });
+
   it('labels the immutable server image as the staff-minimized live pilot', async () => {
     const dockerfile = await Bun.file(
       new URL(

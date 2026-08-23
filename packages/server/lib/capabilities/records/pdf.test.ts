@@ -393,12 +393,20 @@ describe('event summary PDF renderer', () => {
   });
 
   test('rejects unsafe organization metadata before rendering', async () => {
-    await expect(
-      renderEventSummaryPdfWithOrganization(
-        snapshot(),
-        'Example District\nInjected metadata',
-      ),
-    ).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT' });
+    for (const invalidOrganizationName of [
+      'Example District\nInjected metadata',
+      'Example District\u202eSpoofed metadata',
+      'Example District\u2028Injected metadata',
+      '😀'.repeat(81),
+      '界'.repeat(107),
+    ]) {
+      await expect(
+        renderEventSummaryPdfWithOrganization(
+          snapshot(),
+          invalidOrganizationName,
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT' });
+    }
   });
 
   testWithPoppler(

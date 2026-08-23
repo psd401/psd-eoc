@@ -1,3 +1,5 @@
+import { OrganizationNameSchema } from '@psd-eoc/contracts';
+
 /**
  * The values that differ between one district's deployment and another's.
  *
@@ -60,17 +62,15 @@ const ORIGIN_PATTERN = /^https:\/\/[^\s/?#]+$/u;
 export function organizationName(
   environment: DeploymentEnvironment = process.env,
 ): string {
-  const name = required(environment, 'PSD_EOC_ORGANIZATION_NAME');
-  if (
-    name.length > 160 ||
-    Buffer.byteLength(name, 'utf8') > 320 ||
-    /[\p{Cc}\p{Cs}]/u.test(name)
-  ) {
+  const result = OrganizationNameSchema.safeParse(
+    environment.PSD_EOC_ORGANIZATION_NAME,
+  );
+  if (!result.success) {
     throw new DeploymentConfigurationError(
       'PSD_EOC_ORGANIZATION_NAME must be a printable name of at most 160 characters.',
     );
   }
-  return name;
+  return result.data;
 }
 
 /**
