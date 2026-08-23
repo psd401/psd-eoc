@@ -153,6 +153,7 @@ const app = new App({
     'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
     'psdEoc:hostedDomain': 'example.invalid',
     'psdEoc:iosBundleId': 'invalid.example.eoc',
+    'psdEoc:organizationName': 'Example School District',
   },
 });
 const stack = new PsdEocStack(app, STACK_NAME, {
@@ -198,6 +199,7 @@ describe('deployment boundary', () => {
               'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
+              'psdEoc:organizationName': 'Example School District',
             },
           }),
           'WrongAccount',
@@ -214,6 +216,7 @@ describe('deployment boundary', () => {
               'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
+              'psdEoc:organizationName': 'Example School District',
             },
           }),
           'WrongRegion',
@@ -784,6 +787,7 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
+        'PSD_EOC_ORGANIZATION_NAME',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',
@@ -804,6 +808,9 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toEqual({
       Ref: 'RuntimeDatabaseIdleTimeoutSeconds',
     });
+    expect(variables.get('PSD_EOC_ORGANIZATION_NAME')).toBe(
+      'Example School District',
+    );
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
     expect(variables.get('PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('OperationsAlarmTopic'),
