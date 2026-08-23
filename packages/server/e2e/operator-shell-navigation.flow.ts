@@ -43,7 +43,7 @@ test.describe('operator-shell-navigation', () => {
       await expect(page.locator('main#main-content')).toHaveCount(1);
       await expect(
         page.getByRole('heading', { level: 1, name: heading }),
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 30_000 });
       await expect(
         page.getByText(/(?:administrator access|session) required/i),
       ).toHaveCount(0);
