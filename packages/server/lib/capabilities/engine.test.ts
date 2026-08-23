@@ -14,6 +14,7 @@ import { verifySecurityAuditEntries } from '../audit/verification';
 import {
   CapabilityEngineError,
   executeCapability,
+  preflightCapabilityInvocation,
   requireCapabilityAuthorization,
   resolveHumanCapabilityInvocation,
   type CapabilityAuditEvent,
@@ -668,6 +669,26 @@ async function captureEngineError(
 }
 
 describe('capability engine', () => {
+  test('rejects a mutation capability without its static mutation envelope during preflight', () => {
+    let thrown: unknown;
+    try {
+      preflightCapabilityInvocation(
+        'join-event',
+        { eventId: IDS.event },
+        humanQueryInvocation(uuid(99), DISTRICT_SCOPE),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(CapabilityEngineError);
+    expect(thrown).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      reasonCode: 'MUTATION_METADATA_INVALID',
+      status: 400,
+    });
+  });
+
   test('derives a trusted human invocation from issue #7 session facts', () => {
     const authenticated = {
       actor: HUMAN_ACTOR,

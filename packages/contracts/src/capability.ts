@@ -1328,6 +1328,7 @@ export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'preview-event-type-rendering': 'none',
   'get-notification-status': 'none',
   'get-integration-health': 'none',
+  'get-admin-readiness': 'none',
   'query-security-audit': 'none',
   'verify-security-audit-chain': 'none',
   'run-delivery-report': 'none',

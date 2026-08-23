@@ -487,6 +487,38 @@ function parseServerCapabilityInput<Id extends RegisteredCapabilityId>(
   }
 }
 
+/**
+ * Performs the side-effect-free validation shared by canonical execution and
+ * dependency preflights that must run before opening a transaction.
+ */
+export function preflightCapabilityInvocation<
+  Id extends RegisteredCapabilityId,
+>(
+  capabilityId: Id,
+  untrustedInput: unknown,
+  untrustedInvocation: TrustedCapabilityInvocation,
+): CapabilityInput<Id> {
+  const invocation = validateTrustedInvocation(untrustedInvocation);
+  const input = parseServerCapabilityInput(capabilityId, untrustedInput);
+  assertInvocationAllowed(capabilityId, invocation);
+  const definition = defineCapability(capabilityId);
+  if (definition.operation === 'mutation') {
+    assertStaticMutationEnvelope(
+      capabilityId as RegisteredMutationCapabilityId,
+      input,
+      invocation,
+    );
+  } else if (invocation.mutation !== null) {
+    throw new CapabilityEngineError(
+      'VALIDATION_ERROR',
+      'MUTATION_METADATA_INVALID',
+      'Query capabilities cannot carry mutation metadata.',
+      400,
+    );
+  }
+  return input;
+}
+
 function validateConfirmation(
   record: HumanConfirmationRecord,
   invocation: TrustedCapabilityInvocation,
@@ -782,7 +814,11 @@ export async function executeCapability<
   };
 
   try {
-    const input = parseServerCapabilityInput(registration.id, untrustedInput);
+    const input = preflightCapabilityInvocation(
+      registration.id,
+      untrustedInput,
+      invocation,
+    );
     return await store.transaction(async (transaction) => {
       const transactionContext: CapabilityHandlerContext<Transaction> = {
         invocation,

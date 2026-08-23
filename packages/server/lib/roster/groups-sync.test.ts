@@ -19,6 +19,7 @@ import {
   createSyncRosterHandler,
   diffRosterGroupCounts,
   readGoogleCloudIdentityRosterConfiguration,
+  rosterSourceConfigurationRevisionDigest,
   RosterSyncError,
   syncRoster,
   type CompleteRosterSyncPersistenceRequest,
@@ -117,6 +118,7 @@ function syntheticSource(
     grantedRole: null,
     displayName: `Synthetic ${fixtureKey}`,
     active: true,
+    membersCapturedAt: null,
     fixtureKey,
     createdAt: HISTORICAL_TIME,
   });
@@ -201,6 +203,7 @@ function staffLoadedConfiguration(): LoadedRosterSourceConfiguration {
     grantedRole: null,
     displayName: 'North Staff',
     active: true,
+    membersCapturedAt: null,
     googleGroupId: 'north-staff-group',
     email: 'north-staff@example.invalid',
     createdAt: HISTORICAL_TIME,
@@ -636,6 +639,27 @@ async function expectSyncError(
 }
 
 describe('complete fail-closed roster synchronization', () => {
+  test('keeps membership-read liveness out of the configuration revision', () => {
+    const loaded = loadedConfiguration();
+    const first = rosterSourceConfigurationRevisionDigest(
+      loaded.configuration,
+      loaded.sources,
+    );
+    const afterMembershipRead = loaded.sources.map((source) =>
+      GroupSourceSchema.parse({
+        ...source,
+        membersCapturedAt: SYNC_TIME,
+      }),
+    );
+
+    expect(
+      rosterSourceConfigurationRevisionDigest(
+        loaded.configuration,
+        afterMembershipRead,
+      ),
+    ).toBe(first);
+  });
+
   test('calculates a stable PII-free count diff against the last complete baseline', () => {
     const diff = diffRosterGroupCounts(
       [

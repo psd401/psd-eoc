@@ -178,6 +178,10 @@ import {
   SyncRosterInputSchema,
 } from './roster';
 import {
+  AdminReadinessSchema,
+  GetAdminReadinessInputSchema,
+} from './readiness';
+import {
   AgentApiKeyIssuanceSchema,
   AgentApiKeyPageSchema,
   AgentApiKeyRevocationSchema,
@@ -1394,6 +1398,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: GetIntegrationHealthInputSchema,
     outputSchema: IntegrationHealthSchema,
   }),
+  'get-admin-readiness': canonicalCapability({
+    id: 'get-admin-readiness',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: GetAdminReadinessInputSchema,
+    outputSchema: AdminReadinessSchema,
+  }),
   'list-my-devices': canonicalCapability({
     id: 'list-my-devices',
     operation: 'query',
@@ -1631,6 +1642,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'run-delivery-report': humanAgentInvocationPolicy,
   'list-delivery-test-reports': humanAgentInvocationPolicy,
   'get-integration-health': humanAgentScheduledInvocationPolicy,
+  'get-admin-readiness': humanWebAdministrationInvocationPolicy,
   'list-my-devices': humanInteractiveInvocationPolicy,
   'list-facilities': humanAgentInvocationPolicy,
   'get-facility': humanAgentInvocationPolicy,
