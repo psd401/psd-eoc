@@ -208,6 +208,14 @@ describe('agent administration presentation', () => {
       new URL('./layout.tsx', import.meta.url),
       'utf8',
     );
+    const operatorShellSource = readFileSync(
+      new URL('../../nav/operator-shell.tsx', import.meta.url),
+      'utf8',
+    );
+    const operatorShellStyles = readFileSync(
+      new URL('../../nav/primary-nav.css', import.meta.url),
+      'utf8',
+    );
     const styles = readFileSync(
       new URL('./styles.css', import.meta.url),
       'utf8',
@@ -217,10 +225,11 @@ describe('agent administration presentation', () => {
     expect(componentSource).not.toContain('onKeyDown=');
     expect(componentSource).toContain('credentialAlertRef.current?.focus()');
     expect(componentSource).toContain('[issuance.key.id]');
-    expect(layoutSource).toContain('href="#main-content"');
+    expect(layoutSource).toContain('<OperatorShell>{children}</OperatorShell>');
+    expect(operatorShellSource).toContain('href="#main-content"');
     expect(styles).toContain('.credential-alert:focus');
     expect(styles).toContain(':focus-visible');
-    expect(styles).toContain('.skip-link:focus');
+    expect(operatorShellStyles).toContain('.skip-link:focus');
     expect(styles).toContain('@media (forced-colors: active)');
   });
 });

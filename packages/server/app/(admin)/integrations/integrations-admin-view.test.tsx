@@ -133,7 +133,7 @@ describe('integrations admin view', () => {
     );
     expect(markup).not.toContain('TEST — SYNTHETIC RECIPIENTS ONLY');
     expect(markup).not.toContain('class="test-boundary"');
-    expect(markup).toContain('aria-label="Administration"');
+    expect(markup).not.toContain('<nav');
   });
 
   test('shows every truth label, channel state, and safe health evidence as text', () => {

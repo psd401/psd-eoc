@@ -1,7 +1,6 @@
 import type { GroupSourcePage, UserPage } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
-import { AdminNavigation } from '../facilities/admin-nav';
 import type { AccessAdminCursorState } from './access-page-state';
 
 /** A non-admin view carries no configuration data that could be rendered. */
@@ -357,7 +356,6 @@ export function AccessAdminView({
 
   return (
     <main id="main-content" tabIndex={-1}>
-      <AdminNavigation />
       <header>
         <p>Administration</p>
         <h1>Access groups and the roles they grant</h1>

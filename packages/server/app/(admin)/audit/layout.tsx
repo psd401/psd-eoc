@@ -1,24 +1,19 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { PrimaryNav } from '../../nav/primary-nav';
+import { OperatorShell } from '../../nav/operator-shell';
 
 export const metadata: Metadata = {
-  title: 'Security audit log | PSD EOC',
-  description: 'Review minimized, tamper-evident PSD EOC security events.',
+  title: 'Security audit log | Emergency operations',
+  description: 'Review minimized, tamper-evident security events.',
 };
 
 export default function AuditRootLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
-      <body>
-        <a className="skip-link" href="#main-content">
-          Skip to main content
-        </a>
-        <PrimaryNav />
-        {children}
-        <style>{`
+    <OperatorShell>
+      {children}
+      <style>{`
           :root {
             color-scheme: light;
             font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -63,7 +58,6 @@ export default function AuditRootLayout({
           .skip-link { position: absolute; left: .75rem; top: -5rem; z-index: 10; background: #fff; color: #0f172a; padding: .75rem; }
           .skip-link:focus { top: .75rem; }
         `}</style>
-      </body>
-    </html>
+    </OperatorShell>
   );
 }

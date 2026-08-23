@@ -14,6 +14,7 @@ import {
   PrivatePhotoLoadCoordinator,
   eventRoomPollDelay,
   locationPayloadFromDraft,
+  webLifecycleCommandBody,
 } from './event-room';
 
 const IDS = {
@@ -244,6 +245,21 @@ function render(
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('builds web lifecycle requests without typed acknowledgement fields', () => {
+    expect(
+      webLifecycleCommandBody({
+        operation: 'all-clear',
+        lifecyclePreviewId: IDS.activationPreview,
+      }),
+    ).toEqual({
+      operation: 'all-clear',
+      lifecyclePreviewId: IDS.activationPreview,
+    });
+    expect(webLifecycleCommandBody({ operation: 'close' })).toEqual({
+      operation: 'close',
+    });
+  });
+
   test('keeps private-photo dimensions aspect-neutral', async () => {
     const styles = await Bun.file(
       new URL('./styles.css', import.meta.url),
@@ -573,8 +589,14 @@ describe('event room server-rendered safety and history state', () => {
 
     expect(active).toContain('Review all-clear');
     expect(active).not.toContain('Review event close');
+    expect(active.indexOf('Review all-clear')).toBeLessThan(
+      active.indexOf('Post an update'),
+    );
     expect(allClearHtml).toContain('Review event close');
     expect(allClearHtml).not.toContain('Review all-clear');
+    expect(allClearHtml.indexOf('Review event close')).toBeLessThan(
+      allClearHtml.indexOf('Post an update'),
+    );
     expect(closedHtml).toContain('14 minutes');
     expect(closedHtml).toContain(
       'The event is closed. Its complete journal remains retained.',

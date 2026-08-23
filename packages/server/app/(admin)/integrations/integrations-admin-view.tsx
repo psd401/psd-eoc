@@ -7,7 +7,6 @@ import type {
 } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
-import { AdminNavigation } from '../facilities/admin-nav';
 import { SMS_INTEGRATION_ID } from './capabilities';
 
 export interface IntegrationsAdminViewProps {
@@ -290,7 +289,6 @@ export function IntegrationsAdminView({
       id="main-content"
       tabIndex={-1}
     >
-      <AdminNavigation />
       <h1 id="integrations-admin-heading">Integrations administration</h1>
       {statusMessage === null ? null : (
         <p className="notice status-message" role="status">

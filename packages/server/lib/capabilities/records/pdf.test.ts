@@ -8,6 +8,7 @@ import {
   EVENT_SUMMARY_PDF_MAX_JOURNAL_ENTRIES,
   EVENT_SUMMARY_PDF_MAX_SNAPSHOT_BYTES,
   renderEventSummaryPdf as renderEventSummaryPdfWithOrganization,
+  resolveBundledFontFilePath,
   type EventSummaryDeliveryChannelSnapshot,
   type EventSummaryEventSnapshot,
   type EventSummarySnapshot,
@@ -274,6 +275,37 @@ async function extractText(bytes: Uint8Array): Promise<string> {
 const testWithPoppler = Bun.which('pdftotext') === null ? test.skip : test;
 
 describe('event summary PDF renderer', () => {
+  test('resolves emitted fonts from the Next server root, not a nested route', () => {
+    expect(
+      resolveBundledFontFilePath(
+        '/workspace/packages/server/.next/server/app/(app)/records',
+        '/_next/static/media/NotoSans-Regular.60ef0f25.ttf',
+        (candidate) =>
+          candidate ===
+          '/workspace/packages/server/.next/server/static/media/NotoSans-Regular.60ef0f25.ttf',
+      ),
+    ).toBe(
+      '/workspace/packages/server/.next/server/static/media/NotoSans-Regular.60ef0f25.ttf',
+    );
+    expect(() =>
+      resolveBundledFontFilePath(
+        '/workspace/packages/server/.next/server/app',
+        '/_next/static/media/../secret',
+      ),
+    ).toThrow('font path is invalid');
+    expect(
+      resolveBundledFontFilePath(
+        '/workspace/packages/server/.next/server/chunks',
+        '/_next/static/media/NotoSans-Regular.60ef0f25.ttf',
+        (candidate) =>
+          candidate ===
+          '/workspace/packages/server/.next/server/chunks/static/media/NotoSans-Regular.60ef0f25.ttf',
+      ),
+    ).toBe(
+      '/workspace/packages/server/.next/server/chunks/static/media/NotoSans-Regular.60ef0f25.ttf',
+    );
+  });
+
   test('creates deterministic PDF 1.7 bytes with an embedded Noto Sans font', async () => {
     const first = await renderEventSummaryPdf(snapshot());
     const second = await renderEventSummaryPdf(snapshot());

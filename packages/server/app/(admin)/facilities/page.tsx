@@ -4,9 +4,9 @@ import { redirect } from 'next/navigation';
 import {
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 import { AdminCapabilityError } from './admin-core';
 import { executeFacilitiesAdminProjection } from './capabilities';
 import {
@@ -35,10 +35,7 @@ export default async function FacilitiesPage({
   }
   let authenticated: AuthenticatedSession;
   try {
-    authenticated = await getDefaultSessionService().authenticate(
-      sessionToken,
-      'web',
-    );
+    authenticated = await authenticateWebSession(sessionToken);
   } catch {
     redirect('/login?reason=session-expired');
   }

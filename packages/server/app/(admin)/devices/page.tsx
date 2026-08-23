@@ -70,7 +70,7 @@ export default async function DevicesPage({
   const renderedAt = new Date().toISOString();
 
   return (
-    <main>
+    <main id="main-content" tabIndex={-1}>
       <h1>Device sessions</h1>
       <p>
         Revoke an individual session when a staff device is lost or should no
