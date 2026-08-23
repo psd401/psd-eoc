@@ -194,7 +194,7 @@ describe('facilities administration view', () => {
     expect(markup).toContain(
       '<main aria-labelledby="facilities-admin-heading" id="main-content" tabindex="-1">',
     );
-    expect(markup).toContain('<nav aria-label="Administration"');
+    expect(markup).not.toContain('<nav');
     expect(markup).toContain(
       '<h1 id="facilities-admin-heading">Facilities, neighborhoods, and audiences</h1>',
     );

@@ -1,7 +1,5 @@
 import type { AdminReadiness, AdminReadinessStatus } from '@psd-eoc/contracts';
 
-import { AdminNavigation } from '../facilities/admin-nav';
-
 function statusLabel(status: AdminReadinessStatus): string {
   switch (status) {
     case 'ready':
@@ -299,7 +297,6 @@ export function AdminReadinessView({
       id="main-content"
       tabIndex={-1}
     >
-      <AdminNavigation />
       <ReadinessHeader readiness={readiness} />
       <div className="admin-grid readiness-grid">
         <AccessReadiness readiness={readiness} />
