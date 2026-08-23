@@ -20,7 +20,6 @@ import {
   deliveryTestBatch,
 } from '../shared/test-fixtures';
 import {
-  SES_EMAIL_QUEUE_ARN,
   SesEmailRuntime,
   SesEmailRuntimeError,
   type SesEmailRuntimeMode,
@@ -30,6 +29,13 @@ import {
   type DurableSesSendLedger,
   type SesV2SendEmailInput,
 } from './ses-adapter';
+
+const SES_EMAIL_QUEUE_ARN =
+  'arn:aws:sqs:us-east-1:000000000000:example-eoc-email';
+const RUNTIME_CONFIGURATION = Object.freeze({
+  fromEmailAddress: 'eoc-alerts@example.invalid',
+  queueArn: SES_EMAIL_QUEUE_ARN,
+});
 
 const INVOCATION = Object.freeze({
   requestId: '20000000-0000-4000-8000-000000000001',
@@ -166,9 +172,37 @@ function enabledMode(
 }
 
 describe('SES email live-pilot runtime', () => {
+  test('requires a validated deployment queue and sender', () => {
+    expect(
+      () =>
+        new SesEmailRuntime({
+          ...RUNTIME_CONFIGURATION,
+          queueArn: 'not-an-arn',
+          authorizeQueueInvocation: () => true,
+        }),
+    ).toThrow(SesEmailRuntimeError);
+    expect(
+      () =>
+        new SesEmailRuntime({
+          ...RUNTIME_CONFIGURATION,
+          fromEmailAddress: 'not-an-email',
+          authorizeQueueInvocation: () => true,
+        }),
+    ).toThrow(SesEmailRuntimeError);
+    expect(
+      () =>
+        new SesEmailRuntime({
+          authorizeQueueInvocation: () => true,
+          fromEmailAddress: 'alerts@second-district.invalid',
+          queueArn: 'arn:aws:sqs:eu-west-1:111111111111:second-district-email',
+        }),
+    ).not.toThrow();
+  });
+
   test('omitted mode stays dark after authenticating the exact queue invocation', async () => {
     let invocationChecks = 0;
     const runtime = new SesEmailRuntime({
+      ...RUNTIME_CONFIGURATION,
       authorizeQueueInvocation: () => {
         invocationChecks += 1;
         return true;
@@ -194,6 +228,7 @@ describe('SES email live-pilot runtime', () => {
 
   test('rejects an unverified queue invocation before reporting dark state', async () => {
     const runtime = new SesEmailRuntime({
+      ...RUNTIME_CONFIGURATION,
       authorizeQueueInvocation: () => false,
     });
 
@@ -209,6 +244,7 @@ describe('SES email live-pilot runtime', () => {
   test('rejects a neighboring queue before calling the injected authorizer', async () => {
     let invocationChecks = 0;
     const runtime = new SesEmailRuntime({
+      ...RUNTIME_CONFIGURATION,
       authorizeQueueInvocation: () => {
         invocationChecks += 1;
         return true;
@@ -218,7 +254,8 @@ describe('SES email live-pilot runtime', () => {
     await expect(
       runtime.processQueueAttempt(emailWorkItem(), {
         ...INVOCATION,
-        sourceArn: 'arn:aws:sqs:us-west-2:338414773271:psd-eoc-email-neighbor',
+        sourceArn:
+          'arn:aws:sqs:us-east-1:000000000000:example-eoc-email-neighbor',
       }),
     ).rejects.toEqual(
       expect.objectContaining({
@@ -235,6 +272,7 @@ describe('SES email live-pilot runtime', () => {
     expect(
       () =>
         new SesEmailRuntime({
+          ...RUNTIME_CONFIGURATION,
           authorizeQueueInvocation: () => true,
           mode: {
             ...valid,
@@ -248,6 +286,7 @@ describe('SES email live-pilot runtime', () => {
     const providerInputs: SesV2SendEmailInput[] = [];
     const composed = enabledMode(providerInputs, () => false);
     const runtime = new SesEmailRuntime({
+      ...RUNTIME_CONFIGURATION,
       authorizeQueueInvocation: () => true,
       mode: composed.mode,
     });
@@ -268,6 +307,7 @@ describe('SES email live-pilot runtime', () => {
     const providerInputs: SesV2SendEmailInput[] = [];
     const composed = enabledMode(providerInputs, () => true);
     const runtime = new SesEmailRuntime({
+      ...RUNTIME_CONFIGURATION,
       authorizeQueueInvocation: () => true,
       mode: composed.mode,
     });

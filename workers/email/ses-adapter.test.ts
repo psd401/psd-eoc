@@ -12,7 +12,6 @@ import { ProviderDispatchError } from '../shared/retry';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_CORRELATION_TAG_NAMES,
-  SES_FROM_EMAIL_ADDRESS,
   SES_V2_PROVIDER,
   SesV2EmailAdapter,
   SesV2EmailAdapterError,
@@ -24,6 +23,8 @@ import {
   type SesV2Client,
   type SesV2SendEmailInput,
 } from './ses-adapter';
+
+const SES_FROM_EMAIL_ADDRESS = 'eoc-alerts@example.invalid';
 
 const IDS = Object.freeze({
   actor: '10000000-0000-4000-8000-000000000001',
@@ -572,16 +573,23 @@ describe('SES v2 live adapter', () => {
       () =>
         new SesV2EmailAdapter({
           ...base,
-          fromEmailAddress: 'notifications@example.invalid',
+          fromEmailAddress: 'not-an-email',
         }),
     ).toThrow(SesV2EmailAdapterError);
     expect(
       () =>
         new SesV2EmailAdapter({
           ...base,
-          fromEmailAddress: 'other-sender@psd401.net',
+          fromEmailAddress: 'notifications@example.invalid\nforged',
         }),
     ).toThrow(SesV2EmailAdapterError);
+    expect(
+      () =>
+        new SesV2EmailAdapter({
+          ...base,
+          fromEmailAddress: 'notifications@second-district.invalid',
+        }),
+    ).not.toThrow();
   });
 
   test('direct invocation rejects mocked work before ledger or provider I/O', async () => {

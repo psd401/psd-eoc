@@ -19,11 +19,11 @@ import {
   buildEmailMessageContent,
   type EmailMessageContent,
 } from './email-message';
+import { SES_CONFIGURATION_SET_NAME } from './ses-events';
 
 export const SES_EMAIL_INTEGRATION_ID = 'ses-email' as const;
 export const SES_V2_PROVIDER = 'aws-ses-v2' as const;
-export const SES_CONFIGURATION_SET_NAME = 'psd-eoc-transactional' as const;
-export const SES_FROM_EMAIL_ADDRESS = 'eoc-alerts@psd401.net' as const;
+export { SES_CONFIGURATION_SET_NAME };
 
 export const SES_CORRELATION_TAG_NAMES = Object.freeze({
   attemptId: 'psd-eoc-attempt-id',
@@ -133,8 +133,25 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function validFromEmailAddress(value: string): boolean {
-  return value === SES_FROM_EMAIL_ADDRESS;
+const EMAIL_LOCAL_PART_PATTERN = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/u;
+const EMAIL_DOMAIN_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/iu;
+
+export function validSesFromEmailAddress(value: string): boolean {
+  if (
+    typeof value !== 'string' ||
+    value.length > 320 ||
+    value.trim() !== value ||
+    /[\p{Cc}\p{Cs}]/u.test(value)
+  ) {
+    return false;
+  }
+  const separator = value.lastIndexOf('@');
+  return (
+    separator > 0 &&
+    EMAIL_LOCAL_PART_PATTERN.test(value.slice(0, separator)) &&
+    EMAIL_DOMAIN_PATTERN.test(value.slice(separator + 1))
+  );
 }
 
 function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
@@ -155,7 +172,7 @@ function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
     typeof options.sendLedger.claim !== 'function' ||
     typeof options.sendLedger.complete !== 'function' ||
     typeof options.sendLedger.release !== 'function' ||
-    !validFromEmailAddress(options.fromEmailAddress)
+    !validSesFromEmailAddress(options.fromEmailAddress)
   ) {
     throw new SesV2EmailAdapterError('INVALID_CONFIGURATION');
   }

@@ -11,9 +11,9 @@ import {
   type SnsSignatureVersion,
 } from './sns-signature';
 
-const TOPIC_ARN = 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events';
+const TOPIC_ARN = 'arn:aws:sns:us-east-1:000000000000:psd-eoc-email-events';
 const CERTIFICATE_URL =
-  'https://sns.us-west-2.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem';
+  'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem';
 
 // Synthetic, test-only certificate material. It authenticates no service and
 // expires in 2036; keeping it inline makes signature tests network-free.
@@ -114,7 +114,7 @@ function signedEnvelope(
     Signature: '',
     SigningCertURL: CERTIFICATE_URL,
     UnsubscribeURL:
-      'https://sns.us-west-2.amazonaws.com/?Action=Unsubscribe&synthetic=1',
+      'https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&synthetic=1',
     ...overrides,
   };
   const signature = sign(
@@ -202,11 +202,11 @@ describe('SNS Notification signature verification', () => {
       { ...valid, TopicArn: `${TOPIC_ARN}-other` },
       {
         ...valid,
-        TopicArn: 'arn:aws:sns:us-east-1:338414773271:psd-eoc-email-events',
+        TopicArn: 'arn:aws:sns:eu-west-1:000000000000:psd-eoc-email-events',
       },
       {
         ...valid,
-        TopicArn: 'arn:aws:sns:us-west-2:000000000000:psd-eoc-email-events',
+        TopicArn: 'arn:aws:sns:us-east-1:111111111111:psd-eoc-email-events',
       },
       { ...valid, Type: 'SubscriptionConfirmation' },
       { ...valid, unexpected: true },
@@ -217,17 +217,31 @@ describe('SNS Notification signature verification', () => {
         parseSnsEnvelope({ ...input, Signature: signature }, TOPIC_ARN),
       ).toThrow(SnsSignatureError);
     }
+
+    const otherTopic =
+      'arn:aws:sns:eu-central-1:111111111111:second-district-email-events';
+    expect(
+      parseSnsEnvelope(
+        {
+          ...valid,
+          TopicArn: otherTopic,
+          SigningCertURL:
+            'https://sns.eu-central-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+        },
+        otherTopic,
+      ).TopicArn,
+    ).toBe(otherTopic);
   });
 
   test('rejects non-AWS, cross-region, redirected, or decorated certificate URLs', () => {
     const valid = signedEnvelope('2');
     for (const SigningCertURL of [
-      'http://sns.us-west-2.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
-      'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
-      'https://sns.us-west-2.amazonaws.com.evil.invalid/SimpleNotificationService-00000000000000000000000000000000.pem',
-      'https://user@sns.us-west-2.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+      'http://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+      'https://sns.eu-west-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+      'https://sns.us-east-1.amazonaws.com.evil.invalid/SimpleNotificationService-00000000000000000000000000000000.pem',
+      'https://user@sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
       `${CERTIFICATE_URL}?redirect=https://evil.invalid`,
-      'https://sns.us-west-2.amazonaws.com/other.pem',
+      'https://sns.us-east-1.amazonaws.com/other.pem',
     ]) {
       expect(() =>
         parseSnsEnvelope({ ...valid, SigningCertURL }, TOPIC_ARN),

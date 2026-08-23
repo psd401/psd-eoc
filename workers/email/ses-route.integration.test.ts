@@ -54,7 +54,7 @@ const testDatabaseUrl =
 const describeWithDatabase =
   testDatabaseUrl === undefined ? describe.skip : describe;
 
-const TOPIC_ARN = 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events';
+const TOPIC_ARN = 'arn:aws:sns:us-east-1:000000000000:psd-eoc-email-events';
 const CONFIGURATION_SET = 'psd-eoc-transactional';
 const TEST_ROLLBACK = new Error('Issue 13 database test rollback.');
 const STALE_THRESHOLD_SECONDS = 7 * 24 * 60 * 60;
@@ -195,8 +195,8 @@ function bounceRequest(
     mail: {
       timestamp: occurredAt,
       messageId: `synthetic-ses-message-${messageId}`,
-      source: 'synthetic-sender@alerts.psd401.net',
-      sendingAccountId: '338414773271',
+      source: 'synthetic-sender@alerts.example.invalid',
+      sendingAccountId: '000000000000',
       destination: [fixture.email],
       tags: {
         'ses:configuration-set': [CONFIGURATION_SET],
@@ -224,7 +224,7 @@ function bounceRequest(
     SignatureVersion: '2',
     Signature: Buffer.from('synthetic-signature', 'utf8').toString('base64'),
     SigningCertURL:
-      'https://sns.us-west-2.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+      'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
   };
   return new Request('https://app.example.invalid/api/webhooks/ses', {
     method: 'POST',

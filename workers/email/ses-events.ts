@@ -12,8 +12,7 @@ import {
 } from '@psd-eoc/contracts';
 
 const SES_PROVIDER = 'aws-ses-v2';
-const SES_ACCOUNT_ID = '338414773271';
-const SES_CONFIGURATION_SET = 'psd-eoc-transactional';
+export const SES_CONFIGURATION_SET_NAME = 'psd-eoc-transactional' as const;
 const MAX_SES_EVENT_BYTES = 256 * 1024;
 
 const TAGS = Object.freeze({
@@ -36,6 +35,8 @@ export type SesEventType =
   | 'DeliveryDelay';
 
 export interface ParseSesEventOptions {
+  readonly expectedConfigurationSetName: string;
+  readonly expectedSendingAccountId: string;
   readonly snsMessageId: string;
 }
 
@@ -190,7 +191,9 @@ export function parseSesEvent(
     typeof messageString !== 'string' ||
     messageString.length === 0 ||
     Buffer.byteLength(messageString, 'utf8') > MAX_SES_EVENT_BYTES ||
-    !UuidSchema.safeParse(options.snsMessageId).success
+    !UuidSchema.safeParse(options.snsMessageId).success ||
+    !/^[0-9]{12}$/u.test(options.expectedSendingAccountId) ||
+    options.expectedConfigurationSetName !== SES_CONFIGURATION_SET_NAME
   ) {
     throw new SesEventError('INVALID_MESSAGE');
   }
@@ -210,7 +213,7 @@ export function parseSesEvent(
   const mailMessageId = boundedString(mail.messageId);
   if (
     mailMessageId === undefined ||
-    mail.sendingAccountId !== SES_ACCOUNT_ID ||
+    mail.sendingAccountId !== options.expectedSendingAccountId ||
     !TimestampSchema.safeParse(mail.timestamp).success ||
     !isRecord(mail.tags)
   ) {
@@ -229,7 +232,7 @@ export function parseSesEvent(
     singleTag(mail.tags, TAGS.eventKind),
   );
   if (
-    configurationSet !== SES_CONFIGURATION_SET ||
+    configurationSet !== options.expectedConfigurationSetName ||
     !UuidSchema.safeParse(attemptId).success ||
     !UuidSchema.safeParse(endpointId).success ||
     !UuidSchema.safeParse(rosterSnapshotId).success ||
