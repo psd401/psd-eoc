@@ -98,6 +98,35 @@ describe('initial access group deployment preflight', () => {
     }
   });
 
+  test('refuses malformed complete values without reflecting them', () => {
+    for (const environment of [
+      {
+        INITIAL_ACCESS_GROUP_ID: 'groups/invalid nested id',
+        INITIAL_ACCESS_GROUP_EMAIL: 'administrators@example.invalid',
+      },
+      {
+        INITIAL_ACCESS_GROUP_ID: 'groups/synthetic-administrators',
+        INITIAL_ACCESS_GROUP_EMAIL: 'not-an-email',
+      },
+      {
+        INITIAL_ACCESS_GROUP_ID: 'groups/synthetic-administrators',
+        INITIAL_ACCESS_GROUP_EMAIL: 'administrators@example.invalid',
+        INITIAL_ACCESS_GROUP_NAME: 'Administrators\nspoofed output',
+      },
+    ]) {
+      let message = '';
+      try {
+        validateInitialAccessGroupConfiguration(environment);
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toContain('INITIAL_ACCESS_GROUP_');
+      for (const value of Object.values(environment)) {
+        expect(message).not.toContain(value);
+      }
+    }
+  });
+
   test('CLI exits before deployment and never prints configured values', () => {
     const email = 'private-cli@example.invalid';
     const successful = Bun.spawnSync({
@@ -180,5 +209,23 @@ describe('supported deployment workflow', () => {
     expect(workflow).toContain('aws logs get-log-events');
     expect(workflow).toContain("jq -er '.accessBootstrap'");
     expect(workflow).toContain('Initial access group');
+  });
+
+  test('uses current bootstrap code when deploying an older application image', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    expect(workflow).toContain('--image-ids "imageTag=$GITHUB_SHA"');
+    expect(
+      workflow.match(/\$STACK_NAME:BootstrapImageDigest=\$BOOTSTRAP_DIGEST/gu),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /\$STACK_NAME:BootstrapSourceSha=\$BOOTSTRAP_SOURCE_SHA/gu,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:SourceSha=$TARGET_SOURCE_SHA"',
+    );
+    expect(workflow).toContain('source_sha=$source_sha');
+    expect(workflow).toContain('bootstrap_digest=$bootstrap_digest');
   });
 });
