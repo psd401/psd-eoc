@@ -134,6 +134,7 @@ jobs:
           avdmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
           emulator_bin="$ANDROID_HOME/emulator/emulator"
           platform_tools_dir="$ANDROID_HOME/platform-tools"
+          avd_home="$RUNNER_TEMP/android-avd"
           test -x "$sdkmanager_bin"
           test -x "$avdmanager_bin"
           "$sdkmanager_bin" --install platform-tools "$system_image"
@@ -141,11 +142,14 @@ jobs:
           test -x "$platform_tools_dir/adb"
           printf '%s\n' "$platform_tools_dir" >> "$GITHUB_PATH"
           export PATH="$platform_tools_dir:$PATH"
+          mkdir -p "$avd_home"
+          export ANDROID_AVD_HOME="$avd_home"
           printf 'no\n' | "$avdmanager_bin" create avd \
             --force \
             --name issue32_api35 \
             --package "$system_image" \
             --device pixel_6
+          test -f "$avd_home/issue32_api35.ini"
           sudo chmod 0666 /dev/kvm
           "$emulator_bin" \
             -avd issue32_api35 \
