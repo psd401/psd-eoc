@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  AudienceConfigSchema,
   DispatchBatchSchema,
   RosterSnapshotSchema,
   type Actor,
@@ -74,14 +73,6 @@ const resolutionGroup = Object.freeze({
   facilityId: resolutionIds.facility,
 });
 
-const resolutionAudience = AudienceConfigSchema.parse({
-  id: resolutionIds.audience,
-  facilityId: resolutionIds.facility,
-  version: 1,
-  targets: [{ kind: 'building', facilityId: resolutionIds.facility }],
-  createdAt: now.toISOString(),
-});
-
 const resolutionRoster = RosterSnapshotSchema.parse({
   id: ids.roster,
   version: 1,
@@ -129,7 +120,6 @@ function resolutionBatch(endpointCount = 1) {
     },
     rosterSnapshotId: ids.roster,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: resolutionIds.audience, version: 1 },
     requestId: ids.request,
     authorization: {
       kind: 'synthetic-training',
@@ -166,8 +156,7 @@ function resolutionInput(endpointCount = 1) {
   return {
     batch: resolutionBatch(endpointCount),
     audience: {
-      audienceConfig: resolutionAudience,
-      neighborhoodVersions: [],
+      facilityId: resolutionIds.facility,
       rosterSnapshot: resolutionRoster,
     },
   };
@@ -263,8 +252,7 @@ function deliveryTestPushResolutionInput() {
     input: Object.freeze({
       batch,
       audience: Object.freeze({
-        audienceConfig: resolutionAudience,
-        neighborhoodVersions: Object.freeze([]),
+        facilityId: resolutionIds.facility,
         rosterSnapshot,
       }),
     }),

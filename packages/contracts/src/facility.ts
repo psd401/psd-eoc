@@ -1,7 +1,6 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema, paginatedSchema } from './api';
-import { OthersGroupSourceRefSchema } from './group';
 import {
   hasUniqueStrings,
   TimestampSchema,
@@ -45,30 +44,6 @@ export const NeighborhoodVersionRefSchema = z
 export type NeighborhoodVersionRef = z.infer<
   typeof NeighborhoodVersionRefSchema
 >;
-
-/**
- * Owns the stable identifier for one versioned facility audience
- * configuration. Events pin the configuration they resolve.
- */
-export const AudienceConfigIdSchema = UuidSchema;
-
-/** Audience configuration identifier inferred from its schema. */
-export type AudienceConfigId = z.infer<typeof AudienceConfigIdSchema>;
-
-/**
- * Owns the exact immutable audience configuration pinned by a notification
- * intent. Both ID and version are carried for reconstructable history.
- */
-export const AudienceConfigRefSchema = z
-  .object({
-    id: AudienceConfigIdSchema,
-    version: VersionSchema,
-  })
-  .strict()
-  .readonly();
-
-/** Exact audience configuration reference inferred from its schema. */
-export type AudienceConfigRef = z.infer<typeof AudienceConfigRefSchema>;
 
 /**
  * Owns the administrator-managed facility record. Deactivation preserves the
@@ -148,102 +123,6 @@ export const FacilityScopeSchema = z
 
 /** Server-resolved facility authorization boundary. */
 export type FacilityScope = z.infer<typeof FacilityScopeSchema>;
-
-/**
- * Owns the persisted audience-component discriminator used by versioned
- * audience policies and their normalized database rows.
- */
-export const AudienceTargetKindSchema = z.enum([
-  'building',
-  'neighborhood',
-  'others',
-]);
-
-/** Persisted audience-component kind inferred from its schema. */
-export type AudienceTargetKind = z.infer<typeof AudienceTargetKindSchema>;
-
-/**
- * Owns one audience component selected for an activation: the event's own
- * building, an administrator-defined neighborhood, or a configured others
- * group. Components are explicit rather than loose boolean switches.
- */
-export const AudienceTargetSchema = z
-  .discriminatedUnion('kind', [
-    z
-      .object({
-        kind: z.literal('building'),
-        facilityId: FacilityIdSchema,
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal('neighborhood'),
-        neighborhood: NeighborhoodVersionRefSchema,
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal('others'),
-        groupSourceRef: OthersGroupSourceRefSchema,
-      })
-      .strict(),
-  ])
-  .readonly();
-
-/** Explicit audience component inferred from its schema. */
-export type AudienceTarget = z.infer<typeof AudienceTargetSchema>;
-
-/**
- * Owns one immutable version of a facility's audience policy. Building
- * targets must name the owning facility; policy edits create a new version
- * that later events may pin without changing historical sends.
- */
-export const AudienceConfigSchema = z
-  .object({
-    id: AudienceConfigIdSchema,
-    facilityId: FacilityIdSchema,
-    version: VersionSchema,
-    targets: z.array(AudienceTargetSchema).min(1).readonly(),
-    createdAt: TimestampSchema,
-  })
-  .strict()
-  .superRefine((config, context) => {
-    const keys = config.targets.map((target) => {
-      switch (target.kind) {
-        case 'building':
-          return `building:${target.facilityId}`;
-        case 'neighborhood':
-          return `neighborhood:${target.neighborhood.id}`;
-        case 'others':
-          return `others:${target.groupSourceRef.id}`;
-      }
-    });
-
-    if (!hasUniqueStrings(keys)) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Audience targets must be unique.',
-        path: ['targets'],
-      });
-    }
-
-    config.targets.forEach((target, index) => {
-      if (
-        target.kind === 'building' &&
-        target.facilityId !== config.facilityId
-      ) {
-        context.addIssue({
-          code: 'custom',
-          message: 'A building target must match the owning facility.',
-          path: ['targets', index, 'facilityId'],
-        });
-      }
-    });
-  })
-  .readonly();
-
-/** Immutable facility audience policy inferred from its schema. */
-export type AudienceConfig = z.infer<typeof AudienceConfigSchema>;
 
 /** Owns bounded facility-list filters for operational and admin surfaces. */
 export const ListFacilitiesInputSchema = z
@@ -386,69 +265,4 @@ export const CreateNeighborhoodVersionInputSchema = z
 /** Neighborhood-version creation input inferred from its schema. */
 export type CreateNeighborhoodVersionInput = z.infer<
   typeof CreateNeighborhoodVersionInputSchema
->;
-
-/** Owns a read of the latest audience configuration for one facility. */
-export const GetAudienceConfigInputSchema = z
-  .object({
-    facilityId: FacilityIdSchema,
-  })
-  .strict()
-  .readonly();
-
-/** Latest audience-configuration read input inferred from its schema. */
-export type GetAudienceConfigInput = z.infer<
-  typeof GetAudienceConfigInputSchema
->;
-
-/** Owns a read of one exact immutable audience-configuration version. */
-export const GetAudienceConfigVersionInputSchema = z
-  .object({
-    audienceConfig: AudienceConfigRefSchema,
-  })
-  .strict()
-  .readonly();
-
-/** Exact audience-configuration read input inferred from its schema. */
-export type GetAudienceConfigVersionInput = z.infer<
-  typeof GetAudienceConfigVersionInputSchema
->;
-
-/**
- * Owns an append-only audience policy version request. Null identity creates
- * the first configuration; later writes retain the stable ID and append a
- * new version rather than altering an activated event's pinned policy.
- */
-export const CreateAudienceConfigVersionInputSchema = z
-  .object({
-    audienceConfigId: AudienceConfigIdSchema.nullable(),
-    facilityId: FacilityIdSchema,
-    targets: z.array(AudienceTargetSchema).min(1).max(500).readonly(),
-  })
-  .strict()
-  .superRefine((input, context) => {
-    const parsed = AudienceConfigSchema.safeParse({
-      id: input.audienceConfigId ?? '00000000-0000-4000-8000-000000000000',
-      facilityId: input.facilityId,
-      version: 1,
-      targets: input.targets,
-      createdAt: '2000-01-01T00:00:00.000Z',
-    });
-    if (!parsed.success) {
-      parsed.error.issues.forEach((issue) => {
-        if (issue.path[0] === 'targets') {
-          context.addIssue({
-            code: 'custom',
-            message: issue.message,
-            path: issue.path,
-          });
-        }
-      });
-    }
-  })
-  .readonly();
-
-/** Audience-policy version creation input inferred from its schema. */
-export type CreateAudienceConfigVersionInput = z.infer<
-  typeof CreateAudienceConfigVersionInputSchema
 >;

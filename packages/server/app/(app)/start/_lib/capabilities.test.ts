@@ -117,7 +117,6 @@ const PREVIEW = ActivationPreviewSchema.parse({
   },
   rosterSnapshotId: IDS.rosterSnapshot,
   rosterPopulation: 'synthetic',
-  audienceConfig: { id: IDS.audience, version: 1 },
   recipientCount: 2,
   channels: [
     {

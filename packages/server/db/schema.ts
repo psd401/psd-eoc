@@ -71,11 +71,6 @@ export const notificationChannelEnum = pgEnum('notification_channel', [
   'sms',
 ]);
 export const pushPlatformEnum = pgEnum('push_platform', ['ios', 'android']);
-export const audienceTargetKindEnum = pgEnum('audience_target_kind', [
-  'building',
-  'neighborhood',
-  'others',
-]);
 export const eventKindEnum = pgEnum('event_kind', [
   'incident',
   'drill',
@@ -386,97 +381,6 @@ export const groupSources = pgTable(
     check(
       'group_sources_fixture_key_format',
       sql`${table.fixtureKey} is null or ${table.fixtureKey} ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'`,
-    ),
-  ],
-);
-
-/** Immutable versions of a facility's audience policy. */
-export const audienceConfigurations = pgTable(
-  'audience_configurations',
-  {
-    id: uuid('id').notNull(),
-    facilityId: uuid('facility_id')
-      .notNull()
-      .references(() => facilities.id, { onDelete: 'restrict' }),
-    version: integer('version').notNull(),
-    createdAt: occurredAt('created_at').defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.id, table.version] }),
-    unique('audience_configurations_identity_facility_uq').on(
-      table.id,
-      table.version,
-      table.facilityId,
-    ),
-    check(
-      'audience_configurations_version_positive',
-      sql`${table.version} > 0`,
-    ),
-    index('audience_configurations_facility_idx').on(table.facilityId),
-  ],
-);
-
-/** Normalized, explicit target components for an audience policy version. */
-export const audienceTargets = pgTable(
-  'audience_targets',
-  {
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
-    ordinal: integer('ordinal').notNull(),
-    targetKind: audienceTargetKindEnum('target_kind').notNull(),
-    targetFacilityId: uuid('target_facility_id').references(
-      () => facilities.id,
-      { onDelete: 'restrict' },
-    ),
-    neighborhoodId: uuid('neighborhood_id'),
-    neighborhoodVersion: integer('neighborhood_version'),
-    groupSourceId: uuid('group_source_id').references(() => groupSources.id, {
-      onDelete: 'restrict',
-    }),
-  },
-  (table) => [
-    primaryKey({
-      columns: [
-        table.audienceConfigId,
-        table.audienceConfigVersion,
-        table.ordinal,
-      ],
-    }),
-    foreignKey({
-      columns: [table.audienceConfigId, table.audienceConfigVersion],
-      foreignColumns: [
-        audienceConfigurations.id,
-        audienceConfigurations.version,
-      ],
-      name: 'audience_targets_configuration_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.neighborhoodId, table.neighborhoodVersion],
-      foreignColumns: [neighborhoodVersions.id, neighborhoodVersions.version],
-      name: 'audience_targets_neighborhood_fk',
-    }).onDelete('restrict'),
-    check('audience_targets_ordinal_positive', sql`${table.ordinal} > 0`),
-    check(
-      'audience_targets_valid_variant',
-      sql`(
-        ${table.targetKind} = 'building'
-        and ${table.targetFacilityId} is not null
-        and ${table.neighborhoodId} is null
-        and ${table.neighborhoodVersion} is null
-        and ${table.groupSourceId} is null
-      ) or (
-        ${table.targetKind} = 'neighborhood'
-        and ${table.targetFacilityId} is null
-        and ${table.neighborhoodId} is not null
-        and ${table.neighborhoodVersion} is not null
-        and ${table.groupSourceId} is null
-      ) or (
-        ${table.targetKind} = 'others'
-        and ${table.targetFacilityId} is null
-        and ${table.neighborhoodId} is null
-        and ${table.neighborhoodVersion} is null
-        and ${table.groupSourceId} is not null
-      )`,
     ),
   ],
 );
@@ -2432,8 +2336,6 @@ export const activationPreviews = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     recipientCount: integer('recipient_count').notNull(),
     channels: jsonb('channels').notNull(),
     sendReadiness: varchar('send_readiness', { length: 16 }).notNull(),
@@ -2457,8 +2359,6 @@ export const activationPreviews = pgTable(
       table.eventTypeVersionId,
       table.rosterSnapshotId,
       table.rosterPopulation,
-      table.audienceConfigId,
-      table.audienceConfigVersion,
       table.consequenceDigest,
     ),
     unique('activation_previews_delivery_test_anchor_uq').on(
@@ -2477,14 +2377,6 @@ export const activationPreviews = pgTable(
       columns: [table.rosterSnapshotId, table.rosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'activation_previews_roster_population_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.audienceConfigId, table.audienceConfigVersion],
-      foreignColumns: [
-        audienceConfigurations.id,
-        audienceConfigurations.version,
-      ],
-      name: 'activation_previews_audience_fk',
     }).onDelete('restrict'),
     foreignKey({
       columns: [
@@ -2563,8 +2455,6 @@ export const preparedActivations = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     consequenceDigest: digest('consequence_digest').notNull(),
     preparedBy: jsonb('prepared_by').notNull(),
     preparedAt: occurredAt('prepared_at').defaultNow().notNull(),
@@ -2579,8 +2469,6 @@ export const preparedActivations = pgTable(
       table.eventTypeVersionId,
       table.rosterSnapshotId,
       table.rosterPopulation,
-      table.audienceConfigId,
-      table.audienceConfigVersion,
       table.consequenceDigest,
     ),
     foreignKey({
@@ -2592,8 +2480,6 @@ export const preparedActivations = pgTable(
         table.eventTypeVersionId,
         table.rosterSnapshotId,
         table.rosterPopulation,
-        table.audienceConfigId,
-        table.audienceConfigVersion,
         table.consequenceDigest,
       ],
       foreignColumns: [
@@ -2604,8 +2490,6 @@ export const preparedActivations = pgTable(
         activationPreviews.eventTypeVersionId,
         activationPreviews.rosterSnapshotId,
         activationPreviews.rosterPopulation,
-        activationPreviews.audienceConfigId,
-        activationPreviews.audienceConfigVersion,
         activationPreviews.consequenceDigest,
       ],
       name: 'prepared_activations_preview_truth_fk',
@@ -2780,8 +2664,6 @@ export const lifecycleConsequencePreviews = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     recipientCount: integer('recipient_count').notNull(),
     channels: jsonb('channels').notNull(),
     sendReadiness: varchar('send_readiness', { length: 16 }).notNull(),
@@ -2819,14 +2701,6 @@ export const lifecycleConsequencePreviews = pgTable(
       columns: [table.rosterSnapshotId, table.rosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'lifecycle_consequence_previews_roster_population_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.audienceConfigId, table.audienceConfigVersion],
-      foreignColumns: [
-        audienceConfigurations.id,
-        audienceConfigurations.version,
-      ],
-      name: 'lifecycle_consequence_previews_audience_fk',
     }).onDelete('restrict'),
     check(
       'lifecycle_consequence_previews_purpose',
@@ -3075,8 +2949,6 @@ export const preparedActivationConsumptions = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     consequenceDigest: digest('consequence_digest').notNull(),
     authorization: jsonb('authorization').notNull(),
     requestId: uuid('request_id').notNull(),
@@ -3094,8 +2966,6 @@ export const preparedActivationConsumptions = pgTable(
         table.eventTypeVersionId,
         table.rosterSnapshotId,
         table.rosterPopulation,
-        table.audienceConfigId,
-        table.audienceConfigVersion,
         table.consequenceDigest,
       ],
       foreignColumns: [
@@ -3106,8 +2976,6 @@ export const preparedActivationConsumptions = pgTable(
         preparedActivations.eventTypeVersionId,
         preparedActivations.rosterSnapshotId,
         preparedActivations.rosterPopulation,
-        preparedActivations.audienceConfigId,
-        preparedActivations.audienceConfigVersion,
         preparedActivations.consequenceDigest,
       ],
       name: 'prepared_activation_consumptions_preparation_truth_fk',
@@ -3378,8 +3246,6 @@ export const notificationIntents = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     createdBy: jsonb('created_by').notNull(),
     source: invocationSourceEnum('source').notNull(),
     requestId: uuid('request_id').notNull(),
@@ -3433,8 +3299,6 @@ export const notificationIntents = pgTable(
       table.eventTypeVersionId,
       table.rosterSnapshotId,
       table.rosterPopulation,
-      table.audienceConfigId,
-      table.audienceConfigVersion,
       table.requestId,
       table.authorization,
     ),
@@ -3466,14 +3330,6 @@ export const notificationIntents = pgTable(
       columns: [table.rosterSnapshotId, table.rosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'notification_intents_roster_population_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.audienceConfigId, table.audienceConfigVersion],
-      foreignColumns: [
-        audienceConfigurations.id,
-        audienceConfigurations.version,
-      ],
-      name: 'notification_intents_audience_fk',
     }).onDelete('restrict'),
     foreignKey({
       columns: [
@@ -3682,8 +3538,6 @@ export const outbox = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     requestId: uuid('request_id').notNull(),
     authorization: jsonb('authorization').notNull(),
     channels: jsonb('channels').notNull(),
@@ -3709,8 +3563,6 @@ export const outbox = pgTable(
         table.eventTypeVersionId,
         table.rosterSnapshotId,
         table.rosterPopulation,
-        table.audienceConfigId,
-        table.audienceConfigVersion,
         table.requestId,
         table.authorization,
       ],
@@ -3723,8 +3575,6 @@ export const outbox = pgTable(
         notificationIntents.eventTypeVersionId,
         notificationIntents.rosterSnapshotId,
         notificationIntents.rosterPopulation,
-        notificationIntents.audienceConfigId,
-        notificationIntents.audienceConfigVersion,
         notificationIntents.requestId,
         notificationIntents.authorization,
       ],
@@ -3740,8 +3590,6 @@ export const outbox = pgTable(
       table.eventTypeVersionId,
       table.rosterSnapshotId,
       table.rosterPopulation,
-      table.audienceConfigId,
-      table.audienceConfigVersion,
       table.requestId,
       table.authorization,
     ),
@@ -3769,14 +3617,6 @@ export const outbox = pgTable(
       columns: [table.rosterSnapshotId, table.rosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'outbox_roster_population_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.audienceConfigId, table.audienceConfigVersion],
-      foreignColumns: [
-        audienceConfigurations.id,
-        audienceConfigurations.version,
-      ],
-      name: 'outbox_audience_fk',
     }).onDelete('restrict'),
     index('outbox_claim_idx').on(table.status, table.availableAt),
     check('outbox_message_version', sql`${table.messageVersion} in (1, 2)`),
@@ -3806,8 +3646,6 @@ export const outbox = pgTable(
         and ${table.message} -> 'eventTypeVersion' ->> 'templateMode' is not distinct from ${table.templateMode}::text
         and ${table.message} ->> 'rosterSnapshotId' is not distinct from ${table.rosterSnapshotId}::text
         and ${table.message} ->> 'rosterPopulation' is not distinct from ${table.rosterPopulation}::text
-        and ${table.message} -> 'audienceConfig' ->> 'id' is not distinct from ${table.audienceConfigId}::text
-        and (${table.message} -> 'audienceConfig' ->> 'version')::integer is not distinct from ${table.audienceConfigVersion}
         and ${table.message} ->> 'requestId' is not distinct from ${table.requestId}::text
         and (${table.message} ->> 'version')::integer is not distinct from ${table.messageVersion}
         and (
@@ -3939,8 +3777,6 @@ export const dispatchBatches = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
-    audienceConfigId: uuid('audience_config_id').notNull(),
-    audienceConfigVersion: integer('audience_config_version').notNull(),
     requestId: uuid('request_id').notNull(),
     authorization: jsonb('authorization').notNull(),
     channel: notificationChannelEnum('channel').notNull(),
@@ -3983,8 +3819,6 @@ export const dispatchBatches = pgTable(
         table.eventTypeVersionId,
         table.rosterSnapshotId,
         table.rosterPopulation,
-        table.audienceConfigId,
-        table.audienceConfigVersion,
         table.requestId,
         table.authorization,
       ],
@@ -3997,8 +3831,6 @@ export const dispatchBatches = pgTable(
         notificationIntents.eventTypeVersionId,
         notificationIntents.rosterSnapshotId,
         notificationIntents.rosterPopulation,
-        notificationIntents.audienceConfigId,
-        notificationIntents.audienceConfigVersion,
         notificationIntents.requestId,
         notificationIntents.authorization,
       ],
@@ -4015,8 +3847,6 @@ export const dispatchBatches = pgTable(
         table.eventTypeVersionId,
         table.rosterSnapshotId,
         table.rosterPopulation,
-        table.audienceConfigId,
-        table.audienceConfigVersion,
         table.requestId,
         table.authorization,
       ],
@@ -4030,8 +3860,6 @@ export const dispatchBatches = pgTable(
         outbox.eventTypeVersionId,
         outbox.rosterSnapshotId,
         outbox.rosterPopulation,
-        outbox.audienceConfigId,
-        outbox.audienceConfigVersion,
         outbox.requestId,
         outbox.authorization,
       ],
@@ -4061,14 +3889,6 @@ export const dispatchBatches = pgTable(
       columns: [table.rosterSnapshotId, table.rosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'dispatch_batches_roster_population_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.audienceConfigId, table.audienceConfigVersion],
-      foreignColumns: [
-        audienceConfigurations.id,
-        audienceConfigurations.version,
-      ],
-      name: 'dispatch_batches_audience_fk',
     }).onDelete('restrict'),
     foreignKey({
       columns: [

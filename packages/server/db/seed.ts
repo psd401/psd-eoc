@@ -1,5 +1,4 @@
 import {
-  AudienceConfigSchema,
   ChannelConfigurationSchema,
   EventTypeSchema,
   EventTypeVersionSchema,
@@ -24,8 +23,6 @@ import {
   type Database,
 } from './client.js';
 import {
-  audienceConfigurations,
-  audienceTargets,
   channelConfigurations,
   eventTypeTemplates,
   eventTypeVersions,
@@ -52,8 +49,6 @@ const ids = {
   facilityNorth: '00000000-0000-4000-8000-000000000001',
   facilitySouth: '00000000-0000-4000-8000-000000000002',
   neighborhood: '00000000-0000-4000-8000-000000000010',
-  audienceNorth: '00000000-0000-4000-8000-000000000020',
-  audienceSouth: '00000000-0000-4000-8000-000000000021',
   groupNorth: '00000000-0000-4000-8000-000000000030',
   groupSouth: '00000000-0000-4000-8000-000000000031',
   groupOthers: '00000000-0000-4000-8000-000000000032',
@@ -176,23 +171,6 @@ const groupSourceRows = [
     createdAt: SEED_TIMESTAMP,
   }),
 ];
-
-const audienceConfigRows = facilityRows.map((facility, index) =>
-  AudienceConfigSchema.parse({
-    id: index === 0 ? ids.audienceNorth : ids.audienceSouth,
-    facilityId: facility.id,
-    version: 1,
-    targets: [
-      { kind: 'building', facilityId: facility.id },
-      {
-        kind: 'neighborhood',
-        neighborhood: { id: neighborhood.id, version: neighborhood.version },
-      },
-      { kind: 'others', groupSourceRef: groupOthersRef },
-    ],
-    createdAt: SEED_TIMESTAMP,
-  }),
-);
 
 const rosterConfiguration = RosterSourceConfigurationSchema.parse({
   id: ids.rosterConfiguration,
@@ -600,8 +578,6 @@ export interface SeedSummary extends ReferenceSeedSummary {
   readonly facilities: 2;
   readonly neighborhoods: 1;
   readonly neighborhoodFacilities: 2;
-  readonly audienceConfigurations: 2;
-  readonly audienceTargets: 6;
   readonly groupSources: 3;
   readonly rosterSourceConfigurations: 1;
   readonly rosterSnapshots: 1;
@@ -623,8 +599,6 @@ const seedSummary: SeedSummary = {
   facilities: 2,
   neighborhoods: 1,
   neighborhoodFacilities: 2,
-  audienceConfigurations: 2,
-  audienceTargets: 6,
   groupSources: 3,
   rosterSourceConfigurations: 1,
   rosterSnapshots: 1,
@@ -635,7 +609,7 @@ const seedSummary: SeedSummary = {
 
 /**
  * Loads only production-safe reference catalogs and fail-closed integration
- * labels. It never creates facilities, audiences, rosters, recipients, events,
+ * labels. It never creates facilities, rosters, recipients, events,
  * notifications, or outbox work and is safe to run repeatedly at bootstrap.
  */
 export async function seedReferenceData(
@@ -734,8 +708,8 @@ export async function seedReferenceData(
 export interface SeedDatabaseOptions {
   /**
    * Writes the group sources in place of the seed, at the point in the
-   * transaction where they must exist: after facilities, before the audience
-   * targets that reference them.
+   * transaction where they must exist: after facilities, before the roster
+   * source configuration that references them.
    */
   readonly insertGroupSources?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
@@ -798,41 +772,6 @@ export async function seedDatabase(
         )
         .onConflictDoNothing();
     }
-
-    await transaction
-      .insert(audienceConfigurations)
-      .values(
-        audienceConfigRows.map((configuration) => ({
-          id: configuration.id,
-          facilityId: configuration.facilityId,
-          version: configuration.version,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
-    await transaction
-      .insert(audienceTargets)
-      .values(
-        audienceConfigRows.flatMap((configuration) =>
-          configuration.targets.map((target, index) => ({
-            audienceConfigId: configuration.id,
-            audienceConfigVersion: configuration.version,
-            ordinal: index + 1,
-            targetKind: target.kind,
-            targetFacilityId:
-              target.kind === 'building' ? target.facilityId : null,
-            neighborhoodId:
-              target.kind === 'neighborhood' ? target.neighborhood.id : null,
-            neighborhoodVersion:
-              target.kind === 'neighborhood'
-                ? target.neighborhood.version
-                : null,
-            groupSourceId:
-              target.kind === 'others' ? target.groupSourceRef.id : null,
-          })),
-        ),
-      )
-      .onConflictDoNothing();
 
     await transaction
       .insert(rosterSourceConfigurations)

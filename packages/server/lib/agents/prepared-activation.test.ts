@@ -93,7 +93,6 @@ function realActivationPreview(
     eventTypeVersion: { id: IDS.eventType, templateMode: 'real' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
-    audienceConfig: { id: IDS.audience, version: 1 },
     recipientCount: 2,
     channels: [
       {

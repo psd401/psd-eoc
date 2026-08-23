@@ -212,7 +212,6 @@ function previewFixture(
     eventTypeVersion: selection.eventTypeVersion,
     rosterSnapshotId: IDS.roster,
     rosterPopulation: selection.rosterPopulation,
-    audienceConfig: { id: IDS.audience, version: 1 },
     recipientCount: 2,
     channels: [
       {
@@ -393,7 +392,6 @@ function activationResultFixture(
       eventTypeVersion: preview.eventTypeVersion,
       rosterSnapshotId: preview.rosterSnapshotId,
       rosterPopulation: preview.rosterPopulation,
-      audienceConfig: preview.audienceConfig,
       createdBy: actor,
       source: 'mobile',
       requestId: IDS.request,

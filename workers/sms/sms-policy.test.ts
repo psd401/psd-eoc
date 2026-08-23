@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  AudienceConfigSchema,
   ChannelAttemptSchema,
   DispatchBatchSchema,
   EndpointSchema,
@@ -31,7 +30,6 @@ import { parseSmsProviderSendRequest } from './aws-eum-adapter';
 const TIMESTAMP = '2026-08-11T18:00:00.000Z';
 const IDS = Object.freeze({
   facility: '00000000-0000-4000-8000-000000000001',
-  audience: '00000000-0000-4000-8000-000000000002',
   group: '00000000-0000-4000-8000-000000000003',
   configuration: '00000000-0000-4000-8000-000000000004',
   roster: '00000000-0000-4000-8000-000000000005',
@@ -55,14 +53,6 @@ const GROUP = Object.freeze({
   kind: 'synthetic' as const,
   purpose: 'building' as const,
   facilityId: IDS.facility,
-});
-
-const audienceConfig = AudienceConfigSchema.parse({
-  id: IDS.audience,
-  facilityId: IDS.facility,
-  version: 1,
-  targets: [{ kind: 'building', facilityId: IDS.facility }],
-  createdAt: TIMESTAMP,
 });
 
 const rosterSnapshot = RosterSnapshotSchema.parse({
@@ -108,7 +98,6 @@ function batch(): DispatchBatch {
     eventTypeVersion: { id: IDS.eventType, templateMode: 'drill' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: IDS.audience, version: 1 },
     requestId: IDS.request,
     authorization: {
       kind: 'synthetic-training',
@@ -142,8 +131,7 @@ function batch(): DispatchBatch {
 
 function audienceInput() {
   return {
-    audienceConfig,
-    neighborhoodVersions: [],
+    facilityId: IDS.facility,
     rosterSnapshot,
   };
 }
@@ -235,8 +223,7 @@ function deliveryTestSmsResolutionInput() {
     input: Object.freeze({
       batch: deliveryBatch,
       audience: Object.freeze({
-        audienceConfig,
-        neighborhoodVersions: Object.freeze([]),
+        facilityId: IDS.facility,
         rosterSnapshot: roster,
       }),
     }),

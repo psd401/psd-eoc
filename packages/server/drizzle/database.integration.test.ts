@@ -11,10 +11,11 @@ import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../db/client';
 import { seedDatabase, type SeedSummary } from '../db/seed';
-import { notificationIntentChannels, outbox } from '../db/schema';
+import { notificationIntentChannels } from '../db/schema';
 import { migrateDatabase } from './migrate';
 import {
   createDisposableDatabase,
@@ -65,6 +66,33 @@ const ISSUE_23_PRE_OUTBOX_V2_MIGRATIONS = [
 ] as const;
 const ISSUE_23_OUTBOX_V2_MIGRATION = '0008_yummy_living_tribunal.sql';
 
+/**
+ * Inserts the audience configuration the pre-retirement schema requires.
+ *
+ * `notification_intents` carried a NOT NULL `audience_config_id` until 0030
+ * dropped it (#292), and the seed no longer writes any configuration because
+ * `db/schema.ts` no longer models the table. A fixture held at an earlier
+ * migration still has the column, so it stages its own row here in raw SQL,
+ * for the same reason it stages group sources that way.
+ */
+const RETIRED_AUDIENCE_ID = '00000000-0000-4000-8000-000000000020';
+
+async function stageRetiredAudienceConfiguration(
+  database: PostgresDatabase,
+  facilityId: string,
+): Promise<void> {
+  await database.execute(sql`
+    insert into audience_configurations (id, facility_id, version, created_at)
+    values (
+      ${RETIRED_AUDIENCE_ID}::uuid,
+      ${facilityId}::uuid,
+      1,
+      '2026-08-06T12:00:00.000Z'::timestamptz
+    )
+    on conflict do nothing
+  `);
+}
+
 const ISSUE_23_OUTBOX_IDS = Object.freeze({
   event: '00000000-0000-4000-8000-000000009980',
   activationPreview: '00000000-0000-4000-8000-000000009979',
@@ -74,7 +102,6 @@ const ISSUE_23_OUTBOX_IDS = Object.freeze({
   facility: '00000000-0000-4000-8000-000000000001',
   eventTypeVersion: '00000000-0000-4000-8000-000000000201',
   roster: '00000000-0000-4000-8000-000000000041',
-  audience: '00000000-0000-4000-8000-000000000020',
   pushIntegrationStatus: '00000000-0000-4000-8000-000000000301',
   emailIntegrationStatus: '00000000-0000-4000-8000-000000000302',
 });
@@ -759,8 +786,7 @@ async function insertDeliveryTestStructuralFixture(
     sql`
       insert into activation_previews (
         id, facility_id, kind, template_mode, event_type_version_id,
-        roster_snapshot_id, roster_population, audience_config_id,
-        audience_config_version, recipient_count, channels, send_readiness,
+        roster_snapshot_id, roster_population, recipient_count, channels, send_readiness,
         blocking_reason_codes, active_event_ids, consequence_digest,
         delivery_test_target_set_id, delivery_test_target_set_version,
         delivery_test_endpoint_reference_digest, created_at, expires_at
@@ -772,8 +798,6 @@ async function insertDeliveryTestStructuralFixture(
         '00000000-0000-4000-8000-000000000201'::uuid,
         '00000000-0000-4000-8000-000000030003'::uuid,
         'staff'::roster_population,
-        '00000000-0000-4000-8000-000000000020'::uuid,
-        1,
         2,
         '[]'::jsonb,
         'ready',
@@ -828,8 +852,7 @@ async function insertDeliveryTestStructuralFixture(
       insert into notification_intents (
         id, event_id, event_kind, template_mode, purpose,
         event_type_version_id, roster_snapshot_id, roster_population,
-        audience_config_id, audience_config_version, created_by, source,
-        request_id, "authorization", delivery_test_target_set_id,
+        created_by, source, request_id, "authorization", delivery_test_target_set_id,
         delivery_test_target_set_version,
         delivery_test_endpoint_reference_digest, created_at
       ) values (
@@ -841,8 +864,6 @@ async function insertDeliveryTestStructuralFixture(
         '00000000-0000-4000-8000-000000000201'::uuid,
         '00000000-0000-4000-8000-000000030003'::uuid,
         'staff'::roster_population,
-        '00000000-0000-4000-8000-000000000020'::uuid,
-        1,
         jsonb_build_object(
           'kind', 'human',
           'userId', '00000000-0000-4000-8000-000000026001',
@@ -906,8 +927,7 @@ async function insertDeliveryTestStructuralFixture(
       insert into outbox (
         id, message_version, intent_id, event_id, event_kind, template_mode,
         purpose, event_type_version_id, roster_snapshot_id,
-        roster_population, audience_config_id, audience_config_version,
-        request_id, "authorization", channels, message, status, attempts,
+        roster_population, request_id, "authorization", channels, message, status, attempts,
         available_at, locked_until, published_at, failed_at,
         last_error_code, created_at
       )
@@ -922,8 +942,6 @@ async function insertDeliveryTestStructuralFixture(
         intent.event_type_version_id,
         intent.roster_snapshot_id,
         intent.roster_population,
-        intent.audience_config_id,
-        intent.audience_config_version,
         intent.request_id,
         intent."authorization",
         planned.channels,
@@ -941,10 +959,6 @@ async function insertDeliveryTestStructuralFixture(
           ),
           'rosterSnapshotId', intent.roster_snapshot_id::text,
           'rosterPopulation', intent.roster_population::text,
-          'audienceConfig', jsonb_build_object(
-            'id', intent.audience_config_id::text,
-            'version', intent.audience_config_version
-          ),
           'requestId', intent.request_id::text,
           'authorization', intent."authorization",
           'deliveryTest', jsonb_build_object(
@@ -989,8 +1003,7 @@ async function insertDeliveryTestStructuralFixture(
       insert into dispatch_batches (
         id, outbox_id, intent_id, event_id, event_kind, template_mode,
         purpose, event_type_version_id, roster_snapshot_id,
-        roster_population, audience_config_id, audience_config_version,
-        request_id, "authorization", channel, rendered_message,
+        roster_population, request_id, "authorization", channel, rendered_message,
         integration_status_id, integration_id, integration_label,
         sequence, endpoint_count, created_at
       )
@@ -1008,8 +1021,6 @@ async function insertDeliveryTestStructuralFixture(
         outbox.event_type_version_id,
         outbox.roster_snapshot_id,
         outbox.roster_population,
-        outbox.audience_config_id,
-        outbox.audience_config_version,
         outbox.request_id,
         outbox."authorization",
         channel.channel,
@@ -1486,8 +1497,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       // Written here with the columns this schema actually has: Drizzle emits
       // every column of a table it inserts into, so seeding group sources
       // through the current schema fails against a database held at an earlier
-      // migration. Runs after facilities and before the audience targets that
-      // reference them.
+      // migration. Runs after facilities and before the roster source
+      // configuration that references them.
       async insertGroupSources(transaction) {
         await transaction.execute(sql`
       insert into group_sources (
@@ -1530,8 +1541,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
-        // migration. Runs after facilities and before the audience targets that
-        // reference them.
+        // migration. Runs after facilities and before the roster source
+        // configuration that references them.
         async insertGroupSources(transaction) {
           await transaction.execute(sql`
       insert into group_sources (
@@ -2246,8 +2257,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
-        // migration. Runs after facilities and before the audience targets that
-        // reference them.
+        // migration. Runs after facilities and before the roster source
+        // configuration that references them.
         async insertGroupSources(transaction) {
           await transaction.execute(sql`
       insert into group_sources (
@@ -2729,8 +2740,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
-        // migration. Runs after facilities and before the audience targets that
-        // reference them.
+        // migration. Runs after facilities and before the roster source
+        // configuration that references them.
         async insertGroupSources(transaction) {
           await transaction.execute(sql`
       insert into group_sources (
@@ -3127,13 +3138,24 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         },
         rosterSnapshotId: ISSUE_23_OUTBOX_IDS.roster,
         rosterPopulation: 'synthetic',
-        audienceConfig: { id: ISSUE_23_OUTBOX_IDS.audience, version: 1 },
         requestId: ISSUE_23_OUTBOX_IDS.request,
         authorization,
         channels,
         createdAt: createdAt.toISOString(),
       });
 
+      // What the row actually held before #292 retired the audience layer.
+      // `legacyMessage` is the same message read through today's contract, which
+      // no longer declares the key; the stored copy has to keep it, because the
+      // check constraint on this schema asserts it matches the columns.
+      const historicalMessage = {
+        ...legacyMessage,
+        audienceConfig: { id: RETIRED_AUDIENCE_ID, version: 1 },
+      };
+      await stageRetiredAudienceConfiguration(
+        createdConnection.db,
+        ISSUE_23_OUTBOX_IDS.facility,
+      );
       await createdConnection.db.transaction(async (transaction) => {
         await transaction.execute(insertSyntheticTestEvent);
         // This fixture deliberately runs against the pre-0008 schema. Use its
@@ -3165,7 +3187,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             ${ISSUE_23_OUTBOX_IDS.eventTypeVersion}::uuid,
             ${ISSUE_23_OUTBOX_IDS.roster}::uuid,
             'synthetic'::roster_population,
-            ${ISSUE_23_OUTBOX_IDS.audience}::uuid,
+            ${RETIRED_AUDIENCE_ID}::uuid,
             1,
             ${JSON.stringify({ kind: 'system', serviceId: 'outbox-v1-migration-proof' })}::jsonb,
             'scheduled-job'::invocation_source,
@@ -3194,32 +3216,41 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             integrationLabel: channel.integrationStatus.label,
           })),
         );
-        await transaction.insert(outbox).values({
-          id: ISSUE_23_OUTBOX_IDS.outbox,
-          messageVersion: 1,
-          intentId: ISSUE_23_OUTBOX_IDS.intent,
-          eventId: ISSUE_23_OUTBOX_IDS.event,
-          eventKind: 'test',
-          templateMode: 'drill',
-          purpose: 'activation',
-          eventTypeVersionId: ISSUE_23_OUTBOX_IDS.eventTypeVersion,
-          rosterSnapshotId: ISSUE_23_OUTBOX_IDS.roster,
-          rosterPopulation: 'synthetic',
-          audienceConfigId: ISSUE_23_OUTBOX_IDS.audience,
-          audienceConfigVersion: 1,
-          requestId: ISSUE_23_OUTBOX_IDS.request,
-          authorization,
-          channels: legacyMessage.channels,
-          message: legacyMessage,
-          status: 'pending',
-          attempts: 0,
-          availableAt: createdAt,
-          lockedUntil: null,
-          publishedAt: null,
-          failedAt: null,
-          lastErrorCode: null,
-          createdAt,
-        });
+        // Raw SQL, not the Drizzle model: this schema still has the audience
+        // columns and `outbox_message_truth` still requires the message to
+        // repeat them, and the current model has neither.
+        await transaction.execute(sql`
+          insert into outbox (
+            id, message_version, intent_id, event_id, event_kind,
+            template_mode, purpose, event_type_version_id, roster_snapshot_id,
+            roster_population, audience_config_id, audience_config_version,
+            request_id, "authorization", channels, message, status, attempts,
+            available_at, locked_until, published_at, failed_at,
+            last_error_code, created_at
+          ) values (
+            ${ISSUE_23_OUTBOX_IDS.outbox}::uuid,
+            1,
+            ${ISSUE_23_OUTBOX_IDS.intent}::uuid,
+            ${ISSUE_23_OUTBOX_IDS.event}::uuid,
+            'test'::event_kind,
+            'drill'::template_mode,
+            'activation'::notification_purpose,
+            ${ISSUE_23_OUTBOX_IDS.eventTypeVersion}::uuid,
+            ${ISSUE_23_OUTBOX_IDS.roster}::uuid,
+            'synthetic'::roster_population,
+            ${RETIRED_AUDIENCE_ID}::uuid,
+            1,
+            ${ISSUE_23_OUTBOX_IDS.request}::uuid,
+            ${JSON.stringify(authorization)}::jsonb,
+            ${JSON.stringify(legacyMessage.channels)}::jsonb,
+            ${JSON.stringify(historicalMessage)}::jsonb,
+            'pending'::outbox_status,
+            0,
+            ${createdAt.toISOString()}::timestamptz,
+            null, null, null, null,
+            ${createdAt.toISOString()}::timestamptz
+          )
+        `);
       });
       const [beforeMigration] = await createdConnection.db.execute<{
         message: unknown;
@@ -3673,9 +3704,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         where id = ${ISSUE_23_OUTBOX_IDS.outbox}::uuid
       `);
       expect(afterMigration).toEqual(beforeMigration);
-      expect(
-        NotificationOutboxMessageSchema.parse(afterMigration?.message),
-      ).toEqual(legacyMessage);
+      // Byte for byte above; here, that what survived is still the message the
+      // contract describes once the retired `audienceConfig` key is set aside.
+      const survivingMessage = { ...(afterMigration?.message as object) };
+      expect(survivingMessage).toHaveProperty('audienceConfig');
+      delete (survivingMessage as { audienceConfig?: unknown }).audienceConfig;
+      expect(NotificationOutboxMessageSchema.parse(survivingMessage)).toEqual(
+        legacyMessage,
+      );
 
       const constraints = await createdConnection.db.execute<{
         constraint_name: string;
@@ -3717,9 +3753,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         select message_version, message from outbox_version_probe
       `);
       expect(version2Probe?.message_version).toBe(2);
-      expect(
-        NotificationOutboxMessageSchema.parse(version2Probe?.message),
-      ).toEqual(
+      const version2Message = { ...(version2Probe?.message as object) };
+      delete (version2Message as { audienceConfig?: unknown }).audienceConfig;
+      expect(NotificationOutboxMessageSchema.parse(version2Message)).toEqual(
         expect.objectContaining({
           version: 2,
           facilityId: ISSUE_23_OUTBOX_IDS.facility,
@@ -5280,8 +5316,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             event_type_version_id,
             roster_snapshot_id,
             roster_population,
-            audience_config_id,
-            audience_config_version,
             created_by,
             source,
             request_id,
@@ -5297,8 +5331,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             event.event_type_version_id,
             event.roster_snapshot_id,
             event.roster_population,
-            audience.id,
-            audience.version,
             '{"kind":"system","serviceId":"database-test"}'::jsonb,
             'worker'::invocation_source,
             '00000000-0000-4000-8000-000000009982'::uuid,
@@ -5311,8 +5343,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             ),
             now()
           from events as event
-          join audience_configurations as audience
-            on audience.facility_id = event.facility_id
           where event.id = '00000000-0000-4000-8000-000000009980'::uuid
         `);
 
@@ -5373,8 +5403,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               event_type_version_id,
               roster_snapshot_id,
               roster_population,
-              audience_config_id,
-              audience_config_version,
               created_by,
               source,
               request_id,
@@ -5390,8 +5418,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               mismatched_version.id,
               event.roster_snapshot_id,
               event.roster_population,
-              audience.id,
-              audience.version,
               '{"kind":"system","serviceId":"database-test"}'::jsonb,
               'worker'::invocation_source,
               '00000000-0000-4000-8000-000000009985'::uuid,
@@ -5404,8 +5430,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               ),
               now()
             from events as event
-            join audience_configurations as audience
-              on audience.facility_id = event.facility_id
             cross join event_type_versions as mismatched_version
             join event_types as mismatched_type
               on mismatched_type.id = mismatched_version.event_type_id
@@ -5430,8 +5454,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               event_type_version_id,
               roster_snapshot_id,
               roster_population,
-              audience_config_id,
-              audience_config_version,
               recipient_count,
               channels,
               send_readiness,
@@ -5449,8 +5471,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               mismatched_version.id,
               event.roster_snapshot_id,
               event.roster_population,
-              audience.id,
-              audience.version,
               4,
               '[]'::jsonb,
               'ready',
@@ -5459,8 +5479,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               now(),
               now() + interval '5 minutes'
             from events as event
-            join audience_configurations as audience
-              on audience.facility_id = event.facility_id
             cross join event_type_versions as mismatched_version
             join event_types as mismatched_type
               on mismatched_type.id = mismatched_version.event_type_id
@@ -5768,7 +5786,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             insert into prepared_activations (
               id, activation_preview_id, facility_id, kind, template_mode,
               event_type_version_id, roster_snapshot_id, roster_population,
-              audience_config_id, audience_config_version,
               consequence_digest, prepared_by, prepared_at
             ) values (
               '00000000-0000-4000-8000-000000030060'::uuid,
@@ -5779,8 +5796,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
               '00000000-0000-4000-8000-000000000201'::uuid,
               '00000000-0000-4000-8000-000000030003'::uuid,
               'staff'::roster_population,
-              '00000000-0000-4000-8000-000000000020'::uuid,
-              1,
               repeat('d', 64),
               jsonb_build_object(
                 'kind', 'agent',
@@ -6573,8 +6588,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       facilities: 2,
       neighborhoods: 1,
       neighborhoodFacilities: 2,
-      audienceConfigurations: 2,
-      audienceTargets: 6,
       groupSources: 3,
       rosterSourceConfigurations: 1,
       rosterSnapshots: 1,
@@ -6668,15 +6681,11 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         neighborhoodMemberships: {
           with: { neighborhoodVersion: true },
         },
-        audienceConfigurations: {
-          with: { targets: true },
-        },
       },
     });
     expect(northFacility?.neighborhoodMemberships).toHaveLength(1);
     expect(
       northFacility?.neighborhoodMemberships[0]?.neighborhoodVersion.name,
     ).toBe('Synthetic Twin Campuses');
-    expect(northFacility?.audienceConfigurations[0]?.targets).toHaveLength(3);
   });
 });

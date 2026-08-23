@@ -411,10 +411,9 @@ export async function resolvePushEndpoints(
   ) {
     throw new PushEndpointResolutionError('PUSH_ROSTER_MISMATCH');
   }
-  if (
-    audience.audienceConfig.id !== batch.audienceConfig.id ||
-    audience.audienceConfig.version !== batch.audienceConfig.version
-  ) {
+  // The audience is the school now, not a versioned configuration object,
+  // so the provenance check compares the school the batch was built for.
+  if (audience.facilityId !== batch.facilityId) {
     throw new PushEndpointResolutionError('PUSH_AUDIENCE_MISMATCH');
   }
 

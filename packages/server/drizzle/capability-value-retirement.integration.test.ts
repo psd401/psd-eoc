@@ -468,8 +468,16 @@ describeWithDatabase('retiring removed capability values', () => {
         const after = await enumLabels(connection.db);
         expect(after).not.toContain('set-user-roles');
         expect(after).not.toContain('set-fanout-control');
+        // `applyRetirement` runs the whole folder, and 0030 retires a third
+        // value the same way when it drops the audience layer. Naming it here
+        // keeps the assertion exact — every surviving label, in its original
+        // order — rather than loosening it to a containment check.
         expect(after).toEqual(
-          before.filter((label) => !RETIRED_VALUES.includes(label as never)),
+          before.filter(
+            (label) =>
+              !RETIRED_VALUES.includes(label as never) &&
+              label !== 'create-audience-config-version',
+          ),
         );
       },
     );

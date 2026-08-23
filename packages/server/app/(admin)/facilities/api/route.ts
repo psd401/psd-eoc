@@ -1,5 +1,4 @@
 import {
-  executeCreateAudienceConfigVersionCapability,
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
   executeCreateNeighborhoodVersionCapability,
@@ -62,13 +61,6 @@ export async function POST(request: Request): Promise<Response> {
         break;
       case 'create-neighborhood-version':
         await executeCreateNeighborhoodVersionCapability({
-          authenticated,
-          command: mutation.command,
-          metadata,
-        });
-        break;
-      case 'create-audience-version':
-        await executeCreateAudienceConfigVersionCapability({
           authenticated,
           command: mutation.command,
           metadata,

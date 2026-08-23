@@ -56,7 +56,6 @@ const ids = {
   seedFacilityNorth: '26050000-0000-4000-8000-000000000035',
   seedFacilitySouth: '26050000-0000-4000-8000-000000000036',
   seedNeighborhood: '26050000-0000-4000-8000-000000000037',
-  seedAudience: '26050000-0000-4000-8000-000000000038',
   seedGroup: '26050000-0000-4000-8000-000000000039',
   seedRosterConfiguration: '26050000-0000-4000-8000-000000000040',
   upgradeStatusOld: '26050000-0000-4000-8000-000000000001',
@@ -74,7 +73,6 @@ const ids = {
   rosterSnapshotSkip: '26050000-0000-4000-8000-000000000023',
   rosterSnapshotTwo: '26050000-0000-4000-8000-000000000024',
   neighborhood: '26050000-0000-4000-8000-000000000030',
-  audience: '26050000-0000-4000-8000-000000000031',
   adminFacility: '26050000-0000-4000-8000-000000000032',
   staffGroup: '26050000-0000-4000-8000-000000000033',
   movedAudience: '26050000-0000-4000-8000-000000000034',
@@ -458,8 +456,8 @@ async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
     // seeding them through the current schema fails against a database held at
     // migration 0004 the moment that table gains a column — as it did when
     // access groups started carrying the role they grant. This runs at the same
-    // point in the transaction, after facilities and before the audience
-    // targets that reference them.
+    // point in the transaction, after facilities and before the roster source
+    // configuration that references them.
     async insertGroupSources(transaction) {
       await transaction.execute(sql`
     insert into group_sources (
@@ -496,6 +494,52 @@ async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
     on conflict do nothing
       `);
     },
+  });
+  // The audience layer is retired (#292), so the seed no longer writes these and
+  // `db/schema.ts` no longer models them. This fixture is held at migration 0004,
+  // where they still exist and the historical migration under test counts them
+  // in its approved graph, so it stages them here in raw SQL — the same reason
+  // the group sources above are written this way.
+  //
+  // Parent and children in one transaction:
+  // `psd_eoc_guard_admin_version_child_insert` admits a target only while its
+  // configuration's xmin is the current transaction's.
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into audience_configurations (id, facility_id, version, created_at)
+      values
+        ('00000000-0000-4000-8000-000000000020'::uuid,
+         '00000000-0000-4000-8000-000000000001'::uuid, 1,
+         '2026-08-06T12:00:00.000Z'::timestamptz),
+        ('00000000-0000-4000-8000-000000000021'::uuid,
+         '00000000-0000-4000-8000-000000000002'::uuid, 1,
+         '2026-08-06T12:00:00.000Z'::timestamptz)
+    `);
+    await transaction.execute(sql`
+      insert into audience_targets (
+        audience_config_id, audience_config_version, ordinal, target_kind,
+        target_facility_id, neighborhood_id, neighborhood_version,
+        group_source_id
+      ) values
+        ('00000000-0000-4000-8000-000000000020'::uuid, 1, 1,
+         'building'::audience_target_kind,
+         '00000000-0000-4000-8000-000000000001'::uuid, null, null, null),
+        ('00000000-0000-4000-8000-000000000020'::uuid, 1, 2,
+         'neighborhood'::audience_target_kind, null,
+         '00000000-0000-4000-8000-000000000010'::uuid, 1, null),
+        ('00000000-0000-4000-8000-000000000020'::uuid, 1, 3,
+         'others'::audience_target_kind, null, null, null,
+         '00000000-0000-4000-8000-000000000032'::uuid),
+        ('00000000-0000-4000-8000-000000000021'::uuid, 1, 1,
+         'building'::audience_target_kind,
+         '00000000-0000-4000-8000-000000000002'::uuid, null, null, null),
+        ('00000000-0000-4000-8000-000000000021'::uuid, 1, 2,
+         'neighborhood'::audience_target_kind, null,
+         '00000000-0000-4000-8000-000000000010'::uuid, 1, null),
+        ('00000000-0000-4000-8000-000000000021'::uuid, 1, 3,
+         'others'::audience_target_kind, null, null, null,
+         '00000000-0000-4000-8000-000000000032'::uuid)
+    `);
   });
   await database.execute(sql`
     insert into facilities (id, code, name, active, created_at)
@@ -674,30 +718,6 @@ async function seedPostRemovalFacilityFixture(
       ) values (
         ${ids.seedNeighborhood}::uuid,
         1,
-        ${ids.seedFacilityNorth}::uuid
-      )
-    `);
-  });
-  await database.transaction(async (transaction) => {
-    await transaction.execute(sql`
-      insert into audience_configurations (
-        id, facility_id, version, created_at
-      ) values (
-        ${ids.seedAudience}::uuid,
-        ${ids.seedFacilityNorth}::uuid,
-        1,
-        ${times.adminOne}::timestamptz
-      )
-    `);
-    await transaction.execute(sql`
-      insert into audience_targets (
-        audience_config_id, audience_config_version, ordinal,
-        target_kind, target_facility_id
-      ) values (
-        ${ids.seedAudience}::uuid,
-        1,
-        1,
-        'building'::audience_target_kind,
         ${ids.seedFacilityNorth}::uuid
       )
     `);
@@ -1433,8 +1453,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
             'roster_source_configurations_monotonic_insert_guard',
             'roster_snapshots_monotonic_insert_guard',
             'neighborhood_versions_monotonic_insert_guard',
-            'audience_configurations_monotonic_insert_guard',
-            'audience_targets_construction_guard',
             'neighborhood_facilities_construction_guard',
             'user_roles_immutable_guard',
             'user_facility_scopes_admin_availability_lock',
@@ -1446,8 +1464,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     expect(triggers).toEqual([
       'access_membership_snapshots_admin_availability_lock',
       'access_membership_snapshots_immutable_guard',
-      'audience_configurations_monotonic_insert_guard',
-      'audience_targets_construction_guard',
       'group_sources_admin_availability_lock',
       'group_sources_identity_guard',
       'integration_statuses_channel_configuration_sync',
@@ -2057,7 +2073,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     const db = databaseConnection().db;
     const expectedPrivileges = [
       ['access_membership_snapshots', 'id'],
-      ['audience_configurations', 'id'],
       ['integration_statuses', 'id'],
       ['neighborhood_versions', 'id'],
       ['roster_source_configuration_facilities', 'configuration_id'],
@@ -2088,7 +2103,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           ('roster_source_configuration_facilities', 'configuration_id'),
           ('roster_source_configuration_groups', 'configuration_id'),
           ('neighborhood_versions', 'id'),
-          ('audience_configurations', 'id'),
           ('security_audit_chain_anchors', 'sequence')
         ) as intended(table_name, column_name)
         order by intended.table_name
@@ -2163,12 +2177,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       await transaction.execute(sql`
         select neighborhood.id
         from neighborhood_versions as neighborhood
-        limit 1
-        for update
-      `);
-      await transaction.execute(sql`
-        select audience.id
-        from audience_configurations as audience
         limit 1
         for update
       `);
@@ -2300,7 +2308,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
             ('roster_source_configuration_facilities', exists(select 1 from roster_source_configuration_facilities)),
             ('roster_source_configuration_groups', exists(select 1 from roster_source_configuration_groups)),
             ('neighborhood_versions', exists(select 1 from neighborhood_versions)),
-            ('audience_configurations', exists(select 1 from audience_configurations)),
             ('security_audit_chain_anchors', exists(select 1 from security_audit_chain_anchors))
           ) as target(table_name, row_present)
           order by target.table_name
@@ -2320,7 +2327,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       sql`update roster_source_configuration_facilities set configuration_id = configuration_id`,
       sql`update roster_source_configuration_groups set configuration_id = configuration_id`,
       sql`update neighborhood_versions set id = id`,
-      sql`update audience_configurations set id = id`,
       sql`update security_audit_chain_anchors set sequence = sequence`,
     ] as const;
     for (const immutableUpdate of immutableColumnUpdates) {
@@ -2911,7 +2917,11 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     expect(currentRows[0]?.count).toBe(2);
   });
 
-  test('allows only atomic or exact-retry audience and neighborhood children', async () => {
+  // The audience half of this went with the layer itself (#292). Both guards it
+  // exercised are shared: `psd_eoc_guard_admin_version_parent_insert` and
+  // `psd_eoc_guard_admin_version_child_insert` still carry their neighborhood
+  // branches, and those are what remains to prove.
+  test('allows only atomic or exact-retry neighborhood children', async () => {
     const db = databaseConnection().db;
     await db.execute(sql`
       insert into facilities (id, code, name, active, created_at)
@@ -3032,148 +3042,11 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       on conflict do nothing
     `);
 
-    await db.transaction(async (transaction) => {
-      await transaction.execute(sql`
-        insert into audience_configurations (
-          id,
-          facility_id,
-          version,
-          created_at
-        )
-        values (
-          ${ids.audience}::uuid,
-          ${ids.adminFacility}::uuid,
-          1,
-          ${times.adminOne}::timestamptz
-        )
-      `);
-      await transaction.execute(sql`
-        insert into audience_targets (
-          audience_config_id,
-          audience_config_version,
-          ordinal,
-          target_kind,
-          target_facility_id
-        )
-        values (
-          ${ids.audience}::uuid,
-          1,
-          1,
-          'building'::audience_target_kind,
-          ${ids.seedFacilityNorth}::uuid
-        )
-      `);
-    });
-    await db.execute(sql`
-      insert into audience_targets (
-        audience_config_id,
-        audience_config_version,
-        ordinal,
-        target_kind,
-        target_facility_id
-      )
-      values (
-        ${ids.audience}::uuid,
-        1,
-        1,
-        'building'::audience_target_kind,
-        ${ids.seedFacilityNorth}::uuid
-      )
-      on conflict do nothing
-    `);
-    await expectOperationalRejection(() =>
-      db.execute(sql`
-        insert into audience_targets (
-          audience_config_id,
-          audience_config_version,
-          ordinal,
-          target_kind,
-          target_facility_id
-        )
-        values (
-          ${ids.audience}::uuid,
-          1,
-          1,
-          'building'::audience_target_kind,
-          ${ids.seedFacilitySouth}::uuid
-        )
-        on conflict do nothing
-      `),
-    );
-    await expectOperationalRejection(() =>
-      db.execute(sql`
-        insert into audience_targets (
-          audience_config_id,
-          audience_config_version,
-          ordinal,
-          target_kind,
-          target_facility_id
-        )
-        values (
-          ${ids.audience}::uuid,
-          1,
-          2,
-          'building'::audience_target_kind,
-          ${ids.seedFacilityNorth}::uuid
-        )
-        on conflict do nothing
-      `),
-    );
-    await expectOperationalRejection(() =>
-      db.execute(sql`
-        insert into audience_configurations (
-          id,
-          facility_id,
-          version,
-          created_at
-        )
-        values (
-          ${ids.audience}::uuid,
-          ${ids.adminFacility}::uuid,
-          3,
-          ${times.adminTwo}::timestamptz
-        )
-        on conflict do nothing
-      `),
-    );
-    await db.transaction(async (transaction) => {
-      await transaction.execute(sql`
-        insert into audience_configurations (
-          id,
-          facility_id,
-          version,
-          created_at
-        )
-        values (
-          ${ids.audience}::uuid,
-          ${ids.adminFacility}::uuid,
-          2,
-          ${times.adminTwo}::timestamptz
-        )
-      `);
-      await transaction.execute(sql`
-        insert into audience_targets (
-          audience_config_id,
-          audience_config_version,
-          ordinal,
-          target_kind,
-          target_facility_id
-        )
-        values (
-          ${ids.audience}::uuid,
-          2,
-          1,
-          'building'::audience_target_kind,
-          ${ids.seedFacilitySouth}::uuid
-        )
-      `);
-    });
-
     const rows = databaseExecuteRows<CountRow>(
       await db.execute<CountRow>(sql`
         select count(*)::integer as count
-        from audience_configurations
-        where id = ${ids.audience}::uuid
+        from neighborhood_versions
+        where id = ${ids.neighborhood}::uuid
       `),
     );
     expect(rows[0]?.count).toBe(2);

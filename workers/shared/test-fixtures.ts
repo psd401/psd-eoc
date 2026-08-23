@@ -46,7 +46,6 @@ export function syntheticBatch(): DispatchBatch {
     eventTypeVersion: { id: IDS.eventTypeVersion, templateMode: 'drill' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: IDS.audience, version: 1 },
     requestId: IDS.request,
     authorization: {
       kind: 'synthetic-training',
@@ -91,7 +90,6 @@ export function realBatch(): DispatchBatch {
     eventTypeVersion: { id: IDS.eventTypeVersion, templateMode: 'real' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
-    audienceConfig: { id: IDS.audience, version: 1 },
     requestId: IDS.request,
     authorization: {
       kind: 'human-confirmed',
@@ -138,7 +136,6 @@ export function deliveryTestBatch(): DispatchBatch {
     eventTypeVersion: { id: IDS.eventTypeVersion, templateMode: 'drill' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
-    audienceConfig: { id: IDS.audience, version: 1 },
     deliveryTest: {
       purpose: 'monthly-live-delivery-test',
       targetSet: { id: IDS.deliveryTargetSet, version: 1 },

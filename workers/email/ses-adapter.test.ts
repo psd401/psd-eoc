@@ -62,7 +62,6 @@ function batch(live: boolean): DispatchBatch {
     },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: real ? 'staff' : 'synthetic',
-    audienceConfig: { id: IDS.audience, version: 1 },
     requestId: IDS.request,
     authorization: real
       ? {

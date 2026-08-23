@@ -103,7 +103,6 @@ function lifecyclePreview(mode: TemplateMode): LifecycleConsequencePreview {
     eventTypeVersion: { id: ids.eventType, templateMode: mode },
     rosterSnapshotId: ids.roster,
     rosterPopulation: 'staff',
-    audienceConfig: { id: ids.audience, version: 1 },
     recipientCount: 42,
     channels: [
       {

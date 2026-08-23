@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   type Actor,
-  type AudienceConfig,
   type ChannelConfiguration,
   type CreateActivationPreviewInput,
   type EventTypeVersion,
@@ -67,18 +66,6 @@ function groupSource(population: RosterPopulation): RosterGroupSourceRef {
     kind: population === 'staff' ? 'google-group' : 'synthetic',
     purpose: 'building',
     facilityId: IDS.facility,
-  });
-}
-
-function audience(): AudienceConfig {
-  return Object.freeze({
-    id: IDS.audience,
-    facilityId: IDS.facility,
-    version: 1,
-    targets: Object.freeze([
-      Object.freeze({ kind: 'building', facilityId: IDS.facility }),
-    ]),
-    createdAt: CREATED_AT_ISO,
   });
 }
 
@@ -251,8 +238,6 @@ function evidence(
     selection,
     facility: FACILITY,
     eventTypeVersion: eventTypeVersion(templateMode),
-    audienceConfig: audience(),
-    neighborhoodVersions: [],
     rosterSnapshot: roster(population),
     channelConfigurations: channelConfigurations(population),
     activeEventIds: [IDS.activeEventB, IDS.activeEventA],

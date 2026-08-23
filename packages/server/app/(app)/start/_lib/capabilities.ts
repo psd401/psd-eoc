@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 
 import {
   ActivationPreviewSchema,
-  AudienceConfigSchema,
   ChannelConfigurationSchema,
   DeliveryTestPreviewSchema,
   DeliveryTestTargetSetVersionSchema,
@@ -10,13 +9,11 @@ import {
   FacilityPageSchema,
   FacilitySchema,
   IntegrationStatusSchema,
-  NeighborhoodSchema,
   RecipientSchema,
   RosterGroupSourceRefSchema,
   RosterSnapshotSchema,
   type ActivationPreview,
   type Actor,
-  type AudienceConfig,
   type CapabilityInput,
   type CapabilityOutput,
   type CapabilityScope,
@@ -25,7 +22,6 @@ import {
   type DeliveryTestPreview,
   type DeliveryTestTargetSetVersion,
   type FacilityPage,
-  type Neighborhood,
   type NotificationChannel,
   type RegisteredCapabilityId,
   type RosterGroupSourceRef,
@@ -45,8 +41,6 @@ import {
 import {
   activationPreviews,
   agents,
-  audienceConfigurations,
-  audienceTargets,
   channelConfigurations,
   deliveryTestCanaryEligibilityFacts,
   deliveryTestTargetEndpoints,
@@ -55,8 +49,6 @@ import {
   facilities,
   groupSources,
   integrationStatuses,
-  neighborhoodFacilities,
-  neighborhoodVersions,
   rosterEndpoints,
   rosterRecipientGroupSources,
   rosterRecipients,
@@ -121,14 +113,6 @@ const ROSTER_QUERY_LIMITS = Object.freeze({
   provenance: 1_200 * 50,
   recipients: 1_200,
   sources: 500 * 2,
-});
-
-// These read ceilings mirror the canonical administrator mutation inputs:
-// at most 500 audience targets and 200 facilities in one neighborhood.
-const AUDIENCE_QUERY_LIMITS = Object.freeze({
-  neighborhoodFacilities: 200,
-  otherSources: 500,
-  targets: 500,
 });
 
 export const DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV =
@@ -389,212 +373,6 @@ function rosterGroupSourceRef(
   }>,
 ): RosterGroupSourceRef {
   return RosterGroupSourceRefSchema.parse(value);
-}
-
-/**
- * Resolves one facility's current audience without trusting timestamps as a
- * version order. PostgreSQL transaction-start timestamps are not monotonic by
- * commit order, and more than one lineage is ambiguous operational truth.
- */
-export async function loadLatestAudienceConfigurationHeader(
-  databaseValue: unknown,
-  facilityId: string,
-) {
-  const database = startFlowQueryDatabase(databaseValue);
-  const lineages = await database
-    .select({ id: audienceConfigurations.id })
-    .from(audienceConfigurations)
-    .where(eq(audienceConfigurations.facilityId, facilityId))
-    .groupBy(audienceConfigurations.id)
-    .orderBy(asc(audienceConfigurations.id))
-    .limit(2);
-  if (lineages.length > 1) {
-    throw conflict('The facility has conflicting audience lineages.');
-  }
-  const lineage = lineages[0];
-  if (lineage === undefined) {
-    return null;
-  }
-  const [configuration] = await database
-    .select()
-    .from(audienceConfigurations)
-    .where(
-      and(
-        eq(audienceConfigurations.id, lineage.id),
-        eq(audienceConfigurations.facilityId, facilityId),
-      ),
-    )
-    .orderBy(desc(audienceConfigurations.version))
-    .limit(1);
-  return configuration ?? null;
-}
-
-export async function loadAudienceConfiguration(
-  database: StartFlowQueryDatabase,
-  facilityId: string,
-): Promise<Readonly<{
-  audienceConfig: AudienceConfig;
-  neighborhoodVersions: readonly Neighborhood[];
-}> | null> {
-  const configuration = await loadLatestAudienceConfigurationHeader(
-    database,
-    facilityId,
-  );
-  if (configuration === null) {
-    return null;
-  }
-  const targets = await collectBoundedDatabaseRows(
-    (offset, limit) =>
-      database
-        .select()
-        .from(audienceTargets)
-        .where(
-          and(
-            eq(audienceTargets.audienceConfigId, configuration.id),
-            eq(audienceTargets.audienceConfigVersion, configuration.version),
-          ),
-        )
-        .orderBy(asc(audienceTargets.ordinal))
-        .offset(offset)
-        .limit(limit),
-    { maxRows: AUDIENCE_QUERY_LIMITS.targets },
-  );
-
-  const othersIds = targets.flatMap((target) =>
-    target.targetKind === 'others' && target.groupSourceId !== null
-      ? [target.groupSourceId]
-      : [],
-  );
-  const uniqueOthersIds = [...new Set(othersIds)].sort();
-  const otherSources =
-    uniqueOthersIds.length === 0
-      ? []
-      : await collectBoundedDatabaseRows(
-          (offset, limit) =>
-            database
-              .select()
-              .from(groupSources)
-              .where(inArray(groupSources.id, uniqueOthersIds))
-              .orderBy(asc(groupSources.id))
-              .offset(offset)
-              .limit(limit),
-          { maxRows: AUDIENCE_QUERY_LIMITS.otherSources },
-        );
-  const otherById = new Map(otherSources.map((source) => [source.id, source]));
-
-  const neighborhoodRefs = targets.flatMap((target) =>
-    target.targetKind === 'neighborhood' &&
-    target.neighborhoodId !== null &&
-    target.neighborhoodVersion !== null
-      ? [
-          {
-            id: target.neighborhoodId,
-            version: target.neighborhoodVersion,
-          },
-        ]
-      : [],
-  );
-  const resolvedNeighborhoods: Neighborhood[] = [];
-  for (const reference of neighborhoodRefs) {
-    const [version] = await database
-      .select()
-      .from(neighborhoodVersions)
-      .where(
-        and(
-          eq(neighborhoodVersions.id, reference.id),
-          eq(neighborhoodVersions.version, reference.version),
-        ),
-      )
-      .limit(1);
-    if (version === undefined) {
-      return null;
-    }
-    const members = await collectBoundedDatabaseRows(
-      (offset, limit) =>
-        database
-          .select({ facilityId: neighborhoodFacilities.facilityId })
-          .from(neighborhoodFacilities)
-          .where(
-            and(
-              eq(neighborhoodFacilities.neighborhoodId, reference.id),
-              eq(neighborhoodFacilities.neighborhoodVersion, reference.version),
-            ),
-          )
-          .orderBy(asc(neighborhoodFacilities.facilityId))
-          .offset(offset)
-          .limit(limit),
-      { maxRows: AUDIENCE_QUERY_LIMITS.neighborhoodFacilities },
-    );
-    resolvedNeighborhoods.push(
-      NeighborhoodSchema.parse({
-        id: version.id,
-        version: version.version,
-        name: version.name,
-        facilityIds: members.map((member) => member.facilityId),
-        createdAt: dateIso(version.createdAt),
-      }),
-    );
-  }
-
-  const parsedTargets = targets.map((target) => {
-    switch (target.targetKind) {
-      case 'building':
-        if (target.targetFacilityId === null) {
-          throw conflict('The audience building target is incomplete.');
-        }
-        return {
-          kind: 'building' as const,
-          facilityId: target.targetFacilityId,
-        };
-      case 'neighborhood':
-        if (
-          target.neighborhoodId === null ||
-          target.neighborhoodVersion === null
-        ) {
-          throw conflict('The audience neighborhood target is incomplete.');
-        }
-        return {
-          kind: 'neighborhood' as const,
-          neighborhood: {
-            id: target.neighborhoodId,
-            version: target.neighborhoodVersion,
-          },
-        };
-      case 'others': {
-        const source =
-          target.groupSourceId === null
-            ? undefined
-            : otherById.get(target.groupSourceId);
-        if (
-          source === undefined ||
-          source.purpose !== 'others' ||
-          source.facilityId !== null
-        ) {
-          throw conflict('The audience others target is unavailable.');
-        }
-        return {
-          kind: 'others' as const,
-          groupSourceRef: rosterGroupSourceRef({
-            id: source.id,
-            kind: source.kind,
-            purpose: source.purpose,
-            facilityId: source.facilityId,
-          }),
-        };
-      }
-    }
-  });
-
-  return Object.freeze({
-    audienceConfig: AudienceConfigSchema.parse({
-      id: configuration.id,
-      facilityId: configuration.facilityId,
-      version: configuration.version,
-      targets: parsedTargets,
-      createdAt: dateIso(configuration.createdAt),
-    }),
-    neighborhoodVersions: Object.freeze(resolvedNeighborhoods),
-  });
 }
 
 export async function loadRosterSnapshot(
@@ -1058,9 +836,9 @@ export async function loadDeliveryTestTargetSet(
 export async function currentActiveAudienceEndpointReferences(
   database: StartFlowQueryDatabase,
   rosterSnapshot: RosterSnapshot,
-  audience: Awaited<ReturnType<typeof loadAudienceConfiguration>>,
+  facilityId: string,
 ): Promise<readonly DeliveryTestEndpointReference[]> {
-  const references = allAudienceEndpointReferences(rosterSnapshot, audience);
+  const references = allAudienceEndpointReferences(rosterSnapshot, facilityId);
   const endpointIds = references.map((endpoint) => endpoint.endpointId);
   if (endpointIds.length === 0) return [];
   const rows = await database
@@ -1143,16 +921,11 @@ export async function requireCurrentDeliveryTestTargetEligibility(
     undefined,
     hydrationCache,
   );
-  const audience = await loadAudienceConfiguration(
-    database,
-    targetSet.facilityId,
-  );
   if (
     facility === undefined ||
     !facility.active ||
     roster === null ||
-    roster.id !== targetSet.rosterSnapshotId ||
-    audience === null
+    roster.id !== targetSet.rosterSnapshotId
   ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',
@@ -1177,7 +950,7 @@ export async function requireCurrentDeliveryTestTargetEligibility(
   const activeReferences = await currentActiveAudienceEndpointReferences(
     database,
     roster,
-    audience,
+    targetSet.facilityId,
   );
   const activeKeys = new Set(activeReferences.map(endpointReferenceKey));
   const factsById = new Map(facts.map((fact) => [fact.id, fact]));
@@ -1216,9 +989,8 @@ export async function requireCurrentDeliveryTestTargetEligibility(
 
 function allAudienceEndpointReferences(
   rosterSnapshot: RosterSnapshot,
-  audience: Awaited<ReturnType<typeof loadAudienceConfiguration>>,
+  facilityId: string,
 ): readonly DeliveryTestEndpointReference[] {
-  if (audience === null) return [];
   // Resolve audience membership independently from mutable endpoint health;
   // the caller applies the latest status overlay before comparing exact sets.
   const allEndpointsActive = {
@@ -1232,8 +1004,7 @@ function allAudienceEndpointReferences(
     })),
   };
   const resolved = resolveAudience({
-    audienceConfig: audience.audienceConfig,
-    neighborhoodVersions: audience.neighborhoodVersions,
+    facilityId,
     rosterSnapshot: allEndpointsActive,
   });
   return resolved.recipients.flatMap((recipient) =>
@@ -1262,10 +1033,6 @@ async function createActivationPreviewFromDatabase(
       .where(eq(facilities.id, input.facilityId))
       .limit(1);
     const facilityRow = facilityRows[0] ?? null;
-    const audience = await loadAudienceConfiguration(
-      database,
-      input.facilityId,
-    );
     const rosterSnapshot = await loadRosterSnapshot(
       database,
       input.rosterPopulation,
@@ -1277,9 +1044,6 @@ async function createActivationPreviewFromDatabase(
       await loadChannelConfigurations(database);
     if (facilityRow === null || !facilityRow.active) {
       throw unavailable('The selected facility is unavailable.');
-    }
-    if (audience === null) {
-      throw unavailable('The configured notification audience is unavailable.');
     }
     if (rosterSnapshot === null) {
       throw unavailable('A complete roster snapshot is unavailable.');
@@ -1295,7 +1059,7 @@ async function createActivationPreviewFromDatabase(
       const activeReferences = await currentActiveAudienceEndpointReferences(
         database,
         rosterSnapshot,
-        audience,
+        input.facilityId,
       );
       if (
         targetReferences.length === 0 ||
@@ -1339,8 +1103,6 @@ async function createActivationPreviewFromDatabase(
       selection: input,
       facility: facilityFromRow(facilityRow),
       eventTypeVersion,
-      audienceConfig: audience.audienceConfig,
-      neighborhoodVersions: audience.neighborhoodVersions,
       rosterSnapshot,
       channelConfigurations: channelConfigurationsValue,
       activeEventIds: activeEventRows.map((row) => row.id),
@@ -1369,8 +1131,6 @@ async function createActivationPreviewFromDatabase(
       eventTypeVersionId: preview.eventTypeVersion.id,
       rosterSnapshotId: preview.rosterSnapshotId,
       rosterPopulation: preview.rosterPopulation,
-      audienceConfigId: preview.audienceConfig.id,
-      audienceConfigVersion: preview.audienceConfig.version,
       recipientCount: preview.recipientCount,
       channels: preview.channels,
       sendReadiness: preview.sendReadiness,
@@ -1502,19 +1262,6 @@ export async function loadActivationPreview(
   if (row === undefined) {
     return null;
   }
-  const [audience] = await database
-    .select({ facilityId: audienceConfigurations.facilityId })
-    .from(audienceConfigurations)
-    .where(
-      and(
-        eq(audienceConfigurations.id, row.audienceConfigId),
-        eq(audienceConfigurations.version, row.audienceConfigVersion),
-      ),
-    )
-    .limit(1);
-  if (audience?.facilityId !== row.facilityId) {
-    throw conflict('The activation audience is not owned by the facility.');
-  }
   return ActivationPreviewSchema.parse({
     id: row.id,
     facilityId: row.facilityId,
@@ -1526,10 +1273,6 @@ export async function loadActivationPreview(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,

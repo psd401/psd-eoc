@@ -162,9 +162,6 @@ export function requireMatchingActivationResult(
     authorization.consequenceDigest !== preview.consequenceDigest ||
     result.preparedActivationConsumption !== null ||
     notificationIntent === null ||
-    notificationIntent.audienceConfig.id !== preview.audienceConfig.id ||
-    notificationIntent.audienceConfig.version !==
-      preview.audienceConfig.version ||
     !exactChannelConsequencesMatch(notificationIntent, preview.channels)
   ) {
     throw new StartFlowRequestError(

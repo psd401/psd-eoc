@@ -239,7 +239,6 @@ async function completeIdempotency(
 }
 
 const ADMIN_MUTATION_IDS = new Set<RegisteredCapabilityId>([
-  'create-audience-config-version',
   'create-facility',
   'create-group-source',
   'create-neighborhood-version',

@@ -7,14 +7,12 @@ import {
   FacilitySchema,
   type ActivationPreview,
   type Actor,
-  type AudienceConfig,
   type ChannelConfiguration,
   type CreateActivationPreviewInput,
   type DeliveryTestNotificationMetadata,
   type DeliveryTestTargetEndpointRef,
   type EventTypeVersion,
   type Facility,
-  type Neighborhood,
   type NotificationChannel,
   type RosterSnapshot,
 } from '@psd-eoc/contracts';
@@ -76,8 +74,6 @@ export interface ActivationPreviewEvidence {
   readonly selection: CreateActivationPreviewInput;
   readonly facility: Facility;
   readonly eventTypeVersion: EventTypeVersion;
-  readonly audienceConfig: AudienceConfig;
-  readonly neighborhoodVersions: readonly Neighborhood[];
   readonly rosterSnapshot: RosterSnapshot;
   readonly channelConfigurations: readonly ChannelConfiguration[];
   readonly activeEventIds: readonly string[];
@@ -178,10 +174,7 @@ export function buildActivationPreview(
   ) {
     throw new ActivationPreviewBuildError('EVENT_TYPE_UNAVAILABLE');
   }
-  if (
-    evidenceValue.audienceConfig.facilityId !== facility.id ||
-    evidenceValue.rosterSnapshot.population !== selection.rosterPopulation
-  ) {
+  if (evidenceValue.rosterSnapshot.population !== selection.rosterPopulation) {
     throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
   }
   if (
@@ -201,8 +194,7 @@ export function buildActivationPreview(
   }
 
   const resolvedAudience = resolveAudience({
-    audienceConfig: evidenceValue.audienceConfig,
-    neighborhoodVersions: evidenceValue.neighborhoodVersions,
+    facilityId: facility.id,
     rosterSnapshot: evidenceValue.rosterSnapshot,
   });
   const approvedEndpointKeys =
@@ -355,10 +347,7 @@ export function buildActivationPreview(
     eventTypeVersion: selection.eventTypeVersion,
     rosterSnapshotId: resolvedAudience.rosterSnapshot.id,
     rosterPopulation: resolvedAudience.rosterSnapshot.population,
-    audienceConfig: {
-      id: resolvedAudience.audienceConfig.id,
-      version: resolvedAudience.audienceConfig.version,
-    },
+
     recipientCount,
     channels,
     sendReadiness:
