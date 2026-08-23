@@ -133,10 +133,14 @@ jobs:
           sdkmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           avdmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
           emulator_bin="$ANDROID_HOME/emulator/emulator"
+          platform_tools_dir="$ANDROID_HOME/platform-tools"
           test -x "$sdkmanager_bin"
           test -x "$avdmanager_bin"
-          "$sdkmanager_bin" --install "$system_image"
+          "$sdkmanager_bin" --install platform-tools "$system_image"
           test -x "$emulator_bin"
+          test -x "$platform_tools_dir/adb"
+          printf '%s\n' "$platform_tools_dir" >> "$GITHUB_PATH"
+          export PATH="$platform_tools_dir:$PATH"
           printf 'no\n' | "$avdmanager_bin" create avd \
             --force \
             --name issue32_api35 \
