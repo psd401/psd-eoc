@@ -106,20 +106,23 @@
   padding: 0.85rem 1rem;
 }
 
-.delivery-test-human-check {
-  grid-template-columns: auto 1fr !important;
-  align-items: start;
+.delivery-test-consequence-summary,
+.delivery-test-technical-details {
   margin-block: 1rem;
   border: 0.15rem solid var(--delivery-test-blue);
   border-radius: 0.5rem;
   padding: 1rem;
-  font-weight: 700;
 }
 
-.delivery-test-human-check input {
-  width: 1.4rem;
-  height: 1.4rem;
-  margin: 0;
+.delivery-test-consequence-summary {
+  background: var(--delivery-test-blue-light);
+}
+
+.delivery-test-technical-details summary {
+  min-height: 2.75rem;
+  cursor: pointer;
+  font-weight: 750;
+  padding-block: 0.45rem;
 }
 
 .delivery-test-activate {
@@ -158,7 +161,8 @@
   .delivery-test-drill,
   .delivery-test-classification,
   .delivery-test-blocked,
-  .delivery-test-human-check {
+  .delivery-test-consequence-summary,
+  .delivery-test-technical-details {
     border-color: CanvasText;
   }
 }
