@@ -6,6 +6,7 @@ import {
 } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import {
@@ -96,9 +97,9 @@ export default async function DeliveryTestsPage() {
             cannot start this run.
           </p>
         </div>
-        <a className="button button--secondary" href="/">
+        <Link className="button button--secondary" href="/">
           Return to dashboard
-        </a>
+        </Link>
       </header>
 
       <aside className="delivery-test-safety" aria-labelledby="safety-heading">
