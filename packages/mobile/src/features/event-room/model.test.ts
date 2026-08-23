@@ -19,6 +19,7 @@ import {
   formatLocationPayload,
   isEventComposerVisible,
   isNearLiveEdge,
+  journalEntryActionEligibility,
   retainPendingTimelineFollow,
 } from './model';
 
@@ -344,6 +345,52 @@ describe('event-room model', () => {
     expect(updated.entries[0]?.visibility).toBe('redacted');
     expect(JSON.stringify(updated.entries[0])).not.toContain('Update 1');
     expect(updated.entries[1]).toEqual(redaction);
+  });
+
+  test('offers correction and redaction only after complete supersession history is loaded', () => {
+    const original = textEntry(1);
+    const correction = JournalEntryReadProjectionSchema.parse({
+      ...textEntry(2),
+      entry: {
+        ...textEntry(2).entry,
+        payload: { text: 'Corrected update' },
+        supersedes: {
+          entryId: original.entry.id,
+          entrySequence: original.entry.sequence,
+          kind: 'correction',
+          reason: 'Corrected the synthetic wording',
+        },
+      },
+    });
+
+    expect(journalEntryActionEligibility(original, [original], false)).toEqual({
+      correction: {
+        allowed: false,
+        unavailableReason:
+          'Load the complete timeline before correcting or redacting an entry.',
+      },
+      redaction: {
+        allowed: false,
+        unavailableReason:
+          'Load the complete timeline before correcting or redacting an entry.',
+      },
+    });
+    expect(journalEntryActionEligibility(original, [original], true)).toEqual({
+      correction: { allowed: true, unavailableReason: null },
+      redaction: { allowed: true, unavailableReason: null },
+    });
+    expect(
+      journalEntryActionEligibility(original, [original, correction], true)
+        .correction,
+    ).toEqual({
+      allowed: false,
+      unavailableReason:
+        'This entry is already superseded. Refresh and choose the latest entry.',
+    });
+    expect(
+      journalEntryActionEligibility(correction, [original, correction], true)
+        .correction.allowed,
+    ).toBe(true);
   });
 
   test('retains unseen remote updates when applying a confirmed local post', () => {

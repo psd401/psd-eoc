@@ -1,7 +1,11 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema, paginatedSchema } from './api';
-import { EventIdSchema, EventStatusSchema } from './event';
+import {
+  EventClassificationSchema,
+  EventIdSchema,
+  EventStatusSchema,
+} from './event';
 import {
   EventTypeIdSchema,
   EventTypeVersionRefSchema,
@@ -141,16 +145,16 @@ export const DeliveryReportSchema = z
 export type DeliveryReport = z.infer<typeof DeliveryReportSchema>;
 
 /**
- * Owns a retained drill record derived from append-only event history. It
- * supplies the date/time/type evidence needed by downstream records exports
- * without adding compliance-calendar or student-level data.
+ * Owns one activated operational record derived from append-only event
+ * history. It includes real incidents, drills, and synthetic delivery tests
+ * without adding another record store or any student-level data.
  */
-export const DrillRecordSchema = z
+export const EventRecordSchema = z
   .object({
     id: UuidSchema,
     eventId: EventIdSchema,
     facilityId: FacilityIdSchema,
-    kind: z.enum(['drill', 'test']),
+    kind: z.enum(['incident', 'drill', 'test']),
     eventTypeVersion: EventTypeVersionRefSchema,
     eventTypeName: z.string().trim().min(1).max(160),
     status: EventStatusSchema,
@@ -161,17 +165,23 @@ export const DrillRecordSchema = z
   })
   .strict()
   .superRefine((record, context) => {
-    if (record.eventTypeVersion.templateMode !== 'drill') {
+    if (
+      !EventClassificationSchema.safeParse({
+        kind: record.kind,
+        templateMode: record.eventTypeVersion.templateMode,
+      }).success
+    ) {
       context.addIssue({
         code: 'custom',
-        message: 'Drill records must reference drill-mode event types.',
+        message:
+          'Event records must preserve their real-versus-training classification.',
         path: ['eventTypeVersion', 'templateMode'],
       });
     }
     if (record.status === 'draft') {
       context.addIssue({
         code: 'custom',
-        message: 'A drill record exists only after activation.',
+        message: 'An event record exists only after activation.',
         path: ['status'],
       });
     }
@@ -187,7 +197,7 @@ export const DrillRecordSchema = z
         context.addIssue({
           code: 'custom',
           message:
-            'Active drill records carry either no prior all-clear or a complete reactivation pair.',
+            'Active event records carry either no prior all-clear or a complete reactivation pair.',
           path: ['reactivatedAt'],
         });
       }
@@ -198,7 +208,7 @@ export const DrillRecordSchema = z
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'All-clear drill records require an all-clear and no close.',
+        message: 'All-clear event records require an all-clear and no close.',
         path: ['allClearAt'],
       });
     }
@@ -208,14 +218,14 @@ export const DrillRecordSchema = z
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'Closed drill records require all-clear and close times.',
+        message: 'Closed event records require all-clear and close times.',
         path: ['closedAt'],
       });
     }
     if (record.reactivatedAt !== null && record.allClearAt === null) {
       context.addIssue({
         code: 'custom',
-        message: 'Drill reactivation requires retained all-clear history.',
+        message: 'Event reactivation requires retained all-clear history.',
         path: ['allClearAt'],
       });
     }
@@ -225,7 +235,7 @@ export const DrillRecordSchema = z
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'Drill all-clear cannot precede its start.',
+        message: 'Event all-clear cannot precede its start.',
         path: ['allClearAt'],
       });
     }
@@ -239,7 +249,7 @@ export const DrillRecordSchema = z
       if (!isAtOrAfter(time, previous)) {
         context.addIssue({
           code: 'custom',
-          message: 'Drill record lifecycle times must be chronological.',
+          message: 'Event record lifecycle times must be chronological.',
           path: ['status'],
         });
       }
@@ -248,7 +258,20 @@ export const DrillRecordSchema = z
   })
   .readonly();
 
-/** Retained append-only-derived drill record inferred from its schema. */
+/** Retained append-only-derived operational record inferred from its schema. */
+export type EventRecord = z.infer<typeof EventRecordSchema>;
+
+/** Existing training-only capability output; real incidents remain excluded. */
+export const DrillRecordSchema = EventRecordSchema.refine(
+  (record): record is EventRecord & Readonly<{ kind: 'drill' | 'test' }> =>
+    record.kind === 'drill' || record.kind === 'test',
+  {
+    message: 'Drill-record projections cannot contain real incidents.',
+    path: ['kind'],
+  },
+);
+
+/** Backward-compatible record type retained for existing integrations. */
 export type DrillRecord = z.infer<typeof DrillRecordSchema>;
 
 /** Owns bounded drill-record list filters within authorized facilities. */
@@ -280,11 +303,23 @@ export const ListDrillRecordsInputSchema = z
 /** Drill-record list input inferred from its schema. */
 export type ListDrillRecordsInput = z.infer<typeof ListDrillRecordsInputSchema>;
 
+/** Human-interactive mixed-record query; structurally shares bounded filters. */
+export const ListEventRecordsInputSchema = ListDrillRecordsInputSchema;
+
+/** Mixed operational-record list input inferred from its schema. */
+export type ListEventRecordsInput = ListDrillRecordsInput;
+
 /** Owns a bounded page of retained drill records. */
 export const DrillRecordPageSchema = paginatedSchema(DrillRecordSchema);
 
 /** Retained drill-record page inferred from its schema. */
 export type DrillRecordPage = z.infer<typeof DrillRecordPageSchema>;
+
+/** Canonically named page for the mixed operational records view. */
+export const EventRecordPageSchema = paginatedSchema(EventRecordSchema);
+
+/** Mixed incident, drill, and test record page. */
+export type EventRecordPage = z.infer<typeof EventRecordPageSchema>;
 
 /** Owns supported records-export artifact formats. */
 export const RecordsExportFormatSchema = z.enum(['csv', 'pdf']);

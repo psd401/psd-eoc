@@ -9,6 +9,8 @@ import {
   CreateMediaUploadIntentInputSchema,
   EventRoomSyncResultSchema,
   EventSchema,
+  EVENT_CLASSIFICATION_PRESENTATIONS,
+  getEventClassificationPresentation,
   JournalEntryReadProjectionSchema,
   IdempotencyKeySchema,
   JournalEntrySchema,
@@ -3261,16 +3263,11 @@ function PreviewDetails({
             : '.'}
         </p>
         {preview.blockingReasonCodes.length > 0 ? (
-          <>
-            <h4>Blocking reason codes</h4>
-            <ul>
-              {preview.blockingReasonCodes.map((code) => (
-                <li key={code}>
-                  <code>{code}</code>
-                </li>
-              ))}
-            </ul>
-          </>
+          <p role="alert">
+            This action is unavailable because one or more server prerequisites
+            are not ready. Refresh the preview; if it remains blocked, contact
+            an administrator.
+          </p>
         ) : null}
       </details>
     </section>
@@ -3281,9 +3278,12 @@ function DialogClassification({
   label,
   real,
 }: Readonly<{ label: string; real: boolean }>) {
+  const test = label === EVENT_CLASSIFICATION_PRESENTATIONS.test.label;
   return (
-    <p className={`dialog-classification ${real ? 'mode-real' : 'mode-drill'}`}>
-      <span aria-hidden="true">{real ? '⚠' : '◆'} </span>
+    <p
+      className={`dialog-classification ${real ? 'mode-real' : test ? 'mode-test' : 'mode-drill'}`}
+    >
+      <span aria-hidden="true">{real ? '!' : test ? '◇' : '✎'} </span>
       {label}
     </p>
   );
@@ -3387,11 +3387,8 @@ export function EventRoom({
 
   const elapsed = useElapsedLabel(currentEvent);
   const realEvent = event.templateMode === 'real';
-  const classificationLabel = realEvent
-    ? 'REAL INCIDENT'
-    : event.kind === 'test'
-      ? 'TEST — TRAINING ONLY'
-      : 'DRILL — TRAINING ONLY';
+  const classification = getEventClassificationPresentation(event);
+  const classificationLabel = classification.label;
 
   const queueAnnouncement = useCallback((count: number) => {
     if (count <= 0) return;
@@ -4655,10 +4652,10 @@ export function EventRoom({
     <main className="event-room" id="main-content" tabIndex={-1}>
       <header>
         <div
-          className={`classification-banner ${realEvent ? 'mode-real' : 'mode-drill'}`}
+          className={`classification-banner mode-${classification.kind === 'incident' ? 'real' : classification.kind}`}
         >
           <span aria-hidden="true" className="classification-icon">
-            {realEvent ? '⚠' : '◆'}
+            {classification.icon.glyph}
           </span>
           <span>{classificationLabel}</span>
         </div>

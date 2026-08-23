@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { TemplateModeSchema } from '@psd-eoc/contracts';
+import {
+  EVENT_CLASSIFICATION_PRESENTATIONS,
+  EventKindSchema,
+  TemplateModeSchema,
+} from '@psd-eoc/contracts';
 
 import { EVENT_THEME_TOKENS, getEventTheme } from './event-theme';
 
@@ -50,17 +54,49 @@ describe('event theme tokens', () => {
     );
     expect(real.colors.pageBackground).not.toBe(drill.colors.pageBackground);
     expect(real.classificationWord).toBe('REAL INCIDENT');
-    expect(drill.classificationWord).toBe('DRILL — PRACTICE');
+    expect(drill.classificationWord).toBe('DRILL — TRAINING ONLY');
     expect(drill.explanation).toBe(
-      'This visual state is for a drill or synthetic test only.',
+      'This is a drill for training. It is not a real incident.',
     );
     expect(real.icon.name).not.toBe(drill.icon.name);
     expect(real.icon.glyph).not.toBe(drill.icon.glyph);
   });
 
+  test('renders tests as tests instead of collapsing them into drills', () => {
+    const testTheme = getEventTheme('drill', 'test');
+    const drillTheme = getEventTheme('drill', 'drill');
+
+    expect(testTheme.classificationWord).toBe('TEST — NOT A REAL INCIDENT');
+    expect(testTheme.explanation).toBe(
+      'This is a synthetic delivery test. It is not a real incident.',
+    );
+    expect(testTheme.colors.bannerBackground).not.toBe(
+      drillTheme.colors.bannerBackground,
+    );
+  });
+
+  test('cannot drift from the canonical contract presentation', () => {
+    for (const kind of EventKindSchema.options) {
+      const canonical = EVENT_CLASSIFICATION_PRESENTATIONS[kind];
+      const mobile = getEventTheme(canonical.templateMode, kind);
+      expect({
+        label: mobile.classificationWord,
+        explanation: mobile.explanation,
+        icon: mobile.icon,
+        colors: mobile.colors,
+      }).toEqual({
+        label: canonical.label,
+        explanation: canonical.explanation,
+        icon: canonical.icon,
+        colors: canonical.colors,
+      });
+    }
+  });
+
   test('keeps classification banners at WCAG AA text contrast', () => {
-    for (const mode of TemplateModeSchema.options) {
-      const { colors } = getEventTheme(mode);
+    for (const kind of EventKindSchema.options) {
+      const canonical = EVENT_CLASSIFICATION_PRESENTATIONS[kind];
+      const { colors } = getEventTheme(canonical.templateMode, kind);
       expect(
         contrastRatio(colors.bannerBackground, colors.onBanner),
       ).toBeGreaterThanOrEqual(4.5);

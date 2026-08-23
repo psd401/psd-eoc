@@ -439,8 +439,6 @@ describe('mobile distribution configuration', () => {
 
     for (const integration of [
       'Expo Application Services (Submit)',
-      'Apple App Store Connect / TestFlight',
-      'Google Play closed testing',
       'Firebase App Distribution',
     ]) {
       const row = rows.find((line) => line.includes(`| ${integration}`));
@@ -458,9 +456,11 @@ describe('mobile distribution configuration', () => {
     );
     expect(submit).toContain('6801607849');
     expect(apple).toContain('6801607849');
+    expect(apple).toContain('| `live-verified`');
+    expect(play).toContain('| `live-verified`');
     expect(submit).toContain('dcd24fd9-16ef-455d-92a8-c3852b4cfcd3');
     expect(apple).toContain('90683');
-    expect(apple).toContain('No processed TestFlight build');
+    expect(apple).toContain('which** build is on the device');
     expect(play).toContain('4860219896995172827');
     expect(play).toContain('Internal testing');
   });
@@ -520,15 +520,23 @@ describe('mobile distribution configuration', () => {
       );
       expect(compactGuide).not.toContain('expected staff name');
       expect(guide).toMatch(/Deleting\s+the app alone does not prove/u);
-      expect(compactGuide).toContain('canonical **`[DRILL]`** marker');
-      expect(compactGuide).toContain('**DRILL — PRACTICE**');
+      expect(compactGuide).toContain(
+        'canonical **`[DRILL]`** transport marker',
+      );
+      expect(compactGuide).toContain('**TEST — NOT A REAL INCIDENT**');
       expect(compactGuide).toContain('**`[INCIDENT]`**');
       expect(compactGuide).toContain('omits **`[DRILL]`**');
       expect(compactGuide).toContain('conflicting markers');
       expect(compactGuide).toContain('uses real-incident wording');
       expect(compactGuide).toContain('generic wording such as **TEST ONLY**');
       expect(compactGuide).toContain(
-        'opened event does not visibly say **DRILL — PRACTICE**',
+        'opened event does not visibly say **TEST — NOT A REAL INCIDENT**',
+      );
+      expect(compactGuide).toContain('**DRILL — TRAINING ONLY**');
+      expect(compactGuide).toContain('## Use event collaboration safely');
+      expect(compactGuide).toContain('server strips EXIF and GPS metadata');
+      expect(compactGuide).toContain(
+        'appends a linked entry; it never rewrites or deletes the original',
       );
       expect(compactGuide).not.toContain(
         'continues to show **`[DRILL]`** on the opened event content',

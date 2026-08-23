@@ -565,19 +565,11 @@ dd {
   align-items: center;
   gap: 0.8rem;
   margin: 0 0 1.25rem;
-  border: 0.1875rem solid currentcolor;
+  border: 0.1875rem solid var(--classification-banner-border);
   border-radius: 0.65rem;
+  background: var(--classification-banner-background);
+  color: var(--classification-banner-foreground);
   padding: 0.9rem 1rem;
-}
-
-.classification-banner--real {
-  background: var(--real-surface);
-  color: var(--real-dark);
-}
-
-.classification-banner--drill {
-  background: var(--drill-surface);
-  color: var(--drill-dark);
 }
 
 .classification-banner__icon {

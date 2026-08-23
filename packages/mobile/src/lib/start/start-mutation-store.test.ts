@@ -50,6 +50,7 @@ const UNRESOLVED = Object.freeze({
   phase: 'unresolved' as const,
   owner: OWNER,
   operation: 'activate' as const,
+  eventKind: 'drill' as const,
   eventTypeName: 'Practice Lockdown',
   mode: 'drill' as const,
   idempotencyKey: KEY,
@@ -64,6 +65,7 @@ const SUCCEEDED = Object.freeze({
   phase: 'succeeded' as const,
   owner: OWNER,
   operation: 'join' as const,
+  eventKind: 'incident' as const,
   eventTypeName: 'Lockdown',
   mode: 'real' as const,
   idempotencyKey: KEY,
@@ -71,16 +73,31 @@ const SUCCEEDED = Object.freeze({
   completion: Object.freeze({
     kind: 'joined' as const,
     eventId: SUCCEEDED_EVENT_ID,
+    eventKind: 'incident' as const,
     eventTypeName: 'Lockdown',
     mode: 'real' as const,
   }),
   feedbackClaimed: false,
 });
 
+const TEST_SUCCEEDED = Object.freeze({
+  ...SUCCEEDED,
+  eventKind: 'test' as const,
+  eventTypeName: 'Synthetic delivery test',
+  mode: 'drill' as const,
+  completion: Object.freeze({
+    ...SUCCEEDED.completion,
+    eventKind: 'test' as const,
+    eventTypeName: 'Synthetic delivery test',
+    mode: 'drill' as const,
+  }),
+});
+
 const FAILED = Object.freeze({
   phase: 'failed' as const,
   owner: OWNER,
   operation: 'activate' as const,
+  eventKind: 'drill' as const,
   eventTypeName: 'Practice Lockdown',
   mode: 'drill' as const,
   idempotencyKey: KEY,
@@ -143,6 +160,7 @@ describe('start mutation store', () => {
   const roundTripFixtures = [
     ['unresolved', UNRESOLVED],
     ['succeeded', SUCCEEDED],
+    ['test succeeded', TEST_SUCCEEDED],
     ['failed', FAILED],
   ] as const;
   for (const [name, record] of roundTripFixtures) {
@@ -170,10 +188,11 @@ describe('start mutation store', () => {
       'The stored start-mutation recovery record is invalid.',
     );
     expectRejected({
-      version: 2,
+      version: 1,
       ...UNRESOLVED,
     });
     expectRejected({ ...UNRESOLVED, phase: 'pending' });
+    expectRejected({ version: 1, phase: 'empty', unexpected: true });
     expectRejected({ ...UNRESOLVED, unexpected: true });
     expectRejected({
       ...UNRESOLVED,
@@ -207,6 +226,25 @@ describe('start mutation store', () => {
       owner: { ...OWNER, deviceEnrollmentId: 'not-an-enrollment-id' },
     });
     expectRejected({ ...UNRESOLVED, mode: 'test' });
+    expectRejected({ ...UNRESOLVED, eventKind: 'incident' });
+    expectRejected({
+      ...UNRESOLVED,
+      eventKind: 'test',
+      activationEvidence: ACTIVATION_EVIDENCE,
+    });
+    expectRejected({
+      ...UNRESOLVED,
+      activationEvidence: { ...ACTIVATION_EVIDENCE, kind: 'test' },
+    });
+    expectRejected({
+      ...UNRESOLVED,
+      eventKind: 'test',
+      activationEvidence: {
+        ...ACTIVATION_EVIDENCE,
+        kind: 'test',
+        rosterPopulation: 'staff',
+      },
+    });
     expectRejected({ ...UNRESOLVED, operation: 'close' });
     expectRejected({ ...UNRESOLVED, eventTypeName: '   ' });
     expectRejected({ ...UNRESOLVED, idempotencyKey: 'too-short' });
@@ -255,6 +293,10 @@ describe('start mutation store', () => {
       ...SUCCEEDED,
       completion: { ...SUCCEEDED.completion, mode: 'drill' },
     });
+    expectRejected({
+      ...SUCCEEDED,
+      completion: { ...SUCCEEDED.completion, eventKind: 'test' },
+    });
     expectRejected({ ...SUCCEEDED, feedbackClaimed: 'false' });
     expectRejected({
       ...UNRESOLVED,
@@ -301,6 +343,15 @@ describe('start mutation store', () => {
       phase: 'empty',
     });
     expect(store.read()).toBeNull();
+  });
+
+  test('migrates only the exact legacy v1 empty tombstone as empty', () => {
+    expect(
+      parseStartMutationStoreRecord('{"version":1,"phase":"empty"}'),
+    ).toBeNull();
+    expect(() =>
+      parseStartMutationStoreRecord(serialized({ version: 1, ...UNRESOLVED })),
+    ).toThrow('The stored start-mutation recovery record is invalid.');
   });
 
   test('default storage is synchronous, device-only, and dedicated', () => {

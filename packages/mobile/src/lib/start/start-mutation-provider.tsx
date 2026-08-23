@@ -186,6 +186,7 @@ export class StartMutationProviderController {
     owner: StartMutationOwner,
     display: Readonly<{
       operation: 'activate' | 'join';
+      eventKind: ActivationPreview['kind'];
       eventTypeName: string;
       mode: ActivationPreview['templateMode'];
     }>,
@@ -232,6 +233,7 @@ export class StartMutationProviderController {
     if (
       !this.assertAdmissionOrReport(owner, {
         operation: 'activate',
+        eventKind: input.preview.kind,
         eventTypeName: input.eventTypeName,
         mode: input.preview.templateMode,
       })
@@ -246,6 +248,7 @@ export class StartMutationProviderController {
     return this.coordinator.submit({
       operation: 'activate',
       owner,
+      eventKind: input.preview.kind,
       eventTypeName: input.eventTypeName,
       mode: input.preview.templateMode,
       idempotencyKey,
@@ -262,6 +265,7 @@ export class StartMutationProviderController {
     if (
       !this.assertAdmissionOrReport(owner, {
         operation: 'join',
+        eventKind: input.choice.event.kind,
         eventTypeName: input.choice.eventTypeName,
         mode: input.choice.event.templateMode,
       })
@@ -275,6 +279,7 @@ export class StartMutationProviderController {
       operation: 'join',
       owner,
       eventId: input.choice.event.id,
+      eventKind: input.choice.event.kind,
       eventTypeName: input.choice.eventTypeName,
       mode: input.choice.event.templateMode,
       idempotencyKey,

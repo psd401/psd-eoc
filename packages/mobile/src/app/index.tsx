@@ -215,6 +215,7 @@ export default function HomeScreen() {
       <SafeAreaView style={styles.page}>
         <ActivationResult
           announceOnMount={false}
+          eventKind={mutationSnapshot.completion.eventKind}
           eventTypeName={mutationSnapshot.completion.eventTypeName}
           kind={mutationSnapshot.completion.kind}
           mode={mutationSnapshot.completion.mode}
@@ -273,6 +274,7 @@ export default function HomeScreen() {
     return (
       <SafeAreaView style={styles.page}>
         <StartMutationAttention
+          eventKind={mutationSnapshot.eventKind}
           eventTypeName={mutationSnapshot.eventTypeName}
           mode={mutationSnapshot.mode}
           operation={mutationSnapshot.operation}
@@ -327,6 +329,7 @@ export default function HomeScreen() {
                     : {
                         activeEvents: outcomeActiveEvents.map((choice) => ({
                           eventId: choice.event.id,
+                          eventKind: choice.event.kind,
                           eventTypeName: choice.eventTypeName,
                           facilityName: choice.facilityName,
                           mode: choice.event.templateMode,
@@ -489,6 +492,7 @@ export default function HomeScreen() {
                       }
                       disabled={mutationPending}
                       eventId={choice.event.id}
+                      eventKind={choice.event.kind}
                       eventTypeName={choice.eventTypeName}
                       facilityName={choice.facilityName}
                       key={choice.event.id}

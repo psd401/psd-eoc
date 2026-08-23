@@ -36,6 +36,7 @@ import {
   EventTypeChoice,
   ISSUE_21_MAESTRO_IDS,
   OtherSessionStartMutationAttention,
+  publicBlockingMessages,
   StartMutationAttention,
   StartMutationRecoveryBlockedAttention,
   StartMutationRecoveryCheckingAttention,
@@ -60,7 +61,6 @@ import {
   useStartMutationHardwareBackGuard,
   useStartMutationNavigationGuard,
 } from '../../lib/start';
-import {} from '../../lib/start/start-api-client';
 import { getEventTheme } from '../../theme/event-theme';
 
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
@@ -87,11 +87,6 @@ function previewFailureMessage(error: unknown): string {
 
 export function unresolvedOutcomeRefreshError(): string {
   return 'PSD EOC could not load fresh active events. This refresh did not determine the earlier request outcome. That outcome remains unresolved, and nothing retried automatically.';
-}
-
-function blockingMessage(code: string): string {
-  const words = code.replaceAll('_', ' ').toLowerCase();
-  return `${words.charAt(0).toUpperCase()}${words.slice(1)}.`;
 }
 
 function startedLabel(choice: StartHomeActiveEvent): string {
@@ -307,10 +302,10 @@ export default function StartEventScreen() {
 
       setData(currentData);
       setPreview(nextPreview);
-      const previewClassification =
-        nextPreview.templateMode === 'real'
-          ? 'REAL INCIDENT'
-          : 'DRILL — PRACTICE';
+      const previewClassification = getEventTheme(
+        nextPreview.templateMode,
+        nextPreview.kind,
+      ).classificationWord;
       AccessibilityInfo.announceForAccessibility(
         `Consequence preview ready for ${previewClassification}. ${activationAudienceLabel(nextPreview.recipientCount, nextPreview.rosterPopulation)}. ${nextPreview.channels.length} channels list the exact rendered messages, endpoint counts, and integration truth labels. Review before confirming.`,
       );
@@ -372,6 +367,7 @@ export default function StartEventScreen() {
       <SafeAreaView style={styles.page}>
         <ActivationResult
           announceOnMount={false}
+          eventKind={mutationSnapshot.completion.eventKind}
           eventTypeName={mutationSnapshot.completion.eventTypeName}
           kind={mutationSnapshot.completion.kind}
           mode={mutationSnapshot.completion.mode}
@@ -431,6 +427,7 @@ export default function StartEventScreen() {
     return (
       <SafeAreaView style={styles.page}>
         <StartMutationAttention
+          eventKind={mutationSnapshot.eventKind}
           eventTypeName={mutationSnapshot.eventTypeName}
           mode={mutationSnapshot.mode}
           operation={mutationSnapshot.operation}
@@ -485,6 +482,7 @@ export default function StartEventScreen() {
                     : {
                         activeEvents: outcomeActiveEvents.map((choice) => ({
                           eventId: choice.event.id,
+                          eventKind: choice.event.kind,
                           eventTypeName: choice.eventTypeName,
                           facilityName: choice.facilityName,
                           mode: choice.event.templateMode,
@@ -745,8 +743,8 @@ export default function StartEventScreen() {
         boundPreview !== null ? (
           <ActivationConfirmation
             activeEventCount={boundPreview.activeEventIds.length}
-            blockingMessages={boundPreview.blockingReasonCodes.map(
-              blockingMessage,
+            blockingMessages={publicBlockingMessages(
+              boundPreview.blockingReasonCodes,
             )}
             busy={
               mutationSnapshot.phase === 'pending' &&
@@ -755,6 +753,7 @@ export default function StartEventScreen() {
             }
             channels={boundPreview.channels}
             disabled={mutationPending}
+            eventKind={boundPreview.kind}
             eventTypeName={selectedType.latestVersion.name}
             facilityName={facility.name}
             mode={mode}
@@ -787,6 +786,7 @@ export default function StartEventScreen() {
                     }
                     disabled={mutationPending}
                     eventId={choice.event.id}
+                    eventKind={choice.event.kind}
                     eventTypeName={choice.eventTypeName}
                     facilityName={choice.facilityName}
                     key={choice.event.id}

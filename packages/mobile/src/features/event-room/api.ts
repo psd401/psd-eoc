@@ -4,6 +4,7 @@ import {
   EventIdSchema,
   EventRoomSyncResultSchema,
   JournalEntrySchema,
+  JournalSupersessionSchema,
   LifecycleConsequencePreviewSchema,
   MediaReadGrantSchema,
   MediaRecordSchema,
@@ -93,6 +94,47 @@ function journalMutationSchema(
     }
     return projectJournalEntryForRead(entry, false);
   });
+}
+
+function journalSupersessionSchema(
+  eventId: string,
+  sessionId: string,
+  target: Readonly<{ entryId: string; entrySequence: number }>,
+  supersessionKind: 'correction' | 'redaction',
+  reason: string,
+  kind: 'text' | 'location',
+  clientTime: string | null,
+  matchesRequest: (entry: JournalEntry) => boolean,
+): JsonResponseSchema<JournalEntryReadProjection> {
+  return schema((value) => {
+    const entry = JournalEntrySchema.parse(record(value).entry);
+    if (
+      entry.eventId !== eventId ||
+      entry.kind !== kind ||
+      entry.source !== 'mobile' ||
+      entry.author.kind !== 'human' ||
+      entry.author.sessionId !== sessionId ||
+      entry.clientTime !== clientTime ||
+      entry.supersedes?.entryId !== target.entryId ||
+      entry.supersedes.entrySequence !== target.entrySequence ||
+      entry.supersedes.kind !== supersessionKind ||
+      entry.supersedes.reason !== reason ||
+      !matchesRequest(entry)
+    ) {
+      throw new Error(
+        'PSD EOC returned a journal supersession for another request.',
+      );
+    }
+    return projectJournalEntryForRead(entry, false);
+  });
+}
+
+function supersessionTarget(
+  target: Readonly<{ entryId: string; entrySequence: number }>,
+  kind: 'correction' | 'redaction',
+  reason: string,
+) {
+  return JournalSupersessionSchema.parse({ ...target, kind, reason });
 }
 
 function allClearPreviewSchema(
@@ -269,6 +311,116 @@ export class EventRoomApi {
           entry.payload.mediaId === mediaId &&
           entry.payload.altText === altText &&
           entry.payload.caption === caption,
+      ),
+      signal,
+    );
+  }
+
+  public correctText(
+    eventId: string,
+    sessionId: string,
+    target: Readonly<{ entryId: string; entrySequence: number }>,
+    text: string,
+    reason: string,
+    idempotencyKey: string,
+    clientTime: string | null,
+    signal?: AbortSignal,
+  ): Promise<JournalEntryReadProjection> {
+    const supersedes = supersessionTarget(target, 'correction', reason);
+    return this.mutate(
+      eventId,
+      {
+        operation: 'correct-text',
+        entryId: supersedes.entryId,
+        entrySequence: supersedes.entrySequence,
+        text,
+        reason: supersedes.reason,
+        clientTime,
+      },
+      idempotencyKey,
+      journalSupersessionSchema(
+        EventIdSchema.parse(eventId),
+        SessionIdSchema.parse(sessionId),
+        supersedes,
+        'correction',
+        supersedes.reason,
+        'text',
+        clientTime,
+        (entry) => entry.kind === 'text' && entry.payload.text === text,
+      ),
+      signal,
+    );
+  }
+
+  public correctLocation(
+    eventId: string,
+    sessionId: string,
+    target: Readonly<{ entryId: string; entrySequence: number }>,
+    payload: LocationPayload,
+    reason: string,
+    idempotencyKey: string,
+    clientTime: string | null,
+    signal?: AbortSignal,
+  ): Promise<JournalEntryReadProjection> {
+    const supersedes = supersessionTarget(target, 'correction', reason);
+    return this.mutate(
+      eventId,
+      {
+        operation: 'correct-location',
+        entryId: supersedes.entryId,
+        entrySequence: supersedes.entrySequence,
+        payload,
+        reason: supersedes.reason,
+        clientTime,
+      },
+      idempotencyKey,
+      journalSupersessionSchema(
+        EventIdSchema.parse(eventId),
+        SessionIdSchema.parse(sessionId),
+        supersedes,
+        'correction',
+        supersedes.reason,
+        'location',
+        clientTime,
+        (entry) =>
+          entry.kind === 'location' &&
+          structurallyEqual(entry.payload, payload),
+      ),
+      signal,
+    );
+  }
+
+  public redactEntry(
+    eventId: string,
+    sessionId: string,
+    target: Readonly<{ entryId: string; entrySequence: number }>,
+    reason: string,
+    idempotencyKey: string,
+    clientTime: string | null,
+    signal?: AbortSignal,
+  ): Promise<JournalEntryReadProjection> {
+    const redactionText = '[Content redacted — original retained in journal]';
+    const supersedes = supersessionTarget(target, 'redaction', reason);
+    return this.mutate(
+      eventId,
+      {
+        operation: 'redact-entry',
+        entryId: supersedes.entryId,
+        entrySequence: supersedes.entrySequence,
+        reason: supersedes.reason,
+        clientTime,
+      },
+      idempotencyKey,
+      journalSupersessionSchema(
+        EventIdSchema.parse(eventId),
+        SessionIdSchema.parse(sessionId),
+        supersedes,
+        'redaction',
+        supersedes.reason,
+        'text',
+        clientTime,
+        (entry) =>
+          entry.kind === 'text' && entry.payload.text === redactionText,
       ),
       signal,
     );

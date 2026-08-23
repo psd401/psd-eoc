@@ -148,7 +148,7 @@ describe('monthly delivery-test browser safety', () => {
       />,
     );
 
-    expect(markup).toContain('DRILL — LIVE CANARY — TRAINING ONLY');
+    expect(markup).toContain('TEST — NOT A REAL INCIDENT · LIVE CANARY');
     expect(markup).toContain('not a real incident');
     expect(markup).toContain('Nothing sends automatically');
     expect(markup).toContain('approved recipients across');
@@ -182,7 +182,10 @@ describe('monthly delivery-test browser safety', () => {
       );
       expect(markup).toContain('Live canary run blocked');
       expect(markup).toContain('Technical preview details');
-      expect(markup).toContain('INTEGRATION_NOT_LIVE_VERIFIED');
+      expect(markup).toContain(
+        'one or more integration prerequisites are not ready',
+      );
+      expect(markup).not.toContain('INTEGRATION_NOT_LIVE_VERIFIED');
       expect(markup).toMatch(
         /<button[^>]*disabled=""[^>]*>Confirm and start DRILL live canary<\/button>/u,
       );
@@ -363,6 +366,8 @@ describe('destination-free monthly report view', () => {
     expect(markup).toContain('Provider accepted:');
     expect(markup).toContain('Unknown:');
     expect(markup).toContain('does not prove delivery or human receipt');
+    expect(markup).toContain('Provider evidence is still incomplete');
+    expect(markup).not.toContain('PROVIDER_TRUTH_INCOMPLETE');
     expect(markup).not.toContain('recipientId');
     expect(markup).not.toContain('endpointId');
     expect(markup).not.toContain('@');

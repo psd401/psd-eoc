@@ -123,6 +123,7 @@ const JOIN_EVENT_ID = '00000000-0000-4000-8000-000000000023';
 const CHOICE = {
   event: {
     id: JOIN_EVENT_ID,
+    kind: 'incident',
     templateMode: 'real',
   } as Event,
   eventTypeName: 'Synthetic lockdown',
@@ -133,6 +134,7 @@ function activationResult(): StartEventResult {
   return {
     event: {
       id: ACTIVATED_EVENT_ID,
+      kind: 'drill',
       templateMode: 'drill',
       eventTypeVersion: { templateMode: 'drill' },
     },
@@ -144,6 +146,7 @@ function joinResult(): JoinEventResult {
   return {
     event: {
       id: JOIN_EVENT_ID,
+      kind: 'incident',
       templateMode: 'real',
       eventTypeVersion: { templateMode: 'real' },
     },
@@ -165,6 +168,7 @@ function unresolvedActivationRecord(): StartMutationRecoveryRecord {
     phase: 'unresolved',
     owner: ownerFixture(),
     operation: 'activate',
+    eventKind: 'drill',
     eventTypeName: 'Recovered synthetic earthquake drill',
     mode: 'drill',
     idempotencyKey: 'recovered-provider-key-0001',
@@ -299,6 +303,7 @@ describe('StartMutationProviderController retention', () => {
       completion: {
         kind: 'activated',
         eventId: ACTIVATED_EVENT_ID,
+        eventKind: 'drill',
         eventTypeName: 'Synthetic earthquake drill',
         mode: 'drill',
       },
@@ -608,6 +613,7 @@ describe('StartMutationProviderController admission and terminal API', () => {
     expect(controller.getSnapshot()).toEqual({
       phase: 'failed',
       operation: 'join',
+      eventKind: 'incident',
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
       error: {
@@ -656,6 +662,7 @@ describe('StartMutationProviderController admission and terminal API', () => {
     expect(controller.claimSuccessFeedback()).toEqual({
       kind: 'joined',
       eventId: JOIN_EVENT_ID,
+      eventKind: 'incident',
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
     });

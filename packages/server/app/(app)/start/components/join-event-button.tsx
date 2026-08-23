@@ -1,6 +1,10 @@
 'use client';
 
-import { JoinEventResultSchema, type Event } from '@psd-eoc/contracts';
+import {
+  getEventClassificationPresentation,
+  JoinEventResultSchema,
+  type Event,
+} from '@psd-eoc/contracts';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 
@@ -22,6 +26,7 @@ export function JoinEventButton({
   event,
   label,
 }: JoinEventButtonProps) {
+  const classification = getEventClassificationPresentation(event);
   const idempotencyKey = useRef<string | null>(null);
   const inFlight = useRef(false);
   const feedbackRef = useRef<HTMLParagraphElement>(null);
@@ -77,10 +82,8 @@ export function JoinEventButton({
         role="status"
         tabIndex={-1}
       >
-        {event.templateMode === 'real'
-          ? 'REAL INCIDENT'
-          : 'DRILL — TRAINING ONLY'}{' '}
-        event joined. <Link href={`/events/${joinedEventId}`}>Open event</Link>
+        {classification.label} event joined.{' '}
+        <Link href={`/events/${joinedEventId}`}>Open event</Link>
       </p>
     );
   }
@@ -93,10 +96,8 @@ export function JoinEventButton({
         type="button"
         onClick={() => void join()}
       >
-        <ClassificationIcon mode={event.templateMode} />
-        {pending
-          ? `Joining ${event.templateMode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY'} once…`
-          : `Join ${label}`}
+        <ClassificationIcon kind={event.kind} mode={event.templateMode} />
+        {pending ? `Joining ${classification.label} once…` : `Join ${label}`}
       </button>
       {error === null ? null : (
         <p

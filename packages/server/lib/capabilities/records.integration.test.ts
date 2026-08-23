@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { eq, sql } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -22,6 +22,8 @@ import {
   journalEntries,
   notificationIntentChannels,
   notificationIntents,
+  rosterSnapshots,
+  rosterSourceConfigurations,
   securityAuditEntries,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
@@ -34,6 +36,7 @@ import {
 } from './journal';
 import {
   createRecordsCapabilityRuntime,
+  executeEventRecordsCapability,
   executeRecordsCapability,
   type RecordsCapabilityRuntime,
 } from './records';
@@ -80,7 +83,9 @@ const RUN = Object.freeze({
   northRedactedEntryAt: runTime(12),
   northRedactionAt: runTime(13),
   northTestAt: runTimestamp(60),
+  northIncidentAt: runTimestamp(75),
   southDrillAt: runTimestamp(90),
+  southIncidentAt: runTimestamp(105),
   southEntryAt: runTime(91),
   northDraftAt: runTime(120),
   northNewerDrillAt: runTimestamp(150),
@@ -99,9 +104,12 @@ const SEEDED = Object.freeze({
   facilitySouth: '00000000-0000-4000-8000-000000000002',
   audienceNorth: '00000000-0000-4000-8000-000000000020',
   rosterSnapshot: '00000000-0000-4000-8000-000000000041',
+  staffRosterConfiguration: randomUUID(),
+  staffRosterSnapshot: randomUUID(),
   drillEventType: '00000000-0000-4000-8000-000000000101',
   otherDrillEventType: '00000000-0000-4000-8000-000000000103',
   drillEventTypeVersion: '00000000-0000-4000-8000-000000000201',
+  realEventTypeVersion: '00000000-0000-4000-8000-000000000200',
   integrationExpoPush: '00000000-0000-4000-8000-000000000301',
   integrationSesEmail: '00000000-0000-4000-8000-000000000302',
 });
@@ -112,11 +120,19 @@ const ACTOR = Object.freeze({
   apiKeyId: randomUUID(),
 });
 
+const HUMAN_ACTOR = Object.freeze({
+  kind: 'human' as const,
+  userId: randomUUID(),
+  sessionId: randomUUID(),
+});
+
 const FIXTURE = Object.freeze({
   northDrill: randomUUID(),
   northTest: randomUUID(),
+  northIncident: randomUUID(),
   northDraft: randomUUID(),
   southDrill: randomUUID(),
+  southIncident: randomUUID(),
   northNewerDrill: randomUUID(),
   northVisibleEntry: randomUUID(),
   northRedactedEntry: randomUUID(),
@@ -171,6 +187,26 @@ function invocation(
   });
 }
 
+function humanInvocation(
+  requestId = randomUUID(),
+  facilityIds: readonly string[] = [SEEDED.facilityNorth],
+): TrustedCapabilityInvocation {
+  return Object.freeze({
+    actor: HUMAN_ACTOR,
+    source: 'web' as const,
+    scope: {
+      facilityScope: {
+        kind: 'facilities' as const,
+        facilityIds: [...facilityIds],
+      },
+    },
+    requestId,
+    serverTime: RUN.invocationAt,
+    connectivityEpochId: null,
+    mutation: null,
+  });
+}
+
 function activationAuthorization() {
   return {
     kind: 'synthetic-training' as const,
@@ -184,7 +220,7 @@ function activatedEvent(
   input: Readonly<{
     id: string;
     facilityId: string;
-    kind: 'drill' | 'test';
+    kind: 'incident' | 'drill' | 'test';
     activatedAt: string;
     status?: 'active' | 'closed';
   }>,
@@ -199,12 +235,20 @@ function activatedEvent(
     id: input.id,
     facilityId: input.facilityId,
     kind: input.kind,
-    templateMode: 'drill' as const,
-    eventTypeVersionId: SEEDED.drillEventTypeVersion,
+    templateMode:
+      input.kind === 'incident' ? ('real' as const) : ('drill' as const),
+    eventTypeVersionId:
+      input.kind === 'incident'
+        ? SEEDED.realEventTypeVersion
+        : SEEDED.drillEventTypeVersion,
     status,
-    rosterSnapshotId: SEEDED.rosterSnapshot,
-    rosterPopulation: 'synthetic' as const,
-    createdBy: ACTOR,
+    rosterSnapshotId:
+      input.kind === 'incident'
+        ? SEEDED.staffRosterSnapshot
+        : SEEDED.rosterSnapshot,
+    rosterPopulation:
+      input.kind === 'incident' ? ('staff' as const) : ('synthetic' as const),
+    createdBy: input.kind === 'incident' ? HUMAN_ACTOR : ACTOR,
     createdAt: new Date(activatedAt.getTime() - 60_000),
     activatedAt,
     allClearAt,
@@ -213,7 +257,17 @@ function activatedEvent(
       allClearAt === null ? null : new Date(allClearAt.getTime() + 60_000),
     correctionOfEventId: null,
     correctionReason: null,
-    activationAuthorization: activationAuthorization(),
+    activationAuthorization:
+      input.kind === 'incident'
+        ? {
+            kind: 'human-confirmed' as const,
+            activationPreviewId: randomUUID(),
+            preparedActivationId: null,
+            confirmationId: randomUUID(),
+            consequenceDigest: 'd'.repeat(64),
+            requestId: randomUUID(),
+          }
+        : activationAuthorization(),
   };
 }
 
@@ -255,6 +309,43 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     };
     recordsRuntime = createRecordsCapabilityRuntime(opened, artifactStore);
 
+    const [existingStaffRosterConfiguration] = await opened.db
+      .select({
+        id: rosterSourceConfigurations.id,
+        version: rosterSourceConfigurations.version,
+      })
+      .from(rosterSourceConfigurations)
+      .where(eq(rosterSourceConfigurations.population, 'staff'))
+      .orderBy(desc(rosterSourceConfigurations.version))
+      .limit(1);
+    const staffRosterConfiguration = existingStaffRosterConfiguration ?? {
+      id: SEEDED.staffRosterConfiguration,
+      version: 1,
+    };
+    if (existingStaffRosterConfiguration === undefined) {
+      await opened.db.insert(rosterSourceConfigurations).values({
+        ...staffRosterConfiguration,
+        population: 'staff',
+        createdAt: runTime(1),
+      });
+    }
+    const [latestStaffRosterSnapshot] = await opened.db
+      .select({ version: rosterSnapshots.version })
+      .from(rosterSnapshots)
+      .where(eq(rosterSnapshots.population, 'staff'))
+      .orderBy(desc(rosterSnapshots.version))
+      .limit(1);
+    await opened.db.insert(rosterSnapshots).values({
+      id: SEEDED.staffRosterSnapshot,
+      version: (latestStaffRosterSnapshot?.version ?? 0) + 1,
+      population: 'staff',
+      complete: true,
+      sourceConfigurationId: staffRosterConfiguration.id,
+      sourceConfigurationVersion: staffRosterConfiguration.version,
+      syncStartedAt: runTime(2),
+      capturedAt: runTime(3),
+    });
+
     await opened.db.insert(events).values([
       activatedEvent({
         id: FIXTURE.northDrill,
@@ -270,10 +361,22 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         activatedAt: RUN.northTestAt,
       }),
       activatedEvent({
+        id: FIXTURE.northIncident,
+        facilityId: SEEDED.facilityNorth,
+        kind: 'incident',
+        activatedAt: RUN.northIncidentAt,
+      }),
+      activatedEvent({
         id: FIXTURE.southDrill,
         facilityId: SEEDED.facilitySouth,
         kind: 'drill',
         activatedAt: RUN.southDrillAt,
+      }),
+      activatedEvent({
+        id: FIXTURE.southIncident,
+        facilityId: SEEDED.facilitySouth,
+        kind: 'incident',
+        activatedAt: RUN.southIncidentAt,
       }),
       {
         id: FIXTURE.northDraft,
@@ -472,6 +575,9 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     expect(all.items.map((record) => record.eventId)).not.toContain(
       FIXTURE.southDrill,
     );
+    expect(all.items.map((record) => record.eventId)).not.toContain(
+      FIXTURE.northIncident,
+    );
     expect(all.items).toEqual([
       expect.objectContaining({
         facilityId: SEEDED.facilityNorth,
@@ -571,6 +677,73 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         outcome: 'success',
         principal: ACTOR,
         requestId: allRequestId,
+      }),
+    ]);
+  });
+
+  test('lists incident, drill, and test records for an authorized human without leaking another facility', async () => {
+    const requestId = randomUUID();
+    const result = await executeEventRecordsCapability(
+      {
+        facilityId: null,
+        eventTypeId: null,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        cursor: null,
+        limit: 25,
+      },
+      humanInvocation(requestId),
+      capabilityStore(),
+    );
+
+    expect(result.items.map((record) => record.eventId)).toEqual([
+      FIXTURE.northNewerDrill,
+      FIXTURE.northIncident,
+      FIXTURE.northTest,
+      FIXTURE.northDrill,
+    ]);
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        eventId: FIXTURE.northNewerDrill,
+        facilityId: SEEDED.facilityNorth,
+        kind: 'drill',
+        eventTypeVersion: expect.objectContaining({ templateMode: 'drill' }),
+      }),
+      expect.objectContaining({
+        eventId: FIXTURE.northIncident,
+        facilityId: SEEDED.facilityNorth,
+        kind: 'incident',
+        eventTypeVersion: expect.objectContaining({ templateMode: 'real' }),
+        eventTypeName: 'Lockdown',
+        startedAt: RUN.northIncidentAt,
+      }),
+      expect.objectContaining({
+        eventId: FIXTURE.northTest,
+        kind: 'test',
+        eventTypeVersion: expect.objectContaining({ templateMode: 'drill' }),
+      }),
+      expect.objectContaining({
+        eventId: FIXTURE.northDrill,
+        kind: 'drill',
+        eventTypeVersion: expect.objectContaining({ templateMode: 'drill' }),
+      }),
+    ]);
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(FIXTURE.southIncident);
+    expect(serialized).not.toContain(FIXTURE.southDrill);
+    expect(serialized).not.toContain(SEEDED.facilitySouth);
+
+    const auditRows = await database()
+      .select()
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, requestId));
+    expect(auditRows).toEqual([
+      expect.objectContaining({
+        action: 'list-event-records',
+        outcome: 'success',
+        principal: HUMAN_ACTOR,
+        requestId,
       }),
     ]);
   });

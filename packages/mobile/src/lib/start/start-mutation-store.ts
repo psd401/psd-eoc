@@ -1,8 +1,10 @@
 import {
   ActivationPreviewIdSchema,
   DeviceEnrollmentIdSchema,
+  EventClassificationSchema,
   EventIdSchema,
   EventKindSchema,
+  EventTargetingSchema,
   EventTypeVersionRefSchema,
   FacilityIdSchema,
   IdempotencyKeySchema,
@@ -24,7 +26,7 @@ import type {
   StartMutationRecoveryRecord,
 } from './start-mutation-coordinator';
 
-export const START_MUTATION_STORE_VERSION = 1 as const;
+export const START_MUTATION_STORE_VERSION = 2 as const;
 export const START_MUTATION_STORE_KEY = 'psd-eoc.start-mutation.v1';
 
 const START_MUTATION_STORE_KEYCHAIN_SERVICE = 'net.psd401.eoc.start-mutation';
@@ -135,12 +137,18 @@ function parseDisplay(
     return invalidRecord();
   }
   try {
-    return Object.freeze({
+    const display = Object.freeze({
       operation: value.operation,
+      eventKind: EventKindSchema.parse(value.eventKind),
       eventTypeName: parseEventTypeName(value.eventTypeName),
       mode: TemplateModeSchema.parse(value.mode),
       idempotencyKey: IdempotencyKeySchema.parse(value.idempotencyKey),
     });
+    EventClassificationSchema.parse({
+      kind: display.eventKind,
+      templateMode: display.mode,
+    });
+    return display;
   } catch {
     return invalidRecord();
   }
@@ -174,8 +182,14 @@ function parseActivationEvidence(
     const rosterPopulation = RosterPopulationSchema.parse(
       evidence.rosterPopulation,
     );
+    EventTargetingSchema.parse({
+      kind,
+      templateMode: mode,
+      rosterPopulation,
+    });
     if (
       mode !== display.mode ||
+      kind !== display.eventKind ||
       eventTypeVersion.templateMode !== mode ||
       (mode === 'real' && kind !== 'incident') ||
       (mode === 'drill' && kind !== 'drill' && kind !== 'test') ||
@@ -223,7 +237,13 @@ function parseCompletion(
   display: StartMutationDisplay,
 ): StartMutationCompletion {
   const completion = objectRecord(value);
-  assertExactKeys(completion, ['kind', 'eventId', 'eventTypeName', 'mode']);
+  assertExactKeys(completion, [
+    'kind',
+    'eventId',
+    'eventKind',
+    'eventTypeName',
+    'mode',
+  ]);
   const expectedKind =
     display.operation === 'activate' ? 'activated' : 'joined';
   if (
@@ -233,12 +253,17 @@ function parseCompletion(
     return invalidRecord();
   }
   let mode: StartMutationCompletion['mode'];
+  let eventKind: StartMutationCompletion['eventKind'];
   try {
     mode = TemplateModeSchema.parse(completion.mode);
+    eventKind = EventKindSchema.parse(completion.eventKind);
+    EventClassificationSchema.parse({ kind: eventKind, templateMode: mode });
   } catch {
     return invalidRecord();
   }
-  if (mode !== display.mode) return invalidRecord();
+  if (mode !== display.mode || eventKind !== display.eventKind) {
+    return invalidRecord();
+  }
   let eventId: StartMutationCompletion['eventId'];
   try {
     eventId = EventIdSchema.parse(completion.eventId);
@@ -248,6 +273,7 @@ function parseCompletion(
   return Object.freeze({
     kind: expectedKind,
     eventId,
+    eventKind,
     eventTypeName: display.eventTypeName,
     mode,
   });
@@ -257,12 +283,21 @@ function parseStoredValue(
   value: unknown,
 ): VersionedStartMutationRecoveryRecord | EmptyStartMutationStoreRecord {
   const stored = objectRecord(value);
-  if (stored.version !== START_MUTATION_STORE_VERSION) {
-    return invalidRecord();
-  }
   if (stored.phase === 'empty') {
     assertExactKeys(stored, ['version', 'phase']);
+    // v1 used the same secure-storage key. Its exact empty tombstone carries
+    // no pending truth and is safe to migrate as empty; every non-empty v1
+    // record remains fail-closed because it lacks an immutable event kind.
+    if (
+      stored.version !== 1 &&
+      stored.version !== START_MUTATION_STORE_VERSION
+    ) {
+      return invalidRecord();
+    }
     return EMPTY_RECORD;
+  }
+  if (stored.version !== START_MUTATION_STORE_VERSION) {
+    return invalidRecord();
   }
 
   const commonKeys = [
@@ -270,6 +305,7 @@ function parseStoredValue(
     'phase',
     'owner',
     'operation',
+    'eventKind',
     'eventTypeName',
     'mode',
     'idempotencyKey',
@@ -340,6 +376,7 @@ export function parseStartMutationStoreRecord(
   const common = {
     owner: parsed.owner,
     operation: parsed.operation,
+    eventKind: parsed.eventKind,
     eventTypeName: parsed.eventTypeName,
     mode: parsed.mode,
     idempotencyKey: parsed.idempotencyKey,

@@ -37,6 +37,86 @@ export const EMPTY_EVENT_ROOM_MODEL: EventRoomModel = Object.freeze({
   unseenUpdateCount: 0,
 });
 
+export interface JournalEntryActionAvailability {
+  readonly allowed: boolean;
+  readonly unavailableReason: string | null;
+}
+
+export interface JournalEntryActionEligibility {
+  readonly correction: JournalEntryActionAvailability;
+  readonly redaction: JournalEntryActionAvailability;
+}
+
+function unavailable(reason: string): JournalEntryActionAvailability {
+  return Object.freeze({ allowed: false, unavailableReason: reason });
+}
+
+const AVAILABLE_ACTION = Object.freeze({
+  allowed: true,
+  unavailableReason: null,
+});
+
+/**
+ * Derives safe mobile correction/redaction affordances only from a complete
+ * canonical history. The server remains the final facility/role authority.
+ */
+export function journalEntryActionEligibility(
+  targetValue: JournalEntryReadProjection,
+  entries: readonly JournalEntryReadProjection[],
+  historyComplete: boolean,
+): JournalEntryActionEligibility {
+  const target = JournalEntryReadProjectionSchema.parse(targetValue);
+  if (!historyComplete) {
+    const reason =
+      'Load the complete timeline before correcting or redacting an entry.';
+    return Object.freeze({
+      correction: unavailable(reason),
+      redaction: unavailable(reason),
+    });
+  }
+  if (target.visibility === 'redacted') {
+    const reason = 'This entry is already redacted.';
+    return Object.freeze({
+      correction: unavailable(reason),
+      redaction: unavailable(reason),
+    });
+  }
+  if (target.entry.kind === 'system') {
+    const reason = 'System lifecycle facts cannot be corrected or redacted.';
+    return Object.freeze({
+      correction: unavailable(reason),
+      redaction: unavailable(reason),
+    });
+  }
+
+  const supersessions = entries
+    .map(
+      (projection) =>
+        JournalEntryReadProjectionSchema.parse(projection).entry.supersedes,
+    )
+    .filter(
+      (supersession) =>
+        supersession?.entryId === target.entry.id &&
+        supersession.entrySequence === target.entry.sequence,
+    );
+  const correction =
+    target.entry.kind !== 'text' && target.entry.kind !== 'location'
+      ? unavailable(
+          'Photos cannot be replaced as corrections. Redact the photo and post a new one instead.',
+        )
+      : supersessions.length > 0
+        ? unavailable(
+            'This entry is already superseded. Refresh and choose the latest entry.',
+          )
+        : AVAILABLE_ACTION;
+  const redaction = supersessions.some(
+    (supersession) => supersession?.kind === 'redaction',
+  )
+    ? unavailable('This entry already has an append-only redaction.')
+    : AVAILABLE_ACTION;
+  return Object.freeze({ correction, redaction });
+}
+
 function immutableEventIdentity(event: Event): string {
   return JSON.stringify({
     id: event.id,

@@ -17,11 +17,13 @@ import {
 } from './photo-draft';
 import {
   NativePhotoDraftStorage,
+  PhotoSelectionUnavailableError,
   deletePrivatePhoto,
   uploadPrivatePhoto,
   type PendingPhotoSelectionLease,
   type PendingPhotoSelectionOwner,
   type PrivatePhotoFile,
+  type PhotoSource,
 } from './native-photo';
 
 export interface EventPhotoDraftView {
@@ -45,7 +47,8 @@ export interface UseEventPhotoDraftInput {
 export interface EventPhotoDraftWorkflow {
   readonly draft: EventPhotoDraftView | null;
   readonly busy: boolean;
-  readonly selectPhoto: () => Promise<void>;
+  readonly takePhoto: () => Promise<void>;
+  readonly choosePhoto: () => Promise<void>;
   readonly setAltText: (value: string) => void;
   readonly setCaption: (value: string) => void;
   readonly submit: () => Promise<void>;
@@ -821,101 +824,113 @@ export function useEventPhotoDraft(
     [queueDescription],
   );
 
-  const selectPhoto = useCallback(async () => {
-    const scope = currentScopeRef.current;
-    if (
-      scope.eventId !== input.eventId ||
-      scope.sessionId !== input.sessionId ||
-      !newPostsAllowedRef.current ||
-      hydratingRef.current ||
-      submissionClaimRef.current !== null
-    ) {
-      setDraft((current) => ({ ...current, error: boundedFailure() }));
-      return;
-    }
-    if (selectionRef.current !== null) return;
-    if (blockedRef.current) {
-      setDraft((current) => ({
-        ...current,
-        error:
-          'A retained photo draft cannot be opened by this session. It will not be overwritten.',
-      }));
-      return;
-    }
-    if (controllerRef.current !== null) {
-      setDraft((current) => ({
-        ...current,
-        error:
-          'Finish or safely discard the retained photo before selecting another.',
-      }));
-      return;
-    }
-    const owner: PendingPhotoSelectionOwner = Object.freeze({
-      version: 1,
-      selectionId: Crypto.randomUUID(),
-      draftId: Crypto.randomUUID(),
-      eventId: scope.eventId,
-      sessionId: scope.sessionId,
-    });
-    selectionRef.current = Object.freeze({ owner, scope });
-    setSelecting(true);
-    try {
-      await editTailRef.current;
-      if (!scopeIsCurrent(scope)) return;
-      if (blockedRef.current || controllerRef.current !== null) {
-        throw new Error('The retained photo owner changed before selection.');
+  const selectPhoto = useCallback(
+    async (source: PhotoSource) => {
+      const scope = currentScopeRef.current;
+      if (
+        scope.eventId !== input.eventId ||
+        scope.sessionId !== input.sessionId ||
+        !newPostsAllowedRef.current ||
+        hydratingRef.current ||
+        submissionClaimRef.current !== null
+      ) {
+        setDraft((current) => ({ ...current, error: boundedFailure() }));
+        return;
       }
-      const altText = descriptionRef.current.altText.trim();
-      const caption = descriptionRef.current.caption?.trim() || null;
-      if (altText.length === 0) {
+      if (selectionRef.current !== null) return;
+      if (blockedRef.current) {
         setDraft((current) => ({
           ...current,
           error:
-            'Describe the photo for screen-reader users before selecting it.',
+            'A retained photo draft cannot be opened by this session. It will not be overwritten.',
         }));
         return;
       }
-      await storage.saveComposer(
-        scope.eventId,
-        scope.sessionId,
-        altText,
-        caption,
-      );
-      if (!scopeIsCurrent(scope)) return;
-      await storage.withNewPendingSelection(owner, async (lease) => {
-        pendingOwnerRef.current = owner;
-        if (!scopeIsCurrent(scope)) {
-          if (await lease.clearBeforeCopy()) {
-            pendingOwnerRef.current = null;
-          }
-          return;
-        }
-        const file = await lease.select();
-        if (file === null) {
-          if (pendingOwnerRef.current?.selectionId === owner.selectionId) {
-            pendingOwnerRef.current = null;
-          }
-          return;
-        }
-        if (!scopeIsCurrent(scope)) return;
-        await createFromFile(owner, file, altText, caption, scope, lease);
+      if (controllerRef.current !== null) {
+        setDraft((current) => ({
+          ...current,
+          error:
+            'Finish or safely discard the retained photo before selecting another.',
+        }));
+        return;
+      }
+      const owner: PendingPhotoSelectionOwner = Object.freeze({
+        version: 1,
+        selectionId: Crypto.randomUUID(),
+        draftId: Crypto.randomUUID(),
+        eventId: scope.eventId,
+        sessionId: scope.sessionId,
       });
-    } catch {
-      if (scopeIsCurrent(scope)) {
-        setDraft((current) => ({ ...current, error: boundedFailure() }));
-        setHydrationRevision((current) => current + 1);
+      selectionRef.current = Object.freeze({ owner, scope });
+      setSelecting(true);
+      try {
+        await editTailRef.current;
+        if (!scopeIsCurrent(scope)) return;
+        if (blockedRef.current || controllerRef.current !== null) {
+          throw new Error('The retained photo owner changed before selection.');
+        }
+        const altText = descriptionRef.current.altText.trim();
+        const caption = descriptionRef.current.caption?.trim() || null;
+        if (altText.length === 0) {
+          setDraft((current) => ({
+            ...current,
+            error:
+              'Describe the photo for screen-reader users before selecting it.',
+          }));
+          return;
+        }
+        await storage.saveComposer(
+          scope.eventId,
+          scope.sessionId,
+          altText,
+          caption,
+        );
+        if (!scopeIsCurrent(scope)) return;
+        await storage.withNewPendingSelection(owner, async (lease) => {
+          pendingOwnerRef.current = owner;
+          if (!scopeIsCurrent(scope)) {
+            if (await lease.clearBeforeCopy()) {
+              pendingOwnerRef.current = null;
+            }
+            return;
+          }
+          const file = await lease.select(source);
+          if (file === null) {
+            if (pendingOwnerRef.current?.selectionId === owner.selectionId) {
+              pendingOwnerRef.current = null;
+            }
+            return;
+          }
+          if (!scopeIsCurrent(scope)) return;
+          await createFromFile(owner, file, altText, caption, scope, lease);
+        });
+      } catch (error) {
+        if (scopeIsCurrent(scope)) {
+          setDraft((current) => ({
+            ...current,
+            error:
+              error instanceof PhotoSelectionUnavailableError
+                ? error.message
+                : boundedFailure(),
+          }));
+          setHydrationRevision((current) => current + 1);
+        }
+      } finally {
+        const scopeChanged = !scopeIsCurrent(scope);
+        if (selectionRef.current?.owner.selectionId === owner.selectionId) {
+          selectionRef.current = null;
+          if (mountedRef.current) setSelecting(false);
+        }
+        if (scopeChanged && mountedRef.current) {
+          setHydrationRevision((current) => current + 1);
+        }
       }
-    } finally {
-      const scopeChanged = !scopeIsCurrent(scope);
-      if (selectionRef.current?.owner.selectionId === owner.selectionId) {
-        selectionRef.current = null;
-        if (mountedRef.current) setSelecting(false);
-      }
-      if (scopeChanged && mountedRef.current) {
-        setHydrationRevision((current) => current + 1);
-      }
-    }
-  }, [createFromFile, input.eventId, input.sessionId, scopeIsCurrent, storage]);
+    },
+    [createFromFile, input.eventId, input.sessionId, scopeIsCurrent, storage],
+  );
+
+  const takePhoto = useCallback(() => selectPhoto('camera'), [selectPhoto]);
+  const choosePhoto = useCallback(() => selectPhoto('library'), [selectPhoto]);
 
   const submit = useCallback(async () => {
     const scope = currentScopeRef.current;
@@ -1212,7 +1227,8 @@ export function useEventPhotoDraft(
     draft,
     busy:
       hydrating || submitting || selecting || ACTIVE_STAGES.has(draft.stage),
-    selectPhoto,
+    takePhoto,
+    choosePhoto,
     setAltText,
     setCaption,
     submit,

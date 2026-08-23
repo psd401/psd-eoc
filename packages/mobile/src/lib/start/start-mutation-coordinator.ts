@@ -1,6 +1,9 @@
 import {
   DeviceEnrollmentIdSchema,
+  EventClassificationSchema,
+  EventTargetingSchema,
   EventIdSchema,
+  EventKindSchema,
   IdempotencyKeySchema,
   SessionIdSchema,
   TemplateModeSchema,
@@ -34,6 +37,7 @@ export type StartMutationOperation = 'activate' | 'join';
 export interface StartMutationCompletion {
   readonly kind: 'activated' | 'joined';
   readonly eventId: EventId;
+  readonly eventKind: EventKind;
   readonly eventTypeName: string;
   readonly mode: TemplateMode;
 }
@@ -50,6 +54,7 @@ export type StartMutationPublicError =
 
 export interface StartMutationDisplay {
   readonly operation: StartMutationOperation;
+  readonly eventKind: EventKind;
   readonly eventTypeName: string;
   readonly mode: TemplateMode;
 }
@@ -351,6 +356,7 @@ function pendingOwnerSnapshot(
         visibility: 'owner',
         operation: 'join',
         eventId: EventIdSchema.parse(submission.eventId),
+        eventKind: presentation.eventKind,
         eventTypeName: presentation.eventTypeName,
         mode: presentation.mode,
       })
@@ -358,6 +364,7 @@ function pendingOwnerSnapshot(
         phase: 'pending',
         visibility: 'owner',
         operation: 'activate',
+        eventKind: presentation.eventKind,
         eventTypeName: presentation.eventTypeName,
         mode: presentation.mode,
       });
@@ -379,6 +386,7 @@ function unresolvedOwnerSnapshot(
   return Object.freeze({
     phase: 'unresolved',
     operation: presentation.operation,
+    eventKind: presentation.eventKind,
     eventTypeName: presentation.eventTypeName,
     mode: presentation.mode,
     error,
@@ -392,6 +400,7 @@ function failedOwnerSnapshot(
   return Object.freeze({
     phase: 'failed',
     operation: presentation.operation,
+    eventKind: presentation.eventKind,
     eventTypeName: presentation.eventTypeName,
     mode: presentation.mode,
     error,
@@ -410,10 +419,12 @@ function resultCompletion(
       ? hasActivationTransition && !hasJoinEvidence
       : hasJoinEvidence && !hasActivationTransition;
   const mode = TemplateModeSchema.parse(result.event.templateMode);
+  const eventKind = EventKindSchema.parse(result.event.kind);
 
   if (
     !matchesOperation ||
     mode !== submission.mode ||
+    eventKind !== submission.eventKind ||
     result.event.eventTypeVersion.templateMode !== mode
   ) {
     throw new StartClientError(RESULT_MISMATCH_MESSAGE, false, true);
@@ -422,6 +433,7 @@ function resultCompletion(
   return Object.freeze({
     kind: submission.operation === 'activate' ? 'activated' : 'joined',
     eventId: EventIdSchema.parse(result.event.id),
+    eventKind,
     eventTypeName: submission.eventTypeName,
     mode,
   });
@@ -430,10 +442,35 @@ function resultCompletion(
 function presentationOf(
   submission: StartMutationSubmission,
 ): StartMutationPresentation {
+  const mode = TemplateModeSchema.parse(submission.mode);
+  const eventKind = EventKindSchema.parse(submission.eventKind);
+  EventClassificationSchema.parse({ kind: eventKind, templateMode: mode });
+  if (submission.operation === 'activate') {
+    const evidence = submission.activationEvidence;
+    EventClassificationSchema.parse({
+      kind: evidence.kind,
+      templateMode: evidence.mode,
+    });
+    EventTargetingSchema.parse({
+      kind: evidence.kind,
+      templateMode: evidence.mode,
+      rosterPopulation: evidence.rosterPopulation,
+    });
+    if (
+      evidence.kind !== eventKind ||
+      evidence.mode !== mode ||
+      evidence.eventTypeVersion.templateMode !== mode
+    ) {
+      throw new Error(
+        'Activation evidence does not match the displayed event classification.',
+      );
+    }
+  }
   return Object.freeze({
     operation: submission.operation,
+    eventKind,
     eventTypeName: submission.eventTypeName,
-    mode: TemplateModeSchema.parse(submission.mode),
+    mode,
     idempotencyKey: IdempotencyKeySchema.parse(submission.idempotencyKey),
   });
 }
@@ -500,6 +537,7 @@ export class StartMutationCoordinator {
         phase: 'unresolved',
         owner: this.state.owner,
         operation: this.state.operation,
+        eventKind: this.state.eventKind,
         eventTypeName: this.state.eventTypeName,
         mode: this.state.mode,
         idempotencyKey: this.state.idempotencyKey,
@@ -569,6 +607,7 @@ export class StartMutationCoordinator {
 
     const presentation: StartMutationPresentation = Object.freeze({
       operation: record.operation,
+      eventKind: record.eventKind,
       eventTypeName: record.eventTypeName,
       mode: record.mode,
       idempotencyKey: record.idempotencyKey,
@@ -757,6 +796,7 @@ export class StartMutationCoordinator {
     }
     const presentation: StartMutationPresentation = Object.freeze({
       operation: pending.operation,
+      eventKind: pending.eventKind,
       eventTypeName: pending.eventTypeName,
       mode: pending.mode,
       idempotencyKey: pending.idempotencyKey,
@@ -779,6 +819,7 @@ export class StartMutationCoordinator {
     const error = mapStartMutationError(thrown);
     const presentation: StartMutationPresentation = Object.freeze({
       operation: pending.operation,
+      eventKind: pending.eventKind,
       eventTypeName: pending.eventTypeName,
       mode: pending.mode,
       idempotencyKey: pending.idempotencyKey,
@@ -840,6 +881,7 @@ export class StartMutationCoordinator {
     const ownerSnapshot: FailedState['ownerSnapshot'] = Object.freeze({
       phase: 'failed',
       operation: display.operation,
+      eventKind: EventKindSchema.parse(display.eventKind),
       eventTypeName: display.eventTypeName,
       mode: TemplateModeSchema.parse(display.mode),
       error,
@@ -850,6 +892,7 @@ export class StartMutationCoordinator {
       presentation: null,
       activationEvidence: null,
       operation: ownerSnapshot.operation,
+      eventKind: ownerSnapshot.eventKind,
       eventTypeName: ownerSnapshot.eventTypeName,
       mode: ownerSnapshot.mode,
       ownerSnapshot,

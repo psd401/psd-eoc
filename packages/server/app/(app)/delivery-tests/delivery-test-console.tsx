@@ -6,6 +6,7 @@ import {
   DeliveryTestCanaryEligibilityFactSchema,
   DeliveryTestPreviewSchema,
   DeliveryTestTargetSetVersionSchema,
+  getEventClassificationPresentation,
   StartEventResultSchema,
   RecordDeliveryTestCanaryEligibilityInputSchema,
   type DeliveryTestCanaryEligibilityFact,
@@ -179,6 +180,10 @@ export function DeliveryTestPreviewConfirmation({
   onActivate,
   preview,
 }: DeliveryTestPreviewConfirmationProps) {
+  const classification = getEventClassificationPresentation({
+    kind: 'test',
+    templateMode: 'drill',
+  });
   const previewReady = canActivateDeliveryTest(preview);
   const channelSummary = preview.channels
     .map(
@@ -193,15 +198,22 @@ export function DeliveryTestPreviewConfirmation({
       className="panel delivery-test-drill"
       aria-labelledby="live-canary-confirm-heading"
     >
-      <p className="delivery-test-classification">
-        DRILL — LIVE CANARY — TRAINING ONLY
+      <p
+        className="delivery-test-classification"
+        style={{
+          backgroundColor: classification.colors.bannerBackground,
+          borderColor: classification.colors.border,
+          color: classification.colors.onBanner,
+        }}
+      >
+        {classification.label} · LIVE CANARY
       </p>
       <h2 id="live-canary-confirm-heading">
         3. Review consequences and confirm
       </h2>
       <p>
         This is a real provider send to the exact approved controlled canary
-        endpoints, rendered unmistakably as a DRILL. It is not a real incident.
+        endpoints. {classification.explanation}
       </p>
       <p className="delivery-test-consequence-summary">
         <strong>
@@ -276,16 +288,11 @@ export function DeliveryTestPreviewConfirmation({
           </dd>
         </dl>
         {preview.activationPreview.blockingReasonCodes.length > 0 ? (
-          <>
-            <h3>Blocking reason codes</h3>
-            <ul>
-              {preview.activationPreview.blockingReasonCodes.map((reason) => (
-                <li key={reason}>
-                  <code>{reason}</code>
-                </li>
-              ))}
-            </ul>
-          </>
+          <p role="alert">
+            This delivery test is unavailable because one or more integration
+            prerequisites are not ready. Refresh the preview; if it remains
+            blocked, contact an administrator.
+          </p>
         ) : null}
       </details>
       <button

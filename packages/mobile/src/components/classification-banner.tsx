@@ -1,19 +1,21 @@
-import type { TemplateMode } from '@psd-eoc/contracts';
+import type { EventKind, TemplateMode } from '@psd-eoc/contracts';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { getEventTheme } from '../theme/event-theme';
 
 export interface ClassificationBannerProps {
   readonly mode: TemplateMode;
+  readonly kind?: EventKind;
   readonly compact?: boolean;
 }
 
 /** Color, word, and icon classification treatment shared by every screen. */
 export function ClassificationBanner({
   mode,
+  kind,
   compact = false,
 }: ClassificationBannerProps) {
-  const theme = getEventTheme(mode);
+  const theme = getEventTheme(mode, kind);
 
   return (
     <View

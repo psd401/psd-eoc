@@ -1,5 +1,6 @@
 import type {
   ActivationPreview,
+  EventKind,
   RosterPopulation,
   TemplateMode,
 } from '@psd-eoc/contracts';
@@ -17,6 +18,7 @@ export interface ActivationConfirmationProps {
   readonly children?: ReactNode;
   readonly disabled?: boolean;
   readonly eventTypeName: string;
+  readonly eventKind: EventKind;
   readonly facilityName: string;
   readonly mode: TemplateMode;
   readonly onConfirm: () => void;
@@ -83,6 +85,17 @@ export function activationAudienceLabel(
   return `${recipientCount} selected staff member${recipientCount === 1 ? '' : 's'}`;
 }
 
+/** Hides internal readiness tokens behind one bounded recovery instruction. */
+export function publicBlockingMessages(
+  reasonCodes: readonly string[],
+): readonly string[] {
+  return reasonCodes.length === 0
+    ? []
+    : [
+        'One or more server prerequisites are unavailable. Refresh the preview; if it remains blocked, contact an administrator.',
+      ];
+}
+
 /**
  * Third-tap consequence confirmation. Active-event joins can be rendered in
  * `children`; when any exist, the final action explicitly says “separate.”
@@ -95,6 +108,7 @@ export function ActivationConfirmation({
   children,
   disabled = false,
   eventTypeName,
+  eventKind,
   facilityName,
   mode,
   onConfirm,
@@ -103,20 +117,17 @@ export function ActivationConfirmation({
   sendReadiness,
   testID,
 }: ActivationConfirmationProps) {
-  const theme = getEventTheme(mode);
-  const real = mode === 'real';
-  const classification = real ? 'REAL INCIDENT' : 'DRILL — PRACTICE';
+  const theme = getEventTheme(mode, eventKind);
+  const classification = theme.classificationWord;
   const audience = activationAudienceLabel(recipientCount, rosterPopulation);
   const separate = activeEventCount > 0;
   const blocked = sendReadiness === 'blocked';
   const unavailable = disabled || busy || blocked;
-  const action = `${separate ? 'Start a separate ' : 'Start '}${
-    real ? 'REAL incident' : 'DRILL — PRACTICE'
-  } and record notification intents for ${audience}`;
+  const action = `${separate ? 'Start a separate ' : 'Start '}${classification} and record notification intents for ${audience}`;
 
   return (
     <View style={styles.container}>
-      <ClassificationBanner mode={mode} />
+      <ClassificationBanner kind={eventKind} mode={mode} />
 
       <View
         style={[

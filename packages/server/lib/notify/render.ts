@@ -1,4 +1,5 @@
 import {
+  getEventClassificationPresentation,
   MessageTemplateSetSchema,
   RenderedMessageSchema,
   TimestampSchema,
@@ -266,6 +267,7 @@ export class TemplateRenderError extends Error {
 type Classification = Readonly<{
   templateMode: TemplateMode;
   marker: 'INCIDENT' | 'DRILL';
+  label: string;
 }>;
 
 type RendererFrame = Readonly<{
@@ -274,9 +276,18 @@ type RendererFrame = Readonly<{
 }>;
 
 function classificationFor(eventKind: EventKind): Classification {
-  return eventKind === 'incident'
-    ? Object.freeze({ templateMode: 'real', marker: 'INCIDENT' })
-    : Object.freeze({ templateMode: 'drill', marker: 'DRILL' });
+  const templateMode = eventKind === 'incident' ? 'real' : 'drill';
+  const presentation = getEventClassificationPresentation({
+    kind: eventKind,
+    templateMode,
+  });
+  return Object.freeze({
+    templateMode,
+    marker: eventKind === 'incident' ? 'INCIDENT' : 'DRILL',
+    // ASCII keeps training/test SMS in the 160-septet GSM alphabet instead of
+    // forcing the much shorter 70-character UCS-2 limit solely for an em dash.
+    label: presentation.label.replaceAll(' — ', ' - '),
+  });
 }
 
 function purposeLabel(purpose: NotificationPurpose): string {
@@ -298,10 +309,8 @@ function rendererOwnedFrame(
   classification: Classification,
   purpose: NotificationPurpose,
 ): RendererFrame {
-  const modeLabel =
-    classification.templateMode === 'real' ? 'REAL INCIDENT' : 'TRAINING ONLY';
   return Object.freeze({
-    prefix: `[${classification.marker}] ${modeLabel} - ${purposeLabel(purpose)}: `,
+    prefix: `[${classification.marker}] ${classification.label} - ${purposeLabel(purpose)}: `,
     suffix: ` [${classification.marker}]`,
   });
 }

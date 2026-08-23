@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import type {
   CapabilityInput,
   DrillRecordPage,
+  EventRecordPage,
   FacilityScope,
   JournalEntryPage,
   RecordsExport,
@@ -20,6 +21,7 @@ import {
 import {
   executeRecordsCapability,
   executeRecordsExportCapability,
+  executeEventRecordsCapability,
 } from './records';
 import type {
   RecordsArtifactStore,
@@ -46,6 +48,24 @@ function invocation(facilityScope: FacilityScope): TrustedCapabilityInvocation {
       apiKeyId: IDS.apiKey,
     },
     source: 'agent-rest' as const,
+    scope: { facilityScope },
+    requestId: IDS.request,
+    serverTime: new Date('2026-08-11T17:30:00.000Z'),
+    connectivityEpochId: null,
+    mutation: null,
+  });
+}
+
+function humanInvocation(
+  facilityScope: FacilityScope,
+): TrustedCapabilityInvocation {
+  return Object.freeze({
+    actor: {
+      kind: 'human' as const,
+      userId: IDS.agent,
+      sessionId: IDS.apiKey,
+    },
+    source: 'web' as const,
     scope: { facilityScope },
     requestId: IDS.request,
     serverTime: new Date('2026-08-11T17:30:00.000Z'),
@@ -82,17 +102,28 @@ interface RecordsHarness {
   readonly store: JournalCapabilityStore;
   readonly audits: CapabilityAuditEvent[];
   readonly calls: Array<{
-    readonly input: CapabilityInput<'list-drill-records'>;
+    readonly input:
+      | CapabilityInput<'list-drill-records'>
+      | CapabilityInput<'list-event-records'>;
     readonly scope: TrustedCapabilityInvocation['scope'];
   }>;
 }
 
-function recordsHarness(result: DrillRecordPage = drillPage()): RecordsHarness {
+function recordsHarness(
+  result: DrillRecordPage | EventRecordPage = drillPage(),
+): RecordsHarness {
   const audits: CapabilityAuditEvent[] = [];
   const calls: RecordsHarness['calls'][number][] = [];
   const transaction = {
     async listDrillRecords(
       input: CapabilityInput<'list-drill-records'>,
+      scope: TrustedCapabilityInvocation['scope'],
+    ) {
+      calls.push({ input, scope });
+      return result as DrillRecordPage;
+    },
+    async listEventRecords(
+      input: CapabilityInput<'list-event-records'>,
       scope: TrustedCapabilityInvocation['scope'],
     ) {
       calls.push({ input, scope });
@@ -119,7 +150,7 @@ function recordsHarness(result: DrillRecordPage = drillPage()): RecordsHarness {
   };
 }
 
-describe('canonical drill-record reads', () => {
+describe('canonical operational-record reads', () => {
   test('returns RCW date/time/type evidence and writes the canonical agent audit', async () => {
     const harness = recordsHarness();
     const call = invocation({
@@ -180,7 +211,7 @@ describe('canonical drill-record reads', () => {
     expect(harness.calls[0]?.scope).toEqual(call.scope);
   });
 
-  test('fails closed if persistence ever projects a real incident as a drill record', async () => {
+  test('fails closed if the training capability projects a real incident', async () => {
     const valid = drillPage();
     const harness = recordsHarness({
       ...valid,
@@ -219,12 +250,73 @@ describe('canonical drill-record reads', () => {
     expect(harness.audits).toEqual([
       expect.objectContaining({
         action: 'list-drill-records',
-        category: 'capability-execution',
-        facilityId: IDS.facility,
         outcome: 'failure',
-        reasonCode: 'PERSISTENCE_CONFLICT',
       }),
     ]);
+  });
+
+  test('returns real incidents only through the human-interactive records capability', async () => {
+    const valid = drillPage();
+    const result = {
+      ...valid,
+      items: [
+        {
+          ...valid.items[0]!,
+          kind: 'incident',
+          eventTypeVersion: {
+            ...valid.items[0]!.eventTypeVersion,
+            templateMode: 'real',
+          },
+        },
+      ],
+    } as EventRecordPage;
+    const harness = recordsHarness(result);
+    const call = humanInvocation({
+      kind: 'facilities',
+      facilityIds: [IDS.facility],
+    });
+
+    await expect(
+      executeEventRecordsCapability(
+        {
+          facilityId: IDS.facility,
+          eventTypeId: null,
+          startedFrom: null,
+          startedThrough: null,
+          cursor: null,
+          limit: 25,
+        },
+        call,
+        harness.store,
+      ),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          kind: 'incident',
+          eventTypeVersion: { templateMode: 'real' },
+        },
+      ],
+    });
+
+    const agentHarness = recordsHarness(result);
+    await expect(
+      executeEventRecordsCapability(
+        {
+          facilityId: IDS.facility,
+          eventTypeId: null,
+          startedFrom: null,
+          startedThrough: null,
+          cursor: null,
+          limit: 25,
+        },
+        invocation({
+          kind: 'facilities',
+          facilityIds: [IDS.facility],
+        }),
+        agentHarness.store,
+      ),
+    ).rejects.toMatchObject({ reasonCode: 'CAPABILITY_INVOCATION_DENIED' });
+    expect(agentHarness.calls).toEqual([]);
   });
 
   test('denies an explicit out-of-scope site before any records are read', async () => {
