@@ -307,7 +307,7 @@ jobs:
           # outcome without copying the configured email into Actions output.
           log_stream="native-bootstrap/native-bootstrap/${task_arn##*/}"
           bootstrap_summary=''
-          for attempt in {1..10}; do
+          for _ in {1..10}; do
             messages=$(aws logs get-log-events \
               --log-group-name "$log_group" \
               --log-stream-name "$log_stream" \
