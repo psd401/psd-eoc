@@ -104,58 +104,68 @@ export function DeviceSessionList({
                   : `Revoked ${readableDate(item.deviceEnrollment.revokedAt)}`}
               </dd>
             </dl>
-            <table>
-              <caption>Sessions for this device</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Started</th>
-                  <th scope="col">Expires</th>
-                  <th scope="col">Sign-in evidence grace ends</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {item.sessions.map((session) => {
-                  const revoked = session.revokedAt !== null;
-                  const renderedAtMs = Date.parse(renderedAt);
-                  const expired = renderedAtMs >= Date.parse(session.expiresAt);
-                  const issuanceMembershipExpired =
-                    renderedAtMs >=
-                    Date.parse(session.authorization.membershipGraceUntil);
-                  const status = revoked
-                    ? 'Revoked'
-                    : expired
-                      ? 'Expired'
-                      : issuanceMembershipExpired
-                        ? 'Sign-in evidence expired'
-                        : 'Retained';
-                  return (
-                    <tr key={session.id}>
-                      <td>{readableDate(session.createdAt)}</td>
-                      <td>{readableDate(session.expiresAt)}</td>
-                      <td>
-                        {readableDate(
-                          session.authorization.membershipGraceUntil,
-                        )}
-                      </td>
-                      <td>{status}</td>
-                      <td>
-                        <button
-                          disabled={revoked || pendingSessionId === session.id}
-                          onClick={() => void revokeSession(session.id)}
-                          type="button"
-                        >
-                          {pendingSessionId === session.id
-                            ? 'Revoking…'
-                            : 'Revoke session'}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div
+              aria-label={`Sessions for ${item.deviceEnrollment.platform.toUpperCase()} device`}
+              className="table-region"
+              role="region"
+              tabIndex={0}
+            >
+              <table>
+                <caption>Sessions for this device</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Started</th>
+                    <th scope="col">Expires</th>
+                    <th scope="col">Sign-in evidence grace ends</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {item.sessions.map((session) => {
+                    const revoked = session.revokedAt !== null;
+                    const renderedAtMs = Date.parse(renderedAt);
+                    const expired =
+                      renderedAtMs >= Date.parse(session.expiresAt);
+                    const issuanceMembershipExpired =
+                      renderedAtMs >=
+                      Date.parse(session.authorization.membershipGraceUntil);
+                    const status = revoked
+                      ? 'Revoked'
+                      : expired
+                        ? 'Expired'
+                        : issuanceMembershipExpired
+                          ? 'Sign-in evidence expired'
+                          : 'Retained';
+                    return (
+                      <tr key={session.id}>
+                        <td>{readableDate(session.createdAt)}</td>
+                        <td>{readableDate(session.expiresAt)}</td>
+                        <td>
+                          {readableDate(
+                            session.authorization.membershipGraceUntil,
+                          )}
+                        </td>
+                        <td>{status}</td>
+                        <td>
+                          <button
+                            disabled={
+                              revoked || pendingSessionId === session.id
+                            }
+                            onClick={() => void revokeSession(session.id)}
+                            type="button"
+                          >
+                            {pendingSessionId === session.id
+                              ? 'Revoking…'
+                              : 'Revoke session'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </section>
         );
       })}

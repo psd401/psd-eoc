@@ -75,9 +75,7 @@ describe('administrator readiness view', () => {
     expect(markup).toContain(
       '<caption>Active access groups and their last membership read</caption>',
     );
-    expect(markup).toContain('href="/access"');
-    expect(markup).toContain('href="/facilities"');
-    expect(markup).toContain('href="/integrations"');
+    expect(markup).not.toContain('<nav');
     expect(markup).toContain('does not send a notification');
     expect(markup).not.toContain('/emergency');
   });

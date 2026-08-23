@@ -28,17 +28,89 @@ function one(value: SearchValue): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+async function StartFacilityPage() {
+  const authenticated = await requirePageSession('/start');
+  const data = await loadOperationalViewData(authenticated);
+
+  return (
+    <main className="page-shell start-flow" id="main-content" tabIndex={-1}>
+      <header className="page-heading">
+        <div>
+          <p className="eyebrow">Staff emergency operations</p>
+          <h1>Start an event</h1>
+          <p className="lede">
+            Choose a site and whether this is a real incident or a drill.
+            Choosing here does not start an event or notify anyone.
+          </p>
+        </div>
+        <Link className="button button--secondary" href="/">
+          Return to active events
+        </Link>
+      </header>
+
+      <Call911Affordance />
+
+      <section aria-labelledby="start-site-heading">
+        <div className="section-heading">
+          <h2 id="start-site-heading">Choose site and mode</h2>
+          <span className="step-hint">Step 1 of 3</span>
+        </div>
+        <div className="dashboard-grid">
+          {data.facilities.map((facility) => (
+            <article className="facility-card" key={facility.id}>
+              <p className="facility-code">{facility.code}</p>
+              <h3>{facility.name}</h3>
+              <div className="action-grid">
+                <a
+                  aria-label={`Start REAL incident at ${facility.name}`}
+                  className="action-link action-link--real"
+                  href={startSelectionReturnPath({
+                    facilityId: facility.id,
+                    mode: 'real',
+                  })}
+                >
+                  <ClassificationIcon mode="real" />
+                  <span>
+                    Start <strong>REAL incident</strong>
+                  </span>
+                </a>
+                <a
+                  aria-label={`Run DRILL at ${facility.name}`}
+                  className="action-link action-link--drill"
+                  href={startSelectionReturnPath({
+                    facilityId: facility.id,
+                    mode: 'drill',
+                  })}
+                >
+                  <ClassificationIcon mode="drill" />
+                  <span>
+                    Run <strong>DRILL</strong>
+                  </span>
+                </a>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
 export async function generateMetadata({
   searchParams,
 }: SelectEventTypePageProps): Promise<Metadata> {
-  const mode = one((await searchParams).mode);
+  const parameters = await searchParams;
+  const facilityId = one(parameters.facilityId);
+  const mode = one(parameters.mode);
   return {
     title:
-      mode === 'real'
-        ? 'Choose REAL incident type'
-        : mode === 'drill'
-          ? 'Choose DRILL type'
-          : 'Choose event type',
+      facilityId === null && mode === null
+        ? 'Start an event'
+        : mode === 'real'
+          ? 'Choose REAL incident type'
+          : mode === 'drill'
+            ? 'Choose DRILL type'
+            : 'Choose event type',
   };
 }
 
@@ -46,10 +118,14 @@ export default async function SelectEventTypePage({
   searchParams,
 }: SelectEventTypePageProps) {
   const parameters = await searchParams;
-  const facilityResult = FacilityIdSchema.safeParse(one(parameters.facilityId));
+  const facilityValue = one(parameters.facilityId);
   const mode = one(parameters.mode);
+  if (facilityValue === null && mode === null) {
+    return <StartFacilityPage />;
+  }
+  const facilityResult = FacilityIdSchema.safeParse(facilityValue);
   if (!facilityResult.success || (mode !== 'real' && mode !== 'drill')) {
-    redirect('/');
+    redirect('/start');
   }
 
   const returnPath = startSelectionReturnPath({

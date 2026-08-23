@@ -2,25 +2,15 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 import '../facilities/styles.css';
-import { PrimaryNav } from '../../nav/primary-nav';
+import { OperatorShell } from '../../nav/operator-shell';
 
 export const metadata: Metadata = {
-  title: 'Access administration | PSD EOC',
-  description: 'Configure PSD EOC access groups and administrator roles.',
+  title: 'Access administration | Emergency operations',
+  description: 'Configure access groups and administrator roles.',
 };
 
 export default function AccessLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
-  return (
-    <html lang="en">
-      <body>
-        <a className="skip-link" href="#main-content">
-          Skip to main content
-        </a>
-        <PrimaryNav />
-        {children}
-      </body>
-    </html>
-  );
+  return <OperatorShell>{children}</OperatorShell>;
 }
