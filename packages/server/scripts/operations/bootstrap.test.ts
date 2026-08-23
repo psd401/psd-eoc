@@ -20,16 +20,15 @@ import {
 import postgres from 'postgres';
 
 import {
-  DRIVER_FAILURE_LEAKS,
   driverFailureFixture,
-  WRAPPED_PARAMETERS,
-  WRAPPED_STATEMENT,
+  WRAPPED_DRIVER_FAILURE_LEAKS,
   wrappedDriverFailureFixture,
 } from './driver-error-test-fixtures';
 
 import {
   createBootstrapDependencies,
   createRoleStatementExecutor,
+  reduceDriverErrors,
   runBootstrap,
 } from './bootstrap';
 import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
@@ -793,6 +792,69 @@ describe('bootstrap statement executor', () => {
   });
 });
 
+describe('bootstrap dependency driver-error boundary', () => {
+  test('wraps each deliberately unwrapped method transparently', async () => {
+    const rawDependencies = {
+      async calculate(
+        this: { readonly factor: number },
+        left: number,
+        right: number,
+      ): Promise<number> {
+        return this.factor * (left + right);
+      },
+      deliberatelyUnwrapped(): Promise<never> {
+        throw wrappedDriverFailureFixture(driverFailureFixture());
+      },
+    };
+    const dependencies = reduceDriverErrors(rawDependencies);
+
+    expect(Object.keys(dependencies)).toEqual(Object.keys(rawDependencies));
+    await expect(
+      dependencies.calculate.call({ factor: 4 }, 2, 5),
+    ).resolves.toBe(28);
+
+    const raised = await dependencies.deliberatelyUnwrapped().then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(raised).not.toBeNull();
+    expect(raised instanceof postgres.PostgresError).toBe(false);
+    expect(Reflect.get(Object(raised), 'cause')).toBeUndefined();
+    const message = String(Reflect.get(Object(raised), 'message'));
+    expect(message).toContain(
+      'The deliberatelyUnwrapped step failed in the database.',
+    );
+    expect(message).toContain('code=23505');
+    for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
+      expect(message).not.toContain(leak);
+    }
+  });
+
+  test('rethrows ordinary and errno failures untouched', async () => {
+    const ordinary = new Error('Google Cloud Identity refused the request.');
+    const errno = Object.assign(
+      new Error('EROFS: read-only file system, open /etc/rds-ca.pem'),
+      { code: 'EROFS' },
+    );
+
+    for (const original of [ordinary, errno]) {
+      const dependencies = reduceDriverErrors({
+        async deliberatelyUnwrapped(): Promise<void> {
+          throw original;
+        },
+      });
+
+      const raised = await dependencies
+        .deliberatelyUnwrapped()
+        .catch((error: unknown) => error);
+
+      expect(raised).toBe(original);
+      expect(Reflect.get(Object(raised), 'message')).toBe(original.message);
+    }
+  });
+});
+
 describe('bootstrap steps that issue SQL outside the executor', () => {
   /**
    * A connection on which every interaction raises a driver error, so a step is
@@ -813,12 +875,13 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
   }
 
   const steps = [
-    ['migration', 'migrate'],
-    ['reference seed', 'seedReference'],
-    ['access bootstrap', 'bootstrapAccess'],
+    'migrate',
+    'seedReference',
+    'bootstrapAccess',
+    'bootstrapDistrict',
   ] as const;
 
-  for (const [label, method] of steps) {
+  for (const method of steps) {
     test(`${method} reduces a driver error where it is raised`, async () => {
       const connection = failingConnection() as unknown as Parameters<
         typeof createBootstrapDependencies
@@ -837,10 +900,14 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
           process.env.PSD_EOC_INITIAL_ACCESS_GROUP_ID,
         PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL:
           process.env.PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL,
+        PSD_EOC_FACILITIES: process.env.PSD_EOC_FACILITIES,
       };
       process.env.PSD_EOC_INITIAL_ACCESS_GROUP_ID = 'synthetic-group-id';
       process.env.PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL =
         'access-group@example.invalid';
+      process.env.PSD_EOC_FACILITIES = JSON.stringify([
+        { code: 'SYNTHETIC', name: 'Synthetic Facility' },
+      ]);
 
       const raised = await Promise.resolve(
         dependencies[method](readBootstrapConfig(validConfigEnvironment())),
@@ -862,16 +929,37 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
       expect(raised).not.toBeNull();
       expect(raised instanceof postgres.PostgresError).toBe(false);
       const message = String(Reflect.get(Object(raised), 'message'));
-      expect(message).toContain(`The ${label} step failed in the database.`);
+      expect(message).toContain(`The ${method} step failed in the database.`);
       expect(message).toContain('code=23505');
-      for (const leak of [
-        ...DRIVER_FAILURE_LEAKS,
-        WRAPPED_STATEMENT,
-        ...WRAPPED_PARAMETERS,
-        'Failed query',
-      ]) {
+      for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
         expect(message).not.toContain(leak);
       }
     });
   }
+
+  test('keeps an executor-authored diagnostic under the blanket', async () => {
+    const connection = failingConnection() as unknown as Parameters<
+      typeof createBootstrapDependencies
+    >[1];
+    const dependencies = createBootstrapDependencies(
+      readBootstrapConfig(validConfigEnvironment()),
+      connection,
+      connection,
+    );
+
+    expect(Object.isFrozen(dependencies)).toBe(true);
+    const message = await dependencies
+      .acquireAdvisoryLock()
+      .catch((error: unknown) => String(Reflect.get(Object(error), 'message')));
+
+    expect(message).toContain(
+      'A native database bootstrap statement failed. statement=SELECT',
+    );
+    expect(message).not.toContain(
+      'The acquireAdvisoryLock step failed in the database.',
+    );
+    for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
+      expect(message).not.toContain(leak);
+    }
+  });
 });

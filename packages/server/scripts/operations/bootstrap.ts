@@ -59,6 +59,59 @@ export interface BootstrapDependencies {
   verifyApplicationTls(): Promise<void>;
 }
 
+type AsyncDependencyMethod = (...parameters: never[]) => Promise<unknown>;
+
+type ReducedDependencyMethod<Method extends AsyncDependencyMethod> = (
+  this: ThisParameterType<Method>,
+  ...parameters: Parameters<OmitThisParameter<Method>>
+) => ReturnType<Method>;
+
+type ReducedDriverErrorDependencies<
+  Dependencies extends Record<string, AsyncDependencyMethod>,
+> = {
+  [Step in Extract<keyof Dependencies, string>]: ReducedDependencyMethod<
+    Dependencies[Step]
+  >;
+};
+
+/**
+ * Reduces driver errors for every method in a source-defined dependency object.
+ *
+ * The method names are code-controlled log labels. Discovering them from the
+ * object is the point: adding a dependency cannot create an unguarded database
+ * path merely because its author did not know about this boundary. The input
+ * contract is deliberately narrow: a plain object whose own enumerable string
+ * keys are Promise-returning methods. Only call signatures are preserved; symbols,
+ * descriptors, and properties attached to function objects are not supported.
+ */
+export function reduceDriverErrors<
+  const Dependencies extends Record<string, AsyncDependencyMethod>,
+>(dependencies: Dependencies): ReducedDriverErrorDependencies<Dependencies> {
+  const prototype = Object.getPrototypeOf(dependencies);
+  const ownKeys = Reflect.ownKeys(dependencies);
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    ownKeys.some(
+      (key) =>
+        typeof key !== 'string' ||
+        !Object.prototype.propertyIsEnumerable.call(dependencies, key),
+    )
+  ) {
+    throw new TypeError(
+      'Bootstrap dependencies must be a plain object of own enumerable string-keyed methods.',
+    );
+  }
+  const reduced = Object.entries(dependencies).map(([step, run]) => [
+    step,
+    function (this: unknown, ...parameters: never[]): Promise<unknown> {
+      return withReducedDriverErrors(step, () => run.apply(this, parameters));
+    },
+  ]);
+  return Object.fromEntries(
+    reduced,
+  ) as ReducedDriverErrorDependencies<Dependencies>;
+}
+
 /**
  * What the district-configuration step found and what it had to create.
  *
@@ -341,10 +394,10 @@ export function createRoleStatementExecutor(
 /**
  * Wires the bootstrap steps to two live connections.
  *
- * Exported so each step's failure handling can be exercised without a database.
- * The steps that issue SQL outside the statement executor have to reduce a
- * driver error where it is raised, and only a test that drives these proves the
- * wiring rather than the reducer in isolation.
+ * Exported so the dependency boundary can be exercised without a database.
+ * Every method is reduced after the object is complete, so a new database path
+ * cannot opt out by omission. Statement-executor methods already return authored
+ * errors; the blanket reduction rethrows those untouched.
  */
 export function createBootstrapDependencies(
   config: BootstrapConfig,
@@ -357,7 +410,7 @@ export function createBootstrapDependencies(
   const applicationExecutor = createRoleStatementExecutor(
     applicationConnection,
   );
-  return Object.freeze({
+  const dependencies = {
     async acquireAdvisoryLock(): Promise<void> {
       await administratorExecutor.execute(ADVISORY_LOCK_SQL);
     },
@@ -371,9 +424,7 @@ export function createBootstrapDependencies(
       await verifyDatabaseTls({ executor: administratorExecutor });
     },
     async migrate(): Promise<void> {
-      await withReducedDriverErrors('migration', () =>
-        migrateDatabase(administratorConnection),
-      );
+      await migrateDatabase(administratorConnection);
     },
     async configureApplicationRole() {
       return configureAndVerifyApplicationRole({
@@ -382,13 +433,11 @@ export function createBootstrapDependencies(
       });
     },
     async seedReference() {
-      return withReducedDriverErrors('reference seed', () =>
-        seedReferenceData(administratorConnection.db),
-      );
+      return seedReferenceData(administratorConnection.db);
     },
     async bootstrapAccess() {
-      const outcome = await withReducedDriverErrors('access bootstrap', () =>
-        bootstrapAccessConfiguration(administratorConnection.db),
+      const outcome = await bootstrapAccessConfiguration(
+        administratorConnection.db,
       );
       console.info(describeBootstrapOutcome(outcome));
       return outcome;
@@ -398,17 +447,12 @@ export function createBootstrapDependencies(
       // district's own codes and is refused if one of them is not there yet.
       //
       // Both go through the drizzle handle rather than the executor, so they
-      // are a driver-error bypass path and need the same wrapper the steps
-      // above use — without it a failure logs the statement text and its bound
+      // rely on the dependency boundary to remove statement text and bound
       // parameters, which here are facility codes and campus names.
-      const facilities = await withReducedDriverErrors(
-        'facility bootstrap',
-        () => bootstrapFacilities(administratorConnection.db),
-      );
+      const facilities = await bootstrapFacilities(administratorConnection.db);
       console.info(describeFacilityOutcome(facilities));
-      const neighborhoods = await withReducedDriverErrors(
-        'neighborhood bootstrap',
-        () => bootstrapNeighborhoods(administratorConnection.db),
+      const neighborhoods = await bootstrapNeighborhoods(
+        administratorConnection.db,
       );
       console.info(describeNeighborhoodOutcome(neighborhoods));
       return Object.freeze({
@@ -424,7 +468,8 @@ export function createBootstrapDependencies(
     async verifyApplicationTls(): Promise<void> {
       await verifyDatabaseTls({ executor: applicationExecutor });
     },
-  });
+  } satisfies BootstrapDependencies;
+  return Object.freeze(reduceDriverErrors(dependencies));
 }
 
 /** Fails closed unless the exact canonical fixture is absent after bootstrap. */
