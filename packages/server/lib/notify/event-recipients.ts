@@ -18,6 +18,29 @@ import {
  */
 export type EventReach = 'building' | 'neighborhood';
 
+/**
+ * Which population an event addresses, and therefore which group sources may
+ * be read at all.
+ *
+ * This is the real-versus-drill classification reaching the query. A `test`
+ * event is contractually bound to `synthetic` by `EventTargetingSchema`, and
+ * that binding is worth nothing unless something refuses to look at staff
+ * groups when it is set. So population selects `group_sources.kind`: `staff`
+ * reads only `google-group` sources, `synthetic` reads only `synthetic` ones,
+ * and neither can see the other's members.
+ *
+ * The health check and integrations test mode exercise the whole activation
+ * path continuously. They can only do that safely because a synthetic
+ * activation cannot address a real person — not because something downstream
+ * declines to send.
+ */
+export type EventPopulation = 'staff' | 'synthetic';
+
+const SOURCE_KIND_FOR_POPULATION = Object.freeze({
+  staff: 'google-group',
+  synthetic: 'synthetic',
+} as const);
+
 /** One school whose staff an event reaches, and when its roster was read. */
 export interface ReachedFacility {
   readonly facilityId: string;
@@ -129,7 +152,11 @@ async function reachedFacilityIds(
  */
 export async function resolveEventRecipients(
   database: Database,
-  input: Readonly<{ facilityId: string; reach: EventReach }>,
+  input: Readonly<{
+    facilityId: string;
+    reach: EventReach;
+    population: EventPopulation;
+  }>,
 ): Promise<EventRecipients> {
   const facilityIds = await reachedFacilityIds(
     database,
@@ -137,9 +164,11 @@ export async function resolveEventRecipients(
     input.reach,
   );
 
-  // Purpose is applied here, before any member is read. That ordering is what
-  // keeps a shared membership table safe: an access group's members can never
-  // be reached through this query, because its source is never selected.
+  // Purpose and kind are both applied here, before any member is read. That
+  // ordering is what keeps a shared membership table safe: an access group's
+  // members can never be reached through this query because its source is
+  // never selected, and a staff activation can never reach a synthetic member
+  // — nor a synthetic one a real staff member — for the same reason.
   const sources = await database
     .select({
       id: groupSources.id,
@@ -150,6 +179,7 @@ export async function resolveEventRecipients(
     .where(
       and(
         eq(groupSources.purpose, 'building'),
+        eq(groupSources.kind, SOURCE_KIND_FOR_POPULATION[input.population]),
         eq(groupSources.active, true),
         inArray(groupSources.facilityId, [...facilityIds]),
       ),
