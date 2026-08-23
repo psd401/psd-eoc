@@ -126,14 +126,44 @@ jobs:
           test -x "$root/maestro/bin/maestro"
           echo "$root/maestro/bin" >> "$GITHUB_PATH"
 
+      - name: Create an Android 35 emulator
+        run: |
+          set -euo pipefail
+          system_image='system-images;android-35;google_apis;x86_64'
+          sdkmanager --install "$system_image"
+          printf 'no\n' | avdmanager create avd \
+            --force \
+            --name issue32_api35 \
+            --package "$system_image" \
+            --device pixel_6
+          sudo chmod 0666 /dev/kvm
+          emulator \
+            -avd issue32_api35 \
+            -no-window \
+            -noaudio \
+            -no-boot-anim \
+            -no-snapshot \
+            -gpu swiftshader_indirect \
+            > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
+          adb wait-for-device
+          boot_completed=''
+          for _attempt in {1..60}; do
+            boot_completed=$(adb shell getprop sys.boot_completed | tr -d '\r')
+            if test "$boot_completed" = '1'; then
+              break
+            fi
+            sleep 5
+          done
+          if test "$boot_completed" != '1'; then
+            cat "$RUNNER_TEMP/android-emulator.log"
+            exit 1
+          fi
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+
       - name: Run Android drill lifecycle
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          arch: x86_64
-          disable-animations: true
-          profile: pixel_6
-          script: bun packages/mobile/e2e/run.ts android
+        run: bun packages/mobile/e2e/run.ts android
         env:
           PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-android
 
@@ -142,6 +172,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: mobile-e2e-android-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mobile-e2e-android
+          path: |
+            ${{ runner.temp }}/mobile-e2e-android
+            ${{ runner.temp }}/android-emulator.log
           if-no-files-found: warn
           retention-days: 14

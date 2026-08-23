@@ -57,5 +57,5 @@ The dedicated `Mobile E2E` workflow runs both platforms after every push to
 `main` and supports manual dispatch once the workflow exists on the default
 branch. Before merge, a maintainer can apply the `mobile-e2e` pull-request
 label to opt into both native jobs through the ordinary CI workflow; later
-commits rerun them while the label remains applied. Pull requests always run
-the web Playwright and axe journeys in that workflow.
+commits rerun them while the label remains applied. Code pull requests run the
+web Playwright and axe journeys in that workflow.
