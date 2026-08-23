@@ -45,7 +45,7 @@ function readyEvidence(overrides: Record<string, unknown> = {}) {
     ],
     activeFacilityIds: [FACILITY_ID],
     neighborhoodFacilityIds: [FACILITY_ID],
-    audienceFacilityIds: [FACILITY_ID],
+    buildingGroupFacilityIds: [FACILITY_ID],
     latestRosterAttempt: {
       completedAt: fresh,
       outcome: 'complete' as const,
@@ -281,7 +281,7 @@ describe('administrative readiness projection', () => {
     const projected = projectAdminReadiness(
       readyEvidence({
         neighborhoodFacilityIds: [],
-        audienceFacilityIds: [],
+        buildingGroupFacilityIds: [],
       }),
       OBSERVED_AT,
     );
@@ -290,7 +290,7 @@ describe('administrative readiness projection', () => {
       status: 'action-required',
       activeFacilityCount: 1,
       facilitiesWithoutNeighborhoodCount: 1,
-      facilitiesWithoutAudienceCount: 1,
+      facilitiesWithoutBuildingGroupCount: 1,
     });
   });
 });

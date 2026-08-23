@@ -21,8 +21,8 @@ repeatedly and it loads catalogs only:
 | Channel configurations | 3     |
 
 Read the list of what it does **not** create carefully, because every item on
-it is work you still have to do: facilities, neighborhoods, audiences, rosters,
-recipients, events. A deployment that has only been bootstrapped knows what
+it is work you still have to do: facilities, neighborhoods, group sources,
+rosters, recipients, events. A deployment that has only been bootstrapped knows what
 kinds of event exist and nothing about your district.
 
 ## 1. Get your first administrator in
@@ -109,16 +109,16 @@ can be assigned to and events can be started at.
 Then group them into neighborhoods — the set of schools notified together when
 an event at one of them reaches beyond its own building.
 
-## 4. Give each facility an audience configuration
+## 4. Give each facility a building group
 
-Recipient resolution currently reads a versioned audience configuration per
-facility, and the consequence preview cannot resolve recipients without one.
-Create one for each facility you intend to start events at.
+There is no audience to configure. Issue #292 retired
+`audience_configurations` and `audience_targets`: an event at a school reaches
+that school's staff, and that rule is now the code rather than a row.
 
-> This step is scheduled to disappear. Issue #292 retires
-> `audience_configurations` and `audience_targets` in favour of the domain that
-> already exists — staff belong to schools, schools belong to neighborhoods.
-> Until it lands, this configuration object has to be created.
+What decides whether an activation reaches anybody is the school's **building
+group source** — an active Google group, `purpose = building`, bound to the
+facility. Create one per facility you intend to start events at. The admin
+readiness page reports how many active facilities still have none.
 
 ## 5. Confirm the roster
 
@@ -159,7 +159,7 @@ other check above is necessary and none of them is sufficient.
 - [ ] A human has signed in and arrived as an administrator
 - [ ] Facilities exist for every building you will start events at
 - [ ] Neighborhoods group those facilities
-- [ ] Each facility has an audience configuration
+- [ ] Each facility has an active building group source
 - [ ] A roster snapshot exists
 - [ ] Alarm topics carry a **confirmed** subscription that reaches a person
 - [ ] One drill has run to an all-clear

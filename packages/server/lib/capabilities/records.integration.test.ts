@@ -383,8 +383,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
       eventTypeVersionId: SEEDED.drillEventTypeVersion,
       rosterSnapshotId: SEEDED.rosterSnapshot,
       rosterPopulation: 'synthetic',
-      audienceConfigId: SEEDED.audienceNorth,
-      audienceConfigVersion: 1,
       createdBy: ACTOR,
       source: 'agent-rest',
       requestId: notificationRequestId,

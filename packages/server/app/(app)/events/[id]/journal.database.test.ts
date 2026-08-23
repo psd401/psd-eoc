@@ -27,7 +27,6 @@ import {
 import {
   accessMembershipSnapshots,
   activationPreviews,
-  audienceConfigurations,
   channelAttempts,
   channelConfigurations,
   connectivityEpochs,
@@ -113,8 +112,6 @@ interface SyntheticFixtureIds {
   readonly southFacilityId: string;
   readonly eventTypeVersionId: string;
   readonly rosterSnapshotId: string;
-  readonly audienceConfigId: string;
-  readonly audienceConfigVersion: number;
 }
 
 interface SyntheticReadyPhoto {
@@ -492,25 +489,11 @@ describeWithDatabase('event journal database guarantees', () => {
     ) {
       throw new Error('The synthetic seed is missing event journal fixtures.');
     }
-    const [audience] = await created.db
-      .select({
-        id: audienceConfigurations.id,
-        version: audienceConfigurations.version,
-      })
-      .from(audienceConfigurations)
-      .where(eq(audienceConfigurations.facilityId, north.id))
-      .orderBy(asc(audienceConfigurations.version))
-      .limit(1);
-    if (audience === undefined) {
-      throw new Error('The synthetic seed is missing an audience fixture.');
-    }
     fixtureIds = {
       northFacilityId: north.id,
       southFacilityId: south.id,
       eventTypeVersionId: version.id,
       rosterSnapshotId: snapshot.id,
-      audienceConfigId: audience.id,
-      audienceConfigVersion: audience.version,
     };
   });
 
@@ -1399,10 +1382,6 @@ describeWithDatabase('event journal database guarantees', () => {
           },
           rosterSnapshotId: ids.rosterSnapshotId,
           rosterPopulation: 'synthetic',
-          audienceConfig: {
-            id: ids.audienceConfigId,
-            version: ids.audienceConfigVersion,
-          },
           recipientCount: recipientRows.length,
           channels: [
             {
@@ -1451,8 +1430,6 @@ describeWithDatabase('event journal database guarantees', () => {
           eventTypeVersionId: sourcePreview.eventTypeVersion.id,
           rosterSnapshotId: sourcePreview.rosterSnapshotId,
           rosterPopulation: sourcePreview.rosterPopulation,
-          audienceConfigId: sourcePreview.audienceConfig.id,
-          audienceConfigVersion: sourcePreview.audienceConfig.version,
           recipientCount: sourcePreview.recipientCount,
           channels: sourcePreview.channels,
           sendReadiness: sourcePreview.sendReadiness,
@@ -2164,10 +2141,6 @@ describeWithDatabase('event journal database guarantees', () => {
             },
             rosterSnapshotId: staffRosterSnapshotId,
             rosterPopulation: 'staff',
-            audienceConfig: {
-              id: ids.audienceConfigId,
-              version: ids.audienceConfigVersion,
-            },
             recipientCount: 1,
             channels: [
               {
@@ -2218,8 +2191,6 @@ describeWithDatabase('event journal database guarantees', () => {
             eventTypeVersionId: sourcePreview.eventTypeVersion.id,
             rosterSnapshotId: sourcePreview.rosterSnapshotId,
             rosterPopulation: sourcePreview.rosterPopulation,
-            audienceConfigId: sourcePreview.audienceConfig.id,
-            audienceConfigVersion: sourcePreview.audienceConfig.version,
             recipientCount: sourcePreview.recipientCount,
             channels: sourcePreview.channels,
             sendReadiness: sourcePreview.sendReadiness,

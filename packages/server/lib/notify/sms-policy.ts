@@ -381,10 +381,9 @@ export async function resolveSmsEndpoints(
       'The SMS audience does not match the pinned roster snapshot.',
     );
   }
-  if (
-    audience.audienceConfig.id !== batch.audienceConfig.id ||
-    audience.audienceConfig.version !== batch.audienceConfig.version
-  ) {
+  // The audience is the school now, not a versioned configuration object,
+  // so the provenance check compares the school the batch was built for.
+  if (audience.facilityId !== batch.facilityId) {
     throw new SmsPolicyError(
       'SMS_AUDIENCE_MISMATCH',
       'The SMS audience configuration does not match the dispatch batch.',

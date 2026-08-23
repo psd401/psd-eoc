@@ -180,7 +180,6 @@ function deliveryTestPreview(): DeliveryTestPreview {
     eventTypeVersion: { id: IDS.eventType, templateMode: 'drill' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
-    audienceConfig: { id: IDS.audience, version: 1 },
     recipientCount: 1,
     channels,
     sendReadiness: 'ready',

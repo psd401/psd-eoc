@@ -16,7 +16,6 @@ import {
 } from '../../db/client';
 import {
   activationPreviews,
-  audienceConfigurations,
   idempotencyRecords,
   preparedActivations,
   securityAuditEntries,
@@ -227,22 +226,6 @@ async function activationPreviewById(
     .where(eq(activationPreviews.id, previewId))
     .limit(1);
   if (row === undefined) return null;
-
-  const [audience] = await database
-    .select({ facilityId: audienceConfigurations.facilityId })
-    .from(audienceConfigurations)
-    .where(
-      and(
-        eq(audienceConfigurations.id, row.audienceConfigId),
-        eq(audienceConfigurations.version, row.audienceConfigVersion),
-      ),
-    )
-    .limit(1);
-  if (audience?.facilityId !== row.facilityId) {
-    throw conflict(
-      'The activation audience is not owned by the event facility.',
-    );
-  }
   return ActivationPreviewSchema.parse({
     id: row.id,
     facilityId: row.facilityId,
@@ -254,10 +237,6 @@ async function activationPreviewById(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -312,8 +291,6 @@ async function createPreparedActivation(
       eventTypeVersionId: input.preview.eventTypeVersion.id,
       rosterSnapshotId: input.preview.rosterSnapshotId,
       rosterPopulation: input.preview.rosterPopulation,
-      audienceConfigId: input.preview.audienceConfig.id,
-      audienceConfigVersion: input.preview.audienceConfig.version,
       consequenceDigest: input.preview.consequenceDigest,
       preparedBy: input.preparedBy,
       preparedAt: input.preparedAt,

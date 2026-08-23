@@ -63,7 +63,6 @@ const EVENT_TYPE_VERSION = Object.freeze({
   templateMode: 'drill' as const,
 });
 
-const AUDIENCE = Object.freeze({ id: IDS.audience, version: 1 });
 const ALL_CLEAR_TRANSITION_EVIDENCE_KEY = 'a'.repeat(64);
 const CLOSE_TRANSITION_EVIDENCE_KEY = 'c'.repeat(64);
 
@@ -240,7 +239,6 @@ function lifecyclePreview() {
     ...TARGETING,
     eventTypeVersion: EVENT_TYPE_VERSION,
     rosterSnapshotId: IDS.roster,
-    audienceConfig: AUDIENCE,
     recipientCount: 3,
     channels: channelPlan(),
     sendReadiness: 'ready',
@@ -290,7 +288,6 @@ function allClearResult(
     eventTypeVersion: EVENT_TYPE_VERSION,
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
-    audienceConfig: AUDIENCE,
     createdBy: HUMAN_ACTOR,
     source: 'mobile',
     requestId: IDS.request,

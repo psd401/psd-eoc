@@ -26,13 +26,10 @@ import {
 import { executeRosterHealthProjection } from '../integrations/roster-health';
 import { createDrizzleAdminCapabilityStore } from './admin-core';
 import {
-  executeCreateAudienceConfigVersionCapability,
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
   executeCreateNeighborhoodVersionCapability,
   executeFacilitiesAdminProjection,
-  executeGetAudienceConfigCapability,
-  executeGetAudienceConfigVersionCapability,
   executeGetFacilityCapability,
   executeGetNeighborhoodVersionCapability,
   executeListFacilitiesCapability,
@@ -57,7 +54,6 @@ const NEIGHBORHOOD_ID = '00000000-0000-4000-8000-000000009002';
 const ORIGINAL_GROUP_SOURCE_ID = '00000000-0000-4000-8000-000000009003';
 const REPLACEMENT_GROUP_SOURCE_ID = '00000000-0000-4000-8000-000000009004';
 const ROSTER_CONFIGURATION_ID = '00000000-0000-4000-8000-000000009005';
-const AUDIENCE_CONFIGURATION_ID = '00000000-0000-4000-8000-000000009006';
 const ACCESS_GROUP_SOURCE_ID = '00000000-0000-4000-8000-000000009007';
 const ACCESS_SNAPSHOT_ID = '00000000-0000-4000-8000-000000009008';
 const PROJECTION_FACILITY_IDS = Object.freeze([
@@ -73,11 +69,6 @@ const PROJECTION_NEIGHBORHOOD_IDS = Object.freeze([
       `00000000-0000-4000-8000-${String(9201 + index).padStart(12, '0')}`,
   ),
 ]);
-const PROJECTION_AUDIENCE_IDS = Object.freeze([
-  AUDIENCE_CONFIGURATION_ID,
-  '00000000-0000-4000-8000-000000009031',
-  '00000000-0000-4000-8000-000000009032',
-]);
 
 const CAPABILITY_MATRIX = Object.freeze([
   'create-facility',
@@ -91,9 +82,6 @@ const CAPABILITY_MATRIX = Object.freeze([
   'create-group-source',
   'list-group-sources',
   'update-group-source',
-  'create-audience-config-version',
-  'get-audience-config',
-  'get-audience-config-version',
   'list-users',
   'get-integration-health',
   'set-channel-enabled',
@@ -176,7 +164,6 @@ class FakeRdsDataClient {
   >();
   private readonly idempotencyById = new Map<string, FakeIdempotencyRecord>();
   private readonly inFlight = new Map<string, number>();
-  private audienceVersion = 0;
   private facilityCreated = false;
   private facilityUpdated = false;
   private neighborhoodVersion = 0;
@@ -757,144 +744,6 @@ class FakeRdsDataClient {
           { isNull: true },
           { stringValue: CLOCK_VALUE },
         ]),
-        $metadata: {},
-      };
-    }
-    if (sql.startsWith('insert into "audience_configurations"')) {
-      this.audienceVersion += 1;
-      return {
-        records: [
-          [
-            { stringValue: AUDIENCE_CONFIGURATION_ID },
-            { stringValue: FACILITY_ID },
-            { longValue: this.audienceVersion },
-            { stringValue: CLOCK_VALUE },
-          ],
-        ],
-        numberOfRecordsUpdated: 1,
-        $metadata: {},
-      };
-    }
-    if (sql.startsWith('insert into "audience_targets"')) {
-      return { numberOfRecordsUpdated: 1, $metadata: {} };
-    }
-    if (sql.includes('from "audience_targets"')) {
-      if (sql.includes('left join "group_sources"')) {
-        const audienceIds = this.projectionBatchFixtures
-          ? parameterStrings.filter((value) =>
-              PROJECTION_AUDIENCE_IDS.includes(value),
-            )
-          : [AUDIENCE_CONFIGURATION_ID];
-        return this.audienceVersion > 0
-          ? {
-              records: audienceIds.map((audienceId) => {
-                const index = PROJECTION_AUDIENCE_IDS.indexOf(audienceId);
-                return [
-                  { stringValue: audienceId },
-                  { longValue: this.audienceVersion },
-                  { isNull: true },
-                  { isNull: true },
-                  { longValue: 1 },
-                  { isNull: true },
-                  { isNull: true },
-                  { isNull: true },
-                  { isNull: true },
-                  {
-                    stringValue: PROJECTION_FACILITY_IDS[index] ?? FACILITY_ID,
-                  },
-                  { stringValue: 'building' },
-                ];
-              }),
-              $metadata: {},
-            }
-          : { records: [], $metadata: {} };
-      }
-      return this.audienceVersion > 0
-        ? {
-            records: [
-              [
-                { stringValue: AUDIENCE_CONFIGURATION_ID },
-                { longValue: this.audienceVersion },
-                { longValue: 1 },
-                { stringValue: 'building' },
-                { stringValue: FACILITY_ID },
-                { isNull: true },
-                { isNull: true },
-                { isNull: true },
-              ],
-            ],
-            $metadata: {},
-          }
-        : { records: [], $metadata: {} };
-    }
-    if (sql.includes('from "audience_configurations"')) {
-      if (this.audienceVersion === 0) return { records: [], $metadata: {} };
-      if (sql.includes('group by')) {
-        if (sql.startsWith('select "facility_id", "id"')) {
-          return {
-            records: (this.projectionBatchFixtures
-              ? PROJECTION_FACILITY_IDS
-              : [FACILITY_ID]
-            ).map((facilityId, index) => [
-              { stringValue: facilityId },
-              {
-                stringValue:
-                  PROJECTION_AUDIENCE_IDS[index] ?? AUDIENCE_CONFIGURATION_ID,
-              },
-            ]),
-            $metadata: {},
-          };
-        }
-        return {
-          records: [[{ stringValue: AUDIENCE_CONFIGURATION_ID }]],
-          $metadata: {},
-        };
-      }
-      if (sql.startsWith('select "facility_id", "version"')) {
-        return {
-          records: [
-            [{ stringValue: FACILITY_ID }, { longValue: this.audienceVersion }],
-          ],
-          $metadata: {},
-        };
-      }
-      if (sql.startsWith('select "id", "version"')) {
-        return {
-          records: [
-            [
-              { stringValue: AUDIENCE_CONFIGURATION_ID },
-              { longValue: this.audienceVersion },
-            ],
-          ],
-          $metadata: {},
-        };
-      }
-      if (sql.startsWith('select distinct on (')) {
-        return {
-          records: (this.projectionBatchFixtures
-            ? PROJECTION_FACILITY_IDS
-            : [FACILITY_ID]
-          ).map((facilityId, index) => [
-            { stringValue: CLOCK_VALUE },
-            { stringValue: facilityId },
-            {
-              stringValue:
-                PROJECTION_AUDIENCE_IDS[index] ?? AUDIENCE_CONFIGURATION_ID,
-            },
-            { longValue: this.audienceVersion },
-          ]),
-          $metadata: {},
-        };
-      }
-      return {
-        records: [
-          [
-            { stringValue: AUDIENCE_CONFIGURATION_ID },
-            { stringValue: FACILITY_ID },
-            { longValue: this.audienceVersion },
-            { stringValue: CLOCK_VALUE },
-          ],
-        ],
         $metadata: {},
       };
     }
@@ -1746,68 +1595,6 @@ describe('admin Aurora Data API transport regression', () => {
     expect(updateRosterLockIndex).toBeGreaterThan(updateAdminLockIndex);
     expect(updateCurrentGroupReadIndex).toBeGreaterThan(updateRosterLockIndex);
 
-    const createdAudience = await executeCreateAudienceConfigVersionCapability({
-      authenticated,
-      store,
-      command: {
-        audienceConfigId: null,
-        facilityId: FACILITY_ID,
-        targets: [{ kind: 'building', facilityId: FACILITY_ID }],
-      },
-      metadata: {
-        idempotencyKey: 'synthetic-data-api-create-audience',
-        requestId: '00000000-0000-4000-8000-000000009112',
-        now: new Date(CLOCK_VALUE),
-      },
-    });
-    executedCapabilities.add('create-audience-config-version');
-    expect(createdAudience.version).toBe(1);
-
-    const supersedingAudience =
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: AUDIENCE_CONFIGURATION_ID,
-          facilityId: FACILITY_ID,
-          targets: [{ kind: 'building', facilityId: FACILITY_ID }],
-        },
-        metadata: {
-          idempotencyKey: 'synthetic-data-api-supersede-audience',
-          requestId: '00000000-0000-4000-8000-000000009117',
-          now: new Date(CLOCK_VALUE),
-        },
-      });
-    expect(supersedingAudience.version).toBe(2);
-
-    const audience = await executeGetAudienceConfigCapability({
-      authenticated,
-      store,
-      query: { facilityId: FACILITY_ID },
-      metadata: {
-        requestId: '00000000-0000-4000-8000-000000009113',
-        now: new Date(CLOCK_VALUE),
-      },
-    });
-    executedCapabilities.add('get-audience-config');
-    expect(audience.facilityId).toBe(FACILITY_ID);
-
-    const audienceVersion = await executeGetAudienceConfigVersionCapability({
-      authenticated,
-      store,
-      query: {
-        audienceConfig: { id: AUDIENCE_CONFIGURATION_ID, version: 2 },
-      },
-      metadata: {
-        requestId: '00000000-0000-4000-8000-000000009114',
-        now: new Date(CLOCK_VALUE),
-      },
-    });
-    executedCapabilities.add('get-audience-config-version');
-    expect(audienceVersion.targets).toEqual([
-      { kind: 'building', facilityId: FACILITY_ID },
-    ]);
-
     client.enableProjectionBatchFixtures();
     const projectionStatementStart = client.statements.length;
     const facilitiesProjection = await executeFacilitiesAdminProjection({
@@ -1844,16 +1631,12 @@ describe('admin Aurora Data API transport regression', () => {
     expect(facilitiesProjection.neighborhoodOptions).toHaveLength(
       PROJECTION_NEIGHBORHOOD_IDS.length,
     );
-    expect(facilitiesProjection.audienceConfigs).toHaveLength(
-      PROJECTION_AUDIENCE_IDS.length,
-    );
-    expect(facilitiesProjection.audienceConfigs[0]).toEqual(audience);
     const projectionStatements = client.statements.slice(
       projectionStatementStart,
     );
     // The signed-in route uses these exact limits. Its visible pages and form
     // option catalogs are therefore one query apiece, not duplicate reads.
-    expect(projectionStatements).toHaveLength(23);
+    expect(projectionStatements).toHaveLength(19);
     expect(
       new Set(projectionStatements.map(({ transactionId }) => transactionId))
         .size,
@@ -1901,16 +1684,6 @@ describe('admin Aurora Data API transport regression', () => {
         ({ sql }) => (sql.match(/:\d+/gu) ?? []).length === 40,
       ),
     ).toBe(true);
-    const audienceTargetStatements = projectionStatements.filter(({ sql }) =>
-      sql.includes('from "audience_targets" left join "group_sources"'),
-    );
-    expect(audienceTargetStatements).toHaveLength(2);
-    expect(
-      audienceTargetStatements.every(
-        ({ sql }) => (sql.match(/:\d+/gu) ?? []).length <= 4,
-      ),
-    ).toBe(true);
-
     const independentCatalogStatementStart = client.statements.length;
     const independentlyLoadedProjection =
       await executeFacilitiesAdminProjection({
@@ -1948,7 +1721,7 @@ describe('admin Aurora Data API transport regression', () => {
     const independentCatalogStatements = client.statements.slice(
       independentCatalogStatementStart,
     );
-    expect(independentCatalogStatements).toHaveLength(30);
+    expect(independentCatalogStatements).toHaveLength(26);
     expect(
       independentCatalogStatements.filter(
         ({ sql, parameterLongs }) =>

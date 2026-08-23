@@ -1,10 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  AudienceConfigSchema,
-  NeighborhoodSchema,
   RosterSnapshotSchema,
-  type AudienceConfig,
-  type Neighborhood,
   type Recipient,
   type RosterGroupSourceRef,
   type RosterSnapshot,
@@ -178,38 +174,6 @@ const BASE_RECIPIENTS: readonly Recipient[] = Object.freeze([
   },
 ]);
 
-function neighborhood(
-  version: number,
-  facilityIds: readonly string[],
-): Neighborhood {
-  return NeighborhoodSchema.parse({
-    id: IDS.neighborhood,
-    version,
-    name: `Synthetic Neighborhood v${version}`,
-    facilityIds,
-    createdAt: TIMESTAMP,
-  });
-}
-
-const NEIGHBORHOOD_V1 = neighborhood(1, [IDS.facilityNorth, IDS.facilitySouth]);
-const NEIGHBORHOOD_V2 = neighborhood(2, [IDS.facilityNorth]);
-
-function audience(
-  targets: AudienceConfig['targets'],
-  options: Readonly<{
-    facilityId?: string;
-    version?: number;
-  }> = {},
-): AudienceConfig {
-  return AudienceConfigSchema.parse({
-    id: IDS.audience,
-    facilityId: options.facilityId ?? IDS.facilityNorth,
-    version: options.version ?? 1,
-    targets,
-    createdAt: TIMESTAMP,
-  });
-}
-
 function snapshot(overrides: Partial<RosterSnapshot> = {}): RosterSnapshot {
   return RosterSnapshotSchema.parse({
     id: IDS.snapshotOld,
@@ -228,12 +192,11 @@ function snapshot(overrides: Partial<RosterSnapshot> = {}): RosterSnapshot {
 }
 
 function input(
-  audienceConfig: AudienceConfig,
+  facilityId: string,
   overrides: Partial<ResolveAudienceInput> = {},
 ): ResolveAudienceInput {
   return {
-    audienceConfig,
-    neighborhoodVersions: [NEIGHBORHOOD_V2, NEIGHBORHOOD_V1],
+    facilityId,
     rosterSnapshot: snapshot(),
     ...overrides,
   };
@@ -263,13 +226,12 @@ function expectResolutionError(
   throw new Error(`Expected audience resolution to fail with ${code}.`);
 }
 
-describe('pinned roster audience resolution', () => {
-  test('resolves the event building and retains recipients without active endpoints', () => {
-    const result = resolveAudience(
-      input(audience([{ kind: 'building', facilityId: IDS.facilityNorth }])),
-    );
+describe('roster audience resolution for one school', () => {
+  test('resolves the school and retains recipients without active endpoints', () => {
+    const result = resolveAudience(input(IDS.facilityNorth));
 
     expect(result.sourceGroupRefs).toEqual([NORTH_GROUP]);
+    expect(result.facilityId).toBe(IDS.facilityNorth);
     expect(recipientIds(result)).toEqual([
       IDS.recipientNorth,
       IDS.recipientShared,
@@ -278,360 +240,82 @@ describe('pinned roster audience resolution', () => {
     expect(
       result.recipients[0]?.endpoints.map((endpoint) => endpoint.id),
     ).toEqual([IDS.endpointNorthEmail]);
+    // Kept with no endpoints rather than dropped: somebody at the school with
+    // no reachable address is a fact the consequence preview should be able to
+    // show, not one to quietly omit.
     expect(result.recipients[2]?.endpoints).toEqual([]);
+    // Inactive endpoints are excluded from the plan.
     expect(endpointIds(result)).not.toContain(IDS.endpointNorthPush);
   });
 
-  test('unions all building sources in the exact neighborhood version', () => {
-    const result = resolveAudience(
-      input(
-        audience([
-          {
-            kind: 'neighborhood',
-            neighborhood: { id: IDS.neighborhood, version: 1 },
-          },
-        ]),
-      ),
-    );
+  test('reaches only the school it was given', () => {
+    // The rule that replaced twenty configuration rows: an event at a school
+    // reaches that school. Nothing selects a second one, so a recipient who is
+    // only at the other school cannot appear.
+    const north = resolveAudience(input(IDS.facilityNorth));
+    const south = resolveAudience(input(IDS.facilitySouth));
 
-    expect(result.neighborhoodVersions).toEqual([
-      { id: IDS.neighborhood, version: 1 },
-    ]);
-    expect(result.sourceGroupRefs).toEqual([NORTH_GROUP, SOUTH_GROUP]);
-    expect(recipientIds(result)).toEqual([
-      IDS.recipientNorth,
-      IDS.recipientShared,
-      IDS.recipientSouth,
-      IDS.recipientNoEndpoint,
-      IDS.recipientInactive,
-    ]);
-    expect(
-      result.recipients.filter(
-        (recipient) => recipient.recipientId === IDS.recipientShared,
-      ),
-    ).toHaveLength(1);
-    expect(result.recipients.at(-1)?.endpoints).toEqual([]);
+    expect(north.sourceGroupRefs).toEqual([NORTH_GROUP]);
+    expect(south.sourceGroupRefs).toEqual([SOUTH_GROUP]);
+    expect(recipientIds(north)).not.toContain(IDS.recipientSouth);
+    expect(recipientIds(south)).not.toContain(IDS.recipientNorth);
   });
 
-  test('resolves the exact others group and accepts a completed empty group', () => {
-    const othersAudience = audience([
-      { kind: 'others', groupSourceRef: OTHERS_GROUP },
-    ]);
-    const populated = resolveAudience(input(othersAudience));
-
-    expect(populated.sourceGroupRefs).toEqual([OTHERS_GROUP]);
-    expect(recipientIds(populated)).toEqual([
+  test('a recipient at both schools resolves under either', () => {
+    expect(recipientIds(resolveAudience(input(IDS.facilityNorth)))).toContain(
       IDS.recipientShared,
-      IDS.recipientOthers,
-    ]);
-
-    const recipientsWithoutOthers = BASE_RECIPIENTS.flatMap((recipient) => {
-      if (recipient.id === IDS.recipientOthers) {
-        return [];
-      }
-      if (recipient.id !== IDS.recipientShared) {
-        return [recipient];
-      }
-      return [
-        {
-          ...recipient,
-          groupSourceRefs: [SOUTH_GROUP, NORTH_GROUP],
-        },
-      ];
-    });
-    const empty = resolveAudience(
-      input(othersAudience, {
-        rosterSnapshot: snapshot({ recipients: recipientsWithoutOthers }),
-      }),
     );
-
-    expect(empty.sourceGroupRefs).toEqual([OTHERS_GROUP]);
-    expect(empty.recipients).toEqual([]);
+    expect(recipientIds(resolveAudience(input(IDS.facilitySouth)))).toContain(
+      IDS.recipientShared,
+    );
   });
 
-  test('deduplicates combined components and is stable across target order', () => {
-    const targets = [
-      { kind: 'building', facilityId: IDS.facilityNorth },
-      {
-        kind: 'neighborhood',
-        neighborhood: { id: IDS.neighborhood, version: 1 },
-      },
-      { kind: 'others', groupSourceRef: OTHERS_GROUP },
-    ] as const;
-    const forward = resolveAudience(input(audience(targets)));
-    const reverse = resolveAudience(input(audience([...targets].reverse())));
+  test('pins the exact snapshot version it resolved against', () => {
+    // The reason the snapshot reference survives the audience configuration:
+    // the record of who was notified must not change under a later sync.
+    const result = resolveAudience(input(IDS.facilityNorth));
 
-    expect(forward).toEqual(reverse);
-    expect(recipientIds(forward)).toEqual([
-      IDS.recipientNorth,
-      IDS.recipientShared,
-      IDS.recipientSouth,
-      IDS.recipientOthers,
-      IDS.recipientNoEndpoint,
-      IDS.recipientInactive,
-    ]);
-    expect(new Set(recipientIds(forward)).size).toBe(forward.recipients.length);
-    expect(new Set(endpointIds(forward)).size).toBe(
-      endpointIds(forward).length,
-    );
-    expect(endpointIds(forward)).toEqual([
-      IDS.endpointNorthEmail,
-      IDS.endpointSharedEmail,
-      IDS.endpointSharedPush,
-      IDS.endpointSouthSms,
-      IDS.endpointOthersPush,
-    ]);
-  });
-
-  test('pins old snapshot, audience, and neighborhood versions exactly', () => {
-    const oldConfig = audience(
-      [
-        {
-          kind: 'neighborhood',
-          neighborhood: { id: IDS.neighborhood, version: 1 },
-        },
-      ],
-      { version: 1 },
-    );
-    const oldSnapshot = snapshot();
-    const newRecipients: readonly Recipient[] = BASE_RECIPIENTS.map(
-      (recipient) => {
-        if (recipient.id !== IDS.recipientNorth) {
-          return recipient;
-        }
-        const emailEndpoint = recipient.endpoints.find(
-          (endpoint) => endpoint.channel === 'email',
-        );
-        if (emailEndpoint === undefined) {
-          throw new Error('Synthetic fixture omitted its email endpoint.');
-        }
-        return {
-          ...recipient,
-          endpoints: [
-            {
-              ...emailEndpoint,
-              email: 'north.new@example.invalid',
-            },
-          ],
-        };
-      },
-    );
-    const newSnapshot = snapshot({
-      id: IDS.snapshotNew,
-      version: 8,
-      recipients: newRecipients,
-    });
-    const newConfig = audience(
-      [
-        {
-          kind: 'neighborhood',
-          neighborhood: { id: IDS.neighborhood, version: 2 },
-        },
-      ],
-      { version: 2 },
-    );
-
-    const oldResult = resolveAudience(
-      input(oldConfig, { rosterSnapshot: oldSnapshot }),
-    );
-    const newResult = resolveAudience(
-      input(newConfig, { rosterSnapshot: newSnapshot }),
-    );
-
-    expect(oldResult.rosterSnapshot).toEqual({
-      id: IDS.snapshotOld,
-      version: 7,
-      population: 'synthetic',
-      sourceConfiguration: { id: IDS.configuration, version: 3 },
-      capturedAt: TIMESTAMP,
-    });
-    expect(oldResult.audienceConfig).toEqual({
-      id: IDS.audience,
-      version: 1,
-      facilityId: IDS.facilityNorth,
-    });
-    expect(oldResult.neighborhoodVersions).toEqual([
-      { id: IDS.neighborhood, version: 1 },
-    ]);
-    expect(recipientIds(oldResult)).toContain(IDS.recipientSouth);
-    expect(
-      oldResult.recipients[0]?.endpoints[0]?.channel === 'email'
-        ? oldResult.recipients[0].endpoints[0].email
-        : null,
-    ).toBe('north.staff@example.invalid');
-
-    expect(newResult.rosterSnapshot.id).toBe(IDS.snapshotNew);
-    expect(newResult.audienceConfig.version).toBe(2);
-    expect(newResult.neighborhoodVersions).toEqual([
-      { id: IDS.neighborhood, version: 2 },
-    ]);
-    expect(recipientIds(newResult)).not.toContain(IDS.recipientSouth);
-    expect(
-      newResult.recipients[0]?.endpoints[0]?.channel === 'email'
-        ? newResult.recipients[0].endpoints[0].email
-        : null,
-    ).toBe('north.new@example.invalid');
+    expect(result.rosterSnapshot.id).toBe(IDS.snapshotOld);
+    expect(result.rosterSnapshot.population).toBe('synthetic');
+    expect(result.rosterSnapshot.capturedAt).toBe(TIMESTAMP);
   });
 
   test('returns frozen deterministic evidence without a Google call', () => {
-    const originalFetch = globalThis.fetch;
-    let attemptedNetwork = false;
-    globalThis.fetch = (() => {
-      attemptedNetwork = true;
-      throw new Error('Audience resolution attempted a network request.');
-    }) as unknown as typeof globalThis.fetch;
+    const first = resolveAudience(input(IDS.facilityNorth));
+    const second = resolveAudience(input(IDS.facilityNorth));
 
-    try {
-      const result = resolveAudience(
-        input(audience([{ kind: 'building', facilityId: IDS.facilityNorth }])),
-      );
-      expect(attemptedNetwork).toBe(false);
-      expect(Object.isFrozen(result)).toBe(true);
-      expect(Object.isFrozen(result.rosterSnapshot)).toBe(true);
-      expect(Object.isFrozen(result.sourceGroupRefs)).toBe(true);
-      expect(Object.isFrozen(result.recipients)).toBe(true);
-      expect(Object.isFrozen(result.recipients[0]?.endpoints)).toBe(true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-});
-
-describe('fail-closed audience resolution', () => {
-  test('rejects invalid audience configuration and incomplete roster input', () => {
-    const buildingAudience = audience([
-      { kind: 'building', facilityId: IDS.facilityNorth },
-    ]);
-    const invalidAudience = {
-      ...buildingAudience,
-      targets: [{ kind: 'building', facilityId: IDS.facilitySouth }],
-    } as AudienceConfig;
-    expectResolutionError(
-      () => resolveAudience(input(invalidAudience)),
-      'INVALID_AUDIENCE_CONFIG',
-    );
-
-    const completeSnapshot = snapshot();
-    const incompleteSnapshot = {
-      ...completeSnapshot,
-      sourceGroupRefs: completeSnapshot.sourceGroupRefs.filter(
-        (source) => source.id !== IDS.groupOthers,
-      ),
-    } as RosterSnapshot;
-    expectResolutionError(
-      () =>
-        resolveAudience(
-          input(audience([{ kind: 'others', groupSourceRef: OTHERS_GROUP }]), {
-            rosterSnapshot: incompleteSnapshot,
-          }),
-        ),
-      'INVALID_ROSTER_SNAPSHOT',
-    );
+    expect(first).toEqual(second);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.recipients)).toBe(true);
+    expect(Object.isFrozen(first.sourceGroupRefs)).toBe(true);
   });
 
-  test('rejects missing exact neighborhood and duplicate version evidence', () => {
-    const neighborhoodAudience = audience([
-      {
-        kind: 'neighborhood',
-        neighborhood: { id: IDS.neighborhood, version: 1 },
-      },
-    ]);
+  test('rejects a school the snapshot does not cover', () => {
     expectResolutionError(
-      () =>
-        resolveAudience(
-          input(neighborhoodAudience, { neighborhoodVersions: [] }),
-        ),
-      'MISSING_NEIGHBORHOOD_VERSION',
-    );
-    expectResolutionError(
-      () =>
-        resolveAudience(
-          input(neighborhoodAudience, {
-            neighborhoodVersions: [NEIGHBORHOOD_V1, NEIGHBORHOOD_V1],
-          }),
-        ),
-      'DUPLICATE_NEIGHBORHOOD_VERSION',
-    );
-  });
-
-  test('rejects missing audience and neighborhood facilities', () => {
-    const westAudience = audience(
-      [{ kind: 'others', groupSourceRef: OTHERS_GROUP }],
-      { facilityId: IDS.facilityWest },
-    );
-    expectResolutionError(
-      () => resolveAudience(input(westAudience)),
+      () => resolveAudience(input(IDS.facilityWest)),
       'MISSING_AUDIENCE_FACILITY',
     );
+  });
 
-    const neighborhoodV3 = neighborhood(3, [
-      IDS.facilityNorth,
-      IDS.facilityWest,
-    ]);
-    const neighborhoodAudience = audience([
-      {
-        kind: 'neighborhood',
-        neighborhood: { id: IDS.neighborhood, version: 3 },
-      },
-    ]);
+  test('rejects a school with no building source in the snapshot', () => {
+    // A school in the snapshot but with no staff group would resolve to nobody
+    // and look like an empty audience. It is refused instead, because those are
+    // different problems.
     expectResolutionError(
       () =>
         resolveAudience(
-          input(neighborhoodAudience, {
-            neighborhoodVersions: [neighborhoodV3],
+          input(IDS.facilityNorth, {
+            rosterSnapshot: snapshot({
+              // Both lists, because the schema requires the snapshot to have
+              // read exactly the sources it expected to.
+              expectedSourceGroupRefs: [SOUTH_GROUP],
+              sourceGroupRefs: [SOUTH_GROUP],
+              facilityIds: [IDS.facilityNorth, IDS.facilitySouth],
+              recipients: [],
+            }),
           }),
         ),
-      'MISSING_TARGET_FACILITY',
-    );
-  });
-
-  test('rejects targeted facilities without a building source', () => {
-    const westAudience = audience(
-      [{ kind: 'building', facilityId: IDS.facilityWest }],
-      { facilityId: IDS.facilityWest },
-    );
-    const expandedSnapshot = snapshot({
-      facilityIds: [IDS.facilityNorth, IDS.facilitySouth, IDS.facilityWest],
-    });
-
-    expectResolutionError(
-      () =>
-        resolveAudience(
-          input(westAudience, { rosterSnapshot: expandedSnapshot }),
-        ),
       'MISSING_BUILDING_SOURCE',
-    );
-  });
-
-  test('rejects missing or conflicting others provenance', () => {
-    const missingOthers = Object.freeze({
-      id: IDS.groupMissing,
-      kind: 'synthetic',
-      purpose: 'others',
-      facilityId: null,
-    }) satisfies RosterGroupSourceRef;
-    expectResolutionError(
-      () =>
-        resolveAudience(
-          input(audience([{ kind: 'others', groupSourceRef: missingOthers }])),
-        ),
-      'MISSING_OTHERS_SOURCE',
-    );
-
-    const conflictingOthers = Object.freeze({
-      id: IDS.groupOthers,
-      kind: 'google-group',
-      purpose: 'others',
-      facilityId: null,
-    }) satisfies RosterGroupSourceRef;
-    expectResolutionError(
-      () =>
-        resolveAudience(
-          input(
-            audience([{ kind: 'others', groupSourceRef: conflictingOthers }]),
-          ),
-        ),
-      'GROUP_SOURCE_PROVENANCE_CONFLICT',
     );
   });
 });

@@ -179,8 +179,8 @@ function FacilityReadiness({
         <dd>{configuration.activeFacilityCount}</dd>
         <dt>Without a current neighborhood</dt>
         <dd>{configuration.facilitiesWithoutNeighborhoodCount}</dd>
-        <dt>Without an audience configuration</dt>
-        <dd>{configuration.facilitiesWithoutAudienceCount}</dd>
+        <dt>Without a building group</dt>
+        <dd>{configuration.facilitiesWithoutBuildingGroupCount}</dd>
       </dl>
       {configuration.status === 'action-required' ? (
         <p>

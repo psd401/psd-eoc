@@ -278,10 +278,6 @@ function activationPreviewFromRow(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -322,10 +318,6 @@ function lifecyclePreviewFromRow(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -2025,7 +2017,6 @@ async function createLifecycleConsequencePreviewFromDatabase(
     eventTypeVersion: event.eventTypeVersion,
     rosterSnapshotId: event.rosterSnapshotId,
     rosterPopulation: event.rosterPopulation,
-    audienceConfig: source.audienceConfig,
     recipientCount: source.recipientCount,
     channels,
     sendReadiness,
@@ -2042,7 +2033,6 @@ async function createLifecycleConsequencePreviewFromDatabase(
     eventTypeVersion: event.eventTypeVersion,
     rosterSnapshotId: event.rosterSnapshotId,
     rosterPopulation: event.rosterPopulation,
-    audienceConfig: source.audienceConfig,
     recipientCount: source.recipientCount,
     channels,
     sendReadiness,
@@ -2060,8 +2050,6 @@ async function createLifecycleConsequencePreviewFromDatabase(
     eventTypeVersionId: preview.eventTypeVersion.id,
     rosterSnapshotId: preview.rosterSnapshotId,
     rosterPopulation: preview.rosterPopulation,
-    audienceConfigId: preview.audienceConfig.id,
-    audienceConfigVersion: preview.audienceConfig.version,
     recipientCount: preview.recipientCount,
     channels: preview.channels,
     sendReadiness: preview.sendReadiness,
@@ -2451,8 +2439,6 @@ async function issueEventHumanConfirmationWithDatabase(
       source.eventTypeVersion.id !== event.eventTypeVersion.id ||
       source.rosterSnapshotId !== event.rosterSnapshotId ||
       source.rosterPopulation !== event.rosterPopulation ||
-      digestCapabilityValue(source.audienceConfig) !==
-        digestCapabilityValue(preview.audienceConfig) ||
       source.recipientCount !== preview.recipientCount ||
       digestCapabilityValue(channelPlan(source)) !==
         digestCapabilityValue(channelPlan(preview))

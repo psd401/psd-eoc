@@ -1,14 +1,9 @@
 import {
-  CreateAudienceConfigVersionInputSchema,
   CreateFacilityInputSchema,
   CreateGroupSourceInputSchema,
   CreateNeighborhoodVersionInputSchema,
-  NeighborhoodVersionRefSchema,
-  OthersGroupSourceRefSchema,
   UpdateFacilityInputSchema,
   UpdateGroupSourceInputSchema,
-  type AudienceTarget,
-  type CreateAudienceConfigVersionInput,
   type CreateFacilityInput,
   type CreateGroupSourceInput,
   type CreateNeighborhoodVersionInput,
@@ -53,29 +48,12 @@ export type FacilitiesAdminMutation =
       intent: 'create-neighborhood-version';
       command: CreateNeighborhoodVersionInput;
       status: 'neighborhood-version-created';
-    }>
-  | Readonly<{
-      intent: 'create-audience-version';
-      command: CreateAudienceConfigVersionInput;
-      status: 'audience-version-created';
     }>;
 
 function parseActive(value: string): boolean {
   if (value === 'true') return true;
   if (value === 'false') return false;
   throw new AdminFormError('The facility status is invalid.');
-}
-
-function parseNeighborhoodReference(value: string | null) {
-  if (value === null) return null;
-  const separator = value.lastIndexOf(':');
-  if (separator <= 0 || separator === value.length - 1) {
-    throw new AdminFormError('The neighborhood selection is invalid.');
-  }
-  return NeighborhoodVersionRefSchema.parse({
-    id: value.slice(0, separator),
-    version: Number(value.slice(separator + 1)),
-  });
 }
 
 function parseGoogleGroup(
@@ -188,59 +166,6 @@ function parseSyntheticGroupReplacement(
   };
 }
 
-function parseAudienceVersion(form: AdminForm): FacilitiesAdminMutation {
-  form.assertFields(
-    [
-      ...COMMON_FIELDS,
-      'facilityId',
-      'audienceConfigId',
-      'neighborhoodReference',
-      'googleOthersGroupSourceId',
-      'syntheticOthersGroupSourceId',
-    ],
-    ['googleOthersGroupSourceId', 'syntheticOthersGroupSourceId'],
-  );
-  const facilityId = form.required('facilityId');
-  const neighborhood = parseNeighborhoodReference(
-    form.optional('neighborhoodReference'),
-  );
-  const targets: AudienceTarget[] = [{ kind: 'building', facilityId }];
-  if (neighborhood !== null) {
-    targets.push({ kind: 'neighborhood', neighborhood });
-  }
-  form.all('googleOthersGroupSourceId').forEach((id) => {
-    targets.push({
-      kind: 'others',
-      groupSourceRef: OthersGroupSourceRefSchema.parse({
-        id,
-        kind: 'google-group',
-        purpose: 'others',
-        facilityId: null,
-      }),
-    });
-  });
-  form.all('syntheticOthersGroupSourceId').forEach((id) => {
-    targets.push({
-      kind: 'others',
-      groupSourceRef: OthersGroupSourceRefSchema.parse({
-        id,
-        kind: 'synthetic',
-        purpose: 'others',
-        facilityId: null,
-      }),
-    });
-  });
-  return {
-    intent: 'create-audience-version',
-    command: CreateAudienceConfigVersionInputSchema.parse({
-      audienceConfigId: form.optional('audienceConfigId'),
-      facilityId,
-      targets,
-    }),
-    status: 'audience-version-created',
-  };
-}
-
 /** Strictly parses one whitelisted native-form mutation into contract input. */
 export function parseFacilitiesAdminMutation(
   form: AdminForm,
@@ -301,8 +226,6 @@ export function parseFacilitiesAdminMutation(
         }),
         status: 'neighborhood-version-created',
       };
-    case 'create-audience-version':
-      return parseAudienceVersion(form);
     default:
       throw new AdminFormError(
         'The facilities administration action is invalid.',

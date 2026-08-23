@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  AudienceConfigSchema,
   DispatchBatchSchema,
   RosterSnapshotSchema,
   type DispatchBatch,
@@ -66,14 +65,7 @@ const TARGET_DIGEST = deliveryTestEndpointReferenceDigest([
 
 function audienceInput(): ResolveAudienceInput {
   return {
-    audienceConfig: AudienceConfigSchema.parse({
-      id: IDS.audience,
-      facilityId: IDS.facility,
-      version: 1,
-      targets: [{ kind: 'building', facilityId: IDS.facility }],
-      createdAt: TIMESTAMP,
-    }),
-    neighborhoodVersions: [],
+    facilityId: IDS.facility,
     rosterSnapshot: RosterSnapshotSchema.parse({
       id: IDS.roster,
       version: 1,
@@ -144,7 +136,6 @@ function emailBatch(
     },
     rosterSnapshotId: overrides.rosterSnapshotId ?? IDS.roster,
     rosterPopulation: 'staff',
-    audienceConfig: { id: IDS.audience, version: 1 },
     deliveryTest: {
       purpose: 'monthly-live-delivery-test',
       targetSet: { id: IDS.targetSet, version: 1 },

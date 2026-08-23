@@ -7,7 +7,6 @@ import {
 import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 
 import {
-  audienceConfigurations,
   facilities,
   groupSources,
   neighborhoodFacilities,
@@ -50,7 +49,7 @@ interface ReadinessProjectionEvidence {
   }>[];
   readonly activeFacilityIds: readonly string[];
   readonly neighborhoodFacilityIds: readonly string[];
-  readonly audienceFacilityIds: readonly string[];
+  readonly buildingGroupFacilityIds: readonly string[];
   readonly latestRosterAttempt: Readonly<{
     completedAt: Date;
     outcome: 'complete' | 'failed' | 'partial-rejected';
@@ -97,17 +96,17 @@ export function projectAdminReadiness(
       : 'action-required';
 
   const neighborhoodFacilityIds = new Set(evidence.neighborhoodFacilityIds);
-  const audienceFacilityIds = new Set(evidence.audienceFacilityIds);
+  const buildingGroupFacilityIds = new Set(evidence.buildingGroupFacilityIds);
   const facilitiesWithoutNeighborhoodCount = evidence.activeFacilityIds.filter(
     (facilityId) => !neighborhoodFacilityIds.has(facilityId),
   ).length;
-  const facilitiesWithoutAudienceCount = evidence.activeFacilityIds.filter(
-    (facilityId) => !audienceFacilityIds.has(facilityId),
+  const facilitiesWithoutBuildingGroupCount = evidence.activeFacilityIds.filter(
+    (facilityId) => !buildingGroupFacilityIds.has(facilityId),
   ).length;
   const facilityStatus =
     evidence.activeFacilityIds.length > 0 &&
     facilitiesWithoutNeighborhoodCount === 0 &&
-    facilitiesWithoutAudienceCount === 0
+    facilitiesWithoutBuildingGroupCount === 0
       ? 'ready'
       : 'action-required';
 
@@ -146,7 +145,7 @@ export function projectAdminReadiness(
       status: facilityStatus,
       activeFacilityCount: evidence.activeFacilityIds.length,
       facilitiesWithoutNeighborhoodCount,
-      facilitiesWithoutAudienceCount,
+      facilitiesWithoutBuildingGroupCount,
     },
     roster: {
       status: rosterStatus,
@@ -256,15 +255,25 @@ async function readDatabaseEvidence(database: AdminQueryDatabase) {
             ),
           )
           .limit(501);
-  const audienceRows =
+  // The same three conditions `resolveEventRecipients` applies when it reads a
+  // school's staff, so a facility this reports as covered is one an activation
+  // can actually reach.
+  const buildingGroupRows =
     activeFacilityIds.length === 0
       ? []
       : await database
-          .selectDistinct({ facilityId: audienceConfigurations.facilityId })
-          .from(audienceConfigurations)
-          .where(inArray(audienceConfigurations.facilityId, activeFacilityIds))
+          .selectDistinct({ facilityId: groupSources.facilityId })
+          .from(groupSources)
+          .where(
+            and(
+              eq(groupSources.purpose, 'building'),
+              eq(groupSources.kind, 'google-group'),
+              eq(groupSources.active, true),
+              inArray(groupSources.facilityId, activeFacilityIds),
+            ),
+          )
           .limit(501);
-  if (neighborhoodRows.length > 500 || audienceRows.length > 500) {
+  if (neighborhoodRows.length > 500 || buildingGroupRows.length > 500) {
     throw new AdminCapabilityError(
       'INTERNAL_ERROR',
       'Facility coverage readiness evidence is outside the supported bounds.',
@@ -304,7 +313,9 @@ async function readDatabaseEvidence(database: AdminQueryDatabase) {
     neighborhoodFacilityIds: neighborhoodRows.map(
       ({ facilityId }) => facilityId,
     ),
-    audienceFacilityIds: audienceRows.map(({ facilityId }) => facilityId),
+    buildingGroupFacilityIds: buildingGroupRows.flatMap(({ facilityId }) =>
+      facilityId === null ? [] : [facilityId],
+    ),
     latestRosterAttempt: latestRosterAttempt ?? null,
     latestCompleteRosterSnapshot: latestCompleteRosterSnapshot ?? null,
   });

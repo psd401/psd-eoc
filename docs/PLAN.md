@@ -13,7 +13,7 @@ Build a district-owned notification + documentation platform ("call 911 first" p
 
 **Release 1 (go-live before Easy Alert shutdown):**
 - Any staff member (Google Groups-gated) starts an incident or drill: site → type → confirm (≤3 taps after unlock).
-- Delivery: native push + email (+ SMS when carrier registration clears, D-013) to configurable audience: building staff + neighborhood staff + "others" group (D-008).
+- Delivery: native push + email (+ SMS when carrier registration clears, D-013) to the staff of the school an event is started at, and of its neighborhood when an event reaches beyond its own building (D-008; the configurable audience layer was retired in #292).
 - Live event: timeline with text, photos, location pins; join-or-start-new for concurrent events (D-025); anyone can all-clear/close (D-009).
 - Drill records captured automatically by running the drill in-app (D-018).
 - Agent surfaces: REST + MCP over the same capability layer — read/report/draft only for live-event actions (D-020).
@@ -167,7 +167,7 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 ### Phase 4 — Agent-native & admin (parallel after 9)
 24. REST agent API: scoped API keys, per-agent identity, audit; human-only enforcement tests.
 25. MCP server: read/report/draft capabilities + prepare-activation (human confirms in app).
-26. Admin: facilities/neighborhoods, group mappings, audience config per site, test mode + synthetic roster.
+26. Admin: facilities/neighborhoods, group mappings per site, test mode + synthetic roster.
 27. Drill records view + event export (CSV/PDF summary).
 28. Audit trail + security-event log (distinct from operational journal).
 
