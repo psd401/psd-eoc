@@ -388,10 +388,9 @@ export async function resolveEmailEndpoints(
   ) {
     throw new EmailEndpointResolutionError('EMAIL_ROSTER_MISMATCH');
   }
-  if (
-    audience.audienceConfig.id !== batch.audienceConfig.id ||
-    audience.audienceConfig.version !== batch.audienceConfig.version
-  ) {
+  // The audience is the school now, not a versioned configuration object,
+  // so the provenance check compares the school the batch was built for.
+  if (audience.facilityId !== batch.facilityId) {
     throw new EmailEndpointResolutionError('EMAIL_AUDIENCE_MISMATCH');
   }
 
@@ -2082,10 +2081,6 @@ function batchFromRow(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     deliveryTest: message.deliveryTest,
     requestId: row.requestId,
     authorization: row.authorization,
@@ -2240,8 +2235,6 @@ async function ensureStableDispatchBatches(
       eventTypeVersionId: message.eventTypeVersion.id,
       rosterSnapshotId: message.rosterSnapshotId,
       rosterPopulation: message.rosterPopulation,
-      audienceConfigId: message.audienceConfig.id,
-      audienceConfigVersion: message.audienceConfig.version,
       requestId: message.requestId,
       authorization: message.authorization,
       channel: planned.channel,

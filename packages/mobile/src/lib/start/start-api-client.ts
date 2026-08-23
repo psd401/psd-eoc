@@ -461,7 +461,6 @@ function activationMatchesPreview(
     sameVersion(intent.eventTypeVersion, preview.eventTypeVersion) &&
     intent.rosterSnapshotId === preview.rosterSnapshotId &&
     intent.rosterPopulation === preview.rosterPopulation &&
-    structurallyEqual(intent.audienceConfig, preview.audienceConfig) &&
     structurallyEqual(intent.channels, preview.channels)
   );
 }

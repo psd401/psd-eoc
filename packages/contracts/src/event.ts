@@ -9,7 +9,7 @@ import {
   isActorSourceCompatible,
   type Actor,
 } from './capability';
-import { AudienceConfigRefSchema, FacilityIdSchema } from './facility';
+import { FacilityIdSchema } from './facility';
 import {
   ChannelConsequencePreviewSchema,
   EventKindSchema,
@@ -602,7 +602,7 @@ export type JoinOrStartDecision = z.infer<typeof JoinOrStartDecisionSchema>;
 
 /**
  * Owns the non-mutating selection used to create a server-bound activation
- * preview. The server resolves the latest roster and audience versions; the
+ * preview. The server resolves the latest roster version; the
  * client cannot choose those persistence IDs directly.
  */
 export const CreateActivationPreviewInputSchema = z
@@ -633,7 +633,7 @@ export type CreateActivationPreviewInput = z.infer<
 
 /**
  * Owns a server-issued consequence preview that pins the latest roster,
- * audience, event-type version, recipient count, and active-event set. The
+ * event-type version, recipient count, and active-event set. The
  * digest is what a human confirmation signs; stale previews fail closed.
  */
 const MultiChannelActivationPreviewPlanSchema = z
@@ -665,7 +665,6 @@ export const ActivationPreviewSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    audienceConfig: AudienceConfigRefSchema,
     recipientCount: z.number().int().nonnegative().max(1_200),
     channels: z.union([
       MultiChannelActivationPreviewPlanSchema,
@@ -833,8 +832,8 @@ export type ActivationPreview = z.infer<typeof ActivationPreviewSchema>;
 
 /**
  * Owns a short-lived all-clear/reactivation consequence preview. It pins the
- * exact immutable event, roster, audience, rendered purpose-specific copy,
- * recipients, integrations, and digest before a human confirms.
+ * exact immutable event, roster, rendered purpose-specific copy, recipients,
+ * integrations, and digest before a human confirms.
  */
 export const LifecycleConsequencePreviewSchema = z
   .object({
@@ -846,7 +845,6 @@ export const LifecycleConsequencePreviewSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    audienceConfig: AudienceConfigRefSchema,
     recipientCount: z.number().int().nonnegative().max(1_200),
     channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
     sendReadiness: z.enum(['ready', 'blocked']),

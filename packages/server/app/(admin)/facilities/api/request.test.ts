@@ -7,7 +7,6 @@ const uuid = (suffix: number): string =>
   `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
 
 const IDS = Object.freeze({
-  audience: uuid(2601),
   buildingSource: uuid(2607),
   facilityA: uuid(2602),
   facilityB: uuid(2603),
@@ -210,62 +209,6 @@ describe('facilities administration form parsing', () => {
     });
   });
 
-  test('always adds the building target and parses optional latest neighborhood and others refs', () => {
-    const parsed = parseFacilitiesAdminMutation(
-      adminForm('create-audience-version', [
-        ['facilityId', IDS.facilityA],
-        ['audienceConfigId', IDS.audience],
-        ['neighborhoodReference', `${IDS.neighborhood}:3`],
-        ['googleOthersGroupSourceId', IDS.googleOthers],
-        ['syntheticOthersGroupSourceId', IDS.syntheticOthers],
-      ]),
-    );
-    expect(parsed).toEqual({
-      intent: 'create-audience-version',
-      command: {
-        audienceConfigId: IDS.audience,
-        facilityId: IDS.facilityA,
-        targets: [
-          { kind: 'building', facilityId: IDS.facilityA },
-          {
-            kind: 'neighborhood',
-            neighborhood: { id: IDS.neighborhood, version: 3 },
-          },
-          {
-            kind: 'others',
-            groupSourceRef: {
-              id: IDS.googleOthers,
-              kind: 'google-group',
-              purpose: 'others',
-              facilityId: null,
-            },
-          },
-          {
-            kind: 'others',
-            groupSourceRef: {
-              id: IDS.syntheticOthers,
-              kind: 'synthetic',
-              purpose: 'others',
-              facilityId: null,
-            },
-          },
-        ],
-      },
-      status: 'audience-version-created',
-    });
-
-    const buildingOnly = parseFacilitiesAdminMutation(
-      adminForm('create-audience-version', [['facilityId', IDS.facilityB]]),
-    );
-    expect(buildingOnly).toMatchObject({
-      command: {
-        audienceConfigId: null,
-        facilityId: IDS.facilityB,
-        targets: [{ kind: 'building', facilityId: IDS.facilityB }],
-      },
-    });
-  });
-
   test('rejects unlisted fields and exposes no in-place building or others update intent', () => {
     expect(() =>
       parseFacilitiesAdminMutation(
@@ -275,14 +218,6 @@ describe('facilities administration form parsing', () => {
           ['googleGroupId', 'google-site-a-staff'],
           ['email', 'site-a@example.invalid'],
           ['fixtureKey', 'smuggled-field'],
-        ]),
-      ),
-    ).toThrow(AdminFormError);
-    expect(() =>
-      parseFacilitiesAdminMutation(
-        adminForm('create-audience-version', [
-          ['facilityId', IDS.facilityA],
-          ['targets', 'client-owned-targets'],
         ]),
       ),
     ).toThrow(AdminFormError);

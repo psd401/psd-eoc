@@ -100,10 +100,7 @@ import {
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
 } from '../../(admin)/facilities/admin-core';
-import {
-  loadAudienceConfiguration,
-  loadRosterSnapshot,
-} from '../start/_lib/capabilities';
+import { loadRosterSnapshot } from '../start/_lib/capabilities';
 
 export const DELIVERY_TEST_PRODUCT_OWNER_USER_ID_ENV =
   'PSD_EOC_PRODUCT_OWNER_USER_ID' as const;
@@ -543,8 +540,7 @@ async function currentActiveAudienceEndpointReferences(
     );
   }
   const roster = currentRoster;
-  const audience = await loadAudienceConfiguration(database, input.facilityId);
-  if (roster === null || audience === null) {
+  if (roster === null) {
     throw unavailable(
       'The current staff audience for delivery testing is unavailable.',
     );
@@ -561,8 +557,7 @@ async function currentActiveAudienceEndpointReferences(
     })),
   };
   const resolved = resolveAudience({
-    audienceConfig: audience.audienceConfig,
-    neighborhoodVersions: audience.neighborhoodVersions,
+    facilityId: input.facilityId,
     rosterSnapshot: allEndpointsActive,
   });
   const resolvedReferences = resolved.recipients.flatMap((recipient) =>

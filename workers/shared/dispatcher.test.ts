@@ -150,7 +150,6 @@ function outboxMessage(endpointCount = 1_200) {
     },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: IDS.audience, version: 1 },
     requestId: IDS.request,
     authorization: AUTHORIZATION,
     channels: channelPlans(endpointCount),
@@ -176,7 +175,6 @@ function dispatchBatches(endpointCount = 1_200): readonly DispatchBatch[] {
         },
         rosterSnapshotId: IDS.roster,
         rosterPopulation: 'synthetic',
-        audienceConfig: { id: IDS.audience, version: 1 },
         requestId: IDS.request,
         authorization: AUTHORIZATION,
         channel: plan.channel,
@@ -761,9 +759,10 @@ describe('queue failure and terminal truth', () => {
 
 describe('production SQS protocol', () => {
   test('matches the regression-pinned SigV4 golden vector', () => {
-    // Generated independently with @smithy/signature-v4 at authoring time and
-    // pinned here so this issue does not depend on an undeclared transitive
-    // package at test runtime.
+    // Generated independently with @smithy/signature-v4 and pinned here so
+    // this issue does not depend on an undeclared transitive package at test
+    // runtime. Re-derived the same way when the signed body changed: retiring
+    // the audience layer removed `audienceConfig` from the outbox message.
     const signed = signSqsSendMessageBatchRequest(
       {
         queueUrl: 'https://sqs.us-west-2.amazonaws.com/123456789012/test-queue',
@@ -783,7 +782,7 @@ describe('production SQS protocol', () => {
     expect(signed.endpoint).toBe('https://sqs.us-west-2.amazonaws.com/');
     expect(signed.headers['x-amz-date']).toBe('20260810T123456Z');
     expect(signed.headers.authorization).toBe(
-      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLEKEY0000/20260810/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=cd2181f5a9c9ebcb8d434fdf0cd719f3342c4bbdfe490efc76547bc2e6671806',
+      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLEKEY0000/20260810/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=11e263ac713f63972924125ef53b6daf56ee60679c7cf3038d1e0a87b0dfaac0',
     );
     const body = JSON.parse(signed.body) as {
       QueueUrl: string;

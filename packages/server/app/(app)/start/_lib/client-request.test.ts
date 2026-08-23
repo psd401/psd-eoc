@@ -239,34 +239,6 @@ describe('activation response binding', () => {
       ),
     );
   });
-
-  test('rejects a schema-valid notification intent for another audience version', async () => {
-    const result = activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY);
-    if (result.notificationIntent === null) {
-      throw new Error(
-        'Synthetic activation result has no notification intent.',
-      );
-    }
-    const mismatched = StartEventResultSchema.parse({
-      ...result,
-      notificationIntent: {
-        ...result.notificationIntent,
-        audienceConfig: {
-          ...result.notificationIntent.audienceConfig,
-          version: result.notificationIntent.audienceConfig.version + 1,
-        },
-      },
-    });
-
-    await expectUnresolved(() =>
-      requireMatchingActivationResult(
-        mismatched,
-        preview,
-        selection,
-        ACTIVATION_IDEMPOTENCY_KEY,
-      ),
-    );
-  });
 });
 
 async function withStalledBrowserRequest(

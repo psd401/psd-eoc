@@ -1,11 +1,7 @@
 import {
-  AudienceConfigSchema,
-  NeighborhoodSchema,
+  FacilityIdSchema,
   RosterSnapshotSchema,
-  type AudienceConfig,
   type Endpoint,
-  type Neighborhood,
-  type NeighborhoodVersionRef,
   type RecipientId,
   type RosterGroupSourceRef,
   type RosterSnapshot,
@@ -60,8 +56,22 @@ export class AudienceResolutionError extends Error {
 
 /** Exact immutable inputs selected before the activation critical path. */
 export interface ResolveAudienceInput {
-  readonly audienceConfig: AudienceConfig;
-  readonly neighborhoodVersions: readonly Neighborhood[];
+  /**
+   * The school the event was started at. Its own staff are who it reaches.
+   *
+   * This replaced a versioned `AudienceConfig` naming a list of targets. On the
+   * live deployment there were twenty of those, one per school, and every one
+   * of them held a single `building` target pointing at its own school — twenty
+   * rows restating the sentence above. An empty table meant no event could be
+   * activated at all, which is a high price for a configuration object that
+   * carried no information.
+   *
+   * Reaching beyond one school goes with it for now. Neither `neighborhood` nor
+   * `others` targeting was ever configured, and the domain-based resolver that
+   * replaces this pipeline supports neighborhood reach directly, from
+   * `neighborhood_facilities` rather than from a pinned target list.
+   */
+  readonly facilityId: string;
   readonly rosterSnapshot: RosterSnapshot;
 }
 
@@ -71,11 +81,6 @@ export type ResolvedRosterSnapshotRef = Readonly<
     RosterSnapshot,
     'capturedAt' | 'id' | 'population' | 'sourceConfiguration' | 'version'
   >
->;
-
-/** Exact immutable audience-configuration evidence used during resolution. */
-export type ResolvedAudienceConfigRef = Readonly<
-  Pick<AudienceConfig, 'facilityId' | 'id' | 'version'>
 >;
 
 /** One selected recipient and only the active endpoints eligible to receive. */
@@ -91,8 +96,7 @@ export interface ResolvedAudienceRecipient {
  */
 export interface ResolvedAudience {
   readonly rosterSnapshot: ResolvedRosterSnapshotRef;
-  readonly audienceConfig: ResolvedAudienceConfigRef;
-  readonly neighborhoodVersions: readonly NeighborhoodVersionRef[];
+  readonly facilityId: string;
   readonly sourceGroupRefs: readonly RosterGroupSourceRef[];
   readonly recipients: readonly ResolvedAudienceRecipient[];
 }
@@ -101,44 +105,12 @@ function fail(code: AudienceResolutionErrorCode): never {
   throw new AudienceResolutionError(code);
 }
 
-function parseAudienceConfig(value: AudienceConfig): AudienceConfig {
-  const result = AudienceConfigSchema.safeParse(value);
-  if (!result.success) {
-    return fail('INVALID_AUDIENCE_CONFIG');
-  }
-  return result.data;
-}
-
 function parseRosterSnapshot(value: RosterSnapshot): RosterSnapshot {
   const result = RosterSnapshotSchema.safeParse(value);
   if (!result.success) {
     return fail('INVALID_ROSTER_SNAPSHOT');
   }
   return result.data;
-}
-
-function parseNeighborhoodVersions(
-  values: readonly Neighborhood[],
-): readonly Neighborhood[] {
-  if (!Array.isArray(values)) {
-    return fail('INVALID_NEIGHBORHOOD_VERSION');
-  }
-
-  return Object.freeze(
-    values.map((value) => {
-      const result = NeighborhoodSchema.safeParse(value);
-      if (!result.success) {
-        return fail('INVALID_NEIGHBORHOOD_VERSION');
-      }
-      return result.data;
-    }),
-  );
-}
-
-function neighborhoodKey(
-  neighborhood: Pick<Neighborhood, 'id' | 'version'>,
-): string {
-  return `${neighborhood.id}:${neighborhood.version}`;
 }
 
 function groupSourceKey(source: RosterGroupSourceRef): string {
@@ -181,13 +153,6 @@ function compareGroupSources(
   return groupSourceKey(left).localeCompare(groupSourceKey(right));
 }
 
-function compareNeighborhoodRefs(
-  left: NeighborhoodVersionRef,
-  right: NeighborhoodVersionRef,
-): number {
-  return left.id.localeCompare(right.id) || left.version - right.version;
-}
-
 function compareEndpoints(left: Endpoint, right: Endpoint): number {
   return endpointKey(left).localeCompare(endpointKey(right));
 }
@@ -208,24 +173,12 @@ function addSelectedSource(
  * There is deliberately no provider, database, or Google dependency here.
  */
 export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
-  const audienceConfig = parseAudienceConfig(input.audienceConfig);
+  const facilityId = FacilityIdSchema.parse(input.facilityId);
   const rosterSnapshot = parseRosterSnapshot(input.rosterSnapshot);
-  const neighborhoodVersions = parseNeighborhoodVersions(
-    input.neighborhoodVersions,
-  );
 
   const snapshotFacilityIds = new Set(rosterSnapshot.facilityIds);
-  if (!snapshotFacilityIds.has(audienceConfig.facilityId)) {
+  if (!snapshotFacilityIds.has(facilityId)) {
     fail('MISSING_AUDIENCE_FACILITY');
-  }
-
-  const neighborhoodByVersion = new Map<string, Neighborhood>();
-  for (const neighborhood of neighborhoodVersions) {
-    const key = neighborhoodKey(neighborhood);
-    if (neighborhoodByVersion.has(key)) {
-      fail('DUPLICATE_NEIGHBORHOOD_VERSION');
-    }
-    neighborhoodByVersion.set(key, neighborhood);
   }
 
   const snapshotSourceById = new Map<string, RosterGroupSourceRef>();
@@ -246,53 +199,20 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
   }
 
   const selectedSources = new Map<string, RosterGroupSourceRef>();
-  const selectedNeighborhoods = new Map<string, NeighborhoodVersionRef>();
 
-  const selectBuildingFacility = (facilityId: string): void => {
-    if (!snapshotFacilityIds.has(facilityId)) {
+  const selectBuildingFacility = (target: string): void => {
+    if (!snapshotFacilityIds.has(target)) {
       fail('MISSING_TARGET_FACILITY');
     }
-    const sources = buildingSourcesByFacility.get(facilityId);
+    const sources = buildingSourcesByFacility.get(target);
     if (sources === undefined || sources.length === 0) {
       fail('MISSING_BUILDING_SOURCE');
     }
     sources.forEach((source) => addSelectedSource(selectedSources, source));
   };
 
-  for (const target of audienceConfig.targets) {
-    switch (target.kind) {
-      case 'building':
-        selectBuildingFacility(target.facilityId);
-        break;
-      case 'neighborhood': {
-        const key = neighborhoodKey(target.neighborhood);
-        const neighborhood = neighborhoodByVersion.get(key);
-        if (neighborhood === undefined) {
-          fail('MISSING_NEIGHBORHOOD_VERSION');
-        }
-        selectedNeighborhoods.set(
-          key,
-          Object.freeze({
-            id: neighborhood.id,
-            version: neighborhood.version,
-          }),
-        );
-        neighborhood.facilityIds.forEach(selectBuildingFacility);
-        break;
-      }
-      case 'others': {
-        const source = snapshotSourceById.get(target.groupSourceRef.id);
-        if (source === undefined) {
-          fail('MISSING_OTHERS_SOURCE');
-        }
-        if (!groupSourcesEqual(source, target.groupSourceRef)) {
-          fail('GROUP_SOURCE_PROVENANCE_CONFLICT');
-        }
-        addSelectedSource(selectedSources, source);
-        break;
-      }
-    }
-  }
+  // The whole selection rule: an event at a school reaches that school's staff.
+  selectBuildingFacility(facilityId);
 
   const endpointOwnerById = new Map<string, RecipientId>();
   const endpointOwnerByDestination = new Map<string, RecipientId>();
@@ -359,14 +279,7 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
       }),
       capturedAt: rosterSnapshot.capturedAt,
     }),
-    audienceConfig: Object.freeze({
-      id: audienceConfig.id,
-      version: audienceConfig.version,
-      facilityId: audienceConfig.facilityId,
-    }),
-    neighborhoodVersions: Object.freeze(
-      [...selectedNeighborhoods.values()].sort(compareNeighborhoodRefs),
-    ),
+    facilityId,
     sourceGroupRefs: Object.freeze(
       [...selectedSources.values()].sort(compareGroupSources),
     ),

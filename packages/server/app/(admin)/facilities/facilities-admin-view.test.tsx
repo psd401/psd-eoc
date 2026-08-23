@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  AudienceConfigSchema,
   FacilityPageSchema,
   GroupSourcePageSchema,
   NeighborhoodPageSchema,
@@ -18,7 +17,6 @@ const uuid = (suffix: number): string =>
 
 const AT = '2026-08-10T18:00:00.000Z';
 const IDS = Object.freeze({
-  audience: uuid(2650),
   buildingGoogle: uuid(2651),
   buildingSuperseded: uuid(2658),
   buildingSynthetic: uuid(2652),
@@ -137,30 +135,6 @@ const AUTHORIZED_VIEW_BASE = Object.freeze({
     ],
     pageInfo: { hasMore: false, nextCursor: null },
   }),
-  audienceConfigs: [
-    AudienceConfigSchema.parse({
-      id: IDS.audience,
-      facilityId: IDS.facilityA,
-      version: 2,
-      targets: [
-        { kind: 'building', facilityId: IDS.facilityA },
-        {
-          kind: 'neighborhood',
-          neighborhood: { id: IDS.neighborhood, version: 2 },
-        },
-        {
-          kind: 'others',
-          groupSourceRef: {
-            id: IDS.othersGoogle,
-            kind: 'google-group',
-            purpose: 'others',
-            facilityId: null,
-          },
-        },
-      ],
-      createdAt: AT,
-    }),
-  ],
 });
 
 const AUTHORIZED_VIEW = Object.freeze({
@@ -196,7 +170,7 @@ describe('facilities administration view', () => {
     );
     expect(markup).toContain('<nav aria-label="Administration"');
     expect(markup).toContain(
-      '<h1 id="facilities-admin-heading">Facilities, neighborhoods, and audiences</h1>',
+      '<h1 id="facilities-admin-heading">Facilities, neighborhoods, and group sources</h1>',
     );
     expect(markup).toContain('<fieldset>');
     expect(markup).toContain('<legend>Add a facility</legend>');
@@ -213,7 +187,6 @@ describe('facilities administration view', () => {
       'replace-google-building-group',
       'replace-google-others-group',
       'create-neighborhood-version',
-      'create-audience-version',
     ]) {
       expect(markup).toContain(`value="${intent}"`);
     }
@@ -230,7 +203,7 @@ describe('facilities administration view', () => {
     expect(markup).toContain('District test response staff');
   });
 
-  test('makes append-only and server-owned audience behavior explicit', () => {
+  test('makes append-only and server-owned source behavior explicit', () => {
     const markup = renderAuthorized();
 
     expect(markup).toContain(
@@ -245,27 +218,6 @@ describe('facilities administration view', () => {
     expect(markup).toContain(`name="sourceId" value="${IDS.buildingGoogle}"`);
     expect(markup).toContain(`name="sourceId" value="${IDS.othersGoogle}"`);
     expect(markup).not.toContain(`value="${IDS.buildingSuperseded}"`);
-    expect(markup).toContain('Building target (always included):');
-    expect(markup).toContain(
-      'The server always includes this facility&#x27;s building target',
-    );
-    expect(markup).not.toContain('name="buildingTarget"');
-    expect(markup).toContain('Latest neighborhood version (optional)');
-    expect(markup).toContain(`value="${IDS.neighborhood}:2" selected=""`);
-    expect(markup).toContain(
-      `Neighborhood ${IDS.neighborhood} — version 2 (current pinned version)`,
-    );
-    expect(markup).toContain(`value="${IDS.neighborhood}:3"`);
-    expect(markup).toContain('Harbor campus corrected — version 3');
-    expect(markup).not.toContain('Harbor campus corrected — version 2');
-    expect(markup).toContain('name="googleOthersGroupSourceId"');
-    expect(markup).toContain('name="syntheticOthersGroupSourceId"');
-    expect(markup).toContain(
-      'The server rejects any selection that does not match the current staff roster population.',
-    );
-    expect(markup).not.toContain('synthetic sources extend TEST audiences');
-    expect(markup).toContain('Current immutable audience version:');
-    expect(markup).toContain(`Neighborhood ${IDS.neighborhood}, version 2`);
   });
 
   test('keeps complete form selections while all four displays paginate independently', () => {
@@ -356,27 +308,6 @@ describe('facilities administration view', () => {
     );
     expect(markup).not.toContain('<summary>Edit Cove Elementary</summary>');
 
-    expect(markup).toContain(`value="${IDS.neighborhood}:2" selected=""`);
-    expect(markup).toContain(
-      `Neighborhood ${IDS.neighborhood} — version 2 (current pinned version)`,
-    );
-    const selectedInactiveInput = markup.match(
-      new RegExp(
-        `<input[^>]*id="audience-${IDS.facilityA}-others-${IDS.othersGoogle}"[^>]*>`,
-      ),
-    )?.[0];
-    expect(selectedInactiveInput).toContain('checked=""');
-    expect(selectedInactiveInput).not.toContain('disabled=""');
-    expect(markup).toContain(
-      'District response staff (google-group) — inactive, currently selected',
-    );
-    const unselectedInactiveInput = markup.match(
-      new RegExp(
-        `<input[^>]*id="audience-${IDS.facilityA}-others-${IDS.othersInactiveUnselected}"[^>]*>`,
-      ),
-    )?.[0];
-    expect(unselectedInactiveInput).toContain('disabled=""');
-
     expect(markup).toContain(
       'href="/facilities?facilityCursor=facility-next&amp;neighborhoodCursor=neighborhood-current&amp;buildingGroupCursor=building-current&amp;othersGroupCursor=others-current"',
     );
@@ -397,9 +328,7 @@ describe('facilities administration view', () => {
     );
 
     expect(markup).toContain('Administrator access required');
-    expect(markup).toContain(
-      'No facility or audience configuration was displayed.',
-    );
+    expect(markup).toContain('No facility configuration was displayed.');
     expect(markup).not.toContain('Harbor Elementary');
     expect(markup).not.toContain('harbor-staff@example.invalid');
     expect(markup).not.toContain(IDS.facilityA);

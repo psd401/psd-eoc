@@ -103,7 +103,6 @@ function preview(
     eventTypeVersion: { id: IDS.eventType, templateMode },
     rosterSnapshotId: IDS.roster,
     rosterPopulation,
-    audienceConfig: { id: IDS.audience, version: 1 },
     recipientCount: 2,
     channels: (['push', 'email'] as const).map((channel) => ({
       channel,

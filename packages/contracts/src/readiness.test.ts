@@ -58,7 +58,7 @@ describe('administrative readiness contracts', () => {
         status: 'ready',
         activeFacilityCount: 2,
         facilitiesWithoutNeighborhoodCount: 0,
-        facilitiesWithoutAudienceCount: 0,
+        facilitiesWithoutBuildingGroupCount: 0,
       },
       roster: {
         status: 'ready',
@@ -118,7 +118,7 @@ describe('administrative readiness contracts', () => {
         status: 'ready',
         activeFacilityCount: 1,
         facilitiesWithoutNeighborhoodCount: 0,
-        facilitiesWithoutAudienceCount: 0,
+        facilitiesWithoutBuildingGroupCount: 0,
       },
       roster: {
         status: 'ready',
@@ -168,7 +168,7 @@ describe('administrative readiness contracts', () => {
         status: 'ready',
         activeFacilityCount: 1,
         facilitiesWithoutNeighborhoodCount: 0,
-        facilitiesWithoutAudienceCount: 0,
+        facilitiesWithoutBuildingGroupCount: 0,
       },
       roster: {
         status: 'ready',

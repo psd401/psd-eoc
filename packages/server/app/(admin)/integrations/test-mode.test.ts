@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  AudienceConfigSchema,
   RosterSnapshotSchema,
   type Endpoint,
   type RosterGroupSourceRef,
@@ -19,7 +18,6 @@ import {
 
 const AT = '2026-08-10T12:00:00.000Z';
 const IDS = Object.freeze({
-  audience: '00000000-0000-4000-8000-000000002601',
   configuration: '00000000-0000-4000-8000-000000002602',
   endpointEmail: '00000000-0000-4000-8000-000000002603',
   endpointPush: '00000000-0000-4000-8000-000000002604',
@@ -43,14 +41,6 @@ const STAFF_GROUP = Object.freeze({
   purpose: 'building',
   facilityId: IDS.facility,
 }) satisfies RosterGroupSourceRef;
-
-const AUDIENCE = AudienceConfigSchema.parse({
-  id: IDS.audience,
-  facilityId: IDS.facility,
-  version: 1,
-  targets: [{ kind: 'building', facilityId: IDS.facility }],
-  createdAt: AT,
-});
 
 const SYNTHETIC_SNAPSHOT = RosterSnapshotSchema.parse({
   id: IDS.snapshot,
@@ -131,8 +121,7 @@ const STAFF_SNAPSHOT = RosterSnapshotSchema.parse({
 
 function input(rosterSnapshot: RosterSnapshot): ResolveAudienceInput {
   return {
-    audienceConfig: AUDIENCE,
-    neighborhoodVersions: [],
+    facilityId: IDS.facility,
     rosterSnapshot,
   };
 }

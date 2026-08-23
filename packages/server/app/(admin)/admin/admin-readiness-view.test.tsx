@@ -33,7 +33,7 @@ function readiness(overrides: Partial<AdminReadiness> = {}): AdminReadiness {
       status: 'ready',
       activeFacilityCount: 2,
       facilitiesWithoutNeighborhoodCount: 0,
-      facilitiesWithoutAudienceCount: 0,
+      facilitiesWithoutBuildingGroupCount: 0,
     },
     roster: {
       status: 'ready',

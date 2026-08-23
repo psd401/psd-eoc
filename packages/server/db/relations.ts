@@ -6,7 +6,6 @@ import * as schema from './schema';
 export const facilitiesRelations = relations(schema.facilities, ({ many }) => ({
   neighborhoodMemberships: many(schema.neighborhoodFacilities),
   groupSources: many(schema.groupSources),
-  audienceConfigurations: many(schema.audienceConfigurations),
   userFacilityScopes: many(schema.userFacilityScopes),
   rosterSourceConfigurationFacilities: many(
     schema.rosterSourceConfigurationFacilities,
@@ -31,7 +30,6 @@ export const neighborhoodVersionsRelations = relations(
   schema.neighborhoodVersions,
   ({ many }) => ({
     facilities: many(schema.neighborhoodFacilities),
-    audienceTargets: many(schema.audienceTargets),
   }),
 );
 
@@ -62,7 +60,6 @@ export const groupSourcesRelations = relations(
       fields: [schema.groupSources.facilityId],
       references: [schema.facilities.id],
     }),
-    audienceTargets: many(schema.audienceTargets),
     rosterSourceConfigurationGroups: many(
       schema.rosterSourceConfigurationGroups,
     ),
@@ -70,56 +67,6 @@ export const groupSourcesRelations = relations(
     rosterRecipientGroupSources: many(schema.rosterRecipientGroupSources),
     rosterSyncResultSources: many(schema.rosterSyncResultSources),
     rosterSyncGroupFailures: many(schema.rosterSyncGroupFailures),
-  }),
-);
-
-export const audienceConfigurationsRelations = relations(
-  schema.audienceConfigurations,
-  ({ one, many }) => ({
-    facility: one(schema.facilities, {
-      fields: [schema.audienceConfigurations.facilityId],
-      references: [schema.facilities.id],
-    }),
-    targets: many(schema.audienceTargets),
-    activationPreviews: many(schema.activationPreviews),
-    lifecycleConsequencePreviews: many(schema.lifecycleConsequencePreviews),
-    notificationIntents: many(schema.notificationIntents),
-    outboxRecords: many(schema.outbox),
-    dispatchBatches: many(schema.dispatchBatches),
-  }),
-);
-
-export const audienceTargetsRelations = relations(
-  schema.audienceTargets,
-  ({ one }) => ({
-    configuration: one(schema.audienceConfigurations, {
-      fields: [
-        schema.audienceTargets.audienceConfigId,
-        schema.audienceTargets.audienceConfigVersion,
-      ],
-      references: [
-        schema.audienceConfigurations.id,
-        schema.audienceConfigurations.version,
-      ],
-    }),
-    targetFacility: one(schema.facilities, {
-      fields: [schema.audienceTargets.targetFacilityId],
-      references: [schema.facilities.id],
-    }),
-    neighborhoodVersion: one(schema.neighborhoodVersions, {
-      fields: [
-        schema.audienceTargets.neighborhoodId,
-        schema.audienceTargets.neighborhoodVersion,
-      ],
-      references: [
-        schema.neighborhoodVersions.id,
-        schema.neighborhoodVersions.version,
-      ],
-    }),
-    groupSource: one(schema.groupSources, {
-      fields: [schema.audienceTargets.groupSourceId],
-      references: [schema.groupSources.id],
-    }),
   }),
 );
 
@@ -784,16 +731,6 @@ export const activationPreviewsRelations = relations(
       fields: [schema.activationPreviews.rosterSnapshotId],
       references: [schema.rosterSnapshots.id],
     }),
-    audienceConfiguration: one(schema.audienceConfigurations, {
-      fields: [
-        schema.activationPreviews.audienceConfigId,
-        schema.activationPreviews.audienceConfigVersion,
-      ],
-      references: [
-        schema.audienceConfigurations.id,
-        schema.audienceConfigurations.version,
-      ],
-    }),
     deliveryTestTargetSetVersion: one(schema.deliveryTestTargetSetVersions, {
       fields: [schema.activationPreviews.deliveryTestTargetSetId],
       references: [schema.deliveryTestTargetSetVersions.id],
@@ -868,16 +805,6 @@ export const lifecycleConsequencePreviewsRelations = relations(
     rosterSnapshot: one(schema.rosterSnapshots, {
       fields: [schema.lifecycleConsequencePreviews.rosterSnapshotId],
       references: [schema.rosterSnapshots.id],
-    }),
-    audienceConfiguration: one(schema.audienceConfigurations, {
-      fields: [
-        schema.lifecycleConsequencePreviews.audienceConfigId,
-        schema.lifecycleConsequencePreviews.audienceConfigVersion,
-      ],
-      references: [
-        schema.audienceConfigurations.id,
-        schema.audienceConfigurations.version,
-      ],
     }),
   }),
 );
@@ -990,16 +917,6 @@ export const notificationIntentsRelations = relations(
       fields: [schema.notificationIntents.rosterSnapshotId],
       references: [schema.rosterSnapshots.id],
     }),
-    audienceConfiguration: one(schema.audienceConfigurations, {
-      fields: [
-        schema.notificationIntents.audienceConfigId,
-        schema.notificationIntents.audienceConfigVersion,
-      ],
-      references: [
-        schema.audienceConfigurations.id,
-        schema.audienceConfigurations.version,
-      ],
-    }),
     deliveryTestTargetSetVersion: one(schema.deliveryTestTargetSetVersions, {
       fields: [schema.notificationIntents.deliveryTestTargetSetId],
       references: [schema.deliveryTestTargetSetVersions.id],
@@ -1044,16 +961,6 @@ export const outboxRelations = relations(schema.outbox, ({ one, many }) => ({
     fields: [schema.outbox.rosterSnapshotId],
     references: [schema.rosterSnapshots.id],
   }),
-  audienceConfiguration: one(schema.audienceConfigurations, {
-    fields: [
-      schema.outbox.audienceConfigId,
-      schema.outbox.audienceConfigVersion,
-    ],
-    references: [
-      schema.audienceConfigurations.id,
-      schema.audienceConfigurations.version,
-    ],
-  }),
   dispatchBatches: many(schema.dispatchBatches),
 }));
 
@@ -1079,16 +986,6 @@ export const dispatchBatchesRelations = relations(
     rosterSnapshot: one(schema.rosterSnapshots, {
       fields: [schema.dispatchBatches.rosterSnapshotId],
       references: [schema.rosterSnapshots.id],
-    }),
-    audienceConfiguration: one(schema.audienceConfigurations, {
-      fields: [
-        schema.dispatchBatches.audienceConfigId,
-        schema.dispatchBatches.audienceConfigVersion,
-      ],
-      references: [
-        schema.audienceConfigurations.id,
-        schema.audienceConfigurations.version,
-      ],
     }),
     integrationStatus: one(schema.integrationStatuses, {
       fields: [schema.dispatchBatches.integrationStatusId],
