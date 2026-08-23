@@ -135,6 +135,7 @@ jobs:
           emulator_bin="$ANDROID_HOME/emulator/emulator"
           platform_tools_dir="$ANDROID_HOME/platform-tools"
           avd_home="$RUNNER_TEMP/android-avd"
+          avd_config="$avd_home/issue32_api35.avd/config.ini"
           test -x "$sdkmanager_bin"
           test -x "$avdmanager_bin"
           "$sdkmanager_bin" --install platform-tools "$system_image"
@@ -150,6 +151,10 @@ jobs:
             --package "$system_image" \
             --device pixel_6
           test -f "$avd_home/issue32_api35.ini"
+          test -f "$avd_config"
+          sed -i '/^disk\.dataPartition\.size=/d' "$avd_config"
+          printf 'disk.dataPartition.size=2G\n' >> "$avd_config"
+          test "$(sed -n 's/^disk\.dataPartition\.size=//p' "$avd_config")" = '2G'
           sudo chmod 0666 /dev/kvm
           "$emulator_bin" \
             -avd issue32_api35 \
@@ -158,7 +163,6 @@ jobs:
             -no-boot-anim \
             -no-metrics \
             -no-snapshot \
-            -partition-size 2048 \
             -gpu swiftshader_indirect \
             > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
           if ! timeout 120s adb wait-for-device; then
