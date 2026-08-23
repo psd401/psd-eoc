@@ -68,6 +68,7 @@ import {
   SES_VERIFICATION_REFERENCE,
   readDeploymentIdentity,
   readFacilityContext,
+  readSyntheticGroupContext,
   readNeighborhoodContext,
 } from './config';
 
@@ -991,6 +992,7 @@ export class PsdEocStack extends Stack {
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
           PSD_EOC_FACILITIES: readFacilityContext(this.node),
           PSD_EOC_NEIGHBORHOODS: readNeighborhoodContext(this.node),
+          PSD_EOC_SYNTHETIC_GROUPS: readSyntheticGroupContext(this.node),
           PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL:
             initialAccessGroupEmail.valueAsString,
           PSD_EOC_INITIAL_ACCESS_GROUP_ID: initialAccessGroupId.valueAsString,

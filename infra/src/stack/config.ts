@@ -92,6 +92,40 @@ export interface DeploymentIdentity {
  * admin UI is legitimate. Malformed context is not, because the failure would
  * otherwise be a deployment that silently has nowhere to declare an incident.
  */
+/**
+ * The synthetic population, as CDK context.
+ *
+ * Validated only for shape here. Whether an address is safe to use as a
+ * synthetic recipient is decided in `bootstrap-synthetic-groups.ts`, which
+ * requires a reserved domain that cannot resolve — that check belongs next to
+ * the insert, not next to the deploy.
+ */
+export function readSyntheticGroupContext(node: {
+  tryGetContext(key: string): unknown;
+}): string {
+  const value = node.tryGetContext('psdEoc:syntheticGroups');
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('CDK context psdEoc:syntheticGroups must be an array.');
+  }
+  for (const entry of value) {
+    const group = entry as Record<string, unknown>;
+    if (
+      typeof group?.facilityCode !== 'string' ||
+      !/^[A-Z0-9-]{1,32}$/u.test(group.facilityCode) ||
+      !Array.isArray(group.members) ||
+      group.members.length === 0
+    ) {
+      throw new Error(
+        'Each psdEoc:syntheticGroups entry needs a facilityCode and at least one member.',
+      );
+    }
+  }
+  return JSON.stringify(value);
+}
+
 export function readFacilityContext(node: {
   tryGetContext(key: string): unknown;
 }): string {

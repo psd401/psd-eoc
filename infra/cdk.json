@@ -193,16 +193,23 @@
         "facilityCodes": ["DES", "DRC", "GHH", "HBH", "PIE"]
       },
       {
-        "name": "Goodman–Harbor Heights Campus",
+        "name": "Goodman\u2013Harbor Heights Campus",
         "facilityCodes": ["GMS", "HHE"]
       },
       {
-        "name": "Kopachuck–Voyager Campus",
+        "name": "Kopachuck\u2013Voyager Campus",
         "facilityCodes": ["KMS", "VGE"]
       },
       {
         "name": "Peninsula Campus",
         "facilityCodes": ["ESC", "PES", "PHS", "TRA"]
+      }
+    ],
+    "psdEoc:syntheticGroups": [
+      {
+        "facilityCode": "ESC",
+        "displayName": "Synthetic test recipients",
+        "members": ["eoc-canary@example.invalid"]
       }
     ]
   }
