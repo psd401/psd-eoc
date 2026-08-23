@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 export default function SignedInPage() {
   return (
     <main id="main-content" tabIndex={-1}>
@@ -6,9 +8,9 @@ export default function SignedInPage() {
         <p>
           PSD EOC verifies your session again before showing protected content.
         </p>
-        <a className="button-link" href="/">
+        <Link className="button-link" href="/">
           Open dashboard
-        </a>
+        </Link>
         <p className="supporting-text">
           No incident was started and no notification was sent.
         </p>

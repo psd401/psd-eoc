@@ -24,7 +24,7 @@ RUN bun install --frozen-lockfile
 
 COPY packages/contracts/src packages/contracts/src
 COPY packages/server packages/server
-COPY workers/email/ses-events.ts workers/email/sns-signature.ts workers/email/
+COPY workers/email/aws-arn.ts workers/email/ses-events.ts workers/email/sns-signature.ts workers/email/
 
 RUN bun run --cwd packages/server build
 
@@ -34,13 +34,16 @@ RUN bun install --frozen-lockfile --production
 
 FROM base AS runtime
 
+ARG SOURCE_REPOSITORY_URL
 ARG SOURCE_SHA
 
-LABEL org.opencontainers.image.source="https://github.com/psd401/psd-eoc" \
+RUN printf '%s' "$SOURCE_REPOSITORY_URL" | grep -Eq '^https://[^[:space:]/]+/[^[:space:]]+$'
+
+LABEL org.opencontainers.image.source="$SOURCE_REPOSITORY_URL" \
       org.opencontainers.image.revision="$SOURCE_SHA" \
       org.opencontainers.image.title="PSD EOC live pilot" \
-      net.psd401.environment="live-pilot" \
-      net.psd401.data-classification="staff-minimized"
+      org.psd-eoc.environment="live-pilot" \
+      org.psd-eoc.data-classification="staff-minimized"
 
 ENV HOSTNAME=0.0.0.0 \
     NODE_ENV=production \

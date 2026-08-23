@@ -14,6 +14,25 @@ import {
   type Role,
 } from './shared';
 
+const ORGANIZATION_NAME_FORBIDDEN_CHARACTERS =
+  /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
+
+/** Canonical, display-safe identity of the organization operating a deployment. */
+export const OrganizationNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(160)
+  .refine((name) => new TextEncoder().encode(name).byteLength <= 320, {
+    message: 'Organization name exceeds its safe UTF-8 byte length.',
+  })
+  .refine((name) => !ORGANIZATION_NAME_FORBIDDEN_CHARACTERS.test(name), {
+    message: 'Organization name contains a non-display character.',
+  });
+
+/** Human-readable organization identity inferred from its canonical schema. */
+export type OrganizationName = z.infer<typeof OrganizationNameSchema>;
+
 const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
   `${source.id}:${source.kind}:${source.purpose}:${source.facilityId ?? ''}`;
 

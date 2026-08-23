@@ -34,9 +34,9 @@ import {
   parseSnsEnvelope,
 } from './sns-signature';
 
-const TOPIC_ARN = 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events';
+const TOPIC_ARN = 'arn:aws:sns:us-east-1:000000000000:psd-eoc-email-events';
 const CERTIFICATE_URL =
-  'https://sns.us-west-2.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem';
+  'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem';
 const SES_MESSAGE_ID = '0101010198f-synthetic-provider-id';
 const EVENT_TIME = '2026-08-11T20:30:00.000Z';
 const RECORDED_TIME = '2026-08-11T20:31:00.000Z';
@@ -138,8 +138,8 @@ function sesMessage(
     mail: {
       timestamp: EVENT_TIME,
       messageId: SES_MESSAGE_ID,
-      source: 'synthetic-sender@alerts.psd401.net',
-      sendingAccountId: '338414773271',
+      source: 'synthetic-sender@alerts.example.invalid',
+      sendingAccountId: '000000000000',
       destination: ['private-recipient@example.invalid'],
       tags: {
         'ses:configuration-set': [
@@ -197,7 +197,7 @@ function signedEnvelope(options: SignedEnvelopeOptions = {}): TestSnsEnvelope {
     Signature: '',
     SigningCertURL: CERTIFICATE_URL,
     UnsubscribeURL:
-      'https://sns.us-west-2.amazonaws.com/?Action=Unsubscribe&synthetic=1',
+      'https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&synthetic=1',
   };
   return Object.freeze({
     ...unsigned,
@@ -627,7 +627,7 @@ describe('SES signed SNS webhook route', () => {
 
     const wrongTopicApp = createHarness();
     const wrongTopic = signedEnvelope({
-      topicArn: 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events-other',
+      topicArn: 'arn:aws:sns:us-east-1:000000000000:psd-eoc-email-events-other',
     });
     const wrongTopicResponse = await wrongTopicApp.handler(
       requestForEnvelope(wrongTopic),

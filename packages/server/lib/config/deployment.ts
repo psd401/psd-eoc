@@ -1,3 +1,5 @@
+import { OrganizationNameSchema } from '@psd-eoc/contracts';
+
 /**
  * The values that differ between one district's deployment and another's.
  *
@@ -55,6 +57,21 @@ export function staffHostedDomain(
 }
 
 const ORIGIN_PATTERN = /^https:\/\/[^\s/?#]+$/u;
+
+/** Human-readable name of the organization operating this deployment. */
+export function organizationName(
+  environment: DeploymentEnvironment = process.env,
+): string {
+  const result = OrganizationNameSchema.safeParse(
+    environment.PSD_EOC_ORGANIZATION_NAME,
+  );
+  if (!result.success) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_ORGANIZATION_NAME must be a printable name of at most 160 characters.',
+    );
+  }
+  return result.data;
+}
 
 /**
  * The browser-visible origin this deployment serves, used wherever a redirect

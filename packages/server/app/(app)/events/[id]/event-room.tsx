@@ -38,6 +38,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
+import Image from 'next/image';
 
 import { LocationMap, formatLocationTextEquivalent } from '../../../../lib/map';
 
@@ -2423,10 +2424,11 @@ function AuthorizedPhoto({
     >
       <DialogClassification label={classificationLabel} real={realEvent} />
       {readUrl === null ? null : (
-        <img
+        <Image
           alt={altText}
           className="timeline-photo"
           decoding="async"
+          height={900}
           loading={explicitDemand ? 'eager' : 'lazy'}
           onError={() => failDisplayedImage(readUrl)}
           onLoad={(event) => finishDecodedImage(event.currentTarget)}
@@ -2435,6 +2437,8 @@ function AuthorizedPhoto({
           }}
           referrerPolicy="no-referrer"
           src={readUrl}
+          unoptimized
+          width={1200}
         />
       )}
       <figcaption id={captionId}>

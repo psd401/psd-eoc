@@ -7,7 +7,7 @@ import {
   EVENT_SUMMARY_ATTEMPT_STATES,
   EVENT_SUMMARY_PDF_MAX_JOURNAL_ENTRIES,
   EVENT_SUMMARY_PDF_MAX_SNAPSHOT_BYTES,
-  renderEventSummaryPdf,
+  renderEventSummaryPdf as renderEventSummaryPdfWithOrganization,
   type EventSummaryDeliveryChannelSnapshot,
   type EventSummaryEventSnapshot,
   type EventSummarySnapshot,
@@ -24,6 +24,13 @@ const PHOTO_CAPTION = 'Synthetic photo caption';
 const PROVIDER_REFERENCE_SECRET = 'provider-reference-must-never-render';
 const RECIPIENT_SECRET = 'synthetic-recipient@example.invalid';
 const UNICODE_TEXT = 'José Nguyễn - Ελληνικά - Кириллица';
+const ORGANIZATION_NAME = 'Example School District';
+
+function renderEventSummaryPdf(
+  source: EventSummarySnapshot,
+): Promise<Uint8Array> {
+  return renderEventSummaryPdfWithOrganization(source, ORGANIZATION_NAME);
+}
 
 const HUMAN_ACTOR = Object.freeze({
   kind: 'human' as const,
@@ -383,6 +390,23 @@ describe('event summary PDF renderer', () => {
         event: { ...invalid.event, templateMode: 'real' },
       }),
     ).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT' });
+  });
+
+  test('rejects unsafe organization metadata before rendering', async () => {
+    for (const invalidOrganizationName of [
+      'Example District\nInjected metadata',
+      'Example District\u202eSpoofed metadata',
+      'Example District\u2028Injected metadata',
+      '😀'.repeat(81),
+      '界'.repeat(107),
+    ]) {
+      await expect(
+        renderEventSummaryPdfWithOrganization(
+          snapshot(),
+          invalidOrganizationName,
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT' });
+    }
   });
 
   testWithPoppler(

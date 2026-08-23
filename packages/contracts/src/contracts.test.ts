@@ -3719,6 +3719,31 @@ describe('notification and outbox classification continuity', () => {
 });
 
 describe('roster, facility, and identity boundaries', () => {
+  test('keeps organization identity display-safe and byte-bounded', () => {
+    expect(Contracts.OrganizationNameSchema.parse('  Example District  ')).toBe(
+      'Example District',
+    );
+    expect(
+      Contracts.OrganizationNameSchema.safeParse('😀'.repeat(80)).success,
+    ).toBe(true);
+    expect(
+      Contracts.OrganizationNameSchema.safeParse('界'.repeat(106)).success,
+    ).toBe(true);
+
+    for (const invalid of [
+      'x'.repeat(161),
+      '😀'.repeat(81),
+      '界'.repeat(107),
+      'District\u202eName',
+      'District\u2028Name',
+      'District\u2029Name',
+    ]) {
+      expect(Contracts.OrganizationNameSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+    }
+  });
+
   const staffBuildingGroupRef = {
     id: ids.group,
     kind: 'google-group',

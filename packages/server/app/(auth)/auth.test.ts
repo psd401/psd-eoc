@@ -555,7 +555,7 @@ describe('Google OIDC adapter', () => {
         'reused web client as iOS client',
         { ...valid, iosClientId: PRODUCTION_WEB_CLIENT_ID },
       ],
-      ['wrong iOS bundle', { ...valid, iosBundleId: 'net.psd401.other' }],
+      ['wrong iOS bundle', { ...valid, iosBundleId: 'invalid.example.other' }],
       ['empty client secret', { ...valid, clientSecret: '' }],
       ['untrimmed client secret', { ...valid, clientSecret: ' secret' }],
       ['line-bearing client secret', { ...valid, clientSecret: 'secret\n' }],

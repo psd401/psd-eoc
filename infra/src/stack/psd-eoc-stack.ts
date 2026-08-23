@@ -1342,6 +1342,10 @@ export class PsdEocStack extends Stack {
                   value: deploymentIdentity.iosBundleId,
                 },
                 {
+                  name: 'PSD_EOC_ORGANIZATION_NAME',
+                  value: deploymentIdentity.organizationName,
+                },
+                {
                   name: 'DATABASE_DRIVER',
                   value: 'postgres',
                 },
