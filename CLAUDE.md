@@ -112,11 +112,13 @@ applied with migrations and only when no access group exists at all. See
 
 ## Mobile
 
-App version is 1.0.3. What is actually in the field is not what this file used
-to claim — `docs/INTEGRATIONS.md` and `docs/runbooks/release.md` are the truth
-register, and they record iOS 1.0.1/build 2 as having failed Apple processing
-and Android 1.0.1 as an unexposed Play internal-testing draft. Read them before
-believing anything about store state. `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` must be
+App version is 1.0.3. The app is installed and running on physical iOS and
+Android devices — attested by the product owner on 2026-08-23. Which build is on
+each device is not recorded anywhere in this repository, because the last store
+operations it captured were a failed iOS upload and an unexposed Play draft.
+`docs/INTEGRATIONS.md` and `docs/runbooks/release.md` are the truth register;
+read them before believing anything else about store state, and record the
+installed build numbers there the first time anyone reads them off a device. `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` must be
 `https://eoc.psd401.net`. Native projects are generated — edit `app.json`, not
 `ios/` or `android/` directly. `bun run prebuild:check` regenerates them.
 
