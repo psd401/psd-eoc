@@ -45,6 +45,15 @@ export const WRAPPED_STATEMENT =
   'INSERT INTO access_group_members (email) VALUES ($1)';
 export const WRAPPED_PARAMETERS = Object.freeze(['staff@example.invalid']);
 
+/** Every value carried only by the raw driver error or drizzle wrapper. */
+export const WRAPPED_DRIVER_FAILURE_LEAKS = Object.freeze([
+  ...DRIVER_FAILURE_LEAKS,
+  WRAPPED_STATEMENT,
+  ...WRAPPED_PARAMETERS,
+  'Failed query',
+  'params:',
+] as const);
+
 /**
  * A failure shaped as drizzle actually delivers one.
  *
