@@ -170,11 +170,14 @@ jobs:
             # Rollback changes the application image, not the migration code.
             # Use the current reviewed image so old application images do not
             # run old bootstrap contracts against the forward-only database.
-            bootstrap_digest=$(aws ecr describe-images \
+            if ! bootstrap_digest=$(aws ecr describe-images \
               --repository-name "$ECR_REPOSITORY" \
               --image-ids "imageTag=$GITHUB_SHA" \
               --query 'imageDetails[0].imageDigest' \
-              --output text)
+              --output text 2>/dev/null); then
+              echo "::error::The current commit does not have a bootstrap image in the repository" >&2
+              exit 1
+            fi
           else
             digest="$BUILT_DIGEST"
             source_sha="$GITHUB_SHA"

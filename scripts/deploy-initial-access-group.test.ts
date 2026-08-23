@@ -227,5 +227,11 @@ describe('supported deployment workflow', () => {
     );
     expect(workflow).toContain('source_sha=$source_sha');
     expect(workflow).toContain('bootstrap_digest=$bootstrap_digest');
+    expect(workflow).toContain(
+      'if ! bootstrap_digest=$(aws ecr describe-images',
+    );
+    expect(workflow).toContain(
+      '::error::The current commit does not have a bootstrap image in the repository',
+    );
   });
 });
