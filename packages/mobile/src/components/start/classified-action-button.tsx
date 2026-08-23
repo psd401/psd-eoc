@@ -1,4 +1,4 @@
-import type { TemplateMode } from '@psd-eoc/contracts';
+import type { EventKind, TemplateMode } from '@psd-eoc/contracts';
 import {
   Pressable,
   StyleSheet,
@@ -16,6 +16,7 @@ export interface ClassifiedActionButtonProps {
   readonly detail?: string;
   readonly disabled?: boolean;
   readonly emphasis?: 'primary' | 'secondary';
+  readonly kind?: EventKind;
   readonly mode: TemplateMode;
   readonly onPress: (event: GestureResponderEvent) => void;
   readonly testID?: string;
@@ -33,12 +34,13 @@ export function ClassifiedActionButton({
   detail,
   disabled = false,
   emphasis = 'secondary',
+  kind,
   mode,
   onPress,
   testID,
   title,
 }: ClassifiedActionButtonProps) {
-  const theme = getEventTheme(mode);
+  const theme = getEventTheme(mode, kind);
   const unavailable = disabled || busy;
   const primary = emphasis === 'primary';
   const foreground = primary ? theme.colors.onBanner : theme.colors.textPrimary;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type {
+  EventKind,
   JoinEventResult,
   StartEventResult,
   TemplateMode,
@@ -96,6 +97,7 @@ function activationResult(mode: TemplateMode = 'drill'): StartEventResult {
   return {
     event: {
       id: ACTIVATED_EVENT_ID,
+      kind: mode === 'real' ? 'incident' : 'drill',
       templateMode: mode,
       eventTypeVersion: { templateMode: mode },
     },
@@ -103,10 +105,14 @@ function activationResult(mode: TemplateMode = 'drill'): StartEventResult {
   } as StartEventResult;
 }
 
-function joinResult(mode: TemplateMode = 'real'): JoinEventResult {
+function joinResult(
+  mode: TemplateMode = 'real',
+  eventKind: EventKind = mode === 'real' ? 'incident' : 'drill',
+): JoinEventResult {
   return {
     event: {
       id: JOIN_EVENT_ID,
+      kind: eventKind,
       templateMode: mode,
       eventTypeVersion: { templateMode: mode },
     },
@@ -129,6 +135,7 @@ function activationSubmission(
   return {
     operation: 'activate',
     owner,
+    eventKind: 'drill',
     eventTypeName: 'Practice Lockdown',
     mode: 'drill',
     idempotencyKey: ACTIVATION_KEY,
@@ -145,6 +152,7 @@ function joinSubmission(
     operation: 'join',
     owner,
     eventId: JOIN_EVENT_ID,
+    eventKind: 'incident',
     eventTypeName: 'Lockdown',
     mode: 'real',
     idempotencyKey: JOIN_KEY,
@@ -153,6 +161,64 @@ function joinSubmission(
 }
 
 describe('StartMutationCoordinator admission', () => {
+  test('rejects drill/test activation-evidence classification drift before persistence or transport', () => {
+    for (const [eventKind, evidenceKind] of [
+      ['test', 'drill'],
+      ['drill', 'test'],
+    ] as const) {
+      const persistence = new MemoryPersistence();
+      const coordinator = new StartMutationCoordinator(persistence);
+      let calls = 0;
+      online(coordinator);
+      const submission = activationSubmission(async () => {
+        calls += 1;
+        return activationResult();
+      }) as Extract<StartMutationSubmission, { operation: 'activate' }>;
+
+      expect(() =>
+        coordinator.submit({
+          ...submission,
+          eventKind,
+          activationEvidence: {
+            ...ACTIVATION_EVIDENCE,
+            kind: evidenceKind,
+          },
+        }),
+      ).toThrow(
+        'Activation evidence does not match the displayed event classification.',
+      );
+      expect(calls).toBe(0);
+      expect(persistence.actions).toEqual([]);
+      expect(coordinator.getSnapshot()).toEqual({ phase: 'idle' });
+    }
+  });
+
+  test('rejects a test event bound to a staff roster before persistence or transport', () => {
+    const persistence = new MemoryPersistence();
+    const coordinator = new StartMutationCoordinator(persistence);
+    let calls = 0;
+    online(coordinator);
+    const submission = activationSubmission(async () => {
+      calls += 1;
+      return activationResult('drill');
+    }) as Extract<StartMutationSubmission, { operation: 'activate' }>;
+
+    expect(() =>
+      coordinator.submit({
+        ...submission,
+        eventKind: 'test',
+        activationEvidence: {
+          ...ACTIVATION_EVIDENCE,
+          kind: 'test',
+          rosterPopulation: 'staff',
+        },
+      }),
+    ).toThrow();
+    expect(calls).toBe(0);
+    expect(persistence.actions).toEqual([]);
+    expect(coordinator.getSnapshot()).toEqual({ phase: 'idle' });
+  });
+
   test('invokes one activation immediately and rejects its double tap', async () => {
     const coordinator = new StartMutationCoordinator();
     const operation = deferred<StartEventResult>();
@@ -183,6 +249,7 @@ describe('StartMutationCoordinator admission', () => {
       phase: 'pending',
       visibility: 'owner',
       operation: 'activate',
+      eventKind: 'drill',
       eventTypeName: 'Practice Lockdown',
       mode: 'drill',
     });
@@ -206,6 +273,7 @@ describe('StartMutationCoordinator admission', () => {
       visibility: 'owner',
       operation: 'join',
       eventId: JOIN_EVENT_ID,
+      eventKind: 'incident',
       eventTypeName: 'Lockdown',
       mode: 'real',
     });
@@ -340,6 +408,7 @@ describe('StartMutationCoordinator app-lifetime retention', () => {
       completion: {
         kind: 'activated',
         eventId: ACTIVATED_EVENT_ID,
+        eventKind: 'drill',
         eventTypeName: 'Practice Lockdown',
         mode: 'drill',
       },
@@ -366,6 +435,7 @@ describe('StartMutationCoordinator app-lifetime retention', () => {
     expect(coordinator.getSnapshot()).toEqual({
       phase: 'failed',
       operation: 'join',
+      eventKind: 'incident',
       eventTypeName: 'Lockdown',
       mode: 'real',
       error: {
@@ -550,6 +620,7 @@ describe('StartMutationCoordinator durable recovery', () => {
     expect(firstRestart.claimSuccessFeedback(OWNER)).toEqual({
       kind: 'activated',
       eventId: ACTIVATED_EVENT_ID,
+      eventKind: 'drill',
       eventTypeName: 'Practice Lockdown',
       mode: 'drill',
     });
@@ -688,6 +759,32 @@ describe('StartMutationCoordinator owner quarantine', () => {
 });
 
 describe('StartMutationCoordinator terminal handling', () => {
+  test('preserves a joined synthetic test as test classification', async () => {
+    const coordinator = new StartMutationCoordinator();
+    online(coordinator);
+    const admission = coordinator.submit({
+      operation: 'join',
+      owner: OWNER,
+      eventId: JOIN_EVENT_ID,
+      eventKind: 'test',
+      eventTypeName: 'Synthetic delivery test',
+      mode: 'drill',
+      idempotencyKey: JOIN_KEY,
+      run: () => Promise.resolve(joinResult('drill', 'test')),
+    });
+    if (admission.accepted) await admission.completion;
+    expect(coordinator.getSnapshot()).toEqual({
+      phase: 'succeeded',
+      completion: {
+        kind: 'joined',
+        eventId: JOIN_EVENT_ID,
+        eventKind: 'test',
+        eventTypeName: 'Synthetic delivery test',
+        mode: 'drill',
+      },
+    });
+  });
+
   test('derives exact completion kind, event type, and mode for join', async () => {
     const coordinator = new StartMutationCoordinator();
     online(coordinator);
@@ -700,6 +797,7 @@ describe('StartMutationCoordinator terminal handling', () => {
       completion: {
         kind: 'joined',
         eventId: JOIN_EVENT_ID,
+        eventKind: 'incident',
         eventTypeName: 'Lockdown',
         mode: 'real',
       },
@@ -758,6 +856,7 @@ describe('StartMutationCoordinator terminal handling', () => {
     expect(coordinator.getSnapshot()).toEqual({
       phase: 'failed',
       operation: 'activate',
+      eventKind: 'drill',
       eventTypeName: 'Practice Lockdown',
       mode: 'drill',
       error: {
@@ -777,6 +876,7 @@ describe('StartMutationCoordinator terminal handling', () => {
         OWNER,
         {
           operation: 'join',
+          eventKind: 'incident',
           eventTypeName: 'Lockdown',
           mode: 'real',
         },
@@ -786,6 +886,7 @@ describe('StartMutationCoordinator terminal handling', () => {
     expect(coordinator.getSnapshot()).toEqual({
       phase: 'failed',
       operation: 'join',
+      eventKind: 'incident',
       eventTypeName: 'Lockdown',
       mode: 'real',
       error: {
@@ -824,6 +925,7 @@ describe('StartMutationCoordinator terminal handling', () => {
     expect(coordinator.claimSuccessFeedback(OWNER)).toEqual({
       kind: 'activated',
       eventId: ACTIVATED_EVENT_ID,
+      eventKind: 'drill',
       eventTypeName: 'Practice Lockdown',
       mode: 'drill',
     });

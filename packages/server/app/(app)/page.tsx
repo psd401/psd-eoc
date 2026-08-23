@@ -1,3 +1,4 @@
+import { getEventClassificationPresentation } from '@psd-eoc/contracts';
 import { WEB_CSRF_COOKIE_NAME } from '../../lib/auth/sessions';
 import type { Metadata } from 'next';
 import Link from 'next/link';
@@ -37,7 +38,7 @@ export default async function DashboardPage() {
           </p>
         </div>
         <Link className="button button--secondary" href="/records">
-          View drill records
+          View records
         </Link>
       </header>
 
@@ -55,10 +56,9 @@ export default async function DashboardPage() {
         ) : (
           <ul className="event-list">
             {data.activeEvents.map(({ event, eventTypeName, facilityName }) => {
-              const real = event.templateMode === 'real';
-              const joinLabel = `${
-                real ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY'
-              } — ${eventTypeName} at ${facilityName} — started ${DATE_FORMATTER.format(
+              const classification = getEventClassificationPresentation(event);
+              const real = classification.kind === 'incident';
+              const joinLabel = `${classification.label} — ${eventTypeName} at ${facilityName} — started ${DATE_FORMATTER.format(
                 new Date(event.activatedAt ?? event.createdAt),
               )} — event ${event.id.slice(-8)}`;
               return (
@@ -67,6 +67,7 @@ export default async function DashboardPage() {
                     real ? 'event-card--real' : 'event-card--drill'
                   }`}
                   key={event.id}
+                  style={{ borderColor: classification.colors.border }}
                 >
                   <p
                     className={`classification-label ${
@@ -74,9 +75,16 @@ export default async function DashboardPage() {
                         ? 'classification-label--real'
                         : 'classification-label--drill'
                     }`}
+                    style={{
+                      backgroundColor: classification.colors.bannerBackground,
+                      color: classification.colors.onBanner,
+                    }}
                   >
-                    <ClassificationIcon mode={event.templateMode} />{' '}
-                    {real ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY'}
+                    <ClassificationIcon
+                      kind={event.kind}
+                      mode={event.templateMode}
+                    />{' '}
+                    {classification.label}
                   </p>
                   <h3>{eventTypeName}</h3>
                   <p>

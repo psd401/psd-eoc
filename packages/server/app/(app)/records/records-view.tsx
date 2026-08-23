@@ -1,7 +1,8 @@
-import type {
-  DrillRecord,
-  EventTypeListItem,
-  Facility,
+import {
+  getEventClassificationPresentation,
+  type EventRecord,
+  type EventTypeListItem,
+  type Facility,
 } from '@psd-eoc/contracts';
 import Link from 'next/link';
 
@@ -13,14 +14,14 @@ export interface RecordsFilters {
   readonly cursor: string | null;
 }
 
-export interface DrillRecordsViewProps {
+export interface RecordsViewProps {
   readonly errorMessage: string | null;
   readonly eventTypes: readonly EventTypeListItem[];
   readonly facilities: readonly Facility[];
   readonly filters: RecordsFilters;
   readonly hasMore: boolean;
   readonly nextCursor: string | null;
-  readonly records: readonly DrillRecord[];
+  readonly records: readonly EventRecord[];
   readonly today: string;
 }
 
@@ -39,13 +40,14 @@ const PACIFIC_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZoneName: 'short',
 });
 
-function recordClassification(record: DrillRecord): string {
-  return record.kind === 'test'
-    ? 'TEST — TRAINING ONLY'
-    : 'DRILL — TRAINING ONLY';
+function recordClassification(record: EventRecord) {
+  return getEventClassificationPresentation({
+    kind: record.kind,
+    templateMode: record.eventTypeVersion.templateMode,
+  });
 }
 
-function recordStatus(record: DrillRecord): string {
+function recordStatus(record: EventRecord): string {
   switch (record.status) {
     case 'active':
       return 'Active';
@@ -58,7 +60,7 @@ function recordStatus(record: DrillRecord): string {
   }
 }
 
-function recordDuration(record: DrillRecord): string {
+function recordDuration(record: EventRecord): string {
   if (record.status === 'active') {
     return 'In progress';
   }
@@ -101,7 +103,7 @@ export function drillCsvExportPath(filters: RecordsFilters): string {
   return `/records/export/drills?${query.toString()}`;
 }
 
-export function DrillRecordsView({
+export function RecordsView({
   errorMessage,
   eventTypes,
   facilities,
@@ -110,7 +112,7 @@ export function DrillRecordsView({
   nextCursor,
   records,
   today,
-}: DrillRecordsViewProps) {
+}: RecordsViewProps) {
   const facilityNameById = new Map(
     facilities.map((facility) => [facility.id, facility.name]),
   );
@@ -120,11 +122,11 @@ export function DrillRecordsView({
     <main className="page-shell records-page" id="main-content" tabIndex={-1}>
       <header className="page-heading records-heading">
         <div className="page-heading__copy">
-          <p className="eyebrow">Retained training evidence</p>
-          <h1>Drill records</h1>
+          <p className="eyebrow">Retained operational history</p>
+          <h1>Records</h1>
           <p className="lede">
-            Review authorized drill and test history. This page never starts an
-            event or sends a notification.
+            Review authorized real incident, drill, and test history. This page
+            never starts an event or sends a notification.
           </p>
         </div>
         <Link className="button button--secondary" href="/">
@@ -134,8 +136,10 @@ export function DrillRecordsView({
 
       <div className="records-classification" role="note">
         <span aria-hidden="true">◆</span>
-        <strong>DRILL RECORDS — TRAINING EVIDENCE</strong>
-        <span>No real incidents appear in this log.</span>
+        <strong>AUTHORIZED OPERATIONAL RECORDS</strong>
+        <span>
+          Every row carries its canonical real, drill, or test classification.
+        </span>
       </div>
 
       {canQuery ? (
@@ -185,7 +189,7 @@ export function DrillRecordsView({
               id="records-event-type"
               name="eventTypeId"
             >
-              <option value="">All drill types</option>
+              <option value="">All event types</option>
               {eventTypes.map(({ eventType, latestVersion }) => (
                 <option key={eventType.id} value={eventType.id}>
                   {latestVersion.name}
@@ -210,10 +214,10 @@ export function DrillRecordsView({
       )}
 
       {errorMessage !== null || !canQuery ? null : (
-        <section aria-labelledby="drill-log-heading">
+        <section aria-labelledby="records-log-heading">
           <div className="section-heading records-results-heading">
             <div>
-              <h2 id="drill-log-heading">Authorized drill log</h2>
+              <h2 id="records-log-heading">Authorized event log</h2>
               <p className="muted">
                 Dates and times use Pacific time. Records come from retained,
                 append-only event history.
@@ -223,28 +227,29 @@ export function DrillRecordsView({
               className="button button--drill"
               href={drillCsvExportPath(filters)}
             >
-              Download CSV
+              Download training CSV
             </a>
           </div>
           <p className="export-note">
-            The CSV includes site, date, time, drill type, duration, and
-            participant count for this explicit site and date range.
+            The CSV is the retained drill/test training export for this site and
+            date range. Each event row also links to its authorized PDF summary.
           </p>
 
           {records.length === 0 ? (
             <p className="status-message" role="status">
-              No drill or test records match these filters.
+              No incident, drill, or test records match these filters.
             </p>
           ) : (
             <div
-              aria-label="Authorized drill records"
+              aria-label="Authorized operational records"
               className="records-table-scroll"
               role="region"
               tabIndex={0}
             >
               <table className="records-table">
                 <caption>
-                  Drill and test history for the selected site and date range
+                  Incident, drill, and test history for the selected site and
+                  date range
                 </caption>
                 <thead>
                   <tr>
@@ -260,6 +265,7 @@ export function DrillRecordsView({
                 <tbody>
                   {records.map((record) => {
                     const startedAt = new Date(record.startedAt);
+                    const classification = recordClassification(record);
                     return (
                       <tr key={record.id}>
                         <td>
@@ -277,19 +283,31 @@ export function DrillRecordsView({
                           </time>
                         </td>
                         <td>
-                          <span className="record-kind">
-                            {recordClassification(record)}
+                          <span
+                            className="record-kind"
+                            style={{
+                              color: classification.colors.bannerBackground,
+                            }}
+                          >
+                            {classification.label}
                           </span>
                           <span>{record.eventTypeName}</span>
                         </td>
                         <td>{recordDuration(record)}</td>
                         <td>{recordStatus(record)}</td>
                         <td>
-                          <a
-                            href={`/events/${encodeURIComponent(record.eventId)}`}
-                          >
-                            Open event
-                          </a>
+                          <span className="record-actions">
+                            <a
+                              href={`/events/${encodeURIComponent(record.eventId)}`}
+                            >
+                              Open event
+                            </a>
+                            <a
+                              href={`/records/export/events/${encodeURIComponent(record.eventId)}`}
+                            >
+                              Download summary
+                            </a>
+                          </span>
                         </td>
                       </tr>
                     );
@@ -300,7 +318,7 @@ export function DrillRecordsView({
           )}
 
           {hasMore && nextCursor !== null ? (
-            <nav aria-label="Drill-record pages" className="records-pagination">
+            <nav aria-label="Record pages" className="records-pagination">
               <a
                 className="button button--secondary"
                 href={`/records?${filterQuery(filters, nextCursor)}`}

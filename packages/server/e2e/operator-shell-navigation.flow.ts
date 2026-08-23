@@ -5,7 +5,7 @@ import { evidencePath, expectAxeClean, statePath } from './support';
 const DISTRICT_ADMIN_DESTINATIONS = [
   ['Events', '/', 'Active events'],
   ['Start event', '/start', 'Start an event'],
-  ['Records', '/records', 'Drill records'],
+  ['Records', '/records', 'Records'],
   ['Delivery tests', '/delivery-tests', 'Monthly live delivery test'],
   ['Readiness', '/admin', 'Deployment readiness'],
   ['Schools', '/facilities', /^Facilities, neighborhoods,/u],

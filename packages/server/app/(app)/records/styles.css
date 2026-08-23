@@ -124,10 +124,14 @@
 .record-kind {
   display: block;
   margin-bottom: 0.25rem;
-  color: var(--records-drill);
   font-size: 0.78rem;
   font-weight: 900;
   letter-spacing: 0.025em;
+}
+
+.record-actions {
+  display: grid;
+  gap: 0.4rem;
 }
 
 .records-pagination {

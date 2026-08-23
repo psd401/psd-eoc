@@ -32,6 +32,7 @@ import {
   DispatchBatchSchema,
   DispatchOutboxResultSchema,
   DrillRecordSchema,
+  EventRecordSchema,
   EventClassificationSchema,
   EventRoomHeaderSchema,
   EventRoomSyncResultSchema,
@@ -57,6 +58,7 @@ import {
   IntegrationStatusSchema,
   LifecycleConsequencePreviewSchema,
   ListDrillRecordsInputSchema,
+  ListEventRecordsInputSchema,
   ListDeliveryTestReportsInputSchema,
   MediaReadGrantSchema,
   McpDraftMessageRevisionInputSchema,
@@ -107,6 +109,7 @@ import {
   StartEventInputSchema,
   UpdateEventTypeDraftInputSchema,
   defineCapability,
+  getEventClassificationPresentation,
   getCapabilityInvocationPolicy,
   parseCapabilityEnvelopeFor,
   parseCapabilityInput,
@@ -779,6 +782,36 @@ describe('event type, targeting, and activation contracts', () => {
       EventTargetingSchema.safeParse(targeting('test', 'drill', 'staff'))
         .success,
     ).toBe(false);
+  });
+
+  test('owns one visible label and color treatment for every classification', () => {
+    expect(
+      getEventClassificationPresentation({
+        kind: 'incident',
+        templateMode: 'real',
+      }),
+    ).toMatchObject({
+      label: 'REAL INCIDENT',
+      colors: { bannerBackground: '#7A1020', onBanner: '#FFFFFF' },
+    });
+    expect(
+      getEventClassificationPresentation({
+        kind: 'drill',
+        templateMode: 'drill',
+      }),
+    ).toMatchObject({
+      label: 'DRILL — TRAINING ONLY',
+      colors: { bannerBackground: '#075985', onBanner: '#FFFFFF' },
+    });
+    expect(
+      getEventClassificationPresentation({
+        kind: 'test',
+        templateMode: 'drill',
+      }),
+    ).toMatchObject({
+      label: 'TEST — NOT A REAL INCIDENT',
+      colors: { bannerBackground: '#765A00', onBanner: '#FFFFFF' },
+    });
   });
 
   test('pins classification across every channel template', () => {
@@ -5121,7 +5154,7 @@ describe('records and report projections', () => {
     ).toBe(false);
   });
 
-  test('derives drill record status from complete lifecycle timestamps', () => {
+  test('derives operational record classification and status from retained lifecycle timestamps', () => {
     const activeRecord = {
       id: ids.outbox,
       eventId: ids.event,
@@ -5136,6 +5169,23 @@ describe('records and report projections', () => {
       closedAt: null,
     } as const;
     expect(DrillRecordSchema.safeParse(activeRecord).success).toBe(true);
+    const incidentRecord = {
+      ...activeRecord,
+      kind: 'incident',
+      eventTypeVersion: {
+        ...activeRecord.eventTypeVersion,
+        templateMode: 'real',
+      },
+      eventTypeName: 'Synthetic Incident',
+    } as const;
+    expect(EventRecordSchema.safeParse(incidentRecord).success).toBe(true);
+    expect(DrillRecordSchema.safeParse(incidentRecord).success).toBe(false);
+    expect(
+      EventRecordSchema.safeParse({
+        ...activeRecord,
+        kind: 'incident',
+      }).success,
+    ).toBe(false);
     expect(
       DrillRecordSchema.safeParse({ ...activeRecord, status: 'draft' }).success,
     ).toBe(false);
@@ -5164,6 +5214,7 @@ describe('records and report projections', () => {
     } as const;
 
     expect(ListDrillRecordsInputSchema.parse(input)).toEqual(input);
+    expect(ListEventRecordsInputSchema.parse(input)).toEqual(input);
     expect(
       ListDrillRecordsInputSchema.safeParse({
         ...input,
@@ -5179,6 +5230,20 @@ describe('records and report projections', () => {
         limit: input.limit,
       }).success,
     ).toBe(false);
+  });
+
+  test('keeps mixed incident records off agent and MCP grants', () => {
+    expect(getCapabilityInvocationPolicy('list-event-records')).toMatchObject({
+      principalKinds: ['human'],
+      sources: ['web', 'mobile'],
+      agentGrantable: false,
+    });
+    expect(
+      Contracts.AGENT_GRANTABLE_CAPABILITY_IDS as readonly string[],
+    ).not.toContain('list-event-records');
+    expect(getCapabilityInvocationPolicy('list-drill-records')).toMatchObject({
+      agentGrantable: true,
+    });
   });
 
   test('bounds CSV drill exports to one explicit facility and 366 Pacific calendar days', () => {

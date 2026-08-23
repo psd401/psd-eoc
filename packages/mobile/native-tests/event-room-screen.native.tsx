@@ -3,10 +3,12 @@ import {
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
   projectJournalEntryForRead,
+  type EventKind,
   type LifecycleConsequencePreview,
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import { describe, expect, jest, test } from '@jest/globals';
+import * as Crypto from 'expo-crypto';
 import {
   act,
   fireEvent,
@@ -19,6 +21,7 @@ import { AppState, Text } from 'react-native';
 
 import {
   EVENT_ROOM_MUTED_TEXT_COLOR,
+  JournalActionDialog,
   LifecycleConfirmationDialog,
   LocationComposerDialog,
   PhotoComposerDialog,
@@ -28,7 +31,12 @@ import {
   invalidateLocationCaptureForPostingState,
   retainJournalMutationIdentity,
 } from '../src/features/event-room/event-room-screen';
-import { NativePhotoDraftStorage } from '../src/features/event-room/native-photo';
+import {
+  NativePhotoDraftStorage,
+  type PendingPhotoSelectionLease,
+  type PendingPhotoSelectionOwner,
+  type PhotoSource,
+} from '../src/features/event-room/native-photo';
 import {
   parsePhotoDraftManifest,
   type PhotoDraftManifest,
@@ -91,8 +99,23 @@ function integrationStatus(channel: 'push' | 'email') {
   };
 }
 
-function lifecyclePreview(mode: TemplateMode): LifecycleConsequencePreview {
-  const kind = mode === 'real' ? 'incident' : 'drill';
+function mockedIntegrationStatus(channel: 'push' | 'email') {
+  return {
+    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
+    label: 'mocked' as const,
+    verifiedAt: null,
+    verifiedByUserId: null,
+    authorizationReference: null,
+    reasonCode: null,
+    observedAt: createdAt,
+  };
+}
+
+function lifecyclePreview(
+  mode: TemplateMode,
+  blocked = false,
+  kind: EventKind = mode === 'real' ? 'incident' : 'drill',
+): LifecycleConsequencePreview {
   const marker = mode === 'real' ? 'INCIDENT' : 'DRILL';
   return LifecycleConsequencePreviewSchema.parse({
     id: ids.preview,
@@ -102,7 +125,7 @@ function lifecyclePreview(mode: TemplateMode): LifecycleConsequencePreview {
     templateMode: mode,
     eventTypeVersion: { id: ids.eventType, templateMode: mode },
     rosterSnapshotId: ids.roster,
-    rosterPopulation: 'staff',
+    rosterPopulation: kind === 'test' ? 'synthetic' : 'staff',
     recipientCount: 42,
     channels: [
       {
@@ -117,7 +140,10 @@ function lifecyclePreview(mode: TemplateMode): LifecycleConsequencePreview {
           title: `[${marker}] ALL CLEAR: Synthetic ${mode === 'real' ? 'incident' : 'drill'}`,
           body: `[${marker}] Synthetic push all-clear instructions.`,
         },
-        integrationStatus: integrationStatus('push'),
+        integrationStatus:
+          kind === 'test'
+            ? mockedIntegrationStatus('push')
+            : integrationStatus('push'),
       },
       {
         channel: 'email',
@@ -131,11 +157,14 @@ function lifecyclePreview(mode: TemplateMode): LifecycleConsequencePreview {
           subject: `[${marker}] ALL CLEAR: Synthetic ${mode === 'real' ? 'incident' : 'drill'}`,
           textBody: `[${marker}] Synthetic email all-clear instructions.`,
         },
-        integrationStatus: integrationStatus('email'),
+        integrationStatus:
+          kind === 'test'
+            ? mockedIntegrationStatus('email')
+            : integrationStatus('email'),
       },
     ],
-    sendReadiness: 'ready',
-    blockingReasonCodes: [],
+    sendReadiness: blocked ? 'blocked' : 'ready',
+    blockingReasonCodes: blocked ? ['PUSH_NOT_LIVE_VERIFIED'] : [],
     consequenceDigest: 'a'.repeat(64),
     createdAt,
     expiresAt,
@@ -167,7 +196,10 @@ function ConfirmationHarness({
       onRefreshPreview={() => undefined}
       phrase={phrase}
       preview={preview}
-      target={target}
+      target={{
+        ...target,
+        eventKind: preview?.kind ?? (mode === 'real' ? 'incident' : 'drill'),
+      }}
       visible
     />
   );
@@ -206,6 +238,34 @@ function PhotoWorkflowHarness({
       {workflow.busy ? 'busy' : 'idle'}:{workflow.draft?.stage ?? 'none'}:
       {workflow.draft?.altText ?? ''}
     </Text>
+  );
+}
+
+function ConnectedPhotoComposerHarness({
+  api,
+  onAppended,
+}: Readonly<{
+  api: EventRoomApi;
+  onAppended: () => void;
+}>) {
+  const photo = useEventPhotoDraft({
+    api,
+    entries: [],
+    eventId: ids.event,
+    newPostsAllowed: true,
+    onAppended,
+    sessionId: ids.session,
+  });
+  return (
+    <PhotoComposerDialog
+      newPostsAllowed
+      onDismiss={() => undefined}
+      online
+      photo={photo}
+      target={target}
+      templateMode="drill"
+      visible
+    />
   );
 }
 
@@ -1021,6 +1081,89 @@ describe('mobile event-room timeline accessibility', () => {
     expect(screen.queryByText('Photo temporarily unavailable')).toBeNull();
   });
 
+  test('offers explicit append-only correction and redaction controls with retained-history copy', () => {
+    const visible = JournalEntryReadProjectionSchema.parse({
+      visibility: 'visible',
+      entry: {
+        id: '10000000-0000-4000-8000-000000000013',
+        eventId: ids.event,
+        sequence: 4,
+        kind: 'text',
+        author: {
+          kind: 'human',
+          userId: ids.user,
+          sessionId: ids.session,
+        },
+        source: 'mobile',
+        serverTime: '2026-08-11T20:04:00.000Z',
+        clientTime: null,
+        payload: { text: 'Synthetic wording to correct' },
+        supersedes: null,
+      },
+    });
+    const onCorrect = jest.fn();
+    const onRedact = jest.fn();
+    const card = render(
+      <TimelineEntryCard
+        actionEligibility={{
+          correction: { allowed: true, unavailableReason: null },
+          redaction: { allowed: true, unavailableReason: null },
+        }}
+        onCorrect={onCorrect}
+        onRedact={onRedact}
+        projection={visible}
+      />,
+    );
+    fireEvent.press(screen.getByRole('button', { name: 'Correct…' }));
+    fireEvent.press(screen.getByRole('button', { name: 'Redact…' }));
+    expect(onCorrect).toHaveBeenCalledTimes(1);
+    expect(onRedact).toHaveBeenCalledTimes(1);
+    card.unmount();
+
+    const onSubmit = jest.fn();
+    const correction = render(
+      <JournalActionDialog
+        action="correction"
+        busy={false}
+        error={null}
+        onDismiss={() => undefined}
+        onSubmit={onSubmit}
+        target={visible}
+      />,
+    );
+    expect(screen.getByText('Original entry retained')).toBeTruthy();
+    expect(screen.getByText(/never rewrites or deletes history/)).toBeTruthy();
+    fireEvent.changeText(
+      screen.getByLabelText('Corrected timeline text'),
+      'Corrected synthetic wording',
+    );
+    fireEvent.changeText(
+      screen.getByLabelText('Reason for correction'),
+      'Fixed the synthetic wording',
+    );
+    fireEvent.press(screen.getByRole('button', { name: 'Append correction' }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      action: 'correction',
+      reason: 'Fixed the synthetic wording',
+      replacement: { kind: 'text', text: 'Corrected synthetic wording' },
+    });
+    correction.unmount();
+
+    render(
+      <JournalActionDialog
+        action="redaction"
+        busy={false}
+        error={null}
+        onDismiss={() => undefined}
+        onSubmit={onSubmit}
+        target={visible}
+      />,
+    );
+    expect(
+      screen.getByText(/original remains retained in append-only history/),
+    ).toBeTruthy();
+  });
+
   test('keeps immutable classification and event target visible in both full-screen composers', () => {
     const location = render(
       <LocationComposerDialog
@@ -1049,7 +1192,7 @@ describe('mobile event-room timeline accessibility', () => {
     );
     expect(
       screen.getByLabelText(
-        'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.',
+        'DRILL — TRAINING ONLY. This is a drill for training. It is not a real incident.',
       ),
     ).toBeTruthy();
     expect(
@@ -1061,6 +1204,51 @@ describe('mobile event-room timeline accessibility', () => {
       screen.getByText(/Do not include student data\. Post only the precision/),
     ).toBeTruthy();
     location.unmount();
+
+    const photo = render(
+      <PhotoComposerDialog
+        newPostsAllowed
+        onDismiss={() => undefined}
+        online
+        photo={{
+          draft: {
+            altText: '',
+            caption: null,
+            stage: 'describe',
+            progress: 0,
+            error: null,
+            localCleanupOnly: false,
+          },
+          busy: false,
+          takePhoto: async () => undefined,
+          choosePhoto: async () => undefined,
+          setAltText: () => undefined,
+          setCaption: () => undefined,
+          submit: async () => undefined,
+          retry: async () => undefined,
+          discard: async () => undefined,
+        }}
+        target={target}
+        templateMode="real"
+        visible
+      />,
+    );
+    expect(
+      screen.getByLabelText(
+        'REAL INCIDENT. This is a real incident. Staff notifications are not a drill.',
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText(
+        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are immutable.',
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /Do not include student data\. Photos are untrusted input/,
+      ),
+    ).toBeTruthy();
+    photo.unmount();
 
     render(
       <PhotoComposerDialog
@@ -1077,33 +1265,25 @@ describe('mobile event-room timeline accessibility', () => {
             localCleanupOnly: false,
           },
           busy: false,
-          selectPhoto: async () => undefined,
+          takePhoto: async () => undefined,
+          choosePhoto: async () => undefined,
           setAltText: () => undefined,
           setCaption: () => undefined,
           submit: async () => undefined,
           retry: async () => undefined,
           discard: async () => undefined,
         }}
-        target={target}
-        templateMode="real"
+        target={{ ...target, eventKind: 'test' }}
+        templateMode="drill"
         visible
       />,
     );
     expect(
       screen.getByLabelText(
-        'REAL INCIDENT. This visual state is reserved for a real incident.',
+        'TEST — NOT A REAL INCIDENT. This is a synthetic delivery test. It is not a real incident.',
       ),
     ).toBeTruthy();
-    expect(
-      screen.getByLabelText(
-        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are immutable.',
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        /Do not include student data\. Photos are untrusted input/,
-      ),
-    ).toBeTruthy();
+    expect(screen.queryByText('DRILL — TRAINING ONLY')).toBeNull();
   });
 
   test('labels capture and picker work without claiming a journal post is underway', () => {
@@ -1153,7 +1333,8 @@ describe('mobile event-room timeline accessibility', () => {
             localCleanupOnly: false,
           },
           busy: true,
-          selectPhoto: async () => undefined,
+          takePhoto: async () => undefined,
+          choosePhoto: async () => undefined,
           setAltText: () => undefined,
           setCaption: () => undefined,
           submit: async () => undefined,
@@ -1167,6 +1348,267 @@ describe('mobile event-room timeline accessibility', () => {
     );
     expect(screen.getByText('Working with photo…')).toBeTruthy();
     expect(screen.queryByText('Posting photo…')).toBeNull();
+  });
+
+  test('wires both native photo sources through explicit upload and retained retry actions', () => {
+    const takePhoto = jest
+      .fn<() => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const choosePhoto = jest
+      .fn<() => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const submit = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const retry = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const sourceSelection = render(
+      <PhotoComposerDialog
+        newPostsAllowed
+        onDismiss={() => undefined}
+        online
+        photo={{
+          draft: {
+            altText: 'Synthetic source selection description',
+            caption: null,
+            stage: 'describe',
+            progress: 0,
+            error: null,
+            localCleanupOnly: false,
+          },
+          busy: false,
+          takePhoto,
+          choosePhoto,
+          setAltText: () => undefined,
+          setCaption: () => undefined,
+          submit,
+          retry,
+          discard: async () => undefined,
+        }}
+        target={target}
+        templateMode="drill"
+        visible
+      />,
+    );
+
+    fireEvent.press(screen.getByRole('button', { name: 'Take Photo' }));
+    fireEvent.press(
+      screen.getByRole('button', { name: 'Choose Existing Photo' }),
+    );
+    expect(takePhoto).toHaveBeenCalledTimes(1);
+    expect(choosePhoto).toHaveBeenCalledTimes(1);
+    sourceSelection.unmount();
+
+    const upload = render(
+      <PhotoComposerDialog
+        newPostsAllowed
+        onDismiss={() => undefined}
+        online
+        photo={{
+          draft: {
+            altText: 'Validated synthetic selected photo',
+            caption: null,
+            stage: 'ready',
+            progress: 0.2,
+            error: null,
+            localCleanupOnly: false,
+          },
+          busy: false,
+          takePhoto,
+          choosePhoto,
+          setAltText: () => undefined,
+          setCaption: () => undefined,
+          submit,
+          retry,
+          discard: async () => undefined,
+        }}
+        target={target}
+        templateMode="drill"
+        visible
+      />,
+    );
+    fireEvent.press(
+      screen.getByRole('button', { name: 'Upload and post photo' }),
+    );
+    expect(submit).toHaveBeenCalledTimes(1);
+    upload.unmount();
+
+    render(
+      <PhotoComposerDialog
+        newPostsAllowed
+        onDismiss={() => undefined}
+        online
+        photo={{
+          draft: {
+            altText: 'Validated synthetic selected photo',
+            caption: null,
+            stage: 'failed',
+            progress: 0.5,
+            error: 'Synthetic interrupted upload',
+            localCleanupOnly: false,
+          },
+          busy: false,
+          takePhoto,
+          choosePhoto,
+          setAltText: () => undefined,
+          setCaption: () => undefined,
+          submit,
+          retry,
+          discard: async () => undefined,
+        }}
+        target={target}
+        templateMode="drill"
+        visible
+      />,
+    );
+    fireEvent.press(
+      screen.getByRole('button', { name: 'Retry retained draft' }),
+    );
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  test('connects camera and library buttons to durable selection, submit, and explicit retry', async () => {
+    const originalLoad = NativePhotoDraftStorage.prototype.load;
+    const originalSave = NativePhotoDraftStorage.prototype.save;
+    const originalDeleteManifest =
+      NativePhotoDraftStorage.prototype.deleteManifest;
+    const originalLoadComposer = NativePhotoDraftStorage.prototype.loadComposer;
+    const originalSaveComposer = NativePhotoDraftStorage.prototype.saveComposer;
+    const originalDeleteComposer =
+      NativePhotoDraftStorage.prototype.deleteComposer;
+    const originalLoadPending =
+      NativePhotoDraftStorage.prototype.loadPendingSelection;
+    const originalWithNewPending =
+      NativePhotoDraftStorage.prototype.withNewPendingSelection;
+    let stored: PhotoDraftManifest | null = null;
+    const selectedSources: PhotoSource[] = [];
+    const originalAppState = AppState.currentState;
+    AppState.currentState = 'active';
+    let uuidSequence = 0;
+    const randomUuid = jest
+      .spyOn(Crypto, 'randomUUID')
+      .mockImplementation(
+        () =>
+          `40000000-0000-4000-8000-${String(++uuidSequence).padStart(12, '0')}`,
+      );
+
+    const load = jest.fn(async () => stored);
+    const save = jest.fn(
+      async (next: PhotoDraftManifest, expected: PhotoDraftManifest | null) => {
+        expect(stored).toEqual(expected);
+        stored = next;
+      },
+    );
+    const deleteManifest = jest.fn(async () => {
+      stored = null;
+    });
+    NativePhotoDraftStorage.prototype.load = load;
+    NativePhotoDraftStorage.prototype.save = save;
+    NativePhotoDraftStorage.prototype.deleteManifest = deleteManifest;
+    NativePhotoDraftStorage.prototype.loadComposer = jest.fn(async () => null);
+    NativePhotoDraftStorage.prototype.saveComposer = jest.fn(
+      async () => undefined,
+    );
+    NativePhotoDraftStorage.prototype.deleteComposer = jest.fn(
+      async () => undefined,
+    );
+    NativePhotoDraftStorage.prototype.loadPendingSelection = jest.fn(
+      async () => null,
+    );
+    async function withNewPendingSelection<Value>(
+      owner: PendingPhotoSelectionOwner,
+      operation: (lease: PendingPhotoSelectionLease) => Promise<Value>,
+    ): Promise<Value> {
+      return operation({
+        owner,
+        storage: { load, save, deleteManifest },
+        select: async (source) => {
+          selectedSources.push(source);
+          return {
+            localUri: `file:///documents/event-photo-drafts/${owner.draftId}.private-photo`,
+            byteLength: 128,
+            contentSha256: 'a'.repeat(64),
+            declaredContentType: 'image/jpeg',
+          };
+        },
+        recover: async () => null,
+        clearBeforeCopy: async () => true,
+        clearAfterCommittedManifest: async () => undefined,
+      });
+    }
+    NativePhotoDraftStorage.prototype.withNewPendingSelection =
+      withNewPendingSelection;
+
+    try {
+      for (const source of ['camera', 'library'] as const) {
+        stored = null;
+        const createMediaUploadIntent = jest.fn(async () => {
+          throw new Error('synthetic interrupted intent request');
+        });
+        const rendered = render(
+          <ConnectedPhotoComposerHarness
+            api={{ createMediaUploadIntent } as unknown as EventRoomApi}
+            onAppended={jest.fn()}
+          />,
+        );
+
+        const description = await screen.findByLabelText(
+          'Photo alternative text, required',
+        );
+        await waitFor(() => expect(description.props.editable).toBe(true));
+        const altText = `Validated synthetic ${source} description`;
+        fireEvent.changeText(description, altText);
+        await waitFor(() =>
+          expect(
+            screen.getByLabelText('Photo alternative text, required').props
+              .value,
+          ).toBe(altText),
+        );
+        const sourceButton = screen.getByRole('button', {
+          name: source === 'camera' ? 'Take Photo' : 'Choose Existing Photo',
+        });
+        await waitFor(() =>
+          expect(sourceButton.props.accessibilityState).toEqual({
+            disabled: false,
+          }),
+        );
+        fireEvent.press(sourceButton);
+        await screen.findByText('Stage: ready');
+        expect(selectedSources.at(-1)).toBe(source);
+
+        fireEvent.press(
+          screen.getByRole('button', { name: 'Upload and post photo' }),
+        );
+        await screen.findByRole('button', {
+          name: 'Retry retained draft',
+        });
+        expect(createMediaUploadIntent).toHaveBeenCalledTimes(1);
+        fireEvent.press(
+          screen.getByRole('button', { name: 'Retry retained draft' }),
+        );
+        await waitFor(() =>
+          expect(createMediaUploadIntent).toHaveBeenCalledTimes(2),
+        );
+        expect(stored).toMatchObject({
+          eventId: ids.event,
+          sessionId: ids.session,
+          stage: 'unknown',
+          retryStage: 'create-intent',
+        });
+        rendered.unmount();
+      }
+      expect(selectedSources).toEqual(['camera', 'library']);
+    } finally {
+      NativePhotoDraftStorage.prototype.load = originalLoad;
+      NativePhotoDraftStorage.prototype.save = originalSave;
+      NativePhotoDraftStorage.prototype.deleteManifest = originalDeleteManifest;
+      NativePhotoDraftStorage.prototype.loadComposer = originalLoadComposer;
+      NativePhotoDraftStorage.prototype.saveComposer = originalSaveComposer;
+      NativePhotoDraftStorage.prototype.deleteComposer = originalDeleteComposer;
+      NativePhotoDraftStorage.prototype.loadPendingSelection =
+        originalLoadPending;
+      NativePhotoDraftStorage.prototype.withNewPendingSelection =
+        originalWithNewPending;
+      AppState.currentState = originalAppState;
+      randomUuid.mockRestore();
+    }
   });
 
   test('locks canonical descriptions after network start for failed and unknown drafts', () => {
@@ -1188,7 +1630,8 @@ describe('mobile event-room timeline accessibility', () => {
               localCleanupOnly: false,
             },
             busy: false,
-            selectPhoto: async () => undefined,
+            takePhoto: async () => undefined,
+            choosePhoto: async () => undefined,
             setAltText,
             setCaption,
             submit: async () => undefined,
@@ -1240,7 +1683,8 @@ describe('mobile event-room timeline accessibility', () => {
             localCleanupOnly: false,
           },
           busy: false,
-          selectPhoto: async () => undefined,
+          takePhoto: async () => undefined,
+          choosePhoto: async () => undefined,
           setAltText: () => undefined,
           setCaption: () => undefined,
           submit: async () => undefined,
@@ -1254,7 +1698,8 @@ describe('mobile event-room timeline accessibility', () => {
     );
 
     expect(screen.getByText('Recover photo draft')).toBeTruthy();
-    expect(screen.queryByText('Choose photo')).toBeNull();
+    expect(screen.queryByText('Take Photo')).toBeNull();
+    expect(screen.queryByText('Choose Existing Photo')).toBeNull();
     expect(screen.queryByText('Upload and post photo')).toBeNull();
     fireEvent.press(screen.getByText('Reconcile with timeline'));
     expect(retry).toHaveBeenCalledTimes(1);
@@ -1277,13 +1722,13 @@ describe('mobile event-room lifecycle confirmations', () => {
 
     expect(
       screen.getByLabelText(
-        'REAL INCIDENT. This visual state is reserved for a real incident.',
+        'REAL INCIDENT. This is a real incident. Staff notifications are not a drill.',
       ),
     ).toBeTruthy();
     expect(screen.getByText('Recipients: 42')).toBeTruthy();
     expect(
       screen.getByText(
-        /Consequence: change this event to all-clear and create a real incident all-clear notification/,
+        /Consequence: change this event to all-clear and create a REAL INCIDENT all-clear notification/,
       ),
     ).toBeTruthy();
     expect(
@@ -1334,12 +1779,12 @@ describe('mobile event-room lifecycle confirmations', () => {
 
     expect(
       screen.getByLabelText(
-        'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.',
+        'DRILL — TRAINING ONLY. This is a drill for training. It is not a real incident.',
       ),
     ).toBeTruthy();
     expect(
       screen.getByText(
-        /Consequence: change this event to all-clear and create a drill all-clear notification/,
+        /Consequence: change this event to all-clear and create a DRILL — TRAINING ONLY all-clear notification/,
       ),
     ).toBeTruthy();
     expect(
@@ -1348,6 +1793,48 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/\[INCIDENT\]/)).toBeNull();
+  });
+
+  test('keeps test events distinct from drills in the room banner and lifecycle consequence', () => {
+    render(
+      <ConfirmationHarness
+        action="all-clear"
+        mode="drill"
+        onConfirm={() => undefined}
+        preview={lifecyclePreview('drill', false, 'test')}
+      />,
+    );
+
+    expect(
+      screen.getByLabelText(
+        'TEST — NOT A REAL INCIDENT. This is a synthetic delivery test. It is not a real incident.',
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /Consequence: change this event to all-clear and create a TEST — NOT A REAL INCIDENT all-clear notification/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText('DRILL — TRAINING ONLY')).toBeNull();
+  });
+
+  test('explains a blocked action without exposing raw server reason codes', () => {
+    render(
+      <ConfirmationHarness
+        action="all-clear"
+        mode="real"
+        onConfirm={() => undefined}
+        preview={lifecyclePreview('real', true)}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        /one or more server prerequisites are not ready.*Refresh the preview.*contact an administrator/su,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/PUSH_NOT_LIVE_VERIFIED/u)).toBeNull();
+    expectConfirmationDisabled(true);
   });
 
   test('uses the separate close phrase and states that close retains history without another notification', () => {

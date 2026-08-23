@@ -28,9 +28,11 @@ mock.module('react-native', () => ({
 }));
 
 const { ClassificationBanner } = await import('../classification-banner');
-const { ActivationConfirmation, activationAudienceLabel } = await import(
-  './activation-confirmation'
-);
+const {
+  ActivationConfirmation,
+  activationAudienceLabel,
+  publicBlockingMessages,
+} = await import('./activation-confirmation');
 const { ActivationResultContent, announceActivationResult } = await import(
   './activation-result'
 );
@@ -225,7 +227,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       const modeButton = renderClassifiedAction(modeChoice);
       expect(modeButton.props.accessibilityRole).toBe('button');
       expect(modeButton.props.accessibilityLabel).toContain(
-        mode === 'real' ? 'REAL INCIDENT' : 'DRILL — PRACTICE',
+        mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY',
       );
       expect(modeButton.props.accessibilityHint).toContain(
         'does not start an event',
@@ -247,6 +249,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
 
       const confirmation = ActivationConfirmation({
         channels: mode === 'real' ? REAL_TEST_CHANNELS : TEST_CHANNELS,
+        eventKind: mode === 'real' ? 'incident' : 'drill',
         eventTypeName: 'Earthquake',
         facilityName: 'Synthetic Test School',
         mode,
@@ -265,7 +268,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       expect(banner?.props.mode).toBe(mode);
       expect(confirmButton?.props.accessibilityRole).toBe('button');
       expect(confirmButton?.props.accessibilityLabel).toContain(
-        mode === 'real' ? 'REAL incident' : 'DRILL — PRACTICE',
+        mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY',
       );
       expect(confirmButton?.props.accessibilityHint).toContain(
         'Final human confirmation',
@@ -293,7 +296,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       }) as Element,
     );
     expect(modeButton.props.accessibilityLabel).toBe(
-      'DRILL — PRACTICE. Run practice drill at Synthetic Test School',
+      'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School',
     );
     press(modeButton);
 
@@ -307,13 +310,14 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       }) as Element,
     );
     expect(typeButton.props.accessibilityLabel).toBe(
-      'DRILL — PRACTICE. Choose Synthetic earthquake drill',
+      'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill',
     );
     press(typeButton);
 
     const confirmation = ActivationConfirmation({
       activeEventCount: 1,
       channels: TEST_CHANNELS,
+      eventKind: 'drill',
       eventTypeName: 'Synthetic earthquake drill',
       facilityName: 'Synthetic Test School',
       mode: 'drill',
@@ -330,7 +334,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
         String(node.props.accessibilityLabel).startsWith('Start a separate'),
     );
     expect(confirmButton?.props.accessibilityLabel).toBe(
-      'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients',
+      'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients',
     );
     if (confirmButton === undefined) {
       throw new Error('The final human confirmation is missing.');
@@ -347,6 +351,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
   test('renders every signed channel consequence before confirmation', () => {
     const confirmation = ActivationConfirmation({
       channels: TEST_CHANNELS,
+      eventKind: 'drill',
       eventTypeName: 'Synthetic earthquake drill',
       facilityName: 'Synthetic Test School',
       mode: 'drill',
@@ -366,7 +371,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     );
 
     expect(text).toContain('Exact notification consequences');
-    expect(text).toContain('DRILL — PRACTICE · Push notifications');
+    expect(text).toContain('DRILL — TRAINING ONLY · Push notifications');
     expect(text).toContain('[DRILL] Synthetic earthquake drill');
     expect(text).toContain('[DRILL] Synthetic recipients only.');
     expect(text).toContain('Eligible endpoints: 2');
@@ -382,6 +387,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
   test('announces an exact join choice without implying another notification', () => {
     const joinChoice = ActiveEventJoinAction({
       eventId: '21000000-0000-4000-8000-000000000001',
+      eventKind: 'drill',
       eventTypeName: 'Earthquake drill',
       facilityName: 'Synthetic Test School',
       mode: 'drill',
@@ -390,6 +396,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     }) as Element;
     const concurrentChoice = ActiveEventJoinAction({
       eventId: '21000000-0000-4000-8000-000000000002',
+      eventKind: 'drill',
       eventTypeName: 'Earthquake drill',
       facilityName: 'Synthetic Test School',
       mode: 'drill',
@@ -401,7 +408,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
 
     expect(joinButton.props.accessibilityRole).toBe('button');
     expect(joinButton.props.accessibilityLabel).toContain(
-      'Join existing DRILL — PRACTICE',
+      'Join existing DRILL — TRAINING ONLY',
     );
     expect(joinButton.props.accessibilityLabel).toContain(
       'Event ID 21000000-0000-4000-8000-000000000001',
@@ -434,6 +441,43 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     );
   });
 
+  test('renders test join classification without leaking readiness reason codes', () => {
+    const joinButton = renderClassifiedAction(
+      ActiveEventJoinAction({
+        eventId: '21000000-0000-4000-8000-000000000003',
+        eventKind: 'test',
+        eventTypeName: 'Synthetic delivery test',
+        facilityName: 'Synthetic Test School',
+        mode: 'drill',
+        onPress: () => {},
+        startedLabel: 'Aug 11, 2026 at 10:10 AM',
+      }) as Element,
+    );
+    const blockingMessages = publicBlockingMessages([
+      'EMAIL_NOT_LIVE_VERIFIED',
+      'PROVIDER_TRUTH_INCOMPLETE',
+    ]);
+
+    expect(joinButton.props.accessibilityLabel).toContain(
+      'Join existing TEST — NOT A REAL INCIDENT',
+    );
+    expect(renderedText(joinButton).join(' ')).toContain(
+      'TEST — NOT A REAL INCIDENT',
+    );
+    expect(renderedText(joinButton).join(' ')).not.toContain(
+      'DRILL — TRAINING ONLY',
+    );
+    expect(blockingMessages).toEqual([
+      'One or more server prerequisites are unavailable. Refresh the preview; if it remains blocked, contact an administrator.',
+    ]);
+    expect(JSON.stringify(blockingMessages)).not.toContain(
+      'EMAIL_NOT_LIVE_VERIFIED',
+    );
+    expect(JSON.stringify(blockingMessages)).not.toContain(
+      'Provider truth incomplete',
+    );
+  });
+
   test('keeps the 911 and full-screen result announcements in the native tree', async () => {
     dialerUrls.length = 0;
     const call911 = Call911Action({
@@ -462,6 +506,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     let openedEvent = false;
     let returnedHome = false;
     const resultInput = {
+      eventKind: 'drill' as const,
       eventTypeName: 'Synthetic earthquake drill',
       kind: 'activated' as const,
       mode: 'drill' as const,
@@ -500,7 +545,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     );
     expect(announcements).toEqual([
       expect.stringContaining(
-        'Drill started. DRILL — PRACTICE. Synthetic earthquake drill.',
+        'Drill started. DRILL — TRAINING ONLY. Synthetic earthquake drill.',
       ),
     ]);
     if (openEvent === undefined || returnHome === undefined) {
@@ -510,6 +555,28 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(openedEvent).toBe(true);
     press(returnHome);
     expect(returnedHome).toBe(true);
+  });
+
+  test('announces a joined synthetic test without cross-rendering it as a drill', () => {
+    announcements.length = 0;
+    const resultInput = {
+      eventKind: 'test' as const,
+      eventTypeName: 'Synthetic delivery test',
+      kind: 'joined' as const,
+      mode: 'drill' as const,
+    };
+
+    announceActivationResult(resultInput);
+    const result = ActivationResultContent(resultInput) as Element;
+    const resultText = renderedText(result).join(' ').replaceAll(/\s+/gu, ' ');
+
+    expect(resultText).toContain('TEST — NOT A REAL INCIDENT');
+    expect(resultText).not.toContain('DRILL — TRAINING ONLY');
+    expect(announcements).toEqual([
+      expect.stringContaining(
+        'Event joined. TEST — NOT A REAL INCIDENT. Synthetic delivery test.',
+      ),
+    ]);
   });
 
   test('guards the executable Maestro flows and fixes activation at three taps', async () => {
@@ -532,7 +599,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(startFlow).toContain('scrollUntilVisible:');
     expect(startFlow.indexOf('scrollUntilVisible:')).toBeLessThan(
       startFlow.indexOf(
-        "tapOn: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'",
+        "tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'",
       ),
     );
     expect(startFlow.indexOf("id: 'issue-21-synthetic-mode'")).toBeLessThan(
@@ -541,19 +608,19 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(joinFlow.indexOf("id: 'issue-21-synthetic-mode'")).toBeLessThan(
       joinFlow.indexOf("id: 'issue-21-join-existing'"),
     );
-    expect(startFlow).toContain("assertVisible: '.*DRILL — PRACTICE.*'");
-    expect(joinFlow).toContain("assertVisible: '.*DRILL — PRACTICE.*'");
+    expect(startFlow).toContain("assertVisible: '.*DRILL — TRAINING ONLY.*'");
+    expect(joinFlow).toContain("assertVisible: '.*DRILL — TRAINING ONLY.*'");
     expect(startFlow).toContain(
-      "tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'",
+      "tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'",
     );
     expect(startFlow).toContain(
-      "tapOn: 'DRILL — PRACTICE. Choose Synthetic earthquake drill'",
+      "tapOn: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'",
     );
     expect(startFlow).toContain(
-      "tapOn: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'",
+      "tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'",
     );
     expect(joinFlow).toContain(
-      "tapOn: 'Join existing DRILL — PRACTICE: Synthetic earthquake drill at Synthetic Test School.*'",
+      "tapOn: 'Join existing DRILL — TRAINING ONLY: Synthetic earthquake drill at Synthetic Test School.*'",
     );
     expect(flowReadme).toContain(
       'human-unlocked session and do not automate biometric or Google',

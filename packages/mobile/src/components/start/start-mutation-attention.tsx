@@ -1,4 +1,4 @@
-import type { TemplateMode } from '@psd-eoc/contracts';
+import type { EventKind, TemplateMode } from '@psd-eoc/contracts';
 import {
   ActivityIndicator,
   Pressable,
@@ -14,6 +14,7 @@ import { Call911Affordance } from './call-911-affordance';
 
 export interface StartMutationActiveEventSummary {
   readonly eventId: string;
+  readonly eventKind: EventKind;
   readonly eventTypeName: string;
   readonly facilityName: string;
   readonly mode: TemplateMode;
@@ -24,6 +25,7 @@ export type StartMutationOperation = 'activate' | 'join';
 export type StartMutationAttentionStatus = 'failed' | 'pending' | 'unresolved';
 
 interface StartMutationAttentionIdentity {
+  readonly eventKind: EventKind;
   readonly eventTypeName: string;
   readonly mode: TemplateMode;
   readonly operation: StartMutationOperation;
@@ -73,7 +75,7 @@ export interface StartMutationAttentionCopy {
 
 type CopyInput = Pick<
   StartMutationAttentionIdentity,
-  'eventTypeName' | 'mode' | 'operation'
+  'eventKind' | 'eventTypeName' | 'mode' | 'operation'
 > & {
   readonly status: StartMutationAttentionStatus;
 };
@@ -81,11 +83,12 @@ type CopyInput = Pick<
 /** Truthful safety copy for a pending, definite-failure, or unknown outcome. */
 export function startMutationAttentionCopy({
   eventTypeName,
+  eventKind,
   mode,
   operation,
   status,
 }: CopyInput): StartMutationAttentionCopy {
-  const classification = mode === 'real' ? 'REAL INCIDENT' : 'DRILL — PRACTICE';
+  const classification = getEventTheme(mode, eventKind).classificationWord;
   const operationName = operation === 'activate' ? 'start' : 'join';
 
   if (status === 'pending') {
@@ -136,10 +139,11 @@ export function StartMutationAttention(props: StartMutationAttentionProps) {
 export function StartMutationAttentionContent(
   props: StartMutationAttentionProps,
 ) {
-  const { eventTypeName, mode, operation, status, testID } = props;
-  const theme = getEventTheme(mode);
+  const { eventKind, eventTypeName, mode, operation, status, testID } = props;
+  const theme = getEventTheme(mode, eventKind);
   const copy = startMutationAttentionCopy({
     eventTypeName,
+    eventKind,
     mode,
     operation,
     status,
@@ -157,7 +161,7 @@ export function StartMutationAttentionContent(
       style={[styles.page, { backgroundColor: theme.colors.pageBackground }]}
       testID={testID}
     >
-      <ClassificationBanner mode={mode} />
+      <ClassificationBanner kind={eventKind} mode={mode} />
       <Call911Affordance />
 
       <View
@@ -233,7 +237,7 @@ export function StartMutationAttentionContent(
             </Text>
           ) : (
             props.activeEvents.map((event) => {
-              const eventTheme = getEventTheme(event.mode);
+              const eventTheme = getEventTheme(event.mode, event.eventKind);
               return (
                 <View
                   accessible

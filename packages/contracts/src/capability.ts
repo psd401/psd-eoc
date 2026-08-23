@@ -1337,6 +1337,7 @@ export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'list-users': 'none',
   'list-agent-api-keys': 'none',
   'list-drill-records': 'none',
+  'list-event-records': 'none',
   'export-drill-records': 'none',
   'export-event-summary': 'none',
 } as const satisfies Readonly<Record<string, 'none'>>);

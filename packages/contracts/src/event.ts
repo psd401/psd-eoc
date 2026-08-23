@@ -80,6 +80,107 @@ export const EventClassificationSchema = z
 export type EventClassification = z.infer<typeof EventClassificationSchema>;
 
 /**
+ * Visible, non-color-only treatment for each immutable classification. These
+ * tokens are shared by web, mobile, records, exports, and delivery tests so a
+ * surface cannot silently invent different real-versus-training language.
+ */
+export interface EventClassificationPresentation {
+  readonly kind: EventKind;
+  readonly templateMode: TemplateMode;
+  readonly label: string;
+  readonly explanation: string;
+  readonly icon: Readonly<{ name: string; glyph: string }>;
+  readonly colors: Readonly<{
+    pageBackground: string;
+    surface: string;
+    textPrimary: string;
+    textMuted: string;
+    bannerBackground: string;
+    onBanner: string;
+    border: string;
+  }>;
+}
+
+const REAL_CLASSIFICATION_COLORS = Object.freeze({
+  pageBackground: '#FFF7F7',
+  surface: '#FFFFFF',
+  textPrimary: '#2B0B0E',
+  textMuted: '#6F3137',
+  bannerBackground: '#7A1020',
+  onBanner: '#FFFFFF',
+  border: '#B42332',
+});
+
+const TRAINING_CLASSIFICATION_COLORS = Object.freeze({
+  pageBackground: '#F0F9FF',
+  surface: '#FFFFFF',
+  textPrimary: '#082F49',
+  textMuted: '#334E68',
+  bannerBackground: '#075985',
+  onBanner: '#FFFFFF',
+  border: '#0369A1',
+});
+
+const TEST_CLASSIFICATION_COLORS = Object.freeze({
+  pageBackground: '#FFFBEB',
+  surface: '#FFFFFF',
+  textPrimary: '#3B2500',
+  textMuted: '#765A00',
+  bannerBackground: '#765A00',
+  onBanner: '#FFFFFF',
+  border: '#A16207',
+});
+
+export const EVENT_CLASSIFICATION_PRESENTATIONS = Object.freeze({
+  incident: Object.freeze({
+    kind: 'incident',
+    templateMode: 'real',
+    label: 'REAL INCIDENT',
+    explanation:
+      'This is a real incident. Staff notifications are not a drill.',
+    icon: Object.freeze({ name: 'warning', glyph: '!' }),
+    colors: REAL_CLASSIFICATION_COLORS,
+  }),
+  drill: Object.freeze({
+    kind: 'drill',
+    templateMode: 'drill',
+    label: 'DRILL — TRAINING ONLY',
+    explanation: 'This is a drill for training. It is not a real incident.',
+    icon: Object.freeze({ name: 'practice-pencil', glyph: '✎' }),
+    colors: TRAINING_CLASSIFICATION_COLORS,
+  }),
+  test: Object.freeze({
+    kind: 'test',
+    templateMode: 'drill',
+    label: 'TEST — NOT A REAL INCIDENT',
+    explanation:
+      'This is a synthetic delivery test. It is not a real incident.',
+    icon: Object.freeze({ name: 'synthetic-test', glyph: '◇' }),
+    colors: TEST_CLASSIFICATION_COLORS,
+  }),
+} as const satisfies Readonly<
+  Record<EventKind, EventClassificationPresentation>
+>);
+
+/** Exact visible label union used by export renderers and drift tests. */
+export type EventClassificationLabel =
+  (typeof EVENT_CLASSIFICATION_PRESENTATIONS)[EventKind]['label'];
+
+/** Returns the canonical visible treatment after validating kind and mode. */
+export function getEventClassificationPresentation(
+  classificationValue: Readonly<{
+    kind: EventKind;
+    templateMode: TemplateMode;
+  }>,
+): EventClassificationPresentation {
+  const classification = EventClassificationSchema.parse({
+    kind: classificationValue.kind,
+    templateMode: classificationValue.templateMode,
+  });
+  return EVENT_CLASSIFICATION_PRESENTATIONS[classification.kind];
+}
+
+/**
  * Owns every valid event, template, and roster-population triple. Staff
  * incidents and drills use live staff rosters; agent-exercisable drills and
  * tests use provably unroutable synthetic rosters.

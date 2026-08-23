@@ -21,8 +21,11 @@ import {
 import { seedDatabase } from '../db/seed';
 import {
   channelConfigurations,
+  events,
   groupMembers,
   groupSources,
+  rosterSnapshots,
+  rosterSourceConfigurations,
   userFacilityScopes,
   users,
 } from '../db/schema';
@@ -47,6 +50,8 @@ import { createDisposableDatabase } from '../lib/testing/database';
 const SERVER_ROOT = resolve(import.meta.dir, '..');
 const REPOSITORY_ROOT = resolve(SERVER_ROOT, '../..');
 const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
+const SYNTHETIC_OTHER_FACILITY_ID = '00000000-0000-4000-8000-000000000002';
+const SYNTHETIC_REAL_VERSION_ID = '00000000-0000-4000-8000-000000000200';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1_000;
 const INHERITED_RUNTIME_ENVIRONMENT_KEYS = [
@@ -303,6 +308,126 @@ async function createSyntheticDrill(
   return result.event.id;
 }
 
+interface SyntheticRecordsFixture {
+  readonly northIncidentId: string;
+  readonly northDrillId: string;
+  readonly northTestId: string;
+  readonly southIncidentId: string;
+}
+
+/**
+ * Seeds retained record fixtures without invoking a real-event capability.
+ * The incident row is inert, closed, and exists only inside the disposable
+ * PostgreSQL database used by this browser run.
+ */
+async function seedSyntheticRecords(
+  connection: PostgresDatabaseConnection,
+  identity: IssuedIdentity,
+  now: Date,
+): Promise<SyntheticRecordsFixture> {
+  const staffRosterConfigurationId = randomUUID();
+  const staffRosterSnapshotId = randomUUID();
+  await connection.db.insert(rosterSourceConfigurations).values({
+    id: staffRosterConfigurationId,
+    version: 1,
+    population: 'staff',
+    createdAt: new Date(now.getTime() - 4 * DAY_MILLISECONDS),
+  });
+  await connection.db.insert(rosterSnapshots).values({
+    id: staffRosterSnapshotId,
+    version: 1,
+    population: 'staff',
+    complete: true,
+    sourceConfigurationId: staffRosterConfigurationId,
+    sourceConfigurationVersion: 1,
+    syncStartedAt: new Date(now.getTime() - 4 * DAY_MILLISECONDS),
+    capturedAt: new Date(now.getTime() - 3 * DAY_MILLISECONDS),
+  });
+
+  const fixture: SyntheticRecordsFixture = Object.freeze({
+    northIncidentId: randomUUID(),
+    northDrillId: randomUUID(),
+    northTestId: randomUUID(),
+    southIncidentId: randomUUID(),
+  });
+  const actor = identity.actor;
+  const activatedAt = (hoursAgo: number) =>
+    new Date(now.getTime() - hoursAgo * 60 * 60 * 1_000);
+  const closedEvent = (
+    id: string,
+    facilityId: string,
+    kind: 'incident' | 'drill' | 'test',
+    hoursAgo: number,
+  ) => {
+    const activated = activatedAt(hoursAgo);
+    const allClear = new Date(activated.getTime() + 12 * 60 * 1_000);
+    const templateMode =
+      kind === 'incident' ? ('real' as const) : ('drill' as const);
+    const authorization =
+      kind === 'incident'
+        ? {
+            kind: 'human-confirmed' as const,
+            activationPreviewId: randomUUID(),
+            preparedActivationId: null,
+            confirmationId: randomUUID(),
+            consequenceDigest: 'd'.repeat(64),
+            requestId: randomUUID(),
+          }
+        : {
+            kind: 'synthetic-training' as const,
+            activationPreviewId: randomUUID(),
+            consequenceDigest: 'a'.repeat(64),
+            requestId: randomUUID(),
+          };
+    return {
+      id,
+      facilityId,
+      kind,
+      templateMode,
+      eventTypeVersionId:
+        kind === 'incident'
+          ? SYNTHETIC_REAL_VERSION_ID
+          : SYNTHETIC_DRILL_VERSION_ID,
+      status: 'closed' as const,
+      rosterSnapshotId:
+        kind === 'incident'
+          ? staffRosterSnapshotId
+          : '00000000-0000-4000-8000-000000000041',
+      rosterPopulation:
+        kind === 'incident' ? ('staff' as const) : ('synthetic' as const),
+      createdBy: actor,
+      createdAt: new Date(activated.getTime() - 60_000),
+      activatedAt: activated,
+      allClearAt: allClear,
+      reactivatedAt: null,
+      closedAt: new Date(allClear.getTime() + 60_000),
+      correctionOfEventId: null,
+      correctionReason: null,
+      activationAuthorization: authorization,
+    };
+  };
+
+  await connection.db
+    .insert(events)
+    .values([
+      closedEvent(
+        fixture.northIncidentId,
+        SYNTHETIC_FACILITY_ID,
+        'incident',
+        28,
+      ),
+      closedEvent(fixture.northDrillId, SYNTHETIC_FACILITY_ID, 'drill', 26),
+      closedEvent(fixture.northTestId, SYNTHETIC_FACILITY_ID, 'test', 24),
+      closedEvent(
+        fixture.southIncidentId,
+        SYNTHETIC_OTHER_FACILITY_ID,
+        'incident',
+        22,
+      ),
+    ]);
+  return fixture;
+}
+
 async function main(): Promise<void> {
   const serverMode = process.env.PSD_EOC_E2E_SERVER_MODE ?? 'development';
   if (serverMode !== 'development' && serverMode !== 'production') {
@@ -321,6 +446,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-340',
     );
+    const committedIssue341EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-341',
+    );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedEvidenceDirectory
@@ -330,6 +460,11 @@ async function main(): Promise<void> {
       'playwright-artifacts',
     );
     await mkdir(committedEvidenceDirectory, { recursive: true });
+    const issue341EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue341EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-341');
+    await mkdir(issue341EvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -398,11 +533,17 @@ async function main(): Promise<void> {
       throw new Error('The synthetic district administrator was not issued.');
     }
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
+    const records = await seedSyntheticRecords(
+      opened,
+      districtAdministrator,
+      now,
+    );
     await writeFile(
       join(createdStateDirectory, 'fixture.json'),
       JSON.stringify({
         eventId,
         districtAdministratorUserId: districtAdministrator.userId,
+        records,
       }),
       { encoding: 'utf8', mode: 0o600 },
     );
@@ -436,6 +577,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
           PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
+          PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,

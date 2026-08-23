@@ -1,4 +1,8 @@
-import type { TemplateMode } from '@psd-eoc/contracts';
+import {
+  getEventClassificationPresentation,
+  type EventKind,
+  type TemplateMode,
+} from '@psd-eoc/contracts';
 
 /**
  * Visual tokens for the immutable real-versus-drill classification.
@@ -7,6 +11,7 @@ import type { TemplateMode } from '@psd-eoc/contracts';
  * color, so classification never depends on color perception alone.
  */
 export interface EventThemeTokens {
+  readonly kind: EventKind;
   readonly mode: TemplateMode;
   readonly classificationWord: string;
   readonly explanation: string;
@@ -26,46 +31,31 @@ export interface EventThemeTokens {
 }
 
 /** Single source of truth for classification styling across mobile screens. */
-export const EVENT_THEME_TOKENS = {
-  real: {
-    mode: 'real',
-    classificationWord: 'REAL INCIDENT',
-    explanation: 'This visual state is reserved for a real incident.',
-    icon: {
-      name: 'warning',
-      glyph: '!',
-    },
-    colors: {
-      pageBackground: '#FFF7F7',
-      surface: '#FFFFFF',
-      textPrimary: '#2B0B0E',
-      textMuted: '#6F3137',
-      bannerBackground: '#7A1020',
-      onBanner: '#FFFFFF',
-      border: '#B42332',
-    },
-  },
-  drill: {
-    mode: 'drill',
-    classificationWord: 'DRILL — PRACTICE',
-    explanation: 'This visual state is for a drill or synthetic test only.',
-    icon: {
-      name: 'practice-pencil',
-      glyph: '✎',
-    },
-    colors: {
-      pageBackground: '#F0F9FF',
-      surface: '#FFFFFF',
-      textPrimary: '#082F49',
-      textMuted: '#334E68',
-      bannerBackground: '#075985',
-      onBanner: '#FFFFFF',
-      border: '#0369A1',
-    },
-  },
-} as const satisfies Readonly<Record<TemplateMode, EventThemeTokens>>;
+function tokensFor(kind: EventKind, mode: TemplateMode): EventThemeTokens {
+  const presentation = getEventClassificationPresentation({
+    kind,
+    templateMode: mode,
+  });
+  return Object.freeze({
+    kind,
+    mode,
+    classificationWord: presentation.label,
+    explanation: presentation.explanation,
+    icon: presentation.icon,
+    colors: presentation.colors,
+  });
+}
+
+export const EVENT_THEME_TOKENS = Object.freeze({
+  real: tokensFor('incident', 'real'),
+  drill: tokensFor('drill', 'drill'),
+}) satisfies Readonly<Record<TemplateMode, EventThemeTokens>>;
 
 /** Returns the complete, canonical visual treatment for an event mode. */
-export function getEventTheme(mode: TemplateMode): EventThemeTokens {
-  return EVENT_THEME_TOKENS[mode];
+export function getEventTheme(
+  mode: TemplateMode,
+  kind: EventKind = mode === 'real' ? 'incident' : 'drill',
+): EventThemeTokens {
+  const defaults = EVENT_THEME_TOKENS[mode];
+  return defaults.kind === kind ? defaults : tokensFor(kind, mode);
 }

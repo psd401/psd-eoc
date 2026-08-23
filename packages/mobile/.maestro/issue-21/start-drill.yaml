@@ -22,18 +22,18 @@ tags:
     direction: DOWN
 - assertVisible:
     id: 'issue-21-start-drill'
-- assertVisible: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
+- assertVisible: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'
 
 # Tap 1: the one-site action chooses both site and DRILL mode.
-- tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
-- assertVisible: '.*DRILL — PRACTICE.*'
+- tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertVisible:
     id: 'issue-21-drill-event-type'
-- assertVisible: 'DRILL — PRACTICE. Choose Synthetic earthquake drill'
+- assertVisible: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'
 
 # Tap 2: choose the seeded synthetic drill event type.
-- tapOn: 'DRILL — PRACTICE. Choose Synthetic earthquake drill'
-- assertVisible: '.*DRILL — PRACTICE.*'
+- tapOn: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertVisible: '.*synthetic recipient.*'
 - scrollUntilVisible:
     element:
@@ -41,10 +41,10 @@ tags:
     direction: DOWN
 - assertVisible:
     id: 'issue-21-confirm-drill'
-- assertVisible: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'
+- assertVisible: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
 
 # Tap 3: the final authenticated-human confirmation performs the activation.
-- tapOn: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'
+- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
 - extendedWaitUntil:
     visible:
       id: 'issue-21-activation-result'

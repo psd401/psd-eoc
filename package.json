@@ -16,6 +16,8 @@
     "test": "bun scripts/test.ts && bun run --cwd packages/mobile test:native",
     "test:e2e:issue-340": "bun packages/server/e2e/run.ts",
     "test:e2e:issue-340:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
+    "test:e2e:issue-341": "bun test packages/mobile/src/features/event-room/native-photo.test.ts packages/mobile/src/features/event-room/photo-draft.test.ts packages/mobile/src/features/event-room/api.test.ts packages/mobile/src/features/event-room/model.test.ts packages/mobile/src/features/event-room/sync-controller.test.ts && bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen.native.tsx && bun packages/server/e2e/run.ts",
+    "test:e2e:issue-341:update-evidence": "bun test packages/mobile/src/features/event-room/native-photo.test.ts packages/mobile/src/features/event-room/photo-draft.test.ts packages/mobile/src/features/event-room/api.test.ts packages/mobile/src/features/event-room/model.test.ts packages/mobile/src/features/event-room/sync-controller.test.ts && bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen.native.tsx && PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
   },
   "devDependencies": {

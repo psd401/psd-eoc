@@ -30,6 +30,9 @@ const IDS = Object.freeze({
   closeEntry: '00000000-0000-4000-8000-000000000020',
   mediaUploadIntent: '00000000-0000-4000-8000-000000000021',
   media: '00000000-0000-4000-8000-000000000022',
+  correctedTextEntry: '00000000-0000-4000-8000-000000000024',
+  correctedLocationEntry: '00000000-0000-4000-8000-000000000025',
+  redactionEntry: '00000000-0000-4000-8000-000000000026',
 });
 
 const TIMES = Object.freeze({
@@ -591,6 +594,122 @@ describe('mobile event-room API', () => {
         TIMES.activated,
       ),
     ).rejects.toThrow('another request');
+  });
+
+  test('corrects and redacts by appending exact backward supersession provenance', async () => {
+    const correctionReason = 'Corrected synthetic wording';
+    const redactionReason = 'Synthetic photo belongs to another event';
+    const correctedLocation = {
+      state: 'unknown' as const,
+      reason: 'The location could not be confirmed',
+    };
+    const correctedTextEntry = {
+      ...journalEntry('text', 4),
+      id: IDS.correctedTextEntry,
+      sequence: 4,
+      payload: { text: 'Corrected synthetic room update.' },
+      supersedes: {
+        entryId: IDS.textEntry,
+        entrySequence: 1,
+        kind: 'correction' as const,
+        reason: correctionReason,
+      },
+    };
+    const correctedLocationEntry = {
+      ...journalEntry('location', 5),
+      id: IDS.correctedLocationEntry,
+      sequence: 5,
+      payload: correctedLocation,
+      supersedes: {
+        entryId: IDS.locationEntry,
+        entrySequence: 2,
+        kind: 'correction' as const,
+        reason: correctionReason,
+      },
+    };
+    const redactionEntry = {
+      ...journalEntry('text', 6),
+      id: IDS.redactionEntry,
+      sequence: 6,
+      payload: {
+        text: '[Content redacted — original retained in journal]',
+      },
+      supersedes: {
+        entryId: IDS.photoEntry,
+        entrySequence: 3,
+        kind: 'redaction' as const,
+        reason: redactionReason,
+      },
+    };
+    const { api, calls } = requestHarness(
+      { entry: correctedTextEntry },
+      { entry: correctedLocationEntry },
+      { entry: redactionEntry },
+    );
+
+    await api.correctText(
+      IDS.event,
+      IDS.session,
+      { entryId: IDS.textEntry, entrySequence: 1 },
+      'Corrected synthetic room update.',
+      correctionReason,
+      'caller-correction-key-0001',
+      TIMES.activated,
+    );
+    await api.correctLocation(
+      IDS.event,
+      IDS.session,
+      { entryId: IDS.locationEntry, entrySequence: 2 },
+      correctedLocation,
+      correctionReason,
+      'caller-correction-key-0002',
+      TIMES.activated,
+    );
+    await api.redactEntry(
+      IDS.event,
+      IDS.session,
+      { entryId: IDS.photoEntry, entrySequence: 3 },
+      redactionReason,
+      'caller-redaction-key-0001',
+      TIMES.activated,
+    );
+
+    expect(
+      calls.map(({ body, idempotencyKey }) => ({ body, idempotencyKey })),
+    ).toEqual([
+      {
+        body: {
+          operation: 'correct-text',
+          entryId: IDS.textEntry,
+          entrySequence: 1,
+          text: 'Corrected synthetic room update.',
+          reason: correctionReason,
+          clientTime: TIMES.activated,
+        },
+        idempotencyKey: 'caller-correction-key-0001',
+      },
+      {
+        body: {
+          operation: 'correct-location',
+          entryId: IDS.locationEntry,
+          entrySequence: 2,
+          payload: correctedLocation,
+          reason: correctionReason,
+          clientTime: TIMES.activated,
+        },
+        idempotencyKey: 'caller-correction-key-0002',
+      },
+      {
+        body: {
+          operation: 'redact-entry',
+          entryId: IDS.photoEntry,
+          entrySequence: 3,
+          reason: redactionReason,
+          clientTime: TIMES.activated,
+        },
+        idempotencyKey: 'caller-redaction-key-0001',
+      },
+    ]);
   });
 
   test('rejects a mutation echo attributed to another authenticated session', async () => {
