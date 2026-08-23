@@ -67,11 +67,16 @@ jobs:
       # error message anywhere in the failure output (see issue #271).
       #
       # The deployment role holds secretsmanager:DescribeSecret on each ARN
-      # below. That returns metadata only; it never grants GetSecretValue, so
-      # this step cannot read a secret's contents.
+      # below. That returns metadata only; it never grants GetSecretValue for
+      # those Secrets Manager values. This step does receive the optional
+      # INITIAL_ACCESS_GROUP_EMAIL GitHub secret solely to validate whether it
+      # is present; its value must never be logged.
       - name: Verify required configuration exists
         shell: bash
         env:
+          INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
+          INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
+          INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
           REQUIRED_SECRETS: >-
             ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
             ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
@@ -79,6 +84,7 @@ jobs:
             /psd-eoc/bootstrap/approved-identity
         run: |
           set -euo pipefail
+          bun scripts/deploy-initial-access-group.ts
           missing=0
 
           echo "Repository variables:"
@@ -152,18 +158,46 @@ jobs:
               echo "::error::rollback_image_digest must be sha256:<64 hex characters>" >&2
               exit 1
             fi
-            # Refuse to roll back to an image that is not in the registry.
-            aws ecr describe-images \
+            # Refuse an image without exactly one immutable commit tag: the
+            # stack records the source represented by the application digest.
+            rollback_details=$(aws ecr describe-images \
               --repository-name "$ECR_REPOSITORY" \
-              --image-ids "imageDigest=$digest" > /dev/null
+              --image-ids "imageDigest=$digest" \
+              --query 'imageDetails[0]' \
+              --output json)
+            source_sha=$(jq -er '
+              [.imageTags[]? | select(test("^[0-9a-f]{40}$"))] | unique |
+              if length == 1 then .[0] else error("expected one source tag") end
+            ' <<< "$rollback_details")
+            # Rollback changes the application image, not the migration code.
+            # Use the current reviewed image so old application images do not
+            # run old bootstrap contracts against the forward-only database.
+            if ! bootstrap_digest=$(aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageTag=$GITHUB_SHA" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null); then
+              echo "::error::The current commit does not have a bootstrap image in the repository" >&2
+              exit 1
+            fi
           else
             digest="$BUILT_DIGEST"
+            source_sha="$GITHUB_SHA"
+            bootstrap_digest="$BUILT_DIGEST"
             if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "::error::The build did not produce an image digest" >&2
               exit 1
             fi
           fi
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          if [[ ! "$bootstrap_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The current commit does not have a bootstrap image in the repository" >&2
+            exit 1
+          fi
+          {
+            echo "digest=$digest"
+            echo "source_sha=$source_sha"
+            echo "bootstrap_digest=$bootstrap_digest"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Record the currently deployed digest
         id: previous
@@ -174,7 +208,12 @@ jobs:
             --service-arn "${{ vars.APP_RUNNER_SERVICE_ARN }}" \
             --query 'Service.SourceConfiguration.ImageRepository.ImageIdentifier' \
             --output text 2>/dev/null || echo "unknown")
+          current_source=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='DeployedAppSourceSha'].OutputValue | [0]" \
+            --output text 2>/dev/null || echo "unknown")
           echo "previous=${current##*@}" >> "$GITHUB_OUTPUT"
+          echo "previous_source=$current_source" >> "$GITHUB_OUTPUT"
           {
             echo "### Deploy"
             echo ""
@@ -183,6 +222,8 @@ jobs:
             echo "| Commit | \`$GITHUB_SHA\` |"
             echo "| Previous image | \`${current##*@}\` |"
             echo "| New image | \`${{ steps.target.outputs.digest }}\` |"
+            echo "| Application source | \`${{ steps.target.outputs.source_sha }}\` |"
+            echo "| Bootstrap image | \`${{ steps.target.outputs.bootstrap_digest }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Three ordered phases. CDK only *defines* the bootstrap task definition;
@@ -199,20 +240,28 @@ jobs:
         working-directory: infra
         shell: bash
         env:
+          INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
+          INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
+          INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
           OPERATIONS_ALARM_EMAIL: ${{ secrets.OPERATIONS_ALARM_EMAIL }}
           OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.OPERATIONS_ALARM_SMS_NUMBER }}
+          TARGET_SOURCE_SHA: ${{ steps.target.outputs.source_sha }}
+          BOOTSTRAP_DIGEST: ${{ steps.target.outputs.bootstrap_digest }}
+          BOOTSTRAP_SOURCE_SHA: ${{ github.sha }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.previous }}
-          SOURCE_SHA: ${{ github.sha }}
+          PREVIOUS_SOURCE_SHA: ${{ steps.previous.outputs.previous_source }}
         run: |
           set -euo pipefail
           # Keep the application on what it is serving now. On a stack with no
           # running service there is nothing to preserve, so the new digest is
           # used and the ordering below still holds.
           app_digest="$PREVIOUS_DIGEST"
-          if [[ ! "$app_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          app_source_sha="$PREVIOUS_SOURCE_SHA"
+          if [[ ! "$app_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
             app_digest="$IMAGE_DIGEST"
+            app_source_sha="$TARGET_SOURCE_SHA"
           fi
           mkdir -p ../artifacts
           bunx --bun cdk \
@@ -225,14 +274,17 @@ jobs:
             --parameters "$STACK_NAME:ProvisionApplication=true" \
             --parameters "$STACK_NAME:AppImageDigest=$app_digest" \
             --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
-            --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
-            --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
+            --parameters "$STACK_NAME:BootstrapImageDigest=$BOOTSTRAP_DIGEST" \
+            --parameters "$STACK_NAME:BootstrapSourceSha=$BOOTSTRAP_SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
+            --parameters "$STACK_NAME:InitialAccessGroupId=$INITIAL_ACCESS_GROUP_ID" \
+            --parameters "$STACK_NAME:InitialAccessGroupEmail=$INITIAL_ACCESS_GROUP_EMAIL" \
+            --parameters "$STACK_NAME:InitialAccessGroupName=$INITIAL_ACCESS_GROUP_NAME" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:OperationsTeamAlarmEmail=$OPERATIONS_ALARM_EMAIL" \
             --parameters "$STACK_NAME:OperationsTeamAlarmSmsNumber=$OPERATIONS_ALARM_SMS_NUMBER" \
-            --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
+            --parameters "$STACK_NAME:SourceSha=$app_source_sha"
 
       # Phase 2 applies migrations. A failure here aborts the deploy with the
       # application still serving its previous digest.
@@ -258,6 +310,7 @@ jobs:
           task_definition=$(jq -er ".\"$STACK_NAME\".BootstrapTaskDefinitionArn" "$outputs")
           subnets=$(jq -er ".\"$STACK_NAME\".BootstrapPrivateSubnetIds" "$outputs")
           security_group=$(jq -er ".\"$STACK_NAME\".BootstrapSecurityGroupId" "$outputs")
+          log_group=$(jq -er ".\"$STACK_NAME\".BootstrapLogGroupName" "$outputs")
 
           task_arn=$(aws ecs run-task \
             --cluster "$cluster" \
@@ -280,6 +333,74 @@ jobs:
             --cluster "$cluster" --tasks "$task_arn" \
             --query 'tasks[0].[stopCode,containers[0].exitCode]' --output text)
 
+          if [[ "$exit_code" != "0" ]]; then
+            {
+              echo ""
+              echo "| Migrations | |"
+              echo "|---|---|"
+              echo "| Task | \`${task_arn##*/}\` |"
+              echo "| Stop code | \`$stop_code\` |"
+              echo "| Exit code | \`$exit_code\` |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Bootstrap exited $exit_code ($stop_code). Log stream native-bootstrap/native-bootstrap/${task_arn##*/}. The application was not updated." >&2
+            exit 1
+          fi
+
+          # The task emits one bounded JSON summary after both idempotence
+          # passes. Read only this task's stream and surface the first-access
+          # outcome without copying the configured email into Actions output.
+          log_stream="native-bootstrap/native-bootstrap/${task_arn##*/}"
+          bootstrap_summary=''
+          log_error=artifacts/bootstrap-log-read.err
+          for _ in {1..20}; do
+            if ! messages=$(aws logs get-log-events \
+              --log-group-name "$log_group" \
+              --log-stream-name "$log_stream" \
+              --query 'events[].message' \
+              --output json 2> "$log_error"); then
+              error_code=$(sed -n 's/.*(\([^)]*\)).*/\1/p' "$log_error" | head -n 1)
+              error_code=${error_code:-AWS_CLI_ERROR}
+              case "$error_code" in
+                ResourceNotFoundException | ThrottlingException | ServiceUnavailableException) ;;
+                *)
+                  echo "::error::Unable to read the bounded bootstrap summary ($error_code). The application was not updated." >&2
+                  exit 1
+                  ;;
+              esac
+              messages='[]'
+            fi
+            bootstrap_summary=$(jq -rc --arg source_sha "$GITHUB_SHA" \
+              '.[] | fromjson? | select(.sourceSha == $source_sha and has("accessBootstrap"))' \
+              <<< "$messages" | tail -n 1)
+            [[ -n "$bootstrap_summary" ]] && break
+            sleep 3
+          done
+
+          if [[ -z "$bootstrap_summary" ]]; then
+            echo "::error::The bootstrap completed without its bounded summary. The application was not updated." >&2
+            exit 1
+          fi
+          if ! jq -e '
+            .mode == "migrate" and
+            .database.transport == "native-postgres" and
+            .database.migrationsApplied == true and
+            .database.tlsVerified == true and
+            .idempotence == {runs: 2, equivalent: true}
+          ' <<< "$bootstrap_summary" > /dev/null; then
+            echo "::error::The bootstrap summary failed validation. The application was not updated." >&2
+            exit 1
+          fi
+          access_outcome=$(jq -er '.accessBootstrap' <<< "$bootstrap_summary")
+          case "$access_outcome" in
+            created) access_summary='created on this deploy' ;;
+            already-configured) access_summary='already existed; no access history changed' ;;
+            not-configured) access_summary='intentionally omitted' ;;
+            *)
+              echo "::error::The bootstrap reported an invalid initial-access outcome. The application was not updated." >&2
+              exit 1
+              ;;
+          esac
+
           {
             echo ""
             echo "| Migrations | |"
@@ -287,12 +408,9 @@ jobs:
             echo "| Task | \`${task_arn##*/}\` |"
             echo "| Stop code | \`$stop_code\` |"
             echo "| Exit code | \`$exit_code\` |"
+            echo "| Initial access group | $access_summary |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [[ "$exit_code" != "0" ]]; then
-            echo "::error::Bootstrap exited $exit_code ($stop_code). Log stream native-bootstrap/native-bootstrap/${task_arn##*/}. The application was not updated." >&2
-            exit 1
-          fi
           echo "Migrations applied."
 
       # Phase 3 cuts the application over, now that the schema is current.
@@ -300,11 +418,16 @@ jobs:
         working-directory: infra
         shell: bash
         env:
+          INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
+          INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
+          INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
           OPERATIONS_ALARM_EMAIL: ${{ secrets.OPERATIONS_ALARM_EMAIL }}
           OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.OPERATIONS_ALARM_SMS_NUMBER }}
+          TARGET_SOURCE_SHA: ${{ steps.target.outputs.source_sha }}
+          BOOTSTRAP_DIGEST: ${{ steps.target.outputs.bootstrap_digest }}
+          BOOTSTRAP_SOURCE_SHA: ${{ github.sha }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
-          SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           bunx --bun cdk \
@@ -316,14 +439,17 @@ jobs:
             --parameters "$STACK_NAME:ProvisionApplication=true" \
             --parameters "$STACK_NAME:AppImageDigest=$IMAGE_DIGEST" \
             --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
-            --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
-            --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
+            --parameters "$STACK_NAME:BootstrapImageDigest=$BOOTSTRAP_DIGEST" \
+            --parameters "$STACK_NAME:BootstrapSourceSha=$BOOTSTRAP_SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
+            --parameters "$STACK_NAME:InitialAccessGroupId=$INITIAL_ACCESS_GROUP_ID" \
+            --parameters "$STACK_NAME:InitialAccessGroupEmail=$INITIAL_ACCESS_GROUP_EMAIL" \
+            --parameters "$STACK_NAME:InitialAccessGroupName=$INITIAL_ACCESS_GROUP_NAME" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:OperationsTeamAlarmEmail=$OPERATIONS_ALARM_EMAIL" \
             --parameters "$STACK_NAME:OperationsTeamAlarmSmsNumber=$OPERATIONS_ALARM_SMS_NUMBER" \
-            --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
+            --parameters "$STACK_NAME:SourceSha=$TARGET_SOURCE_SHA"
 
       # These two checks decide success. Everything above is build work.
       - name: Verify the service is running the deployed image

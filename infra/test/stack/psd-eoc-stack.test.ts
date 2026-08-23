@@ -269,6 +269,11 @@ describe('deployment boundary', () => {
     const sourceSha = asRecord(parameters.SourceSha);
     const bootstrapSourceSha = asRecord(parameters.BootstrapSourceSha);
     const oauthArn = asRecord(parameters.GoogleOauthSecretArn);
+    const initialAccessGroupId = asRecord(parameters.InitialAccessGroupId);
+    const initialAccessGroupEmail = asRecord(
+      parameters.InitialAccessGroupEmail,
+    );
+    const initialAccessGroupName = asRecord(parameters.InitialAccessGroupName);
     const transitionEmailDigest = asRecord(
       parameters.InitialMobileTransitionEmailSha256,
     );
@@ -293,6 +298,19 @@ describe('deployment boundary', () => {
     expect(oauthArn.AllowedPattern).toBe(
       '^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$',
     );
+    expect(initialAccessGroupId).toMatchObject({
+      Default: '',
+      Type: 'String',
+    });
+    expect(initialAccessGroupEmail).toMatchObject({
+      Default: '',
+      NoEcho: true,
+      Type: 'String',
+    });
+    expect(initialAccessGroupName).toMatchObject({
+      Default: '',
+      Type: 'String',
+    });
     // The approved-staff identity fed the removed access fixture. The
     // bootstrap container's environment schema is strict, so leaving these
     // behind would fail the migration task rather than be ignored.
@@ -385,9 +403,9 @@ describe('minimal isolated resource shape', () => {
     // Nine queues: the health queue, plus a source/dead-letter pair each for
     // delivery, email, SMS, and push.
     template.resourceCountIs('AWS::SQS::Queue', 9);
-    // Seven: the five the application has always had, plus one generated
-    // bearer for each internal worker route.
-    template.resourceCountIs('AWS::SecretsManager::Secret', 7);
+    // Eight: the five the application has always had, one generated bearer for
+    // each internal worker route, and the bootstrap-only initial-group email.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 8);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
@@ -606,6 +624,7 @@ describe('minimal isolated resource shape', () => {
       [
         '/psd-eoc/api-salt',
         '/psd-eoc/bootstrap/approved-identity',
+        '/psd-eoc/bootstrap/initial-access-group',
         '/psd-eoc/database/admin',
         '/psd-eoc/database/application',
         '/psd-eoc/google-oidc-cookie-secret',
@@ -647,6 +666,18 @@ describe('minimal isolated resource shape', () => {
     expect(synthesized).not.toHaveProperty('Transform');
     expect(identity?.DeletionPolicy).toBe('Retain');
     expect(identity?.UpdateReplacePolicy).toBe('Retain');
+
+    const initialAccessGroup = byName.get(
+      '/psd-eoc/bootstrap/initial-access-group',
+    );
+    expect(initialAccessGroup).toBeDefined();
+    const initialAccessGroupSecretString = JSON.stringify(
+      properties(initialAccessGroup ?? {}).SecretString,
+    );
+    expect(initialAccessGroupSecretString).toContain('email');
+    expect(initialAccessGroupSecretString).toContain('InitialAccessGroupEmail');
+    expect(initialAccessGroup?.DeletionPolicy).toBe('Retain');
+    expect(initialAccessGroup?.UpdateReplacePolicy).toBe('Retain');
 
     const admin = asRecord(
       properties(byName.get('/psd-eoc/database/admin') ?? {})
@@ -1116,6 +1147,13 @@ describe('one-off native bootstrap boundary', () => {
     expect(environment.get('SOURCE_SHA')).toEqual({
       Ref: 'BootstrapSourceSha',
     });
+    expect(environment.get('PSD_EOC_INITIAL_ACCESS_GROUP_ID')).toEqual({
+      Ref: 'InitialAccessGroupId',
+    });
+    expect(environment.has('PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL')).toBe(false);
+    expect(environment.get('PSD_EOC_INITIAL_ACCESS_GROUP_NAME')).toEqual({
+      Ref: 'InitialAccessGroupName',
+    });
     expect(JSON.stringify(environment)).not.toContain('DATABASE_RESOURCE_ARN');
     expect(JSON.stringify(environment)).not.toContain('aws-data-api');
 
@@ -1131,6 +1169,7 @@ describe('one-off native bootstrap boundary', () => {
         'DATABASE_ADMIN_USERNAME',
         'DATABASE_APPLICATION_PASSWORD',
         'DATABASE_APPLICATION_USERNAME',
+        'PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL',
       ].sort(),
     );
     for (const [name, key] of [
@@ -1138,6 +1177,7 @@ describe('one-off native bootstrap boundary', () => {
       ['DATABASE_ADMIN_USERNAME', 'username'],
       ['DATABASE_APPLICATION_PASSWORD', 'password'],
       ['DATABASE_APPLICATION_USERNAME', 'username'],
+      ['PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL', 'email'],
     ] as const) {
       expect(JSON.stringify(secrets.get(name))).toContain(`:${key}::`);
     }
@@ -1203,7 +1243,8 @@ describe('one-off native bootstrap boundary', () => {
     );
     expect(secretResources).toContain('DatabaseAdminSecret');
     expect(secretResources).toContain('DatabaseApplicationSecret');
-    expect(secretResources).toContain('BootstrapIdentitySecret');
+    expect(secretResources).toContain('InitialAccessGroupSecret');
+    expect(secretResources).not.toContain('BootstrapIdentitySecret');
     expect(secretResources).not.toContain('GoogleOauthSecretArn');
     expect(secretResources).not.toContain('GoogleOidcCookieSecret');
     expect(secretResources).not.toContain('ApiSaltSecret');

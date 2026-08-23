@@ -40,6 +40,18 @@ const GROUP_ID_ENV = 'PSD_EOC_INITIAL_ACCESS_GROUP_ID';
 const GROUP_EMAIL_ENV = 'PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL';
 const GROUP_NAME_ENV = 'PSD_EOC_INITIAL_ACCESS_GROUP_NAME';
 
+export interface InitialAccessGroupEnvironmentNames {
+  readonly groupId: string;
+  readonly groupEmail: string;
+  readonly groupName: string;
+}
+
+const INITIAL_ACCESS_GROUP_ENVIRONMENT_NAMES = Object.freeze({
+  groupId: GROUP_ID_ENV,
+  groupEmail: GROUP_EMAIL_ENV,
+  groupName: GROUP_NAME_ENV,
+}) satisfies InitialAccessGroupEnvironmentNames;
+
 function trimmed(
   environment: Readonly<Record<string, string | undefined>>,
   name: string,
@@ -58,22 +70,23 @@ function trimmed(
  */
 export function readInitialAccessGroupConfiguration(
   environment: Readonly<Record<string, string | undefined>> = process.env,
+  names: InitialAccessGroupEnvironmentNames = INITIAL_ACCESS_GROUP_ENVIRONMENT_NAMES,
 ): InitialAccessGroupConfiguration | null {
-  const googleGroupId = trimmed(environment, GROUP_ID_ENV);
-  const email = trimmed(environment, GROUP_EMAIL_ENV);
-  const displayName = trimmed(environment, GROUP_NAME_ENV);
+  const googleGroupId = trimmed(environment, names.groupId);
+  const email = trimmed(environment, names.groupEmail);
+  const displayName = trimmed(environment, names.groupName);
 
   if (googleGroupId === undefined && email === undefined) {
     if (displayName !== undefined) {
       throw new InitialAccessGroupConfigurationError(
-        `${GROUP_NAME_ENV} was set without ${GROUP_ID_ENV} and ${GROUP_EMAIL_ENV}.`,
+        `${names.groupId} and ${names.groupEmail} are missing; ${names.groupName} cannot be set without them.`,
       );
     }
     return null;
   }
   if (googleGroupId === undefined || email === undefined) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_ID_ENV} and ${GROUP_EMAIL_ENV} must be set together.`,
+      `${googleGroupId === undefined ? names.groupId : names.groupEmail} is missing; ${names.groupId} and ${names.groupEmail} must be set together.`,
     );
   }
   // Cloud Identity names a group "groups/<id>", and that is the form its API
@@ -91,12 +104,12 @@ export function readInitialAccessGroupConfiguration(
   const normalisedGroupId = googleGroupId.replace(/^groups\//u, '');
   if (normalisedGroupId.length > 255 || normalisedGroupId.length === 0) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_ID_ENV} must be between 1 and 255 characters.`,
+      `${names.groupId} must be between 1 and 255 characters.`,
     );
   }
   if (!/^[A-Za-z0-9_-]+$/u.test(normalisedGroupId)) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_ID_ENV} must be a Cloud Identity group id, optionally prefixed with "groups/".`,
+      `${names.groupId} must be a Cloud Identity group id, optionally prefixed with "groups/".`,
     );
   }
   // The same schema the sync parses this row back with, not a looser regex of
@@ -113,12 +126,17 @@ export function readInitialAccessGroupConfiguration(
   // the same mistake, one field over.
   if (!StaffRosterEmailSchema.safeParse(email).success) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_EMAIL_ENV} must be a group email address the roster schema accepts.`,
+      `${names.groupEmail} must be a group email address the roster schema accepts.`,
     );
   }
   if (displayName !== undefined && displayName.length > 160) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_NAME_ENV} must be at most 160 characters.`,
+      `${names.groupName} must be at most 160 characters.`,
+    );
+  }
+  if (displayName !== undefined && /[\0\r\n]/u.test(displayName)) {
+    throw new InitialAccessGroupConfigurationError(
+      `${names.groupName} must be a single-line display name.`,
     );
   }
   return Object.freeze({
@@ -167,14 +185,12 @@ export async function bootstrapAccessConfiguration(
   //
   // Migration 0029 removed that blanket DELETE ban, so the premise is gone: a
   // bad row can now simply be deleted and re-seeded. And keying off "none
-  // active" is dangerous in a way the original is not. The initial-group
-  // CfnParameters are sticky — the deploy workflow never passes them, so
-  // CloudFormation carries the values an operator supplied once forward on
-  // every later deploy indefinitely. A district that deactivates its access
-  // groups on purpose, say while investigating a compromise, would then have a
-  // routine deploy silently recreate an active administrator-granting group
-  // pointed at whatever that stale parameter still names. Automation must not
-  // be able to reopen sign-in that a human closed.
+  // active" is dangerous in a way the original is not. The supported workflow
+  // now passes explicit empty parameter values when configuration is omitted,
+  // but this database guard remains the authoritative protection: a district
+  // that deactivates its access groups on purpose, say while investigating a
+  // compromise, must not have a routine deploy reopen sign-in regardless of
+  // the configuration it receives.
   const existing = await database
     .select({ id: groupSources.id })
     .from(groupSources)
@@ -234,6 +250,6 @@ export function describeBootstrapOutcome(
     case 'already-configured':
       return `Access groups already configured; ${String(outcome.activeGroupCount)} active. The initial-group configuration was ignored.`;
     case 'created':
-      return `Created the initial access group for ${outcome.email}, granting administrator. Members can sign in after the next membership sync.`;
+      return 'Created the configured initial access group, granting administrator. Members can sign in after the next membership sync.';
   }
 }
