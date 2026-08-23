@@ -6,7 +6,7 @@ import {
   connectionFailureFixture,
   DRIVER_FAILURE_LEAKS,
   driverFailureFixture,
-  WRAPPED_PARAMETERS,
+  WRAPPED_DRIVER_FAILURE_LEAKS,
   WRAPPED_STATEMENT,
   wrappedDriverFailureFixture,
 } from './driver-error-test-fixtures';
@@ -391,14 +391,6 @@ describe('withReducedDriverErrors', () => {
 });
 
 describe('the query wrapper drizzle puts around every failure', () => {
-  const wrappedLeaks = [
-    ...DRIVER_FAILURE_LEAKS,
-    WRAPPED_STATEMENT,
-    ...WRAPPED_PARAMETERS,
-    'Failed query',
-    'params:',
-  ];
-
   test('is recognized even though it carries no SQLSTATE of its own', () => {
     const wrapped = wrappedDriverFailureFixture(driverFailureFixture());
 
@@ -420,7 +412,7 @@ describe('the query wrapper drizzle puts around every failure', () => {
         ' table_name=access_group_members' +
         ' constraint_name=access_group_members_pkey',
     );
-    for (const leak of wrappedLeaks) {
+    for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
       expect(described).not.toContain(leak);
     }
   });
@@ -448,7 +440,7 @@ describe('the query wrapper drizzle puts around every failure', () => {
     expect(message).toContain(
       'The access-membership sync step failed in the database. code=23505',
     );
-    for (const leak of wrappedLeaks) {
+    for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
       expect(message).not.toContain(leak);
     }
   });

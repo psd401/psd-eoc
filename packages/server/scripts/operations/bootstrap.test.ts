@@ -20,10 +20,8 @@ import {
 import postgres from 'postgres';
 
 import {
-  DRIVER_FAILURE_LEAKS,
   driverFailureFixture,
-  WRAPPED_PARAMETERS,
-  WRAPPED_STATEMENT,
+  WRAPPED_DRIVER_FAILURE_LEAKS,
   wrappedDriverFailureFixture,
 } from './driver-error-test-fixtures';
 
@@ -795,23 +793,27 @@ describe('bootstrap statement executor', () => {
 });
 
 describe('bootstrap dependency driver-error boundary', () => {
-  const wrappedLeaks = [
-    ...DRIVER_FAILURE_LEAKS,
-    WRAPPED_STATEMENT,
-    ...WRAPPED_PARAMETERS,
-    'Failed query',
-    'params:',
-  ];
-
-  test('reduces a deliberately unwrapped step by its method name', async () => {
-    const dependencies = reduceDriverErrors({
-      async deliberatelyUnwrapped(value: number): Promise<void> {
-        expect(value).toBe(7);
+  test('wraps each deliberately unwrapped method transparently', async () => {
+    const rawDependencies = {
+      async calculate(
+        this: { readonly factor: number },
+        left: number,
+        right: number,
+      ): Promise<number> {
+        return this.factor * (left + right);
+      },
+      deliberatelyUnwrapped(): Promise<never> {
         throw wrappedDriverFailureFixture(driverFailureFixture());
       },
-    });
+    };
+    const dependencies = reduceDriverErrors(rawDependencies);
 
-    const raised = await dependencies.deliberatelyUnwrapped(7).then(
+    expect(Object.keys(dependencies)).toEqual(Object.keys(rawDependencies));
+    await expect(
+      dependencies.calculate.call({ factor: 4 }, 2, 5),
+    ).resolves.toBe(28);
+
+    const raised = await dependencies.deliberatelyUnwrapped().then(
       () => null,
       (error: unknown) => error,
     );
@@ -824,7 +826,7 @@ describe('bootstrap dependency driver-error boundary', () => {
       'The deliberatelyUnwrapped step failed in the database.',
     );
     expect(message).toContain('code=23505');
-    for (const leak of wrappedLeaks) {
+    for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
       expect(message).not.toContain(leak);
     }
   });
@@ -929,12 +931,7 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
       const message = String(Reflect.get(Object(raised), 'message'));
       expect(message).toContain(`The ${method} step failed in the database.`);
       expect(message).toContain('code=23505');
-      for (const leak of [
-        ...DRIVER_FAILURE_LEAKS,
-        WRAPPED_STATEMENT,
-        ...WRAPPED_PARAMETERS,
-        'Failed query',
-      ]) {
+      for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
         expect(message).not.toContain(leak);
       }
     });
@@ -961,13 +958,7 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
     expect(message).not.toContain(
       'The acquireAdvisoryLock step failed in the database.',
     );
-    for (const leak of [
-      ...DRIVER_FAILURE_LEAKS,
-      WRAPPED_STATEMENT,
-      ...WRAPPED_PARAMETERS,
-      'Failed query',
-      'params:',
-    ]) {
+    for (const leak of WRAPPED_DRIVER_FAILURE_LEAKS) {
       expect(message).not.toContain(leak);
     }
   });

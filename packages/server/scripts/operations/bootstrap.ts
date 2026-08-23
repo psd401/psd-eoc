@@ -61,23 +61,55 @@ export interface BootstrapDependencies {
 
 type AsyncDependencyMethod = (...parameters: never[]) => Promise<unknown>;
 
+type ReducedDependencyMethod<Method extends AsyncDependencyMethod> = (
+  this: ThisParameterType<Method>,
+  ...parameters: Parameters<OmitThisParameter<Method>>
+) => ReturnType<Method>;
+
+type ReducedDriverErrorDependencies<
+  Dependencies extends Record<string, AsyncDependencyMethod>,
+> = {
+  [Step in Extract<keyof Dependencies, string>]: ReducedDependencyMethod<
+    Dependencies[Step]
+  >;
+};
+
 /**
  * Reduces driver errors for every method in a source-defined dependency object.
  *
  * The method names are code-controlled log labels. Discovering them from the
  * object is the point: adding a dependency cannot create an unguarded database
- * path merely because its author did not know about this boundary.
+ * path merely because its author did not know about this boundary. The input
+ * contract is deliberately narrow: a plain object whose own enumerable string
+ * keys are Promise-returning methods. Only call signatures are preserved; symbols,
+ * descriptors, and properties attached to function objects are not supported.
  */
 export function reduceDriverErrors<
   const Dependencies extends Record<string, AsyncDependencyMethod>,
->(dependencies: Dependencies): Dependencies {
+>(dependencies: Dependencies): ReducedDriverErrorDependencies<Dependencies> {
+  const prototype = Object.getPrototypeOf(dependencies);
+  const ownKeys = Reflect.ownKeys(dependencies);
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    ownKeys.some(
+      (key) =>
+        typeof key !== 'string' ||
+        !Object.prototype.propertyIsEnumerable.call(dependencies, key),
+    )
+  ) {
+    throw new TypeError(
+      'Bootstrap dependencies must be a plain object of own enumerable string-keyed methods.',
+    );
+  }
   const reduced = Object.entries(dependencies).map(([step, run]) => [
     step,
     function (this: unknown, ...parameters: never[]): Promise<unknown> {
       return withReducedDriverErrors(step, () => run.apply(this, parameters));
     },
   ]);
-  return Object.fromEntries(reduced) as Dependencies;
+  return Object.fromEntries(
+    reduced,
+  ) as ReducedDriverErrorDependencies<Dependencies>;
 }
 
 /**
