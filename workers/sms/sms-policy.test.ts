@@ -315,7 +315,7 @@ function expectPolicyError(
 }
 
 describe('SMS rendering policy', () => {
-  test('renders an unmistakable one-part drill SMS', () => {
+  test('renders an unmistakable one-part synthetic-test SMS', () => {
     const template = SmsMessageTemplateSchema.parse({
       templateMode: 'drill',
       purpose: 'activation',
@@ -335,7 +335,9 @@ describe('SMS rendering policy', () => {
       },
     });
 
-    expect(rendered.body).toStartWith('[DRILL] TRAINING ONLY - ACTIVATION:');
+    expect(rendered.body).toStartWith(
+      '[DRILL] TEST - NOT A REAL INCIDENT - ACTIVATION:',
+    );
     expect(rendered.body).toEndWith('[DRILL]');
     expect(rendered.body).not.toContain('[INCIDENT]');
   });

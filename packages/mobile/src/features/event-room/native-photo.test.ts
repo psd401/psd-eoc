@@ -20,6 +20,9 @@ let launchError: Error | null = null;
 let launchCalls = 0;
 let permissionGranted = true;
 let permissionCalls = 0;
+let cameraPermissionGranted = true;
+let cameraPermissionCalls = 0;
+let cameraLaunchCalls = 0;
 let pendingResult: unknown = null;
 let pendingResultCalls = 0;
 let pendingResultImplementation: (() => Promise<unknown>) | null = null;
@@ -220,6 +223,15 @@ mock.module('expo-image-picker', () => ({
     if (launchError !== null) throw launchError;
     return launchResult;
   },
+  async requestCameraPermissionsAsync() {
+    cameraPermissionCalls += 1;
+    return { granted: cameraPermissionGranted };
+  },
+  async launchCameraAsync() {
+    cameraLaunchCalls += 1;
+    if (launchError !== null) throw launchError;
+    return launchResult;
+  },
   async getPendingResultAsync() {
     pendingResultCalls += 1;
     if (pendingResultImplementation !== null) {
@@ -321,6 +333,9 @@ beforeEach(() => {
   launchCalls = 0;
   permissionGranted = true;
   permissionCalls = 0;
+  cameraPermissionGranted = true;
+  cameraPermissionCalls = 0;
+  cameraLaunchCalls = 0;
   pendingResult = null;
   pendingResultCalls = 0;
   pendingResultImplementation = null;
@@ -748,7 +763,7 @@ describe('native photo durable ownership', () => {
 
     await expect(
       storage.withNewPendingSelection(retainedOwner, async (lease) =>
-        lease.select(),
+        lease.select('library'),
       ),
     ).rejects.toThrow('already owns private bytes');
     expect(await storage.loadPendingSelection()).toEqual(retainedOwner);
@@ -762,7 +777,7 @@ describe('native photo durable ownership', () => {
     permissionGranted = false;
     expect(
       await storage.withNewPendingSelection(owner(), async (lease) =>
-        lease.select(),
+        lease.select('library'),
       ),
     ).toBeNull();
     expect(await storage.loadPendingSelection()).toBeNull();
@@ -773,7 +788,7 @@ describe('native photo durable ownership', () => {
     permissionGranted = true;
     expect(
       await storage.withNewPendingSelection(owner(), async (lease) =>
-        lease.select(),
+        lease.select('library'),
       ),
     ).toBeNull();
     expect(await storage.loadPendingSelection()).toBeNull();
@@ -784,7 +799,7 @@ describe('native photo durable ownership', () => {
     launchResult = { canceled: false, assets: [] };
     await expect(
       storage.withNewPendingSelection(invalidOwner, async (lease) =>
-        lease.select(),
+        lease.select('library'),
       ),
     ).rejects.toThrow('exactly one photo');
     expect(await storage.loadPendingSelection()).toBeNull();
@@ -794,7 +809,7 @@ describe('native photo durable ownership', () => {
     launchError = new Error('synthetic picker launch rejection');
     await expect(
       storage.withNewPendingSelection(thrownOwner, async (lease) =>
-        lease.select(),
+        lease.select('library'),
       ),
     ).rejects.toThrow('synthetic picker launch rejection');
     expect(await storage.loadPendingSelection()).toBeNull();
@@ -805,6 +820,54 @@ describe('native photo durable ownership', () => {
         `${DRAFT_DIRECTORY_URI}${thrownOwner.draftId}.${thrownOwner.selectionId}.pending-photo`,
       ),
     ).toBe(false);
+  });
+
+  test('requests camera access and retains camera bytes through the same private validation path', async () => {
+    const storage = new NativePhotoDraftStorage();
+    const deniedOwner = owner();
+    cameraPermissionGranted = false;
+
+    await expect(
+      storage.withNewPendingSelection(deniedOwner, async (lease) =>
+        lease.select('camera'),
+      ),
+    ).rejects.toMatchObject({
+      name: 'PhotoSelectionUnavailableError',
+      message:
+        'Camera access is unavailable. Enable camera access in device settings, or choose an existing photo.',
+    });
+    expect(cameraPermissionCalls).toBe(1);
+    expect(cameraLaunchCalls).toBe(0);
+    expect(permissionCalls).toBe(0);
+    expect(await storage.loadPendingSelection()).toBeNull();
+
+    cameraPermissionGranted = true;
+    const retainedOwner = owner({
+      selectionId: ids.otherSelection,
+      draftId: ids.otherDraft,
+    });
+    const sourceUri = 'file:///camera/synthetic-photo.jpg';
+    files.set(sourceUri, JPEG);
+    launchResult = {
+      canceled: false,
+      assets: [{ uri: sourceUri, type: 'image', exif: { GPSLatitude: 1 } }],
+    };
+
+    const retained = await storage.withNewPendingSelection(
+      retainedOwner,
+      async (lease) => lease.select('camera'),
+    );
+    expect(retained).toMatchObject({
+      localUri: `${DRAFT_DIRECTORY_URI}${retainedOwner.draftId}.private-photo`,
+      byteLength: JPEG.byteLength,
+      declaredContentType: 'image/jpeg',
+    });
+    expect(files.get(retained!.localUri)).toEqual(JPEG);
+    expect(cameraPermissionCalls).toBe(2);
+    expect(cameraLaunchCalls).toBe(1);
+    expect(launchCalls).toBe(0);
+    expect(permissionCalls).toBe(0);
+    await storage.discardPendingSelection(retainedOwner);
   });
 
   test('automatic cancel and stale-scope clear preserve a valid drained Android asset', async () => {
@@ -818,7 +881,7 @@ describe('native photo durable ownership', () => {
     const canceledOwner = owner();
     const recoveredFromCancel = await storage.withNewPendingSelection(
       canceledOwner,
-      async (lease) => lease.select(),
+      async (lease) => lease.select('library'),
     );
     expect(recoveredFromCancel?.localUri).toBe(
       `${DRAFT_DIRECTORY_URI}${canceledOwner.draftId}.private-photo`,

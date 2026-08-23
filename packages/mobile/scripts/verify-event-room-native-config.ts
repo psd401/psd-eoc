@@ -26,8 +26,9 @@ assert(
   'Photo selection must not request microphone access.',
 );
 assert(
-  picker.cameraPermission === false,
-  'Photo selection must not request unused camera access.',
+  typeof picker.cameraPermission === 'string' &&
+    picker.cameraPermission.includes('event journal'),
+  'Camera access must explain its event-journal purpose.',
 );
 assert(
   typeof picker.photosPermission === 'string' &&

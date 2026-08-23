@@ -4,9 +4,12 @@ import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
 
 import {
+  EVENT_CLASSIFICATION_PRESENTATIONS,
   JournalEntryReadProjectionSchema,
   OrganizationNameSchema,
+  getEventClassificationPresentation,
   type AttemptDeliveryTruthState,
+  type EventClassificationLabel,
   type JournalEntryReadProjection,
   type MediaContentType,
   type NotificationChannel,
@@ -30,10 +33,7 @@ export const EVENT_SUMMARY_ATTEMPT_STATES = Object.freeze([
   'unknown',
 ] as const satisfies readonly AttemptDeliveryTruthState[]);
 
-export type EventSummaryClassification =
-  | 'REAL INCIDENT'
-  | 'DRILL - TRAINING ONLY'
-  | 'TEST - NOT A REAL INCIDENT';
+export type EventSummaryClassification = EventClassificationLabel;
 
 export interface EventSummaryEventSnapshot {
   readonly id: string;
@@ -299,16 +299,16 @@ function measureSnapshotValue(
 function classificationFor(
   event: EventSummaryEventSnapshot,
 ): EventSummaryClassification {
-  if (event.kind === 'incident' && event.templateMode === 'real') {
-    return 'REAL INCIDENT';
+  try {
+    return getEventClassificationPresentation({
+      kind: event.kind,
+      templateMode: event.templateMode,
+    }).label as EventSummaryClassification;
+  } catch {
+    throw invalid(
+      'The event real-versus-drill classification is inconsistent.',
+    );
   }
-  if (event.kind === 'drill' && event.templateMode === 'drill') {
-    return 'DRILL - TRAINING ONLY';
-  }
-  if (event.kind === 'test' && event.templateMode === 'drill') {
-    return 'TEST - NOT A REAL INCIDENT';
-  }
-  throw invalid('The event real-versus-drill classification is inconsistent.');
 }
 
 function prepareSnapshot(snapshot: EventSummarySnapshot): PreparedSnapshot {
@@ -517,12 +517,13 @@ function classificationColor(
   classification: EventSummaryClassification,
 ): string {
   switch (classification) {
-    case 'REAL INCIDENT':
-      return COLORS.red;
-    case 'DRILL - TRAINING ONLY':
-      return COLORS.blue;
-    case 'TEST - NOT A REAL INCIDENT':
-      return COLORS.amber;
+    case EVENT_CLASSIFICATION_PRESENTATIONS.incident.label:
+      return EVENT_CLASSIFICATION_PRESENTATIONS.incident.colors
+        .bannerBackground;
+    case EVENT_CLASSIFICATION_PRESENTATIONS.drill.label:
+      return EVENT_CLASSIFICATION_PRESENTATIONS.drill.colors.bannerBackground;
+    case EVENT_CLASSIFICATION_PRESENTATIONS.test.label:
+      return EVENT_CLASSIFICATION_PRESENTATIONS.test.colors.bannerBackground;
   }
 }
 

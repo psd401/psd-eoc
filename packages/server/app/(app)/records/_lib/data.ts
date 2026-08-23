@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   EventTypeListItem,
   Facility,
-  ListDrillRecordsInput,
+  ListEventRecordsInput,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
@@ -45,8 +45,11 @@ export async function loadRecordsFilterOptions(
         store: getDefaultEventTypeStore(),
         authenticated,
         query: {
-          templateMode: 'drill',
-          enabled: null,
+          templateMode: null,
+          // The published/enabled list is the event-type capability's
+          // staff-safe read surface. Historical rows still carry their
+          // immutable event-type names even if a type is later disabled.
+          enabled: true,
           cursor,
           limit: 200,
         },
@@ -69,13 +72,13 @@ export async function loadRecordsFilterOptions(
   });
 }
 
-/** Lists one authorized page of drill records through canonical execution. */
-export async function loadDrillRecordPage(
+/** Lists one authorized page of operational records through canonical execution. */
+export async function loadEventRecordPage(
   authenticated: AuthenticatedSession,
-  input: ListDrillRecordsInput,
+  input: ListEventRecordsInput,
 ) {
   return getDefaultRecordsCapabilityRuntime().execute(
-    'list-drill-records',
+    'list-event-records',
     input,
     queryInvocation(authenticated),
   );

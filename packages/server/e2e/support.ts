@@ -10,6 +10,12 @@ const axePath = require.resolve('axe-core/axe.min.js');
 export interface BrowserFixture {
   readonly eventId: string;
   readonly districtAdministratorUserId: string;
+  readonly records: Readonly<{
+    northIncidentId: string;
+    northDrillId: string;
+    northTestId: string;
+    southIncidentId: string;
+  }>;
 }
 
 export function statePath(name: string): string {
@@ -22,6 +28,14 @@ export function evidencePath(name: string): string {
   const directory = process.env.PSD_EOC_E2E_EVIDENCE_DIR;
   if (directory === undefined) {
     throw new Error('Browser evidence directory is unavailable.');
+  }
+  return join(directory, name);
+}
+
+export function issue341EvidencePath(name: string): string {
+  const directory = process.env.PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR;
+  if (directory === undefined) {
+    throw new Error('Issue 341 browser evidence directory is unavailable.');
   }
   return join(directory, name);
 }

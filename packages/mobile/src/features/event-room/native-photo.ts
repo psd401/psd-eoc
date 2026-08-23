@@ -71,6 +71,16 @@ export interface PrivatePhotoFile {
   readonly declaredContentType: MediaContentType;
 }
 
+export type PhotoSource = 'camera' | 'library';
+
+/** A bounded, actionable picker failure that is safe to show to staff. */
+export class PhotoSelectionUnavailableError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'PhotoSelectionUnavailableError';
+  }
+}
+
 class InvalidPrivatePhotoError extends Error {
   public constructor(message: string) {
     super(message);
@@ -668,7 +678,7 @@ export interface PendingPhotoSelectionLease {
   readonly owner: PendingPhotoSelectionOwner;
   /** Initial save commits the exact retained file and owner as one operation. */
   readonly storage: PhotoDraftStorage;
-  select(): Promise<PrivatePhotoFile | null>;
+  select(source: PhotoSource): Promise<PrivatePhotoFile | null>;
   recover(): Promise<PrivatePhotoFile | null>;
   /** Returns true only when the exact owner was safely tombstoned. */
   clearBeforeCopy(): Promise<boolean>;
@@ -963,10 +973,10 @@ export class NativePhotoDraftStorage implements PhotoDraftStorage {
     const lease: PendingPhotoSelectionLease = Object.freeze({
       owner,
       storage: pendingStorage,
-      select: async () => {
+      select: async (source: PhotoSource) => {
         assertActive();
         await requirePendingOwner(owner);
-        return selectOwnedPrivatePhoto(owner);
+        return selectOwnedPrivatePhoto(owner, source);
       },
       recover: async () => {
         assertActive();
@@ -1284,10 +1294,20 @@ async function retainOrClearProvedFailure(
 /** Runs only while the exact owner holds the process-global picker lease. */
 async function selectOwnedPrivatePhoto(
   owner: PendingPhotoSelectionOwner,
+  source: PhotoSource,
 ): Promise<PrivatePhotoFile | null> {
   let result: ImagePicker.ImagePickerResult;
   try {
-    result = await ImagePicker.launchImageLibraryAsync({
+    if (source === 'camera') {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        await clearProvedOwnerWithoutBytes(owner);
+        throw new PhotoSelectionUnavailableError(
+          'Camera access is unavailable. Enable camera access in device settings, or choose an existing photo.',
+        );
+      }
+    }
+    const options = {
       mediaTypes: ['images'],
       allowsEditing: false,
       allowsMultipleSelection: false,
@@ -1295,8 +1315,13 @@ async function selectOwnedPrivatePhoto(
       quality: 1,
       exif: false,
       base64: false,
-    });
+    } satisfies ImagePicker.ImagePickerOptions;
+    result =
+      source === 'camera'
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
   } catch (error) {
+    if (error instanceof PhotoSelectionUnavailableError) throw error;
     if (
       !privateDraftDestination(owner.draftId).exists &&
       !privateDraftInProgressFile(owner.draftId, owner.selectionId).exists

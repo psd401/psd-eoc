@@ -158,10 +158,12 @@ import { paginatedSchema, PaginationCursorSchema } from './api';
 import {
   DeliveryReportSchema,
   DrillRecordPageSchema,
+  EventRecordPageSchema,
   EventSummaryExportSchema,
   ExportDrillRecordsInputSchema,
   ExportEventSummaryInputSchema,
   ListDrillRecordsInputSchema,
+  ListEventRecordsInputSchema,
   RecordsExportSchema,
   RunDeliveryReportInputSchema,
 } from './report';
@@ -1457,6 +1459,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: ListDrillRecordsInputSchema,
     outputSchema: DrillRecordPageSchema,
   }),
+  'list-event-records': canonicalCapability({
+    id: 'list-event-records',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: ListEventRecordsInputSchema,
+    outputSchema: EventRecordPageSchema,
+  }),
   'export-drill-records': canonicalCapability({
     id: 'export-drill-records',
     operation: 'query',
@@ -1626,6 +1635,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'list-users': humanAgentInvocationPolicy,
   'list-agent-api-keys': humanAgentInvocationPolicy,
   'list-drill-records': humanAgentInvocationPolicy,
+  'list-event-records': humanInteractiveInvocationPolicy,
   'export-drill-records': humanAgentInvocationPolicy,
   'export-event-summary': humanAgentInvocationPolicy,
   'query-security-audit': humanAgentInvocationPolicy,

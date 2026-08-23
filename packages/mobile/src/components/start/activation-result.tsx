@@ -1,4 +1,4 @@
-import type { TemplateMode } from '@psd-eoc/contracts';
+import type { EventKind, TemplateMode } from '@psd-eoc/contracts';
 import { useEffect, useRef } from 'react';
 import {
   AccessibilityInfo,
@@ -16,6 +16,7 @@ export interface ActivationResultProps {
   /** Defaults true. App-lifetime owners announce from their single claim. */
   readonly announceOnMount?: boolean;
   readonly eventTypeName: string;
+  readonly eventKind: EventKind;
   readonly kind: 'activated' | 'joined';
   readonly mode: TemplateMode;
   readonly onOpenEvent?: () => void;
@@ -25,7 +26,7 @@ export interface ActivationResultProps {
 
 type ResultIdentity = Pick<
   ActivationResultProps,
-  'eventTypeName' | 'kind' | 'mode'
+  'eventKind' | 'eventTypeName' | 'kind' | 'mode'
 >;
 
 function resultCopy({ kind, mode }: ResultIdentity) {
@@ -43,7 +44,7 @@ function resultCopy({ kind, mode }: ResultIdentity) {
 }
 
 export function activationResultAnnouncement(input: ResultIdentity): string {
-  const theme = getEventTheme(input.mode);
+  const theme = getEventTheme(input.mode, input.eventKind);
   const { heading, status } = resultCopy(input);
   return `${heading}. ${theme.classificationWord}. ${input.eventTypeName}. ${status}`;
 }
@@ -62,6 +63,7 @@ export function announceActivationResult(
 /** Full-screen result with a standalone one-announcement-per-mount default. */
 export function ActivationResult({
   announceOnMount = true,
+  eventKind,
   eventTypeName,
   kind,
   mode,
@@ -72,6 +74,7 @@ export function ActivationResult({
   const announced = useRef(false);
   const announcement = activationResultAnnouncement({
     eventTypeName,
+    eventKind,
     kind,
     mode,
   });
@@ -79,12 +82,13 @@ export function ActivationResult({
   useEffect(() => {
     if (!announceOnMount || announced.current) return;
     announced.current = true;
-    announceActivationResult({ eventTypeName, kind, mode });
-  }, [announceOnMount, announcement, eventTypeName, kind, mode]);
+    announceActivationResult({ eventKind, eventTypeName, kind, mode });
+  }, [announceOnMount, announcement, eventKind, eventTypeName, kind, mode]);
 
   return (
     <ActivationResultContent
       eventTypeName={eventTypeName}
+      eventKind={eventKind}
       kind={kind}
       mode={mode}
       {...(onOpenEvent === undefined ? {} : { onOpenEvent })}
@@ -97,15 +101,21 @@ export function ActivationResult({
 /** Pure native result tree shared with renderer-independent accessibility tests. */
 export function ActivationResultContent({
   eventTypeName,
+  eventKind,
   kind,
   mode,
   onOpenEvent,
   onReturnHome,
   testID,
 }: ActivationResultProps) {
-  const theme = getEventTheme(mode);
+  const theme = getEventTheme(mode, eventKind);
   const activated = kind === 'activated';
-  const { heading, status } = resultCopy({ eventTypeName, kind, mode });
+  const { heading, status } = resultCopy({
+    eventKind,
+    eventTypeName,
+    kind,
+    mode,
+  });
 
   return (
     <ScrollView
@@ -113,7 +123,7 @@ export function ActivationResultContent({
       style={[styles.page, { backgroundColor: theme.colors.pageBackground }]}
       testID={testID}
     >
-      <ClassificationBanner mode={mode} />
+      <ClassificationBanner kind={eventKind} mode={mode} />
       <View
         accessibilityLiveRegion="assertive"
         style={[

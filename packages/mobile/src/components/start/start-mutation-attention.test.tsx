@@ -96,6 +96,7 @@ describe('start mutation attention presentation', () => {
     for (const mode of ['real', 'drill'] as const) {
       for (const operation of ['activate', 'join'] as const) {
         const result = StartMutationAttentionContent({
+          eventKind: mode === 'real' ? 'incident' : 'drill',
           eventTypeName: 'Synthetic earthquake',
           mode,
           operation,
@@ -115,7 +116,7 @@ describe('start mutation attention presentation', () => {
         expect(banner?.props.mode).toBe(mode);
         expect(text).toContain('Synthetic earthquake');
         expect(text).toContain(
-          mode === 'real' ? 'REAL INCIDENT' : 'DRILL — PRACTICE',
+          mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY',
         );
         expect(text).toContain(
           operation === 'activate'
@@ -139,6 +140,7 @@ describe('start mutation attention presentation', () => {
     for (const mode of ['real', 'drill'] as const) {
       for (const operation of ['activate', 'join'] as const) {
         const result = StartMutationAttentionContent({
+          eventKind: mode === 'real' ? 'incident' : 'drill',
           eventTypeName: 'Synthetic earthquake',
           mode,
           onCheckActiveEvents: () => {},
@@ -188,6 +190,7 @@ describe('start mutation attention presentation', () => {
   test('invokes the explicit fresh-active-events callback exactly once', () => {
     let checks = 0;
     const result = StartMutationAttentionContent({
+      eventKind: 'drill',
       eventTypeName: 'Synthetic medical response',
       mode: 'drill',
       onCheckActiveEvents: () => {
@@ -211,6 +214,7 @@ describe('start mutation attention presentation', () => {
       activeEvents: [
         {
           eventId: '00000000-0000-4000-8000-000000000901',
+          eventKind: 'incident',
           eventTypeName: 'Synthetic lockdown',
           facilityName: 'Synthetic High School',
           mode: 'real',
@@ -218,12 +222,22 @@ describe('start mutation attention presentation', () => {
         },
         {
           eventId: '00000000-0000-4000-8000-000000000902',
+          eventKind: 'drill',
           eventTypeName: 'Synthetic earthquake practice',
           facilityName: 'Synthetic Middle School',
           mode: 'drill',
           startedLabel: 'Aug 12, 2026, 9:05 AM',
         },
+        {
+          eventId: '00000000-0000-4000-8000-000000000903',
+          eventKind: 'test',
+          eventTypeName: 'Synthetic delivery test',
+          facilityName: 'Synthetic Elementary School',
+          mode: 'drill',
+          startedLabel: 'Aug 12, 2026, 9:10 AM',
+        },
       ],
+      eventKind: 'drill',
       eventTypeName: 'Synthetic medical response',
       mode: 'drill',
       onCheckActiveEvents: () => {},
@@ -239,11 +253,12 @@ describe('start mutation attention presentation', () => {
 
     expect(text).toContain('Fresh active events');
     expect(text).toContain('REAL INCIDENT');
-    expect(text).toContain('DRILL — PRACTICE');
+    expect(text).toContain('DRILL — TRAINING ONLY');
+    expect(text).toContain('TEST — NOT A REAL INCIDENT');
     expect(text).toContain('Synthetic High School');
     expect(text).toContain('00000000-0000-4000-8000-000000000901');
     expect(text).toContain('cannot prove which request created an event');
-    expect(summaries).toHaveLength(2);
+    expect(summaries).toHaveLength(3);
     expect(
       summaries.every((summary) => summary.props.accessible === true),
     ).toBe(true);
@@ -260,6 +275,7 @@ describe('start mutation attention presentation', () => {
   test('renders an empty refreshed list without claiming prior failure', () => {
     const result = StartMutationAttentionContent({
       activeEvents: [],
+      eventKind: 'drill',
       eventTypeName: 'Synthetic medical response',
       mode: 'drill',
       onCheckActiveEvents: () => {},
@@ -277,6 +293,7 @@ describe('start mutation attention presentation', () => {
   test('disables refresh while checking and keeps refresh failures unresolved', () => {
     const checkingResult = StartMutationAttentionContent({
       checking: true,
+      eventKind: 'incident',
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
       onCheckActiveEvents: () => {},
@@ -295,6 +312,7 @@ describe('start mutation attention presentation', () => {
 
     const failedResult = StartMutationAttentionContent({
       checkError: 'Fresh active events are unavailable.',
+      eventKind: 'incident',
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
       onCheckActiveEvents: () => {},
@@ -320,6 +338,7 @@ describe('start mutation attention presentation', () => {
 
   test('is scrollable and avoids fixed content height for large text', () => {
     const result = StartMutationAttentionContent({
+      eventKind: 'drill',
       eventTypeName: 'Synthetic wildlife response with a long localized name',
       mode: 'drill',
       onCheckActiveEvents: () => {},
@@ -356,7 +375,7 @@ describe('start mutation attention presentation', () => {
     expect(text).toContain('Nothing will retry automatically');
     expect(text).not.toContain('Synthetic earthquake');
     expect(text).not.toContain('REAL INCIDENT');
-    expect(text).not.toContain('DRILL — PRACTICE');
+    expect(text).not.toContain('DRILL — TRAINING ONLY');
     expect(action(nodes)).toBeUndefined();
   });
 
@@ -381,6 +400,7 @@ describe('start mutation attention presentation', () => {
   test('renders a definite classified failure without calling it unknown', () => {
     let acknowledgements = 0;
     const result = StartMutationAttentionContent({
+      eventKind: 'drill',
       eventTypeName: 'Synthetic earthquake',
       failureMessage:
         'Offline — no event was started or joined, and nothing was queued.',
@@ -396,7 +416,7 @@ describe('start mutation attention presentation', () => {
     const returnAction = action(nodes);
 
     expect(text).toContain('Start request was not completed');
-    expect(text).toContain('DRILL — PRACTICE');
+    expect(text).toContain('DRILL — TRAINING ONLY');
     expect(text).toContain('nothing was queued');
     expect(text).toContain('Offline — no event was started or joined');
     expect(text).not.toContain('could not determine the server outcome');
@@ -413,6 +433,7 @@ describe('start mutation attention presentation', () => {
   test('disables a definite-failure refresh while it is checking', () => {
     const result = StartMutationAttentionContent({
       checking: true,
+      eventKind: 'drill',
       eventTypeName: 'Synthetic earthquake',
       failureMessage: 'The server rejected the request.',
       mode: 'drill',
@@ -444,7 +465,7 @@ describe('start mutation attention presentation', () => {
     expect(text).toContain('Start and join actions are blocked');
     expect(text).toContain('No request will be sent or queued');
     expect(text).not.toContain('REAL INCIDENT');
-    expect(text).not.toContain('DRILL — PRACTICE');
+    expect(text).not.toContain('DRILL — TRAINING ONLY');
     expect(action(nodes)).toBeUndefined();
   });
 
@@ -465,6 +486,7 @@ describe('start mutation attention presentation', () => {
 
   test('disables attention checks while offline with explicit fail-closed copy', () => {
     const result = StartMutationAttentionContent({
+      eventKind: 'drill',
       eventTypeName: 'Synthetic earthquake',
       mode: 'drill',
       online: false,
@@ -483,6 +505,7 @@ describe('start mutation attention presentation', () => {
   test('copy helper preserves operation and classification semantics', () => {
     expect(
       startMutationAttentionCopy({
+        eventKind: 'incident',
         eventTypeName: 'Lockdown',
         mode: 'real',
         operation: 'activate',
@@ -494,6 +517,7 @@ describe('start mutation attention presentation', () => {
     });
     expect(
       startMutationAttentionCopy({
+        eventKind: 'drill',
         eventTypeName: 'Lockdown practice',
         mode: 'drill',
         operation: 'join',
@@ -501,7 +525,23 @@ describe('start mutation attention presentation', () => {
       }),
     ).toMatchObject({
       heading: 'Join outcome needs attention',
-      status: expect.stringContaining('DRILL — PRACTICE: Lockdown practice'),
+      status: expect.stringContaining(
+        'DRILL — TRAINING ONLY: Lockdown practice',
+      ),
+    });
+    expect(
+      startMutationAttentionCopy({
+        eventKind: 'test',
+        eventTypeName: 'Synthetic delivery test',
+        mode: 'drill',
+        operation: 'join',
+        status: 'pending',
+      }),
+    ).toMatchObject({
+      heading: 'Join request is still resolving',
+      status: expect.stringContaining(
+        'TEST — NOT A REAL INCIDENT: Synthetic delivery test',
+      ),
     });
   });
 });

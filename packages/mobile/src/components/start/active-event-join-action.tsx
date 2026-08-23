@@ -1,4 +1,4 @@
-import type { EventId, TemplateMode } from '@psd-eoc/contracts';
+import type { EventId, EventKind, TemplateMode } from '@psd-eoc/contracts';
 
 import { getEventTheme } from '../../theme/event-theme';
 import { ClassifiedActionButton } from './classified-action-button';
@@ -7,6 +7,7 @@ export interface ActiveEventJoinActionProps {
   readonly busy?: boolean;
   readonly disabled?: boolean;
   readonly eventId: EventId;
+  readonly eventKind: EventKind;
   readonly eventTypeName: string;
   readonly facilityName: string;
   readonly mode: TemplateMode;
@@ -20,6 +21,7 @@ export function ActiveEventJoinAction({
   busy = false,
   disabled = false,
   eventId,
+  eventKind,
   eventTypeName,
   facilityName,
   mode,
@@ -27,7 +29,7 @@ export function ActiveEventJoinAction({
   startedLabel,
   testID,
 }: ActiveEventJoinActionProps) {
-  const theme = getEventTheme(mode);
+  const theme = getEventTheme(mode, eventKind);
 
   return (
     <ClassifiedActionButton
@@ -36,6 +38,7 @@ export function ActiveEventJoinAction({
       busy={busy}
       detail={`${facilityName} · Started ${startedLabel} · Event ID ${eventId}`}
       disabled={disabled}
+      kind={eventKind}
       mode={mode}
       onPress={onPress}
       title={busy ? `Joining ${eventTypeName} once…` : `Join ${eventTypeName}`}

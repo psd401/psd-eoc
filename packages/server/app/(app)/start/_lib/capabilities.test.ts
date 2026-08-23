@@ -128,8 +128,8 @@ const PREVIEW = ActivationPreviewSchema.parse({
         templateMode: 'drill',
         purpose: 'activation',
         classificationMarker: 'DRILL',
-        title: '[DRILL] TRAINING ONLY - ACTIVATION: Test [DRILL]',
-        body: '[DRILL] TRAINING ONLY - ACTIVATION: Test [DRILL]',
+        title: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
+        body: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
       },
       integrationStatus: {
         integrationId: 'expo-push',
@@ -145,8 +145,8 @@ const PREVIEW = ActivationPreviewSchema.parse({
         templateMode: 'drill',
         purpose: 'activation',
         classificationMarker: 'DRILL',
-        subject: '[DRILL] TRAINING ONLY - ACTIVATION: Test [DRILL]',
-        textBody: '[DRILL] TRAINING ONLY - ACTIVATION: Test [DRILL]',
+        subject: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
+        textBody: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
       },
       integrationStatus: {
         integrationId: 'ses-email',

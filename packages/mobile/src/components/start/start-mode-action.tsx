@@ -1,5 +1,6 @@
 import type { TemplateMode } from '@psd-eoc/contracts';
 
+import { getEventTheme } from '../../theme/event-theme';
 import { ClassifiedActionButton } from './classified-action-button';
 
 export interface StartModeActionProps {
@@ -22,11 +23,12 @@ export function StartModeAction({
 }: StartModeActionProps) {
   const real = mode === 'real';
   const title = real ? 'Start real incident' : 'Run practice drill';
+  const classification = getEventTheme(mode).classificationWord;
 
   return (
     <ClassifiedActionButton
       accessibilityHint="Opens event type choices. This choice does not start an event or notify anyone."
-      accessibilityLabel={`${real ? 'REAL INCIDENT' : 'DRILL — PRACTICE'}. ${title} at ${facilityName}`}
+      accessibilityLabel={`${classification}. ${title} at ${facilityName}`}
       busy={busy}
       detail={facilityName}
       disabled={disabled}

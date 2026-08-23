@@ -325,8 +325,8 @@ describe('event summary PDF renderer', () => {
 
   for (const [kind, classification] of [
     ['incident', 'REAL INCIDENT'],
-    ['drill', 'DRILL - TRAINING ONLY'],
-    ['test', 'TEST - NOT A REAL INCIDENT'],
+    ['drill', 'DRILL — TRAINING ONLY'],
+    ['test', 'TEST — NOT A REAL INCIDENT'],
   ] as const) {
     testWithPoppler(`renders the exact ${kind} classification`, async () => {
       const text = await extractText(
@@ -361,7 +361,7 @@ describe('event summary PDF renderer', () => {
       expect(pages.length).toBeGreaterThan(2);
       expect(pages).toHaveLength(pageCount(bytes));
       for (const [index, page] of pages.entries()) {
-        expect(page).toContain('DRILL - TRAINING ONLY');
+        expect(page).toContain('DRILL — TRAINING ONLY');
         expect(renderedFooters[index]).toEqual([index + 1, pages.length]);
       }
       expect(renderedSequences).toEqual(

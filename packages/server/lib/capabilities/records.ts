@@ -1,5 +1,6 @@
 import {
   DrillRecordPageSchema,
+  EventRecordPageSchema,
   EventSummaryExportSchema,
   RecordsExportSchema,
   type CapabilityOutput,
@@ -33,6 +34,7 @@ import { renderEventSummaryPdf } from './records/pdf';
 
 export type RecordsCapabilityId =
   | 'list-drill-records'
+  | 'list-event-records'
   | 'export-drill-records'
   | 'export-event-summary';
 
@@ -45,6 +47,22 @@ export const listDrillRecordsRegistration: ServerCapabilityRegistration<
   async handler(input, context) {
     return DrillRecordPageSchema.parse(
       await context.transaction.listDrillRecords(
+        input,
+        context.invocation.scope,
+      ),
+    );
+  },
+};
+
+export const listEventRecordsRegistration: ServerCapabilityRegistration<
+  'list-event-records',
+  JournalCapabilityTransaction
+> = {
+  id: 'list-event-records',
+  resolveFacilityId: (input) => input.facilityId,
+  async handler(input, context) {
+    return EventRecordPageSchema.parse(
+      await context.transaction.listEventRecords(
         input,
         context.invocation.scope,
       ),
@@ -150,6 +168,20 @@ export function executeRecordsCapability(
   );
 }
 
+/** Executes the human-interactive mixed incident/drill/test records query. */
+export function executeEventRecordsCapability(
+  input: unknown,
+  invocation: TrustedCapabilityInvocation,
+  store: JournalCapabilityStore,
+): Promise<CapabilityOutput<'list-event-records'>> {
+  return executeCapability(
+    listEventRecordsRegistration,
+    input,
+    invocation,
+    store,
+  );
+}
+
 /** Executes one export through the same canonical authorization/audit engine. */
 export function executeRecordsExportCapability<
   Id extends 'export-drill-records' | 'export-event-summary',
@@ -210,6 +242,13 @@ export function createRecordsCapabilityRuntime(
         return executeRecordsCapability(input, invocation, store) as Promise<
           CapabilityOutput<Id>
         >;
+      }
+      if (capabilityId === 'list-event-records') {
+        return executeEventRecordsCapability(
+          input,
+          invocation,
+          store,
+        ) as Promise<CapabilityOutput<Id>>;
       }
       return executeRecordsExportCapability(
         capabilityId,

@@ -50,7 +50,7 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow PSD EOC to select a photo for this staff emergency event journal.",
-          "cameraPermission": false,
+          "cameraPermission": "Allow this app to take a photo for the staff emergency event journal.",
           "microphonePermission": false
         }
       ],

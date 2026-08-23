@@ -165,13 +165,21 @@ dd {
 }
 
 .classification-banner.mode-real {
-  background: #fff1f2;
-  color: #881337;
+  border-color: #b42332;
+  background: #7a1020;
+  color: #fff;
 }
 
 .classification-banner.mode-drill {
-  background: #eff6ff;
-  color: #1e3a8a;
+  border-color: #0369a1;
+  background: #075985;
+  color: #fff;
+}
+
+.classification-banner.mode-test {
+  border-color: #a16207;
+  background: #765a00;
+  color: #fff;
 }
 
 .classification-icon {
@@ -748,13 +756,21 @@ dialog::backdrop {
 }
 
 .dialog-classification.mode-real {
-  background: #fff1f2;
-  color: #881337;
+  border-color: #b42332;
+  background: #7a1020;
+  color: #fff;
 }
 
 .dialog-classification.mode-drill {
-  background: #eff6ff;
-  color: #1e3a8a;
+  border-color: #0369a1;
+  background: #075985;
+  color: #fff;
+}
+
+.dialog-classification.mode-test {
+  border-color: #a16207;
+  background: #765a00;
+  color: #fff;
 }
 
 .consequence-list {

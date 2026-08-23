@@ -4,7 +4,11 @@ import {
   type JournalEntryReadProjection,
   type LifecycleConsequencePreview,
   type LocationPayload,
+  type EventKind,
   type EventStatus,
+  type FacilityScope,
+  type JournalEntry,
+  type Role,
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import * as Crypto from 'expo-crypto';
@@ -42,6 +46,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ClassificationBanner } from '../../components/classification-banner';
+import { AuthenticatedApiError } from '../../lib/api';
 import {
   OFFLINE_ACTION_MESSAGE,
   useMobileAuth,
@@ -55,6 +60,7 @@ import {
   formatLocationPayload,
   isEventComposerVisible,
   isNearLiveEdge,
+  journalEntryActionEligibility,
   retainPendingTimelineFollow,
   timelineEntryAccessibilityLabel,
   timelineEntryText,
@@ -70,12 +76,48 @@ const LOCATION_LABEL_LIMIT = 200;
 const LOCATION_REASON_LIMIT = 500;
 const PIN_ADJUSTMENT_METRES = 5;
 const LOCATION_CAPTURE_TIMEOUT_MS = 10_000;
+const JOURNAL_ACTION_REASON_LIMIT = 1_000;
 
 export const EVENT_ROOM_MUTED_TEXT_COLOR = '#486581';
 
 type LifecycleAction = 'all-clear' | 'close';
 type LocationMode = 'known' | 'ambiguous' | 'unknown';
 type KnownLocation = Extract<LocationPayload, { state: 'known' }>;
+type CorrectableJournalEntry = Extract<
+  JournalEntry,
+  { kind: 'text' | 'location' }
+>;
+type JournalEntryAction = 'correction' | 'redaction';
+
+export function userCanManageEventJournal(
+  roles: readonly Role[],
+  scope: FacilityScope,
+  facilityId: string,
+): boolean {
+  return (
+    roles.length > 0 &&
+    (scope.kind === 'district' || scope.facilityIds.includes(facilityId))
+  );
+}
+
+export function journalActionError(error: unknown): string {
+  if (error instanceof AuthenticatedApiError) {
+    switch (error.status) {
+      case 400:
+        return 'Check the replacement content and reason, then try again.';
+      case 403:
+        return 'Your current role or site access no longer permits this entry action. Refresh your session or contact an administrator.';
+      case 404:
+        return 'This timeline entry is no longer available to your session. Refresh the timeline and choose it again.';
+      case 409:
+        return 'This entry changed or was already superseded. Refresh the timeline and choose the latest entry.';
+    }
+  }
+  return publicError(
+    error,
+    'The entry action did not complete. Reconnect and retry the retained request.',
+  );
+}
 
 export interface JournalMutationIdentity {
   readonly idempotencyKey: string;
@@ -181,6 +223,7 @@ export async function captureForegroundPosition({
 }
 
 export interface EventRoomTargetIdentity {
+  readonly eventKind?: EventKind;
   readonly eventTypeName: string;
   readonly facilityName: string;
   readonly facilityCode: string;
@@ -274,7 +317,10 @@ function EventTargetContext({
 }>) {
   return (
     <View style={styles.eventTargetContext}>
-      <ClassificationBanner mode={mode} />
+      <ClassificationBanner
+        {...(target.eventKind === undefined ? {} : { kind: target.eventKind })}
+        mode={mode}
+      />
       <View
         accessibilityLabel={`Event target. ${target.eventTypeName}. ${target.facilityName}, ${target.facilityCode}. Classification and target are immutable.`}
         accessibilityRole="summary"
@@ -370,10 +416,19 @@ function TimelinePhoto({
 export interface TimelineEntryCardProps {
   readonly projection: JournalEntryReadProjection;
   readonly api?: Pick<EventRoomApi, 'getMediaReadGrant'>;
+  readonly actionEligibility?: ReturnType<typeof journalEntryActionEligibility>;
+  readonly onCorrect?: () => void;
+  readonly onRedact?: () => void;
 }
 
 /** One append-only timeline fact grouped into a single screen-reader stop. */
-export function TimelineEntryCard({ api, projection }: TimelineEntryCardProps) {
+export function TimelineEntryCard({
+  actionEligibility,
+  api,
+  onCorrect,
+  onRedact,
+  projection,
+}: TimelineEntryCardProps) {
   const { entry } = projection;
   const visiblePhoto =
     projection.visibility === 'visible' && projection.entry.kind === 'photo'
@@ -421,7 +476,337 @@ export function TimelineEntryCard({ api, projection }: TimelineEntryCardProps) {
           {...(api === undefined ? {} : { api })}
         />
       )}
+      {actionEligibility === undefined ? null : (
+        <View style={styles.entryActionArea}>
+          <View style={styles.entryActionRow}>
+            {actionEligibility.correction.allowed && onCorrect !== undefined ? (
+              <ActionButton label="Correct…" onPress={onCorrect} />
+            ) : null}
+            {actionEligibility.redaction.allowed && onRedact !== undefined ? (
+              <ActionButton destructive label="Redact…" onPress={onRedact} />
+            ) : null}
+          </View>
+          {actionEligibility.correction.allowed ||
+          actionEligibility.correction.unavailableReason ===
+            actionEligibility.redaction.unavailableReason ? null : (
+            <Text accessibilityRole="summary" style={styles.entryActionHelp}>
+              Correction unavailable:{' '}
+              {actionEligibility.correction.unavailableReason}
+            </Text>
+          )}
+          {!actionEligibility.correction.allowed &&
+          !actionEligibility.redaction.allowed ? (
+            <Text accessibilityRole="summary" style={styles.entryActionHelp}>
+              Entry actions unavailable:{' '}
+              {actionEligibility.correction.unavailableReason ??
+                actionEligibility.redaction.unavailableReason}
+            </Text>
+          ) : null}
+        </View>
+      )}
     </View>
+  );
+}
+
+export type JournalActionSubmission =
+  | Readonly<{ action: 'redaction'; reason: string }>
+  | Readonly<{
+      action: 'correction';
+      reason: string;
+      replacement: Readonly<
+        | { kind: 'text'; text: string }
+        | { kind: 'location'; payload: LocationPayload }
+      >;
+    }>;
+
+interface JournalActionDialogProps {
+  readonly action: JournalEntryAction;
+  readonly busy: boolean;
+  readonly error: string | null;
+  readonly onDismiss: () => void;
+  readonly onSubmit: (submission: JournalActionSubmission) => void;
+  readonly target: JournalEntryReadProjection;
+}
+
+/** Explicit append-only correction/redaction editor for one retained entry. */
+export function JournalActionDialog({
+  action,
+  busy,
+  error,
+  onDismiss,
+  onSubmit,
+  target,
+}: JournalActionDialogProps) {
+  const visibleEntry = target.visibility === 'visible' ? target.entry : null;
+  const [reason, setReason] = useState('');
+  const [text, setText] = useState('');
+  const [knownLatitude, setKnownLatitude] = useState('');
+  const [knownLongitude, setKnownLongitude] = useState('');
+  const [knownAccuracy, setKnownAccuracy] = useState('');
+  const [locationLabel, setLocationLabel] = useState('');
+  const [locationDetail, setLocationDetail] = useState('');
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setReason('');
+    setValidationError(null);
+    if (visibleEntry?.kind === 'text') {
+      setText(visibleEntry.payload.text);
+      return;
+    }
+    if (visibleEntry?.kind !== 'location') return;
+    const payload = visibleEntry.payload;
+    if (payload.state === 'known') {
+      setKnownLatitude(String(payload.latitude));
+      setKnownLongitude(String(payload.longitude));
+      setKnownAccuracy(String(payload.accuracyMeters));
+      setLocationLabel(payload.label ?? '');
+      setLocationDetail('');
+    } else if (payload.state === 'ambiguous') {
+      setLocationLabel(payload.label);
+      setLocationDetail(payload.reason);
+    } else {
+      setLocationLabel('');
+      setLocationDetail(payload.reason);
+    }
+  }, [action, target.entry.id, visibleEntry]);
+
+  const submit = () => {
+    const canonicalReason = reason.trim();
+    if (canonicalReason.length === 0) {
+      setValidationError('Explain why this entry needs this action.');
+      return;
+    }
+    if (action === 'redaction') {
+      onSubmit({ action, reason: canonicalReason });
+      return;
+    }
+    if (visibleEntry?.kind === 'text') {
+      const canonicalText = text.trim();
+      if (canonicalText.length === 0) {
+        setValidationError('Enter the corrected timeline text.');
+        return;
+      }
+      onSubmit({
+        action,
+        reason: canonicalReason,
+        replacement: { kind: 'text', text: canonicalText },
+      });
+      return;
+    }
+    if (visibleEntry?.kind !== 'location') {
+      setValidationError(
+        'This entry cannot be corrected. Close this sheet and choose an available action.',
+      );
+      return;
+    }
+    const original = visibleEntry.payload;
+    const candidate =
+      original.state === 'known'
+        ? {
+            state: 'known' as const,
+            latitude: Number(knownLatitude),
+            longitude: Number(knownLongitude),
+            accuracyMeters: Number(knownAccuracy),
+            label: locationLabel.trim() || null,
+          }
+        : original.state === 'ambiguous'
+          ? {
+              state: 'ambiguous' as const,
+              label: locationLabel.trim(),
+              reason: locationDetail.trim(),
+            }
+          : {
+              state: 'unknown' as const,
+              reason: locationDetail.trim(),
+            };
+    const parsed = LocationPayloadSchema.safeParse(candidate);
+    if (!parsed.success) {
+      setValidationError(
+        'Check the corrected location details, including coordinates and accuracy.',
+      );
+      return;
+    }
+    onSubmit({
+      action,
+      reason: canonicalReason,
+      replacement: { kind: 'location', payload: parsed.data },
+    });
+  };
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={onDismiss}
+      presentationStyle="pageSheet"
+      visible
+    >
+      <SafeAreaView style={styles.modalPage}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalPage}
+        >
+          <ScrollView
+            contentContainerStyle={styles.modalContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={styles.modalTitleRow}>
+              <Text accessibilityRole="header" style={styles.modalTitle}>
+                {action === 'correction'
+                  ? `Correct timeline entry ${target.entry.sequence}`
+                  : `Redact timeline entry ${target.entry.sequence}`}
+              </Text>
+              <Pressable
+                accessibilityLabel="Cancel entry action"
+                accessibilityRole="button"
+                disabled={busy}
+                onPress={onDismiss}
+                style={({ pressed }) => [
+                  styles.closeButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.closeButtonText}>Cancel</Text>
+              </Pressable>
+            </View>
+
+            <View accessible style={styles.retainedNotice}>
+              <Text style={styles.retainedTitle}>Original entry retained</Text>
+              <Text style={styles.retainedText}>
+                {action === 'correction'
+                  ? 'Submitting appends a correction linked to the original. It never rewrites or deletes history.'
+                  : 'Redaction hides the original from outward views, but the original remains retained in append-only history.'}
+              </Text>
+            </View>
+            <Text accessibilityRole="summary" style={styles.safetyHelp}>
+              Current content: {timelineEntryText(target)}
+            </Text>
+
+            {action !== 'correction' ||
+            visibleEntry === null ? null : visibleEntry.kind === 'text' ? (
+              <View style={styles.editorSection}>
+                <Text style={styles.inputLabel}>Corrected text</Text>
+                <TextInput
+                  accessibilityLabel="Corrected timeline text"
+                  editable={!busy}
+                  maxLength={TEXT_LIMIT}
+                  multiline
+                  onChangeText={(value) => {
+                    setText(value);
+                    setValidationError(null);
+                  }}
+                  style={[styles.textField, styles.multilineField]}
+                  value={text}
+                />
+              </View>
+            ) : visibleEntry.kind === 'location' ? (
+              <View style={styles.editorSection}>
+                {visibleEntry.payload.state === 'known' ? (
+                  <>
+                    <Text style={styles.inputLabel}>Latitude</Text>
+                    <TextInput
+                      accessibilityLabel="Corrected latitude"
+                      editable={!busy}
+                      keyboardType="numbers-and-punctuation"
+                      onChangeText={setKnownLatitude}
+                      style={styles.textField}
+                      value={knownLatitude}
+                    />
+                    <Text style={styles.inputLabel}>Longitude</Text>
+                    <TextInput
+                      accessibilityLabel="Corrected longitude"
+                      editable={!busy}
+                      keyboardType="numbers-and-punctuation"
+                      onChangeText={setKnownLongitude}
+                      style={styles.textField}
+                      value={knownLongitude}
+                    />
+                    <Text style={styles.inputLabel}>
+                      Accuracy radius in metres
+                    </Text>
+                    <TextInput
+                      accessibilityLabel="Corrected accuracy radius in metres"
+                      editable={!busy}
+                      keyboardType="decimal-pad"
+                      onChangeText={setKnownAccuracy}
+                      style={styles.textField}
+                      value={knownAccuracy}
+                    />
+                  </>
+                ) : null}
+                {visibleEntry.payload.state === 'unknown' ? null : (
+                  <>
+                    <Text style={styles.inputLabel}>Location label</Text>
+                    <TextInput
+                      accessibilityLabel="Corrected location label"
+                      editable={!busy}
+                      maxLength={LOCATION_LABEL_LIMIT}
+                      onChangeText={setLocationLabel}
+                      style={styles.textField}
+                      value={locationLabel}
+                    />
+                  </>
+                )}
+                {visibleEntry.payload.state === 'known' ? null : (
+                  <>
+                    <Text style={styles.inputLabel}>Location detail</Text>
+                    <TextInput
+                      accessibilityLabel="Corrected location detail"
+                      editable={!busy}
+                      maxLength={LOCATION_REASON_LIMIT}
+                      multiline
+                      onChangeText={setLocationDetail}
+                      style={[styles.textField, styles.multilineField]}
+                      value={locationDetail}
+                    />
+                  </>
+                )}
+              </View>
+            ) : null}
+
+            <Text style={styles.inputLabel}>
+              {action === 'correction'
+                ? 'Reason for correction'
+                : 'Reason for redaction'}
+            </Text>
+            <TextInput
+              accessibilityLabel={
+                action === 'correction'
+                  ? 'Reason for correction'
+                  : 'Reason for redaction'
+              }
+              editable={!busy}
+              maxLength={JOURNAL_ACTION_REASON_LIMIT}
+              multiline
+              onChangeText={(value) => {
+                setReason(value);
+                setValidationError(null);
+              }}
+              placeholder="Explain the retained audit reason"
+              style={[styles.textField, styles.multilineField]}
+              value={reason}
+            />
+            {validationError === null && error === null ? null : (
+              <Text accessibilityRole="alert" style={styles.errorText}>
+                {validationError ?? error}
+              </Text>
+            )}
+            <ActionButton
+              destructive={action === 'redaction'}
+              disabled={busy}
+              label={
+                busy
+                  ? 'Submitting…'
+                  : action === 'correction'
+                    ? 'Append correction'
+                    : 'Append redaction'
+              }
+              onPress={submit}
+            />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
   );
 }
 
@@ -552,9 +937,10 @@ export function LifecycleConfirmationDialog({
                   </Text>
                   <Text style={styles.previewFact}>
                     Consequence: change this event to all-clear and create a{' '}
-                    {preview.templateMode === 'real'
-                      ? 'real incident'
-                      : 'drill'}{' '}
+                    {
+                      getEventTheme(preview.templateMode, preview.kind)
+                        .classificationWord
+                    }{' '}
                     all-clear notification for the channel plan below.
                   </Text>
                   <View style={styles.channelList}>
@@ -581,7 +967,9 @@ export function LifecycleConfirmationDialog({
                   </View>
                   {preview.blockingReasonCodes.length === 0 ? null : (
                     <Text accessibilityRole="alert" style={styles.warningText}>
-                      Blocking reasons: {preview.blockingReasonCodes.join(', ')}
+                      This action is unavailable because one or more server
+                      prerequisites are not ready. Refresh the preview; if it
+                      remains blocked, contact an administrator.
                     </Text>
                   )}
                   <Text selectable style={styles.digestText}>
@@ -1073,17 +1461,35 @@ export function PhotoComposerDialog({
             )}
 
             {recoveryOnly ? null : (
-              <ActionButton
-                disabled={
-                  selected ||
-                  photo.busy ||
-                  (draft?.altText.trim().length ?? 0) === 0
-                }
-                label={selected ? 'Photo retained' : 'Choose photo'}
-                onPress={() => {
-                  void photo.selectPhoto();
-                }}
-              />
+              <View style={styles.actionGroup}>
+                <ActionButton
+                  disabled={
+                    selected ||
+                    photo.busy ||
+                    (draft?.altText.trim().length ?? 0) === 0
+                  }
+                  label="Take Photo"
+                  onPress={() => {
+                    void photo.takePhoto();
+                  }}
+                />
+                <ActionButton
+                  disabled={
+                    selected ||
+                    photo.busy ||
+                    (draft?.altText.trim().length ?? 0) === 0
+                  }
+                  label="Choose Existing Photo"
+                  onPress={() => {
+                    void photo.choosePhoto();
+                  }}
+                />
+                {selected ? (
+                  <Text accessibilityRole="summary" style={styles.safetyHelp}>
+                    Photo retained privately and ready to upload.
+                  </Text>
+                ) : null}
+              </View>
             )}
 
             {draft === null ? null : (
@@ -1208,6 +1614,17 @@ function AuthenticatedEventRoomScreen({
   const [textError, setTextError] = useState<string | null>(null);
   const textMutationIdentityRef = useRef<JournalMutationIdentity | null>(null);
 
+  const [journalActionTarget, setJournalActionTarget] = useState<Readonly<{
+    action: JournalEntryAction;
+    projection: JournalEntryReadProjection;
+  }> | null>(null);
+  const [journalActionBusy, setJournalActionBusy] = useState(false);
+  const [journalActionErrorText, setJournalActionErrorText] = useState<
+    string | null
+  >(null);
+  const journalActionMutationIdentityRef =
+    useRef<JournalMutationIdentity | null>(null);
+
   const [composer, setComposer] = useState<'location' | 'photo' | null>(null);
   const [locationMode, setLocationMode] = useState<LocationMode>('known');
   const [knownLocation, setKnownLocation] = useState<KnownLocation | null>(
@@ -1269,6 +1686,153 @@ function AuthenticatedEventRoomScreen({
     entries: sync.model.entries,
     onAppended: followConfirmedEntry,
   });
+
+  const journalActionsAuthorized =
+    event !== null &&
+    state.session !== null &&
+    userCanManageEventJournal(
+      state.session.user.roles,
+      state.session.user.facilityScope,
+      event.facilityId,
+    );
+
+  const openJournalAction = useCallback(
+    (action: JournalEntryAction, projection: JournalEntryReadProjection) => {
+      journalActionMutationIdentityRef.current = null;
+      setJournalActionErrorText(null);
+      setJournalActionTarget(Object.freeze({ action, projection }));
+    },
+    [],
+  );
+
+  const dismissJournalAction = useCallback(() => {
+    if (journalActionBusy) return;
+    journalActionMutationIdentityRef.current = null;
+    setJournalActionErrorText(null);
+    setJournalActionTarget(null);
+  }, [journalActionBusy]);
+
+  const submitJournalAction = useCallback(
+    async (submission: JournalActionSubmission) => {
+      const selected = journalActionTarget;
+      if (selected === null || journalActionBusy) return;
+      setJournalActionBusy(true);
+      setJournalActionErrorText(null);
+      try {
+        assertMutationAllowed();
+        const currentModel = controller.getSnapshot().model;
+        const current = currentModel.entries.find(
+          ({ entry }) => entry.id === selected.projection.entry.id,
+        );
+        if (current === undefined || !journalActionsAuthorized) {
+          throw new Error(
+            'This timeline entry is no longer available to your current site access. Refresh and choose it again.',
+          );
+        }
+        const eligibility = journalEntryActionEligibility(
+          current,
+          currentModel.entries,
+          currentModel.historyComplete,
+        );
+        const availability = eligibility[selected.action];
+        if (!availability.allowed) {
+          throw new Error(
+            availability.unavailableReason ??
+              'This entry action is no longer available.',
+          );
+        }
+        if (submission.action !== selected.action) {
+          throw new Error('The selected entry action changed. Open it again.');
+        }
+        const canonicalDraft = JSON.stringify({
+          action: submission.action,
+          entryId: current.entry.id,
+          entrySequence: current.entry.sequence,
+          submission,
+        });
+        const identity = retainJournalMutationIdentity(
+          journalActionMutationIdentityRef.current,
+          canonicalDraft,
+          Crypto.randomUUID,
+          () => new Date().toISOString(),
+        );
+        journalActionMutationIdentityRef.current = identity;
+        const target = {
+          entryId: current.entry.id,
+          entrySequence: current.entry.sequence,
+        };
+        let projection: JournalEntryReadProjection;
+        if (submission.action === 'redaction') {
+          projection = await api.redactEntry(
+            eventId,
+            sessionId,
+            target,
+            submission.reason,
+            identity.idempotencyKey,
+            identity.clientTime,
+          );
+        } else if (
+          current.visibility === 'visible' &&
+          current.entry.kind === 'text' &&
+          submission.replacement.kind === 'text'
+        ) {
+          const correctable: CorrectableJournalEntry = current.entry;
+          projection = await api.correctText(
+            eventId,
+            sessionId,
+            {
+              entryId: correctable.id,
+              entrySequence: correctable.sequence,
+            },
+            submission.replacement.text,
+            submission.reason,
+            identity.idempotencyKey,
+            identity.clientTime,
+          );
+        } else if (
+          current.visibility === 'visible' &&
+          current.entry.kind === 'location' &&
+          submission.replacement.kind === 'location'
+        ) {
+          const correctable: CorrectableJournalEntry = current.entry;
+          projection = await api.correctLocation(
+            eventId,
+            sessionId,
+            {
+              entryId: correctable.id,
+              entrySequence: correctable.sequence,
+            },
+            submission.replacement.payload,
+            submission.reason,
+            identity.idempotencyKey,
+            identity.clientTime,
+          );
+        } else {
+          throw new Error(
+            'The replacement no longer matches this entry. Refresh and choose it again.',
+          );
+        }
+        followConfirmedEntry(projection);
+        journalActionMutationIdentityRef.current = null;
+        setJournalActionTarget(null);
+      } catch (error) {
+        setJournalActionErrorText(journalActionError(error));
+      } finally {
+        setJournalActionBusy(false);
+      }
+    },
+    [
+      api,
+      assertMutationAllowed,
+      controller,
+      eventId,
+      followConfirmedEntry,
+      journalActionBusy,
+      journalActionTarget,
+      journalActionsAuthorized,
+      sessionId,
+    ],
+  );
 
   const dismissLifecycle = useCallback(() => {
     lifecycleGenerationRef.current += 1;
@@ -1755,10 +2319,36 @@ function AuthenticatedEventRoomScreen({
   }, [controller]);
 
   const renderTimelineEntry = useCallback(
-    ({ item }: ListRenderItemInfo<JournalEntryReadProjection>) => (
-      <TimelineEntryCard api={api} projection={item} />
-    ),
-    [api],
+    ({ item }: ListRenderItemInfo<JournalEntryReadProjection>) => {
+      const actionEligibility =
+        journalActionsAuthorized && sync.model.historyComplete
+          ? journalEntryActionEligibility(
+              item,
+              sync.model.entries,
+              sync.model.historyComplete,
+            )
+          : undefined;
+      return (
+        <TimelineEntryCard
+          {...(actionEligibility === undefined
+            ? {}
+            : {
+                actionEligibility,
+                onCorrect: () => openJournalAction('correction', item),
+                onRedact: () => openJournalAction('redaction', item),
+              })}
+          api={api}
+          projection={item}
+        />
+      );
+    },
+    [
+      api,
+      journalActionsAuthorized,
+      openJournalAction,
+      sync.model.entries,
+      sync.model.historyComplete,
+    ],
   );
 
   if (event === null || sync.model.header === null) {
@@ -1797,9 +2387,10 @@ function AuthenticatedEventRoomScreen({
   }
 
   const header = sync.model.header;
-  const theme = getEventTheme(event.templateMode);
+  const theme = getEventTheme(event.templateMode, event.kind);
   const postingDisabled = !online || !eventAcceptsPosts;
   const target: EventRoomTargetIdentity = {
+    eventKind: event.kind,
     eventTypeName: header.eventType.name,
     facilityName: header.facility.name,
     facilityCode: header.facility.code,
@@ -1828,7 +2419,11 @@ function AuthenticatedEventRoomScreen({
             {header.facility.name} · {header.facility.code}
           </Text>
         </View>
-        <ClassificationBanner compact mode={event.templateMode} />
+        <ClassificationBanner
+          compact
+          kind={event.kind}
+          mode={event.templateMode}
+        />
         <View style={styles.statusRow}>
           <Text
             accessibilityLiveRegion="polite"
@@ -1866,6 +2461,13 @@ function AuthenticatedEventRoomScreen({
           />
         </View>
       )}
+
+      {journalActionsAuthorized && !sync.model.historyComplete ? (
+        <Text accessibilityRole="summary" style={styles.actionUnavailableText}>
+          Corrections and redactions become available after the complete
+          timeline loads.
+        </Text>
+      ) : null}
 
       <View style={styles.timelineRegion}>
         <FlatList
@@ -2067,6 +2669,18 @@ function AuthenticatedEventRoomScreen({
             photo.draft?.stage !== 'describe')
         }
       />
+      {journalActionTarget === null ? null : (
+        <JournalActionDialog
+          action={journalActionTarget.action}
+          busy={journalActionBusy}
+          error={journalActionErrorText}
+          onDismiss={dismissJournalAction}
+          onSubmit={(submission) => {
+            void submitJournalAction(submission);
+          }}
+          target={journalActionTarget.projection}
+        />
+      )}
       <LifecycleConfirmationDialog
         action={lifecycleAction ?? 'all-clear'}
         busy={lifecycleBusy}
@@ -2206,6 +2820,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 8,
     padding: 14,
+  },
+  entryActionArea: { gap: 8 },
+  entryActionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  entryActionHelp: {
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  actionUnavailableText: {
+    backgroundColor: '#FFF4D6',
+    color: '#5D3D00',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
   },
   timelineMetaRow: {
     flexDirection: 'row',
@@ -2471,6 +3101,7 @@ const styles = StyleSheet.create({
   },
   retainedTitle: { color: '#102A43', fontSize: 16, fontWeight: '900' },
   retainedText: { color: '#334E68', fontSize: 14, lineHeight: 20 },
+  actionGroup: { gap: 10 },
   progressCard: { gap: 6 },
   progressTitle: {
     color: '#102A43',

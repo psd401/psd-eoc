@@ -2,6 +2,7 @@
 
 import {
   ActivationPreviewSchema,
+  getEventClassificationPresentation,
   JoinEventResultSchema,
   StartEventResultSchema,
   type ActivationPreview,
@@ -46,12 +47,14 @@ interface ActivationConfirmProps {
 type MutationResult =
   | Readonly<{
       kind: 'activated';
+      eventKind: EventKind;
       eventId: string;
       eventTypeName: string;
       templateMode: TemplateMode;
     }>
   | Readonly<{
       kind: 'joined';
+      eventKind: EventKind;
       eventId: string;
       eventTypeName: string;
       templateMode: TemplateMode;
@@ -62,10 +65,12 @@ type ResolvedActiveEventChoice = ActiveEventChoice;
 type MutationOperation =
   | Readonly<{
       kind: 'activate';
+      eventKind: EventKind;
       templateMode: TemplateMode;
     }>
   | Readonly<{
       eventId: string;
+      eventKind: EventKind;
       eventTypeName: string;
       kind: 'join';
       templateMode: TemplateMode;
@@ -105,18 +110,17 @@ function integrationLabel(
   }
 }
 
-function blockingReason(reason: string): string {
-  return reason.toLowerCase().replaceAll('_', ' ');
-}
-
 function audienceLabel(preview: ActivationPreview): string {
   return preview.rosterPopulation === 'staff'
     ? 'staff recipients'
     : 'synthetic recipients';
 }
 
-function classificationLabel(mode: TemplateMode): string {
-  return mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY';
+function classificationLabel(eventKind: EventKind, mode: TemplateMode): string {
+  return getEventClassificationPresentation({
+    kind: eventKind,
+    templateMode: mode,
+  }).label;
 }
 
 function shortEventId(eventId: string): string {
@@ -135,10 +139,12 @@ function fallbackEventName(kind: EventKind): string {
 }
 
 function SelectedEventSummary({
+  eventKind,
   eventTypeName,
   facilityName,
   templateMode,
 }: Readonly<{
+  eventKind: EventKind;
   eventTypeName: string;
   facilityName: string;
   templateMode: TemplateMode;
@@ -156,8 +162,8 @@ function SelectedEventSummary({
           <span
             className={`classification-label classification-label--${templateMode}`}
           >
-            <ClassificationIcon mode={templateMode} />{' '}
-            {classificationLabel(templateMode)}
+            <ClassificationIcon kind={eventKind} mode={templateMode} />{' '}
+            {classificationLabel(eventKind, templateMode)}
           </span>
         </dd>
       </dl>
@@ -381,6 +387,7 @@ export function ActivationConfirm({
       return;
     }
     const operation: MutationOperation = {
+      eventKind: selection.eventKind,
       kind: 'activate',
       templateMode: selection.templateMode,
     };
@@ -411,6 +418,7 @@ export function ActivationConfirm({
         activationIdempotencyKey,
       );
       setResult({
+        eventKind: event.kind,
         kind: 'activated',
         eventId: event.id,
         eventTypeName: selection.eventTypeName,
@@ -436,6 +444,7 @@ export function ActivationConfirm({
     if (mutationInFlight.current || result !== null) return;
     const operation: MutationOperation = {
       eventId: choice.event.id,
+      eventKind: choice.event.kind,
       eventTypeName: choice.label,
       kind: 'join',
       templateMode: choice.event.templateMode,
@@ -463,6 +472,7 @@ export function ActivationConfirm({
         choice.event,
       );
       setResult({
+        eventKind: event.kind,
         kind: 'joined',
         eventId: event.id,
         eventTypeName: choice.label,
@@ -486,6 +496,7 @@ export function ActivationConfirm({
     return (
       <div>
         <ClassificationBanner
+          kind={result.eventKind}
           mode={result.templateMode}
           detail={
             result.kind === 'joined'
@@ -511,8 +522,11 @@ export function ActivationConfirm({
             <span
               className={`classification-label classification-label--${result.templateMode}`}
             >
-              <ClassificationIcon mode={result.templateMode} />{' '}
-              {classificationLabel(result.templateMode)}
+              <ClassificationIcon
+                kind={result.eventKind}
+                mode={result.templateMode}
+              />{' '}
+              {classificationLabel(result.eventKind, result.templateMode)}
             </span>
           </p>
           <p role="status">
@@ -540,6 +554,7 @@ export function ActivationConfirm({
   return (
     <div>
       <ClassificationBanner
+        kind={selection.eventKind}
         mode={selection.templateMode}
         detail={
           selection.templateMode === 'real'
@@ -549,6 +564,7 @@ export function ActivationConfirm({
       />
 
       <SelectedEventSummary
+        eventKind={selection.eventKind}
         eventTypeName={selection.eventTypeName}
         facilityName={selection.facilityName}
         templateMode={selection.templateMode}
@@ -671,15 +687,21 @@ export function ActivationConfirm({
                         type="button"
                         onClick={() => void join(choice)}
                       >
-                        <ClassificationIcon mode={choice.event.templateMode} />
+                        <ClassificationIcon
+                          kind={choice.event.kind}
+                          mode={choice.event.templateMode}
+                        />
                         <span>
                           {joiningThisEvent ? (
-                            `Joining ${classificationLabel(choice.event.templateMode)} once…`
+                            `Joining ${classificationLabel(choice.event.kind, choice.event.templateMode)} once…`
                           ) : (
                             <>
                               Join {choice.label} —{' '}
                               <strong>
-                                {classificationLabel(choice.event.templateMode)}
+                                {classificationLabel(
+                                  choice.event.kind,
+                                  choice.event.templateMode,
+                                )}
                               </strong>
                             </>
                           )}
@@ -702,11 +724,10 @@ export function ActivationConfirm({
               <section className="error-summary" role="alert">
                 <h2>Notifications are not ready</h2>
                 <p>The event cannot be started from this preview.</p>
-                <ul>
-                  {preview.blockingReasonCodes.map((reason) => (
-                    <li key={reason}>{blockingReason(reason)}</li>
-                  ))}
-                </ul>
+                <p>
+                  One or more server prerequisites are unavailable. Refresh the
+                  preview; if it remains blocked, contact an administrator.
+                </p>
                 <p>No event was started and no notification was queued.</p>
               </section>
             ) : (
@@ -734,7 +755,7 @@ export function ActivationConfirm({
                   onClick={() => void activate()}
                 >
                   {pendingOperation?.kind === 'activate'
-                    ? `Starting ${classificationLabel(selection.templateMode)} ${selection.eventTypeName} at ${selection.facilityName} once…`
+                    ? `Starting ${classificationLabel(selection.eventKind, selection.templateMode)} ${selection.eventTypeName} at ${selection.facilityName} once…`
                     : `${preview.activeEventIds.length > 0 ? 'Start a separate ' : 'Start '}${
                         selection.templateMode === 'real'
                           ? 'REAL incident'
@@ -763,8 +784,8 @@ export function ActivationConfirm({
               <p>
                 <strong>Attempted action:</strong>{' '}
                 {failedOperation.kind === 'activate'
-                  ? `Start ${classificationLabel(failedOperation.templateMode)} event ${selection.eventTypeName}`
-                  : `Join ${classificationLabel(failedOperation.templateMode)} event ${failedOperation.eventTypeName} — event ${shortEventId(failedOperation.eventId)}`}
+                  ? `Start ${classificationLabel(failedOperation.eventKind, failedOperation.templateMode)} event ${selection.eventTypeName}`
+                  : `Join ${classificationLabel(failedOperation.eventKind, failedOperation.templateMode)} event ${failedOperation.eventTypeName} — event ${shortEventId(failedOperation.eventId)}`}
                 .
               </p>
             )}

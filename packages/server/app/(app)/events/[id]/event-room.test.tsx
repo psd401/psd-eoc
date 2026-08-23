@@ -46,12 +46,17 @@ const ACTOR = {
   sessionId: IDS.session,
 };
 
-function activeEvent(templateMode: 'real' | 'drill'): Event {
+function activeEvent(
+  templateMode: 'real' | 'drill',
+  kind: 'incident' | 'drill' | 'test' = templateMode === 'real'
+    ? 'incident'
+    : 'drill',
+): Event {
   const real = templateMode === 'real';
   return EventSchema.parse({
     id: IDS.event,
     facilityId: IDS.facility,
-    kind: real ? 'incident' : 'drill',
+    kind,
     templateMode,
     eventTypeVersion: { id: IDS.eventType, templateMode },
     status: 'active',
@@ -501,9 +506,10 @@ describe('event room server-rendered safety and history state', () => {
     expect(correctedHtml).not.toContain('Correct entry 5');
   });
 
-  test('renders real and drill classification with words and symbols, not color alone', () => {
+  test('renders real, drill, and test classification with words and symbols, not color alone', () => {
     const real = render(activeEvent('real'), []);
     const drill = render(activeEvent('drill'), []);
+    const testEvent = render(activeEvent('drill', 'test'), []);
 
     expect(real).toContain('REAL INCIDENT');
     expect(real).toContain('Lockdown');
@@ -511,8 +517,12 @@ describe('event room server-rendered safety and history state', () => {
     expect(drill).toContain('DRILL — TRAINING ONLY');
     expect(drill).toContain('Lockdown Drill');
     expect(drill).not.toContain('REAL INCIDENT');
+    expect(testEvent).toContain('TEST — NOT A REAL INCIDENT');
+    expect(testEvent).not.toContain('DRILL — TRAINING ONLY');
+    expect(testEvent).not.toContain('>REAL INCIDENT<');
     expect(real).toContain('aria-hidden="true"');
     expect(drill).toContain('aria-hidden="true"');
+    expect(testEvent).toContain('aria-hidden="true"');
     expect(real).toContain('Download PDF summary');
     expect(real).toContain(
       `/records/export/events/${encodeURIComponent(IDS.event)}`,

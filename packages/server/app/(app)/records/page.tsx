@@ -1,7 +1,7 @@
 import {
   EventTypeIdSchema,
   FacilityIdSchema,
-  ListDrillRecordsInputSchema,
+  ListEventRecordsInputSchema,
   PaginationCursorSchema,
 } from '@psd-eoc/contracts';
 import type { Metadata } from 'next';
@@ -14,17 +14,17 @@ import {
   currentPacificDate,
   parsePacificDateRange,
 } from './_lib/date-range';
-import { loadDrillRecordPage, loadRecordsFilterOptions } from './_lib/data';
+import { loadEventRecordPage, loadRecordsFilterOptions } from './_lib/data';
 import { requireRecordsPageSession } from './_lib/session';
-import { DrillRecordsView, type RecordsFilters } from './records-view';
+import { RecordsView, type RecordsFilters } from './records-view';
 import '../start/styles.css';
 import './styles.css';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const metadata: Metadata = {
-  title: { absolute: 'Drill records | PSD EOC' },
-  description: 'Authorized retained drill and test history.',
+  title: { absolute: 'Records' },
+  description: 'Authorized retained incident, drill, and test history.',
 };
 
 type RawSearchParams = Readonly<
@@ -129,7 +129,7 @@ export default async function RecordsPage({
   const defaultFacilityId = options.facilities[0]?.id;
   if (defaultFacilityId === undefined) {
     return (
-      <DrillRecordsView
+      <RecordsView
         errorMessage={null}
         eventTypes={options.eventTypes}
         facilities={options.facilities}
@@ -158,7 +158,7 @@ export default async function RecordsPage({
         ? error.message
         : 'Check the selected records filters.';
     return (
-      <DrillRecordsView
+      <RecordsView
         errorMessage={message}
         eventTypes={options.eventTypes}
         facilities={options.facilities}
@@ -190,9 +190,9 @@ export default async function RecordsPage({
   }
 
   try {
-    const page = await loadDrillRecordPage(
+    const page = await loadEventRecordPage(
       authenticated,
-      ListDrillRecordsInputSchema.parse({
+      ListEventRecordsInputSchema.parse({
         facilityId: parsed.filters.facilityId,
         eventTypeId: parsed.filters.eventTypeId,
         startedFrom: parsed.range.startedFrom,
@@ -209,7 +209,7 @@ export default async function RecordsPage({
       throw new Error('The records result crossed its authorized site filter.');
     }
     return (
-      <DrillRecordsView
+      <RecordsView
         errorMessage={null}
         eventTypes={options.eventTypes}
         facilities={options.facilities}
@@ -229,7 +229,7 @@ export default async function RecordsPage({
     }
     if (error instanceof CapabilityEngineError && error.status === 400) {
       return (
-        <DrillRecordsView
+        <RecordsView
           errorMessage="Check the selected records filters."
           eventTypes={options.eventTypes}
           facilities={options.facilities}

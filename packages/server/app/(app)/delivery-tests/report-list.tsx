@@ -51,6 +51,19 @@ function channelLabel(channel: string): string {
         : channel;
 }
 
+function reportOutcomeCopy(
+  status: MonthlyDeliveryTestReport['status'],
+): string {
+  switch (status) {
+    case 'succeeded':
+      return 'No blocking condition — the recorded endpoint outcomes reached provider acceptance or better.';
+    case 'failed':
+      return 'The delivery test did not complete successfully. Review channel evidence below, then contact an administrator before retrying.';
+    case 'incomplete':
+      return 'Provider evidence is still incomplete. Refresh the report later; if it remains incomplete, contact an administrator.';
+  }
+}
+
 /** Destination-free append-only monthly delivery-test evidence. */
 export function DeliveryTestReportList({
   reports,
@@ -104,8 +117,8 @@ export function DeliveryTestReportList({
                     <code>{report.supersedesReportId}</code>
                   )}
                 </dd>
-                <dt>Reason code</dt>
-                <dd>{report.reasonCode ?? 'None — succeeded'}</dd>
+                <dt>Report outcome</dt>
+                <dd>{reportOutcomeCopy(report.status)}</dd>
               </dl>
               <div className="delivery-test-report-channels">
                 {report.channels.map((channel) => (

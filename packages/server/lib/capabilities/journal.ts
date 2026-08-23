@@ -5,6 +5,8 @@ import {
   ActivationPreviewSchema,
   DrillRecordPageSchema,
   DrillRecordSchema,
+  EventRecordPageSchema,
+  EventRecordSchema,
   EventSchema,
   FacilitySchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
@@ -24,6 +26,8 @@ import {
   type DrillRecord,
   type DrillRecordPage,
   type Event,
+  type EventRecord,
+  type EventRecordPage,
   type Facility,
   type HumanConfirmationRecord,
   type JournalEntry,
@@ -142,6 +146,10 @@ export interface JournalCapabilityTransaction
     input: CapabilityInput<'list-drill-records'>,
     scope: TrustedCapabilityInvocation['scope'],
   ): Promise<DrillRecordPage>;
+  listEventRecords(
+    input: CapabilityInput<'list-event-records'>,
+    scope: TrustedCapabilityInvocation['scope'],
+  ): Promise<EventRecordPage>;
   loadDrillRecordsExportSnapshot(
     input: CapabilityInput<'export-drill-records'>,
   ): Promise<readonly DrillRecordCsvRow[]>;
@@ -521,11 +529,15 @@ function decodeJournalSearchCursor(
   }
 }
 
-function drillRecordFingerprint(
-  input: CapabilityInput<'list-drill-records'>,
+type RecordListCapabilityId = 'list-drill-records' | 'list-event-records';
+
+function recordListFingerprint(
+  capabilityId: RecordListCapabilityId,
+  input: CapabilityInput<RecordListCapabilityId>,
   scope: TrustedCapabilityInvocation['scope'],
 ): string {
   return digestCapabilityValue({
+    capabilityId,
     input: { ...input, cursor: null, limit: 1 },
     facilityScope:
       scope.facilityScope.kind === 'district'
@@ -538,7 +550,8 @@ function drillRecordFingerprint(
 }
 
 function createDrillRecordCursor(
-  input: CapabilityInput<'list-drill-records'>,
+  capabilityId: RecordListCapabilityId,
+  input: CapabilityInput<RecordListCapabilityId>,
   scope: TrustedCapabilityInvocation['scope'],
   event: Pick<typeof events.$inferSelect, 'id' | 'activatedAt'>,
 ): string {
@@ -551,7 +564,7 @@ function createDrillRecordCursor(
         v: DRILL_RECORD_CURSOR_VERSION,
         t: dateIso(event.activatedAt),
         i: UuidSchema.parse(event.id),
-        f: drillRecordFingerprint(input, scope),
+        f: recordListFingerprint(capabilityId, input, scope),
       } satisfies DrillRecordCursorPayload),
       'utf8',
     ).toString('base64url'),
@@ -559,7 +572,8 @@ function createDrillRecordCursor(
 }
 
 function decodeDrillRecordCursor(
-  input: CapabilityInput<'list-drill-records'>,
+  capabilityId: RecordListCapabilityId,
+  input: CapabilityInput<RecordListCapabilityId>,
   scope: TrustedCapabilityInvocation['scope'],
 ): Readonly<{ startedAt: Date; eventId: string }> | null {
   if (input.cursor === null) {
@@ -582,7 +596,8 @@ function decodeDrillRecordCursor(
       !UuidSchema.safeParse(Reflect.get(value, 'i')).success ||
       typeof Reflect.get(value, 't') !== 'string' ||
       !Number.isFinite(Date.parse(String(Reflect.get(value, 't')))) ||
-      Reflect.get(value, 'f') !== drillRecordFingerprint(input, scope) ||
+      Reflect.get(value, 'f') !==
+        recordListFingerprint(capabilityId, input, scope) ||
       Object.keys(value).sort().join(',') !== 'f,i,t,v'
     ) {
       throw new TypeError('invalid cursor');
@@ -1704,7 +1719,7 @@ async function listDrillRecordsFromDatabase(
   input: CapabilityInput<'list-drill-records'>,
   scope: TrustedCapabilityInvocation['scope'],
 ): Promise<DrillRecordPage> {
-  const cursor = decodeDrillRecordCursor(input, scope);
+  const cursor = decodeDrillRecordCursor('list-drill-records', input, scope);
   const conditions: SQL[] = [
     inArray(events.kind, ['drill', 'test']),
     eq(events.templateMode, 'drill'),
@@ -1766,7 +1781,110 @@ async function listDrillRecordsFromDatabase(
       hasMore,
       nextCursor:
         hasMore && last !== undefined
-          ? createDrillRecordCursor(input, scope, last)
+          ? createDrillRecordCursor('list-drill-records', input, scope, last)
+          : null,
+    },
+  });
+}
+
+function eventRecordFromDatabaseRow(row: DrillRecordDatabaseRow): EventRecord {
+  const { event } = row;
+  if (
+    event.templateMode !== row.eventTypeTemplateMode ||
+    event.status === 'draft' ||
+    event.activatedAt === null
+  ) {
+    throw new CapabilityEngineError(
+      'INTERNAL_ERROR',
+      'PERSISTENCE_CONFLICT',
+      'Persisted event-record classification is inconsistent.',
+      500,
+    );
+  }
+  return EventRecordSchema.parse({
+    id: event.id,
+    eventId: event.id,
+    facilityId: event.facilityId,
+    kind: event.kind,
+    eventTypeVersion: {
+      id: event.eventTypeVersionId,
+      templateMode: event.templateMode,
+    },
+    eventTypeName: row.eventTypeName,
+    status: event.status,
+    startedAt: dateIso(event.activatedAt),
+    allClearAt: event.allClearAt === null ? null : dateIso(event.allClearAt),
+    reactivatedAt:
+      event.reactivatedAt === null ? null : dateIso(event.reactivatedAt),
+    closedAt: event.closedAt === null ? null : dateIso(event.closedAt),
+  });
+}
+
+async function listEventRecordsFromDatabase(
+  database: JournalQueryDatabase,
+  input: CapabilityInput<'list-event-records'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): Promise<EventRecordPage> {
+  const cursor = decodeDrillRecordCursor('list-event-records', input, scope);
+  const conditions: SQL[] = [
+    ne(events.status, 'draft'),
+    isNotNull(events.activatedAt),
+  ];
+  if (input.facilityId !== null) {
+    conditions.push(eq(events.facilityId, input.facilityId));
+  } else if (scope.facilityScope.kind === 'facilities') {
+    conditions.push(
+      inArray(events.facilityId, scope.facilityScope.facilityIds),
+    );
+  }
+  if (input.startedFrom !== null) {
+    conditions.push(gte(events.activatedAt, new Date(input.startedFrom)));
+  }
+  if (input.startedThrough !== null) {
+    conditions.push(lte(events.activatedAt, new Date(input.startedThrough)));
+  }
+  if (input.eventTypeId !== null) {
+    conditions.push(eq(eventTypeVersions.eventTypeId, input.eventTypeId));
+  }
+  if (cursor !== null) {
+    conditions.push(
+      or(
+        lt(events.activatedAt, cursor.startedAt),
+        and(
+          eq(events.activatedAt, cursor.startedAt),
+          gt(events.id, cursor.eventId),
+        ),
+      ) as SQL,
+    );
+  }
+
+  const rows = await database
+    .select({
+      event: events,
+      eventTypeName: eventTypeVersions.name,
+      eventTypeTemplateMode: eventTypeVersions.templateMode,
+    })
+    .from(events)
+    .innerJoin(
+      eventTypeVersions,
+      and(
+        eq(eventTypeVersions.id, events.eventTypeVersionId),
+        eq(eventTypeVersions.templateMode, events.templateMode),
+      ),
+    )
+    .where(and(...conditions))
+    .orderBy(desc(events.activatedAt), asc(events.id))
+    .limit(input.limit + 1);
+  const hasMore = rows.length > input.limit;
+  const visibleRows = rows.slice(0, input.limit);
+  const last = visibleRows.at(-1)?.event;
+  return EventRecordPageSchema.parse({
+    items: visibleRows.map(eventRecordFromDatabaseRow),
+    pageInfo: {
+      hasMore,
+      nextCursor:
+        hasMore && last !== undefined
+          ? createDrillRecordCursor('list-event-records', input, scope, last)
           : null,
     },
   });
@@ -2157,6 +2275,8 @@ function createDrizzleJournalTransaction(
       searchJournalEntriesFromDatabase(database, input, scope),
     listDrillRecords: (input, scope) =>
       listDrillRecordsFromDatabase(database, input, scope),
+    listEventRecords: (input, scope) =>
+      listEventRecordsFromDatabase(database, input, scope),
     loadDrillRecordsExportSnapshot: (input) =>
       loadDrillRecordsExportSnapshot(database, input),
     loadEventSummarySnapshot: (eventId, generatedAt) =>

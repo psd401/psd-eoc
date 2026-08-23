@@ -97,6 +97,21 @@ above, complete these no-notification-send checks:
    settings. Do not include staff identities, message content, or device
    identifiers.
 
+## Use event collaboration safely
+
+- **Take Photo** asks for camera access only when you choose it. **Choose
+  Existing Photo** uses the system photo picker without requesting broad file
+  or media-library access. If camera access is denied, enable **Camera** under
+  **Settings → Apps → PSD EOC → Permissions**, or choose an existing photo.
+- Describe a photo for screen-reader users before selecting it. The app keeps
+  an interrupted draft privately on the device, validates image bytes, and the
+  server strips EXIF and GPS metadata before the photo can appear. Never include
+  student data.
+- Correction and redaction controls appear only after the complete authorized
+  timeline loads. A correction or redaction appends a linked entry; it never
+  rewrites or deletes the original. If an action becomes unavailable, refresh
+  the timeline and follow the plain-language recovery message.
+
 ## Optional separately authorized synthetic push check
 
 Skip this section unless District Technology announces a separately approved
@@ -107,15 +122,15 @@ confirm the action, and launch the synthetic test:
 
 - Lock the device before the scheduled test.
 - Confirm the visible lock-screen notification title **and** body each carry the
-  canonical **`[DRILL]`** marker. Open it and confirm the event screen visibly
-  says **DRILL — PRACTICE**. Report whether the alert appeared, made a sound,
+  canonical **`[DRILL]`** transport marker. Open it and confirm the event screen
+  visibly says **TEST — NOT A REAL INCIDENT**. Report whether the alert appeared, made a sound,
   and opened that exact drill. Provider acceptance or a visible push is not
   proof that every person received it.
 - Stop immediately and contact District Technology if the notification shows
   **`[INCIDENT]`**, omits **`[DRILL]`**, has conflicting markers, uses
   real-incident wording, or uses only generic wording such as **TEST ONLY**.
-  Also stop if the opened event does not visibly say **DRILL — PRACTICE**, says
-  **REAL INCIDENT**, or otherwise conflicts with the drill notification. Do not
+  Also stop if the opened event does not visibly say **TEST — NOT A REAL INCIDENT**, says
+  **REAL INCIDENT** or **DRILL — TRAINING ONLY**, or otherwise conflicts with the test notification. Do not
   continue testing an ambiguous real-versus-drill display.
 - If no alert appears, leave the app installed and contact District Technology.
   Include the Android version, phone model, and PSD EOC version shown in App
