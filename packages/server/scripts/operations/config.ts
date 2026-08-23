@@ -35,6 +35,15 @@ const normalizedValue = (maximum: number) =>
       message: 'must be a normalized single-line value',
     });
 
+const optionalDeploymentValue = (minimum: number, maximum: number) =>
+  z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim().length === 0
+        ? undefined
+        : value,
+    z.string().trim().min(minimum).max(maximum).optional(),
+  );
+
 const DatabaseIdentifierSchema = normalizedValue(63).regex(
   /^[A-Za-z_][A-Za-z0-9_$]*$/u,
   'must be an unquoted PostgreSQL identifier',
@@ -88,31 +97,14 @@ const BootstrapEnvironmentSchema = z
     DATABASE_APPLICATION_PASSWORD: DatabasePasswordSchema,
     SOURCE_SHA: SourceShaSchema,
     BOOTSTRAP_MODE: z.enum(BOOTSTRAP_MODES).default('migrate'),
-    // First-run configuration. All four are optional: a district already
-    // configured through the admin UI supplies none of them. They are listed
-    // here because this schema is strict, and until they were, the bootstrap
-    // task rejected the very variables `bootstrapAccessConfiguration` reads —
-    // so the first access group could never be created and a fresh deployment
-    // admitted nobody. That is not hypothetical; it locked this deployment out
-    // of itself.
-    PSD_EOC_INITIAL_ACCESS_GROUP_ID: z
-      .string()
-      .trim()
-      .min(1)
-      .max(200)
-      .optional(),
-    PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: z
-      .string()
-      .trim()
-      .min(3)
-      .max(320)
-      .optional(),
-    PSD_EOC_INITIAL_ACCESS_GROUP_NAME: z
-      .string()
-      .trim()
-      .min(1)
-      .max(200)
-      .optional(),
+    // First-run configuration. All three are optional: a district already
+    // configured through the admin UI supplies none of them. CloudFormation
+    // represents omitted parameters as empty strings in the task definition,
+    // so empty and whitespace-only values are normalized back to absence before
+    // this strict schema validates the rest of the bootstrap environment.
+    PSD_EOC_INITIAL_ACCESS_GROUP_ID: optionalDeploymentValue(1, 200),
+    PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: optionalDeploymentValue(3, 320),
+    PSD_EOC_INITIAL_ACCESS_GROUP_NAME: optionalDeploymentValue(1, 200),
     /** JSON list of the district's facilities; see db/bootstrap-facilities.ts. */
     PSD_EOC_FACILITIES: z.string().max(200_000).optional(),
     /** JSON list of facility groupings notified together. */

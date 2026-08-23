@@ -9,6 +9,7 @@ import { decideAccess } from '../lib/auth/trusted-group-access';
 import {
   InitialAccessGroupConfigurationError,
   bootstrapAccessConfiguration,
+  describeBootstrapOutcome,
   readInitialAccessGroupConfiguration,
 } from './bootstrap-access';
 import {
@@ -128,6 +129,27 @@ describe('initial access group configuration', () => {
       }),
     ).toThrow(InitialAccessGroupConfigurationError);
   });
+
+  test('refuses a multiline display name and never logs a created email', () => {
+    expect(() =>
+      readInitialAccessGroupConfiguration({
+        PSD_EOC_INITIAL_ACCESS_GROUP_ID: 'groups/one',
+        PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: 'admins@example.invalid',
+        PSD_EOC_INITIAL_ACCESS_GROUP_NAME: 'Administrators\nspoofed log line',
+      }),
+    ).toThrow('single-line display name');
+
+    const email = 'never-log-this@example.invalid';
+    const description = describeBootstrapOutcome({
+      kind: 'created',
+      groupSourceId: randomUUID(),
+      email,
+    });
+    expect(description).not.toContain(email);
+    expect(description).toContain(
+      'Created the configured initial access group',
+    );
+  });
 });
 
 describeWithDatabase(
@@ -217,22 +239,52 @@ describeWithDatabase(
       ).toMatchObject({ granted: true, roles: ['admin'] });
     });
 
-    test('never disturbs a district that already configured itself', async () => {
-      const outcome = await bootstrapAccessConfiguration(database(), {
+    test('reruns never rewrite an existing group or its membership', async () => {
+      const groupsBefore = await database().select().from(groupSources);
+      const membersBefore = await database().select().from(groupMembers);
+      const firstOutcome = await bootstrapAccessConfiguration(database(), {
         googleGroupId: `groups/${randomUUID()}`,
         email: 'someone-elses-idea@example.invalid',
         displayName: 'Should not appear',
       });
-      expect(outcome).toEqual({
+      const secondOutcome = await bootstrapAccessConfiguration(
+        database(),
+        CONFIGURATION,
+      );
+      expect(firstOutcome).toEqual({
         kind: 'already-configured',
         activeGroupCount: 1,
       });
+      expect(secondOutcome).toEqual(firstOutcome);
+      expect(await database().select().from(groupSources)).toEqual(
+        groupsBefore,
+      );
+      expect(await database().select().from(groupMembers)).toEqual(
+        membersBefore,
+      );
+    });
+
+    test('never reopens access after the existing group is deactivated', async () => {
+      await database()
+        .update(groupSources)
+        .set({ active: false })
+        .where(eq(groupSources.purpose, 'access'));
+      const groupsBefore = await database().select().from(groupSources);
+      const membersBefore = await database().select().from(groupMembers);
+
       expect(
-        await database()
-          .select({ email: groupSources.email })
-          .from(groupSources)
-          .where(eq(groupSources.purpose, 'access')),
-      ).toEqual([{ email: CONFIGURATION.email }]);
+        await bootstrapAccessConfiguration(database(), {
+          googleGroupId: `groups/${randomUUID()}`,
+          email: 'replacement@example.invalid',
+          displayName: 'Must not appear',
+        }),
+      ).toEqual({ kind: 'already-configured', activeGroupCount: 0 });
+      expect(await database().select().from(groupSources)).toEqual(
+        groupsBefore,
+      );
+      expect(await database().select().from(groupMembers)).toEqual(
+        membersBefore,
+      );
     });
 
     test('does nothing at all when no configuration is supplied', async () => {

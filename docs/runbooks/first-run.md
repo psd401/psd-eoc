@@ -30,8 +30,13 @@ kinds of event exist and nothing about your district.
 See [first-administrator.md](../guides/first-administrator.md). In short: a
 fresh deployment admits nobody, the page that configures access is behind
 sign-in, and the circle is broken by naming one Google Group in configuration —
-`PSD_EOC_INITIAL_ACCESS_GROUP_ID` and `PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL` —
-which the migration step turns into the first access group.
+the `INITIAL_ACCESS_GROUP_ID` environment variable and
+`INITIAL_ACCESS_GROUP_EMAIL` environment secret in GitHub's `production`
+environment, plus the optional `INITIAL_ACCESS_GROUP_NAME` variable. Run the
+supported `Deploy` workflow once. Its preflight refuses a partial pair before
+building or deploying, and its migration step creates the group only when no
+access group exists. The job summary says whether it was created, already
+existed, or was intentionally omitted.
 
 ## 2. Prove the membership sync is actually running
 
