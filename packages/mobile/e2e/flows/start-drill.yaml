@@ -5,6 +5,10 @@ tags: [issue-32, synthetic-only]
 - assertTrue:
     condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
     label: Refuse to run outside the synthetic mobile harness
+- tapOn:
+    text: 'Continue'
+    waitUntilVisible: true
+    optional: true
 - extendedWaitUntil:
     visible:
       id: 'issue-21-synthetic-mode'
