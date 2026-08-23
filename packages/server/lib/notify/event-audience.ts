@@ -9,7 +9,11 @@ import {
   devicePushTokenUnregistrations,
   users,
 } from '../../db/schema';
-import { resolveEventRecipients, type EventReach } from './event-recipients';
+import {
+  resolveEventRecipients,
+  type EventPopulation,
+  type EventReach,
+} from './event-recipients';
 
 /**
  * A stable identifier derived from a value rather than stored beside it.
@@ -88,7 +92,11 @@ export interface EventAudience {
  */
 export async function resolveEventAudience(
   database: Database,
-  input: Readonly<{ facilityId: string; reach: EventReach }>,
+  input: Readonly<{
+    facilityId: string;
+    reach: EventReach;
+    population: EventPopulation;
+  }>,
 ): Promise<EventAudience> {
   const reached = await resolveEventRecipients(database, input);
   if (reached.emails.length === 0) {

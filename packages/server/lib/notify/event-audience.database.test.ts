@@ -213,6 +213,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     // The property that makes this read the group and not `users`: a member
@@ -234,6 +235,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
     const recipient = audience.recipients.find(
       ({ email }) => email === NEVER_SIGNED_IN,
@@ -249,6 +251,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
     const recipient = audience.recipients.find(
       ({ email }) => email === ENROLLED,
@@ -269,6 +272,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
     const recipient = audience.recipients.find(
       ({ email }) => email === REVOKED_DEVICE,
@@ -285,6 +289,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
     const recipient = audience.recipients.find(
       ({ email }) => email === DISABLED_ACCOUNT,
@@ -300,6 +305,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     for (const recipient of audience.recipients) {
@@ -317,6 +323,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
     const recipient = audience.recipients.find(
       ({ email }) => email === ENROLLED,
@@ -340,6 +347,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: EMPTY_SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     expect(audience.recipients).toEqual([]);
@@ -351,6 +359,7 @@ describeWithDatabase('event audience resolved from the domain', () => {
     const audience = await resolveEventAudience(database(), {
       facilityId: SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     expect(audience.oldestCapturedAt?.toISOString()).toBe(
