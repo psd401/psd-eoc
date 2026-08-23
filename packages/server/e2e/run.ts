@@ -304,6 +304,11 @@ async function createSyntheticDrill(
 }
 
 async function main(): Promise<void> {
+  if (process.env.PSD_EOC_E2E_SYNTHETIC_ONLY !== 'true') {
+    throw new Error(
+      'Issue 340 browser acceptance is synthetic-only. Set PSD_EOC_E2E_SYNTHETIC_ONLY=true to run it.',
+    );
+  }
   const disposable = await createDisposableDatabase('issue_340');
   let stateDirectory: string | undefined;
   let connection: PostgresDatabaseConnection | undefined;
