@@ -102,6 +102,45 @@ describe('bootstrap configuration', () => {
     });
   });
 
+  test('accepts explicit empty initial-group parameters as omitted', () => {
+    expect(() =>
+      readBootstrapConfig({
+        ...validConfigEnvironment(),
+        PSD_EOC_INITIAL_ACCESS_GROUP_ID: '',
+        PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: '   ',
+        PSD_EOC_INITIAL_ACCESS_GROUP_NAME: '',
+      }),
+    ).not.toThrow();
+  });
+
+  test('rejects malformed initial-group values before opening a connection', () => {
+    const invalidValues = [
+      { PSD_EOC_INITIAL_ACCESS_GROUP_ID: 'groups/invalid id' },
+      { PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: 'not-an-email' },
+      {
+        PSD_EOC_INITIAL_ACCESS_GROUP_NAME: 'A'.repeat(160) + '\nprivate-value',
+      },
+    ];
+    for (const invalid of invalidValues) {
+      const environment = {
+        ...validConfigEnvironment(),
+        PSD_EOC_INITIAL_ACCESS_GROUP_ID: 'groups/synthetic-administrators',
+        PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: 'administrators@example.invalid',
+        ...invalid,
+      };
+      let message = '';
+      try {
+        readBootstrapConfig(environment);
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toContain('PSD_EOC_INITIAL_ACCESS_GROUP_');
+      for (const value of Object.values(invalid)) {
+        expect(message).not.toContain(value);
+      }
+    }
+  });
+
   test('defaults to migrations only and accepts nothing but the two modes', () => {
     expect(
       readBootstrapConfig({

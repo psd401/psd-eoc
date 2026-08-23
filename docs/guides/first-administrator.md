@@ -34,43 +34,46 @@ membership — that is the whole design.
 
 ## Configure it
 
-Set two environment variables on the deployment, alongside the database URL
-and the OIDC client:
+Open the repository's **Settings → Environments → production** page. Add the
+initial group with the same GitHub configuration surface the supported
+`Deploy` workflow reads:
 
-| Variable | Value |
-|---|---|
-| `PSD_EOC_INITIAL_ACCESS_GROUP_ID` | `03x8tuzt4fpsm6y` (a leading `groups/` is accepted and stripped) |
-| `PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL` | `eoc-administrators@yourdistrict.org` |
-| `PSD_EOC_INITIAL_ACCESS_GROUP_NAME` | Optional. Defaults to `Administrators`. |
+| GitHub setting               | Kind                           | Example value                                                |
+| ---------------------------- | ------------------------------ | ------------------------------------------------------------ |
+| `INITIAL_ACCESS_GROUP_ID`    | Environment variable           | `groups/03x8tuzt4fpsm6y` (the leading `groups/` is optional) |
+| `INITIAL_ACCESS_GROUP_EMAIL` | Environment secret             | `eoc-administrators@yourdistrict.org`                        |
+| `INITIAL_ACCESS_GROUP_NAME`  | Environment variable, optional | `System administrators`                                      |
 
-Set both of the first two or neither. Setting one alone is refused at startup,
-because the alternative is a deployment nobody can sign in to and no clue why.
+Set both the ID and email or neither. A name alone is also incomplete. The
+workflow validates this before it builds an image or runs CDK, names the
+missing setting, and never prints the configured email. The optional name
+defaults to `Administrators` when omitted.
+
+The workflow passes these settings to the stack's `InitialAccessGroupId`,
+`InitialAccessGroupEmail`, and `InitialAccessGroupName` parameters. The email
+parameter is `NoEcho`. The bootstrap task receives the corresponding
+`PSD_EOC_INITIAL_ACCESS_GROUP_*` environment variables; operators do not set
+those task variables separately.
 
 ## Deploy
 
-Migrations run on deploy, and the initial group is created in the same step.
-The deploy log says which of three things happened:
+Run the repository's `Deploy` workflow once, either by merging the configured
+commit to `main` or with **Actions → Deploy → Run workflow**. There is no
+separate bootstrap command and no database insert in the normal first-run
+path. The workflow stages the task definition, runs migrations and bootstrap,
+and only then promotes the application image.
 
-```
-Created the initial access group for eoc-administrators@yourdistrict.org,
-granting administrator. Members can sign in after the next membership sync.
-```
+The Actions job summary reports one of these outcomes without the group email:
 
-```
-Access groups already configured; 2 active. The initial-group configuration
-was ignored.
-```
-
-```
-No initial access group configured (PSD_EOC_INITIAL_ACCESS_GROUP_ID and
-PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL are unset). Sign-in stays closed until an
-access group exists.
-```
+- `created on this deploy`
+- `already existed; no access history changed`
+- `intentionally omitted`
 
 This step only ever acts when the deployment has **no** access group at all —
 not "none active", not "none matching". Once your district has configured
-access, the variables are inert and can be left in place or removed. It cannot
-lock anyone out.
+access, the settings are inert and can be left in place or removed. Removing
+all three makes the next deploy pass explicit empty parameters, but it does not
+change, replace, or remove any group or membership row.
 
 ## Wait for the first membership sync
 
@@ -120,7 +123,9 @@ Check, in this order:
    groups would grant access, so an administrator can revoke one person
    without waiting on a provider change.
 
-If you have locked yourself out entirely, insert a row into `group_sources`
-with `purpose = 'access'`, `active = true`, `granted_role = 'admin'`, and your
-group's identifier and address, then run the sync. That is the same thing the
-configuration above does.
+If this is a fresh installation and there is no access group, correct the
+GitHub settings and run `Deploy` again; the create-only bootstrap remains the
+supported recovery path. If a group already exists, the bootstrap deliberately
+will not supersede it. Treat that as an access-configuration incident, preserve
+the existing rows and task logs, and repair the existing configuration through
+the database administration process instead of inserting a competing group.

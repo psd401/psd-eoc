@@ -519,6 +519,21 @@ export class PsdEocStack extends Stack {
         },
       },
     );
+    const initialAccessGroupSecret = new secretsmanager.Secret(
+      this,
+      'InitialAccessGroupSecret',
+      {
+        description:
+          'First-run access-group email supplied through a NoEcho deployment parameter and readable only by the bootstrap task execution role.',
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/bootstrap/initial-access-group`,
+        secretObjectValue: {
+          email: SecretValue.unsafePlainText(
+            initialAccessGroupEmail.valueAsString,
+          ),
+        },
+      },
+    );
 
     const databaseSecurityGroup = new ec2.SecurityGroup(
       this,
@@ -993,8 +1008,6 @@ export class PsdEocStack extends Stack {
           PSD_EOC_FACILITIES: readFacilityContext(this.node),
           PSD_EOC_NEIGHBORHOODS: readNeighborhoodContext(this.node),
           PSD_EOC_SYNTHETIC_GROUPS: readSyntheticGroupContext(this.node),
-          PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL:
-            initialAccessGroupEmail.valueAsString,
           PSD_EOC_INITIAL_ACCESS_GROUP_ID: initialAccessGroupId.valueAsString,
           PSD_EOC_INITIAL_ACCESS_GROUP_NAME:
             initialAccessGroupName.valueAsString,
@@ -1031,6 +1044,10 @@ export class PsdEocStack extends Stack {
             databaseApplicationSecret,
             'username',
           ),
+          PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: ecsSecretJsonKey(
+            initialAccessGroupSecret,
+            'email',
+          ),
         },
       },
     );
@@ -1042,7 +1059,7 @@ export class PsdEocStack extends Stack {
     imageRepository.grantPull(bootstrapTaskExecutionRole);
     databaseAdminSecret.grantRead(bootstrapTaskExecutionRole);
     databaseApplicationSecret.grantRead(bootstrapTaskExecutionRole);
-    bootstrapIdentitySecret.grantRead(bootstrapTaskExecutionRole);
+    initialAccessGroupSecret.grantRead(bootstrapTaskExecutionRole);
 
     const accessSyncTaskExecutionRole = new iam.Role(
       this,
