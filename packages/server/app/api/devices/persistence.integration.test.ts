@@ -9,7 +9,6 @@ import {
   test,
 } from 'bun:test';
 import {
-  AudienceConfigSchema,
   ChannelAttemptSchema,
   DispatchBatchSchema,
   NotificationOutboxMessageSchema,
@@ -646,13 +645,6 @@ function pushResolutionFixture(
     purpose: 'building' as const,
     facilityId,
   });
-  const audienceConfig = AudienceConfigSchema.parse({
-    id: SEEDED.audienceId,
-    facilityId,
-    version: 1,
-    targets: [{ kind: 'building', facilityId }],
-    createdAt: SEEDED.integrationObservedAt,
-  });
   const rosterSnapshot = RosterSnapshotSchema.parse({
     id: identity.rosterSnapshotId,
     version: identity.rosterVersion,
@@ -697,7 +689,6 @@ function pushResolutionFixture(
     },
     rosterSnapshotId: identity.rosterSnapshotId,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: SEEDED.audienceId, version: 1 },
     requestId,
     authorization: {
       kind: 'synthetic-training',
@@ -723,8 +714,7 @@ function pushResolutionFixture(
   return Object.freeze({
     batch,
     audience: Object.freeze({
-      audienceConfig,
-      neighborhoodVersions: Object.freeze([]),
+      facilityId,
       rosterSnapshot,
     }),
   });
@@ -799,7 +789,6 @@ async function installDeviceNotRegisteredAttemptFixture(
     },
     rosterSnapshotId: fixture.syntheticRosterSnapshotId,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: SEEDED.audienceId, version: 1 },
     requestId: ids.request,
     authorization,
     channels,
@@ -838,8 +827,6 @@ async function installDeviceNotRegisteredAttemptFixture(
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       rosterSnapshotId: fixture.syntheticRosterSnapshotId,
       rosterPopulation: 'synthetic',
-      audienceConfigId: SEEDED.audienceId,
-      audienceConfigVersion: 1,
       createdBy: {
         kind: 'system',
         serviceId: 'device-invalidation-database-test',
@@ -892,8 +879,6 @@ async function installDeviceNotRegisteredAttemptFixture(
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       rosterSnapshotId: fixture.syntheticRosterSnapshotId,
       rosterPopulation: 'synthetic',
-      audienceConfigId: SEEDED.audienceId,
-      audienceConfigVersion: 1,
       requestId: ids.request,
       authorization,
       channels,
@@ -918,8 +903,6 @@ async function installDeviceNotRegisteredAttemptFixture(
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       rosterSnapshotId: fixture.syntheticRosterSnapshotId,
       rosterPopulation: 'synthetic',
-      audienceConfigId: SEEDED.audienceId,
-      audienceConfigVersion: 1,
       requestId: ids.request,
       authorization,
       channel: 'push',

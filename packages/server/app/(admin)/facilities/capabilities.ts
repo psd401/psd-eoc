@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  AudienceConfigSchema,
-  CreateAudienceConfigVersionInputSchema,
   CreateFacilityInputSchema,
   CreateGroupSourceInputSchema,
   CreateNeighborhoodVersionInputSchema,
@@ -19,7 +17,6 @@ import {
   UpdateGroupSourceInputSchema,
   UuidSchema,
   type Actor,
-  type AudienceConfig,
   type CapabilityInput,
   type Facility,
   type FacilityPage,
@@ -44,8 +41,6 @@ import {
 } from 'drizzle-orm';
 
 import {
-  audienceConfigurations,
-  audienceTargets,
   facilities,
   groupSources,
   neighborhoodFacilities,
@@ -252,10 +247,9 @@ async function lockAdminIdentity(
 async function lockRosterConfigurationPopulations(
   database: AdminQueryDatabase,
 ): Promise<void> {
-  // Audience validation spans both staff and synthetic configurations. Hold
-  // both serialization keys in one deterministic order until the audience
-  // version commits so a concurrent source replacement cannot make a newly
-  // inserted audience version stale between validation and persistence.
+  // Source replacement spans both staff and synthetic configurations. Hold
+  // both serialization keys in one deterministic order so a concurrent
+  // replacement cannot interleave with this one.
   await lockAdminIdentity(database, 'psd-eoc-roster-staff');
   await lockAdminIdentity(database, 'psd-eoc-roster-synthetic');
 }
@@ -1355,443 +1349,6 @@ async function updateGroupSource(
   return source;
 }
 
-async function audienceByVersion(
-  database: AdminQueryDatabase,
-  id: string,
-  version: number,
-): Promise<AudienceConfig | null> {
-  const [header] = await database
-    .select()
-    .from(audienceConfigurations)
-    .where(
-      and(
-        eq(audienceConfigurations.id, id),
-        eq(audienceConfigurations.version, version),
-      ),
-    )
-    .limit(1);
-  if (header === undefined) return null;
-  const rows = await database
-    .select()
-    .from(audienceTargets)
-    .where(
-      and(
-        eq(audienceTargets.audienceConfigId, id),
-        eq(audienceTargets.audienceConfigVersion, version),
-      ),
-    )
-    .orderBy(asc(audienceTargets.ordinal));
-  const targets: Array<AudienceConfig['targets'][number]> = [];
-  for (const row of rows) {
-    switch (row.targetKind) {
-      case 'building':
-        if (row.targetFacilityId === null) {
-          throw conflict('The building audience target is incomplete.');
-        }
-        targets.push({ kind: 'building', facilityId: row.targetFacilityId });
-        break;
-      case 'neighborhood':
-        if (row.neighborhoodId === null || row.neighborhoodVersion === null) {
-          throw conflict('The neighborhood audience target is incomplete.');
-        }
-        targets.push({
-          kind: 'neighborhood',
-          neighborhood: {
-            id: row.neighborhoodId,
-            version: row.neighborhoodVersion,
-          },
-        });
-        break;
-      case 'others': {
-        if (row.groupSourceId === null) {
-          throw conflict('The others audience target is incomplete.');
-        }
-        const source = await getGroupSource(database, row.groupSourceId);
-        if (source === null || source.purpose !== 'others') {
-          throw conflict('The others audience source is unavailable.');
-        }
-        targets.push({
-          kind: 'others',
-          groupSourceRef: {
-            id: source.id,
-            kind: source.kind,
-            purpose: source.purpose,
-            facilityId: source.facilityId,
-          },
-        });
-        break;
-      }
-    }
-  }
-  return AudienceConfigSchema.parse({
-    id: header.id,
-    facilityId: header.facilityId,
-    version: header.version,
-    targets,
-    createdAt: dateIso(header.createdAt),
-  });
-}
-
-async function latestAudienceConfig(
-  database: AdminQueryDatabase,
-  facilityId: string,
-): Promise<AudienceConfig | null> {
-  const lineages = await database
-    .select({ id: audienceConfigurations.id })
-    .from(audienceConfigurations)
-    .where(eq(audienceConfigurations.facilityId, facilityId))
-    .groupBy(audienceConfigurations.id)
-    .limit(2);
-  if (lineages.length > 1) {
-    throw conflict('The facility has conflicting audience lineages.');
-  }
-  const lineage = lineages[0];
-  if (lineage === undefined) return null;
-  const [header] = await database
-    .select({
-      id: audienceConfigurations.id,
-      version: audienceConfigurations.version,
-    })
-    .from(audienceConfigurations)
-    .where(eq(audienceConfigurations.id, lineage.id))
-    .orderBy(desc(audienceConfigurations.version))
-    .limit(1);
-  return header === undefined
-    ? null
-    : audienceByVersion(database, header.id, header.version);
-}
-
-async function latestAudienceConfigs(
-  database: AdminQueryDatabase,
-  facilityIds: readonly string[],
-): Promise<readonly AudienceConfig[]> {
-  if (facilityIds.length === 0) return Object.freeze([]);
-  const lineageRows = await database
-    .select({
-      facilityId: audienceConfigurations.facilityId,
-      id: audienceConfigurations.id,
-    })
-    .from(audienceConfigurations)
-    .where(inArray(audienceConfigurations.facilityId, facilityIds))
-    .groupBy(audienceConfigurations.facilityId, audienceConfigurations.id)
-    .orderBy(
-      asc(audienceConfigurations.facilityId),
-      asc(audienceConfigurations.id),
-    );
-  const lineageByFacility = new Map<string, string>();
-  for (const row of lineageRows) {
-    const existing = lineageByFacility.get(row.facilityId);
-    if (existing !== undefined && existing !== row.id) {
-      throw conflict('The facility has conflicting audience lineages.');
-    }
-    lineageByFacility.set(row.facilityId, row.id);
-  }
-  if (lineageRows.length === 0) return Object.freeze([]);
-
-  const headers = await database
-    .selectDistinctOn([audienceConfigurations.facilityId], {
-      createdAt: audienceConfigurations.createdAt,
-      facilityId: audienceConfigurations.facilityId,
-      id: audienceConfigurations.id,
-      version: audienceConfigurations.version,
-    })
-    .from(audienceConfigurations)
-    .where(
-      inArray(audienceConfigurations.id, [
-        ...new Set(lineageRows.map(({ id }) => id)),
-      ]),
-    )
-    .orderBy(
-      asc(audienceConfigurations.facilityId),
-      desc(audienceConfigurations.version),
-    );
-  if (headers.length === 0) return Object.freeze([]);
-
-  const targetsByVersion = new Map<
-    string,
-    Array<AudienceConfig['targets'][number]>
-  >();
-  for (const headerBatch of chunks(
-    headers,
-    DATA_API_AUDIENCE_HEADER_BATCH_SIZE,
-  )) {
-    const targetRows = await database
-      .select({
-        audienceConfigId: audienceTargets.audienceConfigId,
-        audienceConfigVersion: audienceTargets.audienceConfigVersion,
-        neighborhoodId: audienceTargets.neighborhoodId,
-        neighborhoodVersion: audienceTargets.neighborhoodVersion,
-        ordinal: audienceTargets.ordinal,
-        sourceFacilityId: groupSources.facilityId,
-        sourceId: groupSources.id,
-        sourceKind: groupSources.kind,
-        sourcePurpose: groupSources.purpose,
-        targetFacilityId: audienceTargets.targetFacilityId,
-        targetKind: audienceTargets.targetKind,
-      })
-      .from(audienceTargets)
-      .leftJoin(
-        groupSources,
-        eq(audienceTargets.groupSourceId, groupSources.id),
-      )
-      .where(
-        or(
-          ...headerBatch.map((header) =>
-            and(
-              eq(audienceTargets.audienceConfigId, header.id),
-              eq(audienceTargets.audienceConfigVersion, header.version),
-            ),
-          ),
-        ),
-      )
-      .orderBy(
-        asc(audienceTargets.audienceConfigId),
-        asc(audienceTargets.audienceConfigVersion),
-        asc(audienceTargets.ordinal),
-      );
-    for (const row of targetRows) {
-      const key = `${row.audienceConfigId}:${row.audienceConfigVersion}`;
-      const targets = targetsByVersion.get(key) ?? [];
-      switch (row.targetKind) {
-        case 'building':
-          if (row.targetFacilityId === null) {
-            throw conflict('The building audience target is incomplete.');
-          }
-          targets.push({ kind: 'building', facilityId: row.targetFacilityId });
-          break;
-        case 'neighborhood':
-          if (row.neighborhoodId === null || row.neighborhoodVersion === null) {
-            throw conflict('The neighborhood audience target is incomplete.');
-          }
-          targets.push({
-            kind: 'neighborhood',
-            neighborhood: {
-              id: row.neighborhoodId,
-              version: row.neighborhoodVersion,
-            },
-          });
-          break;
-        case 'others':
-          if (
-            row.sourceId === null ||
-            row.sourceKind === null ||
-            row.sourcePurpose !== 'others' ||
-            row.sourceFacilityId !== null
-          ) {
-            throw conflict('The others audience source is unavailable.');
-          }
-          targets.push({
-            kind: 'others',
-            groupSourceRef: {
-              id: row.sourceId,
-              kind: row.sourceKind,
-              purpose: 'others',
-              facilityId: null,
-            },
-          });
-          break;
-      }
-      targetsByVersion.set(key, targets);
-    }
-  }
-
-  return Object.freeze(
-    headers.map((header) =>
-      AudienceConfigSchema.parse({
-        id: header.id,
-        facilityId: header.facilityId,
-        version: header.version,
-        targets: targetsByVersion.get(`${header.id}:${header.version}`) ?? [],
-        createdAt: dateIso(header.createdAt),
-      }),
-    ),
-  );
-}
-
-async function validateAudienceTargets(
-  database: AdminQueryDatabase,
-  input: CapabilityInput<'create-audience-config-version'>,
-): Promise<void> {
-  const owningBuildingTargets = input.targets.filter(
-    (target) =>
-      target.kind === 'building' && target.facilityId === input.facilityId,
-  );
-  if (owningBuildingTargets.length !== 1) {
-    throw conflict(
-      'Every audience version must include exactly one building target for its owning facility.',
-    );
-  }
-  const facility = await getFacility(database, input.facilityId);
-  if (facility === null || !facility.active) {
-    throw conflict('Audience configuration requires an active facility.');
-  }
-  const effectiveSourceIds = await effectiveRosterSourceIds(database);
-  const targetFacilityIds = new Set([input.facilityId]);
-  const othersKinds = new Set<'google-group' | 'synthetic'>();
-  for (const target of input.targets) {
-    if (target.kind === 'neighborhood') {
-      const neighborhood = await neighborhoodByVersion(
-        database,
-        target.neighborhood.id,
-        target.neighborhood.version,
-      );
-      if (
-        neighborhood === null ||
-        !neighborhood.facilityIds.includes(input.facilityId)
-      ) {
-        throw conflict(
-          'The selected neighborhood must include the audience facility.',
-        );
-      }
-      neighborhood.facilityIds.forEach((facilityId) =>
-        targetFacilityIds.add(facilityId),
-      );
-    }
-    if (target.kind === 'others') {
-      const source = await getGroupSource(database, target.groupSourceRef.id);
-      if (
-        source === null ||
-        !effectiveSourceIds.has(source.id) ||
-        source.kind !== target.groupSourceRef.kind ||
-        source.purpose !== 'others'
-      ) {
-        throw conflict('The selected others group is unavailable.');
-      }
-      othersKinds.add(source.kind);
-    }
-  }
-  if (othersKinds.size > 1) {
-    throw conflict(
-      'One audience version cannot mix staff Google and synthetic TEST others sources.',
-    );
-  }
-
-  const targetedFacilities = await database
-    .select({ id: facilities.id, active: facilities.active })
-    .from(facilities)
-    .where(inArray(facilities.id, [...targetFacilityIds]));
-  if (
-    targetedFacilities.length !== targetFacilityIds.size ||
-    targetedFacilities.some(({ active }) => !active)
-  ) {
-    throw conflict('Every audience facility must be active and available.');
-  }
-  const configuredSourceIds = [...effectiveSourceIds];
-  const buildingSources =
-    configuredSourceIds.length === 0
-      ? []
-      : await database
-          .select({
-            facilityId: groupSources.facilityId,
-            kind: groupSources.kind,
-          })
-          .from(groupSources)
-          .where(
-            and(
-              eq(groupSources.purpose, 'building'),
-              inArray(groupSources.id, configuredSourceIds),
-              inArray(groupSources.facilityId, [...targetFacilityIds]),
-            ),
-          );
-  const requiredKind = [...othersKinds][0];
-  const missingBuildingSource = [...targetFacilityIds].some(
-    (facilityId) =>
-      !buildingSources.some(
-        (source) =>
-          source.facilityId === facilityId &&
-          (requiredKind === undefined || source.kind === requiredKind),
-      ),
-  );
-  if (missingBuildingSource) {
-    throw conflict(
-      requiredKind === undefined
-        ? 'Configure an active building group for every audience facility before saving.'
-        : `Configure an active ${requiredKind} building group for every audience facility before selecting matching others sources.`,
-    );
-  }
-}
-
-async function createAudienceConfigVersion(
-  database: AdminQueryDatabase,
-  inputValue: CapabilityInput<'create-audience-config-version'>,
-): Promise<AudienceConfig> {
-  const input = CreateAudienceConfigVersionInputSchema.parse(inputValue);
-  // Serialize every facility/roster-dependent administrator mutation before
-  // taking row locks. This preserves the replacement-before-audience order
-  // without forming a facility-row/advisory-lock cycle.
-  await lockRosterConfigurationPopulations(database);
-  const [lockedFacility] = await database
-    .select({ id: facilities.id })
-    .from(facilities)
-    .where(eq(facilities.id, input.facilityId))
-    .limit(1)
-    .for('update');
-  if (lockedFacility === undefined) {
-    throw notFound('The audience facility was not found.');
-  }
-  await validateAudienceTargets(database, input);
-  const id = input.audienceConfigId ?? randomUUID();
-  let version = 1;
-  if (input.audienceConfigId === null) {
-    const [existing] = await database
-      .select({ id: audienceConfigurations.id })
-      .from(audienceConfigurations)
-      .where(eq(audienceConfigurations.facilityId, input.facilityId))
-      .limit(1);
-    if (existing !== undefined) {
-      throw conflict(
-        'This facility already has an audience configuration; append a version to its existing identity.',
-      );
-    }
-  } else {
-    const [latest] = await database
-      .select({
-        facilityId: audienceConfigurations.facilityId,
-        version: audienceConfigurations.version,
-      })
-      .from(audienceConfigurations)
-      .where(eq(audienceConfigurations.id, input.audienceConfigId))
-      .orderBy(desc(audienceConfigurations.version))
-      .limit(1)
-      .for('update');
-    if (latest === undefined) {
-      throw notFound('The audience configuration was not found.');
-    }
-    if (latest.facilityId !== input.facilityId) {
-      throw conflict('Audience configuration identity cannot move facilities.');
-    }
-    version = latest.version + 1;
-  }
-  const [header] = await database
-    .insert(audienceConfigurations)
-    .values({ id, facilityId: input.facilityId, version })
-    .returning();
-  if (header === undefined) {
-    throw conflict('The audience configuration could not be created.');
-  }
-  await database.insert(audienceTargets).values(
-    input.targets.map((target, index) => ({
-      audienceConfigId: id,
-      audienceConfigVersion: version,
-      ordinal: index + 1,
-      targetKind: target.kind,
-      targetFacilityId: target.kind === 'building' ? target.facilityId : null,
-      neighborhoodId:
-        target.kind === 'neighborhood' ? target.neighborhood.id : null,
-      neighborhoodVersion:
-        target.kind === 'neighborhood' ? target.neighborhood.version : null,
-      groupSourceId: target.kind === 'others' ? target.groupSourceRef.id : null,
-    })),
-  );
-  return AudienceConfigSchema.parse({
-    id,
-    facilityId: input.facilityId,
-    version,
-    targets: input.targets,
-    createdAt: dateIso(header.createdAt),
-  });
-}
-
 interface ResultReference {
   readonly id: string;
   readonly version: number | null;
@@ -2127,92 +1684,13 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
   replayFacilityId: (output) => output.facilityId,
 };
 
-export const getAudienceConfigRegistration: ServerCapabilityRegistration<
-  'get-audience-config',
-  AdminCapabilityTransaction
-> = {
-  id: 'get-audience-config',
-  resolveFacilityId: (input, context) =>
-    resolveExistingFacilityId(context, input.facilityId),
-  async handler(input, context) {
-    const output = await latestAudienceConfig(
-      context.transaction.database,
-      input.facilityId,
-    );
-    if (output === null)
-      throw notFound('The audience configuration was not found.');
-    return output;
-  },
-};
-
-export const getAudienceConfigVersionRegistration: ServerCapabilityRegistration<
-  'get-audience-config-version',
-  AdminCapabilityTransaction
-> = {
-  id: 'get-audience-config-version',
-  resolveFacilityId: async (input, context) => {
-    guard(context, null);
-    const output = await audienceByVersion(
-      context.transaction.database,
-      input.audienceConfig.id,
-      input.audienceConfig.version,
-    );
-    if (output === null) throw notFound('The audience version was not found.');
-    return output.facilityId;
-  },
-  async handler(input, context) {
-    const output = await audienceByVersion(
-      context.transaction.database,
-      input.audienceConfig.id,
-      input.audienceConfig.version,
-    );
-    if (output === null) throw notFound('The audience version was not found.');
-    return output;
-  },
-};
-
-export const createAudienceConfigVersionRegistration: ServerCapabilityRegistration<
-  'create-audience-config-version',
-  AdminCapabilityTransaction
-> = {
-  id: 'create-audience-config-version',
-  resolveFacilityId: (input, context) =>
-    resolveExistingFacilityId(context, input.facilityId),
-  handler: (input, context) =>
-    createAudienceConfigVersion(context.transaction.database, input),
-  resultReference: (output) => resultReference(output.id, output.version),
-  async loadReplay(reference, context) {
-    const parsed = parseResultReference(reference);
-    const output = await audienceByVersion(
-      context.transaction.database,
-      parsed.id,
-      requireVersion(parsed),
-    );
-    if (output === null) throw conflict('The audience version is unavailable.');
-    return output;
-  },
-  async resolveReplayFacilityId(reference, context) {
-    const parsed = parseResultReference(reference);
-    const output = await audienceByVersion(
-      context.transaction.database,
-      parsed.id,
-      requireVersion(parsed),
-    );
-    if (output === null) throw conflict('The audience version is unavailable.');
-    return guard(context, output.facilityId);
-  },
-  replayFacilityId: (output) => output.facilityId,
-};
-
 const ADMIN_FACILITY_CATALOG_LIMIT = 200;
 const ADMIN_NEIGHBORHOOD_CATALOG_LIMIT = 200;
 const ADMIN_GROUP_CATALOG_LIMIT = 500;
 // Aurora Data API rejects a response over 1 MiB. Neighborhoods can contain
-// 200 facilities and audiences can contain 500 targets, so fetch only compact
-// membership fields in conservative, sequential batches.
+// 200 facilities, so fetch only compact membership fields in conservative,
+// sequential batches.
 const DATA_API_NEIGHBORHOOD_HEADER_BATCH_SIZE = 20;
-const DATA_API_AUDIENCE_HEADER_BATCH_SIZE = 2;
-
 const COMPLETE_FACILITY_CATALOG_QUERY = Object.freeze({
   includeInactive: true,
   cursor: null,
@@ -2289,7 +1767,6 @@ export interface FacilitiesAdminProjection {
   readonly neighborhoodOptions: readonly Neighborhood[];
   readonly buildingGroupOptions: readonly GroupSource[];
   readonly othersGroupOptions: readonly GroupSource[];
-  readonly audienceConfigs: readonly AudienceConfig[];
 }
 
 function requireCompleteCatalog<Item>(
@@ -2388,10 +1865,6 @@ async function facilitiesAdminProjection(
     othersGroupOptions: requireCompleteCatalog(
       completeOthersGroups,
       'others-group',
-    ),
-    audienceConfigs: await latestAudienceConfigs(
-      database,
-      pagedFacilities.items.map(({ id }) => id),
     ),
   });
 }
@@ -2603,39 +2076,6 @@ export const executeUpdateGroupSourceCapability = (
 ) =>
   executeAdminMutationCapability(
     updateGroupSourceRegistration,
-    input.command,
-    input.authenticated,
-    executionStore(input.authenticated, input.store),
-    input.metadata,
-  );
-
-export const executeGetAudienceConfigCapability = (
-  input: QueryExecution<CapabilityInput<'get-audience-config'>>,
-) =>
-  executeAdminQueryCapability(
-    getAudienceConfigRegistration,
-    input.query,
-    input.authenticated,
-    executionStore(input.authenticated, input.store),
-    input.metadata,
-  );
-
-export const executeGetAudienceConfigVersionCapability = (
-  input: QueryExecution<CapabilityInput<'get-audience-config-version'>>,
-) =>
-  executeAdminQueryCapability(
-    getAudienceConfigVersionRegistration,
-    input.query,
-    input.authenticated,
-    executionStore(input.authenticated, input.store),
-    input.metadata,
-  );
-
-export const executeCreateAudienceConfigVersionCapability = (
-  input: MutationExecution<CapabilityInput<'create-audience-config-version'>>,
-) =>
-  executeAdminMutationCapability(
-    createAudienceConfigVersionRegistration,
     input.command,
     input.authenticated,
     executionStore(input.authenticated, input.store),

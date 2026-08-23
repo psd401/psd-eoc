@@ -5,7 +5,7 @@ import {
   InvocationSourceSchema,
   isActorSourceCompatible,
 } from './capability';
-import { AudienceConfigRefSchema, FacilityIdSchema } from './facility';
+import { FacilityIdSchema } from './facility';
 import { IntegrationStatusSchema } from './integration';
 import {
   ActivationAuthorizationSchema,
@@ -406,7 +406,7 @@ function addNotificationAuthorizationIssues(
 
 /**
  * Owns the immutable, transactionally recorded send intent. It pins event,
- * type, roster, and audience versions and repeats classification before work
+ * type and roster versions and repeats classification before work
  * crosses the outbox boundary.
  */
 export const NotificationIntentSchema = z
@@ -419,7 +419,6 @@ export const NotificationIntentSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    audienceConfig: AudienceConfigRefSchema,
     deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     createdBy: ActorSchema,
     source: InvocationSourceSchema,
@@ -481,7 +480,6 @@ export const DispatchBatchSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    audienceConfig: AudienceConfigRefSchema,
     deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     requestId: UuidSchema,
     authorization: NotificationAuthorizationSchema,
@@ -885,7 +883,6 @@ const NotificationOutboxMessageCommonShape = {
   eventTypeVersion: EventTypeVersionRefSchema,
   rosterSnapshotId: RosterSnapshotIdSchema,
   rosterPopulation: RosterPopulationSchema,
-  audienceConfig: AudienceConfigRefSchema,
   deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
   requestId: UuidSchema,
   authorization: NotificationAuthorizationSchema,
@@ -1115,8 +1112,6 @@ export const DispatchOutboxResultSchema = z
           message.eventTypeVersion.templateMode ||
         batch.rosterSnapshotId !== message.rosterSnapshotId ||
         batch.rosterPopulation !== message.rosterPopulation ||
-        batch.audienceConfig.id !== message.audienceConfig.id ||
-        batch.audienceConfig.version !== message.audienceConfig.version ||
         JSON.stringify(batch.deliveryTest) !==
           JSON.stringify(message.deliveryTest) ||
         batch.requestId !== message.requestId ||
@@ -1132,7 +1127,7 @@ export const DispatchOutboxResultSchema = z
         context.addIssue({
           code: 'custom',
           message:
-            'Dispatch batches must exactly preserve outbox classification, authorization, audience, and channel plan truth.',
+            'Dispatch batches must exactly preserve outbox classification, authorization, and channel plan truth.',
           path: ['batches', index],
         });
       }
@@ -1584,8 +1579,6 @@ export const NotificationStatusSchema = z
           status.intent.eventTypeVersion.templateMode ||
         batch.rosterSnapshotId !== status.intent.rosterSnapshotId ||
         batch.rosterPopulation !== status.intent.rosterPopulation ||
-        batch.audienceConfig.id !== status.intent.audienceConfig.id ||
-        batch.audienceConfig.version !== status.intent.audienceConfig.version ||
         JSON.stringify(batch.deliveryTest) !==
           JSON.stringify(status.intent.deliveryTest) ||
         batch.requestId !== status.intent.requestId ||

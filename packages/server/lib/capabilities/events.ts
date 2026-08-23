@@ -68,7 +68,6 @@ import {
 } from '../notify/dispatcher';
 import {
   activationPreviews,
-  audienceConfigurations,
   channelConfigurations,
   deliveryTestRuns,
   deliveryTestTargetEndpoints,
@@ -93,7 +92,6 @@ import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/sign-in-audit';
 import {
   currentActiveAudienceEndpointReferences,
   deliveryTestCredentialIsVerified,
-  loadAudienceConfiguration,
   loadRosterSnapshot,
   readDeliveryTestCredentialVerificationReferences,
   requireCurrentDeliveryTestTargetEligibility,
@@ -520,7 +518,6 @@ function buildNotification(
     eventTypeVersion: input.event.eventTypeVersion,
     rosterSnapshotId: input.event.rosterSnapshotId,
     rosterPopulation: input.event.rosterPopulation,
-    audienceConfig: input.preview.audienceConfig,
     deliveryTest,
     createdBy: input.context.invocation.actor,
     source: input.context.invocation.source,
@@ -542,7 +539,6 @@ function buildNotification(
     eventTypeVersion: intent.eventTypeVersion,
     rosterSnapshotId: intent.rosterSnapshotId,
     rosterPopulation: intent.rosterPopulation,
-    audienceConfig: intent.audienceConfig,
     deliveryTest: intent.deliveryTest,
     requestId: intent.requestId,
     authorization: intent.authorization,
@@ -1718,21 +1714,6 @@ async function activationPreviewById(
   if (row === undefined) {
     return null;
   }
-  const [audience] = await database
-    .select({ facilityId: audienceConfigurations.facilityId })
-    .from(audienceConfigurations)
-    .where(
-      and(
-        eq(audienceConfigurations.id, row.audienceConfigId),
-        eq(audienceConfigurations.version, row.audienceConfigVersion),
-      ),
-    )
-    .limit(1);
-  if (audience?.facilityId !== row.facilityId) {
-    throw conflict(
-      'The activation audience is not owned by the event facility.',
-    );
-  }
   return ActivationPreviewSchema.parse({
     id: row.id,
     facilityId: row.facilityId,
@@ -1744,10 +1725,6 @@ async function activationPreviewById(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -1784,24 +1761,6 @@ async function lifecyclePreviewById(
   if (row === undefined) {
     return null;
   }
-  const [eventAudience] = await database
-    .select({ facilityId: events.facilityId })
-    .from(events)
-    .innerJoin(
-      audienceConfigurations,
-      and(
-        eq(audienceConfigurations.id, row.audienceConfigId),
-        eq(audienceConfigurations.version, row.audienceConfigVersion),
-        eq(audienceConfigurations.facilityId, events.facilityId),
-      ),
-    )
-    .where(eq(events.id, row.eventId))
-    .limit(1);
-  if (eventAudience === undefined) {
-    throw conflict(
-      'The lifecycle audience is not owned by the event facility.',
-    );
-  }
   return LifecycleConsequencePreviewSchema.parse({
     id: row.id,
     eventId: row.eventId,
@@ -1814,10 +1773,6 @@ async function lifecyclePreviewById(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -1860,10 +1815,6 @@ async function notificationIntentById(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    audienceConfig: {
-      id: row.audienceConfigId,
-      version: row.audienceConfigVersion,
-    },
     deliveryTest:
       row.deliveryTestTargetSetId === null ||
       row.deliveryTestTargetSetVersion === null ||
@@ -2245,8 +2196,6 @@ async function persistNotification(
     eventTypeVersionId: intent.eventTypeVersion.id,
     rosterSnapshotId: intent.rosterSnapshotId,
     rosterPopulation: intent.rosterPopulation,
-    audienceConfigId: intent.audienceConfig.id,
-    audienceConfigVersion: intent.audienceConfig.version,
     createdBy: intent.createdBy,
     source: intent.source,
     requestId: intent.requestId,
@@ -2295,8 +2244,6 @@ async function persistNotification(
     eventTypeVersionId: message.eventTypeVersion.id,
     rosterSnapshotId: message.rosterSnapshotId,
     rosterPopulation: message.rosterPopulation,
-    audienceConfigId: message.audienceConfig.id,
-    audienceConfigVersion: message.audienceConfig.version,
     requestId: message.requestId,
     authorization: message.authorization,
     channels: message.channels,
@@ -2377,8 +2324,6 @@ async function persistLifecycleBundle(
       eventTypeVersionId: event.eventTypeVersion.id,
       rosterSnapshotId: intent.rosterSnapshotId,
       rosterPopulation: intent.rosterPopulation,
-      audienceConfigId: intent.audienceConfig.id,
-      audienceConfigVersion: intent.audienceConfig.version,
       consequenceDigest: consumption.authorization.consequenceDigest,
       authorization: consumption.authorization,
       requestId: consumption.requestId,
@@ -2804,10 +2749,6 @@ async function resolveActivationSourceFromDatabase(
         'The monthly delivery-test credential evidence no longer matches its preview.',
       );
     }
-    const audience = await loadAudienceConfiguration(
-      database,
-      preview.facilityId,
-    );
     const rosterSnapshot = await loadRosterSnapshot(
       database,
       'staff',
@@ -2815,14 +2756,13 @@ async function resolveActivationSourceFromDatabase(
       targetSet.rosterSnapshotId,
     );
     const activeAudienceEndpoints =
-      rosterSnapshot === null || audience === null
+      rosterSnapshot === null
         ? []
         : await currentActiveAudienceEndpointReferences(
             database,
             rosterSnapshot,
-            audience,
+            targetSet.facilityId,
           );
-    const currentAudienceHeader = audience?.audienceConfig;
     const activeKeys = new Set(
       activeAudienceEndpoints.map(
         (endpoint) =>
@@ -2831,9 +2771,10 @@ async function resolveActivationSourceFromDatabase(
     );
     if (
       rosterSnapshot === null ||
-      currentAudienceHeader === undefined ||
-      currentAudienceHeader.id !== preview.audienceConfig.id ||
-      currentAudienceHeader.version !== preview.audienceConfig.version ||
+      // The preview must still describe the school this target set belongs to.
+      // It used to have to match a pinned audience-configuration version as
+      // well; there is no version to drift now, only the school itself.
+      preview.facilityId !== targetSet.facilityId ||
       endpointRows.some(
         (endpoint) =>
           !activeKeys.has(

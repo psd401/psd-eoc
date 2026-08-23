@@ -19,7 +19,6 @@ import {
 import {
   groupMembers,
   accessMembershipSnapshots,
-  audienceConfigurations,
   channelConfigurations,
   deviceEnrollments,
   groupSources,
@@ -66,13 +65,10 @@ import {
   executeOwnedDatabaseCreation,
 } from './owned-database-lifecycle';
 import {
-  executeCreateAudienceConfigVersionCapability,
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
   executeCreateNeighborhoodVersionCapability,
   executeFacilitiesAdminProjection,
-  executeGetAudienceConfigCapability,
-  executeGetAudienceConfigVersionCapability,
   executeGetNeighborhoodVersionCapability,
   executeListFacilitiesCapability,
   executeListGroupSourcesCapability,
@@ -1588,29 +1584,6 @@ describeWithDatabase('facilities administrator database flow', () => {
             }),
           ).toMatchObject({ id: neighborhood.id, version: 2 });
 
-          const audience = await executeCreateAudienceConfigVersionCapability({
-            authenticated,
-            store,
-            command: {
-              audienceConfigId: null,
-              facilityId: facility.id,
-              targets: [{ kind: 'building', facilityId: facility.id }],
-            },
-            metadata: metadata('app-role-audience-first', requestIds),
-          });
-          expect(
-            await executeCreateAudienceConfigVersionCapability({
-              authenticated,
-              store,
-              command: {
-                audienceConfigId: audience.id,
-                facilityId: facility.id,
-                targets: [{ kind: 'building', facilityId: facility.id }],
-              },
-              metadata: metadata('app-role-audience-next', requestIds),
-            }),
-          ).toMatchObject({ id: audience.id, version: 2 });
-
           expect(
             await executeSetChannelEnabledCapability({
               authenticated,
@@ -2268,7 +2241,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       others.purpose !== 'others' ||
       others.facilityId !== null
     ) {
-      throw new Error('The configured audience extension lost its purpose.');
+      throw new Error('The configured others extension lost its purpose.');
     }
     if (
       syntheticOthers.kind !== 'synthetic' ||
@@ -2276,7 +2249,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       syntheticOthers.facilityId !== null
     ) {
       throw new Error(
-        'The configured synthetic audience extension lost its purpose.',
+        'The configured synthetic others extension lost its purpose.',
       );
     }
     const neighborhood = await executeCreateNeighborhoodVersionCapability({
@@ -2289,113 +2262,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       },
       metadata: metadata('neighborhood', requestIds),
     });
-    const audience = await executeCreateAudienceConfigVersionCapability({
-      authenticated,
-      store,
-      command: {
-        audienceConfigId: null,
-        facilityId: facility.id,
-        targets: [
-          { kind: 'building', facilityId: facility.id },
-          {
-            kind: 'neighborhood',
-            neighborhood: {
-              id: neighborhood.id,
-              version: neighborhood.version,
-            },
-          },
-          {
-            kind: 'others',
-            groupSourceRef: {
-              id: others.id,
-              kind: others.kind,
-              purpose: others.purpose,
-              facilityId: others.facilityId,
-            },
-          },
-        ],
-      },
-      metadata: metadata('audience', requestIds),
-    });
-
-    expect(
-      await executeGetAudienceConfigCapability({
-        authenticated,
-        store,
-        query: { facilityId: facility.id },
-        metadata: { requestId: randomUUID(), now: new Date() },
-      }),
-    ).toEqual(audience);
-    try {
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: audience.id,
-          facilityId: facility.id,
-          targets: [
-            {
-              kind: 'neighborhood',
-              neighborhood: {
-                id: neighborhood.id,
-                version: neighborhood.version,
-              },
-            },
-          ],
-        },
-        metadata: {
-          idempotencyKey: `issue-26-missing-building-${randomUUID()}`,
-          requestId: randomUUID(),
-          now: new Date(),
-        },
-      });
-      throw new Error('Expected an audience without its building to fail.');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(409);
-    }
-    const mixedAudienceRequestId = randomUUID();
-    try {
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: audience.id,
-          facilityId: facility.id,
-          targets: [
-            { kind: 'building', facilityId: facility.id },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: others.id,
-                kind: others.kind,
-                purpose: others.purpose,
-                facilityId: others.facilityId,
-              },
-            },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: syntheticOthers.id,
-                kind: syntheticOthers.kind,
-                purpose: syntheticOthers.purpose,
-                facilityId: syntheticOthers.facilityId,
-              },
-            },
-          ],
-        },
-        metadata: {
-          idempotencyKey: `issue-26-mixed-audience-${randomUUID()}`,
-          requestId: mixedAudienceRequestId,
-          now: new Date(),
-        },
-      });
-      throw new Error('Expected a mixed-population audience to fail closed.');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(409);
-    }
-
     const neighborhoodV2 = await executeCreateNeighborhoodVersionCapability({
       authenticated,
       store,
@@ -2434,49 +2300,6 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(
       currentNeighborhoods.items.find(({ id }) => id === neighborhood.id),
     ).toEqual(neighborhoodV2);
-
-    const audienceV2 = await executeCreateAudienceConfigVersionCapability({
-      authenticated,
-      store,
-      command: {
-        audienceConfigId: audience.id,
-        facilityId: facility.id,
-        targets: [
-          { kind: 'building', facilityId: facility.id },
-          {
-            kind: 'neighborhood',
-            neighborhood: {
-              id: neighborhoodV2.id,
-              version: neighborhoodV2.version,
-            },
-          },
-        ],
-      },
-      metadata: metadata('audience-v2', requestIds),
-    });
-    expect(audienceV2).toMatchObject({
-      id: audience.id,
-      facilityId: facility.id,
-      version: audience.version + 1,
-    });
-    expect(
-      await executeGetAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        query: {
-          audienceConfig: { id: audience.id, version: audience.version },
-        },
-        metadata: { requestId: randomUUID(), now: new Date() },
-      }),
-    ).toEqual(audience);
-    expect(
-      await executeGetAudienceConfigCapability({
-        authenticated,
-        store,
-        query: { facilityId: facility.id },
-        metadata: { requestId: randomUUID(), now: new Date() },
-      }),
-    ).toEqual(audienceV2);
 
     const roleTargetId = randomUUID();
     await database.insert(users).values({
@@ -3641,29 +3464,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       },
       metadata: metadata('replacement-others', requestIds),
     });
-    const historicalAudience =
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: null,
-          facilityId: facility.id,
-          targets: [
-            { kind: 'building', facilityId: facility.id },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: originalOthers.id,
-                kind: 'google-group',
-                purpose: 'others',
-                facilityId: null,
-              },
-            },
-          ],
-        },
-        metadata: metadata('replacement-audience', requestIds),
-      });
-
     async function latestStaffConfiguration() {
       const [header] = await database
         .select({
@@ -3977,10 +3777,6 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(afterOthers.sourceIds).not.toContain(originalBuilding.id);
     expect(afterOthers.sourceIds).not.toContain(replacement.id);
 
-    const [audienceVersionCountBeforeRace] = await database
-      .select({ count: sql<number>`count(*)::int` })
-      .from(audienceConfigurations)
-      .where(eq(audienceConfigurations.id, historicalAudience.id));
     let releaseRosterLock: (() => void) | undefined;
     const rosterLockReleased = new Promise<void>((resolve) => {
       releaseRosterLock = resolve;
@@ -4014,87 +3810,13 @@ describeWithDatabase('facilities administrator database flow', () => {
       metadata: metadata('replacement-others-race', requestIds),
     });
     await waitForAdvisoryWaiters(database, 1);
-    const racingAudience = executeCreateAudienceConfigVersionCapability({
-      authenticated,
-      store,
-      command: {
-        audienceConfigId: historicalAudience.id,
-        facilityId: facility.id,
-        targets: [
-          { kind: 'building', facilityId: facility.id },
-          {
-            kind: 'others',
-            groupSourceRef: {
-              id: othersReplacement.id,
-              kind: 'google-group',
-              purpose: 'others',
-              facilityId: null,
-            },
-          },
-        ],
-      },
-      metadata: metadata('replacement-audience-race', requestIds),
-    });
-    await waitForAdvisoryWaiters(database, 2);
     releaseRosterLock?.();
     await rosterLockBlocker;
 
-    const [replacementRaceResult, audienceRaceResult] =
-      await Promise.allSettled([racingReplacement, racingAudience]);
+    const [replacementRaceResult] = await Promise.allSettled([
+      racingReplacement,
+    ]);
     expect(replacementRaceResult.status).toBe('fulfilled');
-    expect(audienceRaceResult.status).toBe('rejected');
-    if (audienceRaceResult.status !== 'rejected') {
-      throw new Error('The stale racing audience unexpectedly committed.');
-    }
-    expect(audienceRaceResult.reason).toBeInstanceOf(AdminCapabilityError);
-    expect((audienceRaceResult.reason as AdminCapabilityError).status).toBe(
-      409,
-    );
-    const [audienceVersionCountAfterRace] = await database
-      .select({ count: sql<number>`count(*)::int` })
-      .from(audienceConfigurations)
-      .where(eq(audienceConfigurations.id, historicalAudience.id));
-    expect(audienceVersionCountAfterRace).toEqual(
-      audienceVersionCountBeforeRace,
-    );
-
-    expect(
-      await executeGetAudienceConfigCapability({
-        authenticated,
-        store,
-        query: { facilityId: facility.id },
-        metadata: { requestId: randomUUID(), now: new Date() },
-      }),
-    ).toEqual(historicalAudience);
-    try {
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: historicalAudience.id,
-          facilityId: facility.id,
-          targets: [
-            { kind: 'building', facilityId: facility.id },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: originalOthers.id,
-                kind: 'google-group',
-                purpose: 'others',
-                facilityId: null,
-              },
-            },
-          ],
-        },
-        metadata: metadata('replacement-stale-audience', requestIds),
-      });
-      throw new Error(
-        'Expected a superseded others source to be refused in a new audience version.',
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(409);
-    }
   });
 
   test('replaces synthetic building and others sources without rewriting history', async () => {
@@ -4139,29 +3861,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       },
       metadata: metadata('synthetic-replacement-others', requestIds),
     });
-    const historicalAudience =
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: null,
-          facilityId: facility.id,
-          targets: [
-            { kind: 'building', facilityId: facility.id },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: originalOthers.id,
-                kind: 'synthetic',
-                purpose: 'others',
-                facilityId: null,
-              },
-            },
-          ],
-        },
-        metadata: metadata('synthetic-replacement-audience', requestIds),
-      });
-
     async function latestSyntheticConfiguration() {
       const [header] = await database
         .select({
@@ -4261,82 +3960,6 @@ describeWithDatabase('facilities administrator database flow', () => {
         )
         .orderBy(groupSources.id),
     ).toEqual(originalRowsBefore);
-
-    const correctedAudience =
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: historicalAudience.id,
-          facilityId: facility.id,
-          targets: [
-            { kind: 'building', facilityId: facility.id },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: replacementOthers.id,
-                kind: 'synthetic',
-                purpose: 'others',
-                facilityId: null,
-              },
-            },
-          ],
-        },
-        metadata: metadata('synthetic-audience-corrected', requestIds),
-      });
-    expect(correctedAudience).toMatchObject({
-      id: historicalAudience.id,
-      version: historicalAudience.version + 1,
-    });
-    expect(
-      await executeGetAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        query: {
-          audienceConfig: {
-            id: historicalAudience.id,
-            version: historicalAudience.version,
-          },
-        },
-        metadata: { requestId: randomUUID(), now: new Date() },
-      }),
-    ).toEqual(historicalAudience);
-    expect(
-      await executeGetAudienceConfigCapability({
-        authenticated,
-        store,
-        query: { facilityId: facility.id },
-        metadata: { requestId: randomUUID(), now: new Date() },
-      }),
-    ).toEqual(correctedAudience);
-
-    try {
-      await executeCreateAudienceConfigVersionCapability({
-        authenticated,
-        store,
-        command: {
-          audienceConfigId: historicalAudience.id,
-          facilityId: facility.id,
-          targets: [
-            { kind: 'building', facilityId: facility.id },
-            {
-              kind: 'others',
-              groupSourceRef: {
-                id: originalOthers.id,
-                kind: 'synthetic',
-                purpose: 'others',
-                facilityId: null,
-              },
-            },
-          ],
-        },
-        metadata: metadata('synthetic-stale-audience', requestIds),
-      });
-      throw new Error('Expected a superseded synthetic source to be refused.');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(409);
-    }
   });
 
   test('uses immutable filter-bound keysets and one audited complete facilities projection', async () => {
@@ -4677,7 +4300,6 @@ describeWithDatabase('facilities administrator database flow', () => {
         ({ facilityIds }) => facilityIds.length > 0,
       ),
     ).toBe(true);
-    expect(optimized.audienceConfigs.length).toBeGreaterThan(0);
     expect(optimized).toEqual(independentlyLoaded);
     expect(JSON.stringify(optimized)).toBe(JSON.stringify(independentlyLoaded));
 

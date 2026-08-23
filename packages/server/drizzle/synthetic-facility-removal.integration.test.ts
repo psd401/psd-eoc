@@ -293,8 +293,8 @@ async function stageReviewedLiveShape(
     // Written here with the columns this schema actually has: Drizzle emits
     // every column of a table it inserts into, so seeding group sources
     // through the current schema fails against a database held at an earlier
-    // migration. Runs after facilities and before the audience targets that
-    // reference them.
+    // migration. Runs after facilities and before the roster source
+    // configuration that references them.
     async insertGroupSources(transaction) {
       await transaction.execute(sql`
       insert into group_sources (
@@ -332,6 +332,50 @@ async function stageReviewedLiveShape(
       `);
     },
   });
+  // The audience layer is retired (#292), so the seed no longer writes these
+  // and `db/schema.ts` no longer models them. Migration 0012 is applied history
+  // and still counts them among the 57 rows it purges, so the reviewed live
+  // shape it replays against has to include them. Raw SQL against the historical
+  // column set, for the same reason the group sources above are: this database
+  // is held at an earlier migration than the current schema describes.
+  //
+  // Parent and children go in one transaction because
+  // `psd_eoc_guard_admin_version_child_insert` admits a target only while its
+  // configuration's xmin is the current transaction's.
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into audience_configurations (id, facility_id, version, created_at)
+      values
+        ('00000000-0000-4000-8000-000000000020'::uuid, ${ids.north}::uuid, 1,
+         '2026-08-06T12:00:00.000Z'::timestamptz),
+        ('00000000-0000-4000-8000-000000000021'::uuid, ${ids.south}::uuid, 1,
+         '2026-08-06T12:00:00.000Z'::timestamptz)
+    `);
+    await transaction.execute(sql`
+      insert into audience_targets (
+        audience_config_id, audience_config_version, ordinal, target_kind,
+        target_facility_id, neighborhood_id, neighborhood_version,
+        group_source_id
+      ) values
+        ('00000000-0000-4000-8000-000000000020'::uuid, 1, 1,
+         'building'::audience_target_kind, ${ids.north}::uuid, null, null, null),
+        ('00000000-0000-4000-8000-000000000020'::uuid, 1, 2,
+         'neighborhood'::audience_target_kind, null,
+         ${ids.neighborhood}::uuid, 1, null),
+        ('00000000-0000-4000-8000-000000000020'::uuid, 1, 3,
+         'others'::audience_target_kind, null, null, null,
+         '00000000-0000-4000-8000-000000000032'::uuid),
+        ('00000000-0000-4000-8000-000000000021'::uuid, 1, 1,
+         'building'::audience_target_kind, ${ids.south}::uuid, null, null, null),
+        ('00000000-0000-4000-8000-000000000021'::uuid, 1, 2,
+         'neighborhood'::audience_target_kind, null,
+         ${ids.neighborhood}::uuid, 1, null),
+        ('00000000-0000-4000-8000-000000000021'::uuid, 1, 3,
+         'others'::audience_target_kind, null, null, null,
+         '00000000-0000-4000-8000-000000000032'::uuid)
+    `);
+  });
+
   await database.transaction(async (transaction) => {
     await transaction.execute(sql`
       update facilities set active = false where id = ${ids.north}::uuid
@@ -495,9 +539,25 @@ async function retainedTruthSnapshot(
   return rows[0]?.snapshot ?? '';
 }
 
+/**
+ * Counts the reviewed live graph 0012 purges.
+ *
+ * `includeAudience` is false only where the caller has already run the whole
+ * migration folder: 0030 drops `audience_configurations` and `audience_targets`
+ * with the audience layer (#292), and PostgreSQL resolves a relation at parse
+ * time, so naming a dropped table fails even inside a branch that never runs.
+ * 0012 is applied history and still counts those eight rows among its 57, so
+ * every call made before it runs keeps them.
+ */
 async function canonicalOperationalCount(
   database: PostgresDatabase,
+  includeAudience = true,
 ): Promise<number> {
+  const audienceRows = includeAudience
+    ? sql`
+        (select count(*) from audience_configurations where id in ('00000000-0000-4000-8000-000000000020'::uuid, '00000000-0000-4000-8000-000000000021'::uuid)) +
+        (select count(*) from audience_targets where audience_config_id in ('00000000-0000-4000-8000-000000000020'::uuid, '00000000-0000-4000-8000-000000000021'::uuid)) +`
+    : sql``;
   const rows = databaseExecuteRows<CountRow>(
     await database.execute<CountRow>(sql`
       select (
@@ -505,8 +565,7 @@ async function canonicalOperationalCount(
         (select count(*) from neighborhood_versions where id = ${ids.neighborhood}::uuid) +
         (select count(*) from neighborhood_facilities where neighborhood_id = ${ids.neighborhood}::uuid) +
         (select count(*) from group_sources where id between '00000000-0000-4000-8000-000000000030'::uuid and '00000000-0000-4000-8000-000000000032'::uuid) +
-        (select count(*) from audience_configurations where id in ('00000000-0000-4000-8000-000000000020'::uuid, '00000000-0000-4000-8000-000000000021'::uuid)) +
-        (select count(*) from audience_targets where audience_config_id in ('00000000-0000-4000-8000-000000000020'::uuid, '00000000-0000-4000-8000-000000000021'::uuid)) +
+        ${audienceRows}
         (select count(*) from roster_source_configurations where id = ${ids.configuration}::uuid) +
         (select count(*) from roster_source_configuration_facilities where configuration_id = ${ids.configuration}::uuid) +
         (select count(*) from roster_source_configuration_groups where configuration_id = ${ids.configuration}::uuid) +
@@ -682,7 +741,7 @@ describeWithDatabase('canonical synthetic facility physical removal', () => {
       await seedReferenceData(connection.db);
       await seedReferenceData(connection.db);
 
-      expect(await canonicalOperationalCount(connection.db)).toBe(0);
+      expect(await canonicalOperationalCount(connection.db, false)).toBe(0);
       expect(await retainedTruthSnapshot(connection.db)).toBe(before);
       const rows = databaseExecuteRows<RemovalReadbackRow>(
         await connection.db.execute<RemovalReadbackRow>(sql`
@@ -741,7 +800,7 @@ describeWithDatabase('canonical synthetic facility physical removal', () => {
             )
           `);
       }, /retained facility identity cannot be reused/iu);
-      expect(await canonicalOperationalCount(connection.db)).toBe(0);
+      expect(await canonicalOperationalCount(connection.db, false)).toBe(0);
     });
   });
 

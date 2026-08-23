@@ -9,7 +9,6 @@ import {
   AgentCapabilityGrantSchema,
   ActivationPreviewSchema,
   AllClearEventResultSchema,
-  AudienceConfigSchema,
   CAPABILITY_CATALOG,
   CAPABILITY_MUTATION_SAFETY_MANIFEST,
   CAPABILITY_QUERY_MANIFEST,
@@ -240,8 +239,6 @@ const drillTypeRef = {
   templateMode: 'drill',
 } as const;
 
-const audienceRef = { id: ids.audience, version: 1 } as const;
-
 function templateSet(
   mode: TemplateMode,
   purpose: 'activation' | 'all-clear' | 'reactivation',
@@ -354,7 +351,6 @@ function activationPreview(target = targeting('incident', 'real', 'staff')) {
     eventTypeVersion:
       target.templateMode === 'real' ? realTypeRef : drillTypeRef,
     rosterSnapshotId: ids.roster,
-    audienceConfig: audienceRef,
     recipientCount: 42,
     channels: channelPlan(target),
     sendReadiness: 'ready',
@@ -475,7 +471,6 @@ function lifecyclePreview(
     eventTypeVersion:
       target.templateMode === 'real' ? realTypeRef : drillTypeRef,
     rosterSnapshotId: ids.roster,
-    audienceConfig: audienceRef,
     recipientCount: 42,
     channels: channelPlan(target, purpose),
     sendReadiness: 'ready',
@@ -644,7 +639,6 @@ function syntheticAllClearResult() {
     purpose: 'all-clear',
     eventTypeVersion: drillTypeRef,
     rosterSnapshotId: ids.roster,
-    audienceConfig: audienceRef,
     createdBy: agentActor,
     source: 'mcp',
     requestId: ids.request,
@@ -3442,7 +3436,6 @@ describe('notification and outbox classification continuity', () => {
       purpose: 'all-clear',
       eventTypeVersion: realTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       createdBy: humanActor,
       source: 'web',
       requestId: ids.request,
@@ -3476,7 +3469,6 @@ describe('notification and outbox classification continuity', () => {
       purpose: 'activation',
       eventTypeVersion: realTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       createdBy: humanActor,
       source: 'web',
       requestId: ids.request,
@@ -3508,7 +3500,6 @@ describe('notification and outbox classification continuity', () => {
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       requestId: ids.request,
       authorization: activationAuthorization(syntheticTarget),
       channel: 'push',
@@ -3567,7 +3558,6 @@ describe('notification and outbox classification continuity', () => {
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       createdBy: agentActor,
       source: 'mcp',
       requestId: ids.request,
@@ -3598,7 +3588,6 @@ describe('notification and outbox classification continuity', () => {
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       requestId: ids.request,
       authorization: activationAuthorization(syntheticTarget),
       channels: channelPlan(syntheticTarget),
@@ -3686,7 +3675,6 @@ describe('notification and outbox classification continuity', () => {
         eventTypeVersion: message.eventTypeVersion,
         rosterSnapshotId: message.rosterSnapshotId,
         rosterPopulation: message.rosterPopulation,
-        audienceConfig: message.audienceConfig,
         requestId: message.requestId,
         authorization: message.authorization,
         channel: plan.channel,
@@ -3979,47 +3967,7 @@ describe('roster, facility, and identity boundaries', () => {
     }
   });
 
-  test('pins neighborhood versions and rejects another building', () => {
-    const valid = {
-      id: ids.audience,
-      facilityId: ids.facility,
-      version: 1,
-      targets: [
-        { kind: 'building', facilityId: ids.facility },
-        {
-          kind: 'neighborhood',
-          neighborhood: { id: ids.neighborhood, version: 2 },
-        },
-      ],
-      createdAt: times.created,
-    } as const;
-    expect(AudienceConfigSchema.safeParse(valid).success).toBe(true);
-    expect(
-      AudienceConfigSchema.safeParse({
-        ...valid,
-        targets: [
-          { kind: 'building', facilityId: ids.otherFacility },
-          valid.targets[1],
-        ],
-      }).success,
-    ).toBe(false);
-    expect(
-      AudienceConfigSchema.safeParse({
-        ...valid,
-        targets: [{ kind: 'neighborhood', neighborhoodId: ids.neighborhood }],
-      }).success,
-    ).toBe(false);
-    expect(
-      AudienceConfigSchema.safeParse({
-        ...valid,
-        targets: [
-          {
-            kind: 'others',
-            groupSourceRef: accessGroupRef,
-          },
-        ],
-      }).success,
-    ).toBe(false);
+  test('refuses a synthetic source for access or a real roster', () => {
     expect(
       GroupSourceSchema.safeParse({
         id: ids.group,
@@ -4826,7 +4774,6 @@ describe('monthly live delivery-test contracts', () => {
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       deliveryTest: deliveryTestMetadata,
       createdBy: humanActor,
       source: 'web',
@@ -4845,7 +4792,6 @@ describe('monthly live delivery-test contracts', () => {
       purpose: intent.purpose,
       eventTypeVersion: intent.eventTypeVersion,
       rosterSnapshotId: intent.rosterSnapshotId,
-      audienceConfig: intent.audienceConfig,
       deliveryTest: deliveryTestMetadata,
       requestId: intent.requestId,
       authorization: intent.authorization,
@@ -4861,7 +4807,6 @@ describe('monthly live delivery-test contracts', () => {
       purpose: intent.purpose,
       eventTypeVersion: intent.eventTypeVersion,
       rosterSnapshotId: intent.rosterSnapshotId,
-      audienceConfig: intent.audienceConfig,
       deliveryTest: deliveryTestMetadata,
       requestId: intent.requestId,
       authorization: intent.authorization,
@@ -5127,7 +5072,6 @@ describe('records and report projections', () => {
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
       rosterSnapshotId: ids.roster,
-      audienceConfig: audienceRef,
       createdBy: agentActor,
       source: 'mcp',
       requestId: ids.request,

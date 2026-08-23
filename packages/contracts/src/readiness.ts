@@ -93,19 +93,19 @@ export const FacilityConfigurationReadinessSchema = z
     status: z.enum(['ready', 'action-required']),
     activeFacilityCount: z.number().int().nonnegative(),
     facilitiesWithoutNeighborhoodCount: z.number().int().nonnegative(),
-    facilitiesWithoutAudienceCount: z.number().int().nonnegative(),
+    facilitiesWithoutBuildingGroupCount: z.number().int().nonnegative(),
   })
   .strict()
   .superRefine((value, context) => {
     const expected =
       value.activeFacilityCount > 0 &&
       value.facilitiesWithoutNeighborhoodCount === 0 &&
-      value.facilitiesWithoutAudienceCount === 0
+      value.facilitiesWithoutBuildingGroupCount === 0
         ? 'ready'
         : 'action-required';
     if (
       value.facilitiesWithoutNeighborhoodCount > value.activeFacilityCount ||
-      value.facilitiesWithoutAudienceCount > value.activeFacilityCount
+      value.facilitiesWithoutBuildingGroupCount > value.activeFacilityCount
     ) {
       context.addIssue({
         code: 'custom',

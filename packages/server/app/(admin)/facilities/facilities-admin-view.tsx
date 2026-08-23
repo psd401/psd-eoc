@@ -1,5 +1,4 @@
 import type {
-  AudienceConfig,
   Facility,
   FacilityPage,
   GroupSource,
@@ -28,7 +27,6 @@ export type FacilitiesAdminViewModel =
       neighborhoodOptions: readonly Neighborhood[];
       buildingGroupOptions: readonly GroupSource[];
       othersGroupOptions: readonly GroupSource[];
-      audienceConfigs: readonly AudienceConfig[];
       currentCursors: Readonly<{
         buildingGroupCursor: string | null;
         facilityCursor: string | null;
@@ -207,8 +205,8 @@ function FacilitiesSection({
         <fieldset>
           <legend>Add a facility</legend>
           <p id="new-facility-help">
-            Add the site first, then configure its immutable building source and
-            append its first audience version below.
+            Add the site first, then configure its immutable building source
+            below.
           </p>
           <label>
             Short code
@@ -337,8 +335,8 @@ function OthersGroupForm({
       <fieldset>
         <legend>Add a Google others source</legend>
         <p id={helpId}>
-          Others sources are optional, district-level audience extensions.
-          Select them explicitly on each facility audience version.
+          Others sources are optional, district-level roster extensions. Select
+          them explicitly on each roster source configuration.
         </p>
         <GoogleGroupFields helpId={helpId} />
         <button type="submit">Add Google others source</button>
@@ -480,8 +478,7 @@ function GroupSourcesSection({
       <p>
         Building and others group sources are immutable. Replacing one creates a
         new source and appends a roster configuration version; the old source
-        and historical configuration versions remain unchanged. Append a new
-        audience version separately when an others selection changes.
+        and historical configuration versions remain unchanged.
       </p>
       {omittedUnexpected ? (
         <p role="alert">
@@ -567,7 +564,7 @@ function NeighborhoodForm({
         </legend>
         <p id={helpId}>
           Saving creates an immutable version. Earlier membership remains
-          available to events and audience versions that already pin it.
+          available to events that already pin it.
         </p>
         <label>
           Neighborhood name
@@ -640,7 +637,8 @@ function NeighborhoodsSection({
       <h2 id="neighborhoods-heading">Neighborhoods</h2>
       <p>
         A neighborhood is a versioned set of geographically co-located
-        facilities. Audience versions always pin an exact membership version.
+        facilities. An event that reaches beyond its own building pins an exact
+        membership version.
       </p>
       {page.items.length === 0 ? (
         <p role="status">No neighborhoods are configured.</p>
@@ -709,289 +707,6 @@ function NeighborhoodsSection({
   );
 }
 
-function neighborhoodReference(neighborhood: Neighborhood): string {
-  return `${neighborhood.id}:${neighborhood.version}`;
-}
-
-function CurrentAudience({
-  audience,
-  neighborhoodsByReference,
-  othersById,
-}: Readonly<{
-  audience: AudienceConfig | undefined;
-  neighborhoodsByReference: ReadonlyMap<string, Neighborhood>;
-  othersById: ReadonlyMap<string, GroupSource>;
-}>) {
-  if (audience === undefined) {
-    return <p role="status">No audience configuration exists yet.</p>;
-  }
-  return (
-    <div>
-      <p>
-        Current immutable audience version: <strong>{audience.version}</strong>
-      </p>
-      <ul>
-        {audience.targets.map((target) => {
-          switch (target.kind) {
-            case 'building':
-              return <li key={`building:${target.facilityId}`}>Building</li>;
-            case 'neighborhood':
-              return (
-                <li
-                  key={`neighborhood:${target.neighborhood.id}:${target.neighborhood.version}`}
-                >
-                  Neighborhood{' '}
-                  {neighborhoodsByReference.get(
-                    `${target.neighborhood.id}:${target.neighborhood.version}`,
-                  )?.name ?? target.neighborhood.id}
-                  , version {target.neighborhood.version}
-                </li>
-              );
-            case 'others':
-              return (
-                <li key={`others:${target.groupSourceRef.id}`}>
-                  Others:{' '}
-                  {othersById.get(target.groupSourceRef.id)?.displayName ??
-                    'Unavailable source'}
-                </li>
-              );
-          }
-        })}
-      </ul>
-    </div>
-  );
-}
-
-function AudienceForm({
-  audience,
-  buildingGroups,
-  csrfToken,
-  facility,
-  neighborhoods,
-  othersGroups,
-}: Readonly<{
-  audience: AudienceConfig | undefined;
-  buildingGroups: readonly GroupSource[];
-  csrfToken: string;
-  facility: Facility;
-  neighborhoods: readonly Neighborhood[];
-  othersGroups: readonly GroupSource[];
-}>) {
-  const facilityBuildingGroups = buildingGroups.filter(
-    (group) =>
-      group.purpose === 'building' &&
-      group.facilityId === facility.id &&
-      group.active,
-  );
-  const availableNeighborhoods = neighborhoods.filter((neighborhood) =>
-    neighborhood.facilityIds.includes(facility.id),
-  );
-  const currentNeighborhood = audience?.targets.find(
-    (target) => target.kind === 'neighborhood',
-  );
-  const currentNeighborhoodReference =
-    currentNeighborhood === undefined
-      ? ''
-      : `${currentNeighborhood.neighborhood.id}:${currentNeighborhood.neighborhood.version}`;
-  const currentNeighborhoodIsAvailable = availableNeighborhoods.some(
-    (neighborhood) =>
-      neighborhoodReference(neighborhood) === currentNeighborhoodReference,
-  );
-  const neighborhoodsByReference = new Map(
-    neighborhoods.map((neighborhood) => [
-      neighborhoodReference(neighborhood),
-      neighborhood,
-    ]),
-  );
-  const currentNeighborhoodName = neighborhoodsByReference.get(
-    currentNeighborhoodReference,
-  )?.name;
-  const pinnedCurrentNeighborhood =
-    currentNeighborhood === undefined || currentNeighborhoodIsAvailable
-      ? null
-      : {
-          name:
-            currentNeighborhoodName ??
-            `Neighborhood ${currentNeighborhood.neighborhood.id}`,
-          reference: currentNeighborhoodReference,
-          version: currentNeighborhood.neighborhood.version,
-        };
-  const currentOthersIds = new Set(
-    audience?.targets.flatMap((target) =>
-      target.kind === 'others' ? [target.groupSourceRef.id] : [],
-    ) ?? [],
-  );
-  const disabled = !facility.active || facilityBuildingGroups.length === 0;
-  const helpId = `audience-${facility.id}-help`;
-  return (
-    <form action="/facilities/api" method="post">
-      <AdminMutationFields csrfToken={csrfToken} />
-      <input name="intent" type="hidden" value="create-audience-version" />
-      <input name="facilityId" type="hidden" value={facility.id} />
-      {audience === undefined ? null : (
-        <input name="audienceConfigId" type="hidden" value={audience.id} />
-      )}
-      <fieldset disabled={disabled}>
-        <legend>Append audience configuration</legend>
-        <p id={helpId}>
-          Saving appends an immutable version. The server always includes this
-          facility&apos;s building target; it cannot be omitted by the form.
-        </p>
-        <p>
-          <strong>Building target (always included):</strong> {facility.name}
-        </p>
-        <p>
-          Active building sources: {facilityBuildingGroups.length}. All matching
-          sources in the selected roster snapshot are resolved.
-        </p>
-        <label>
-          Latest neighborhood version (optional)
-          <select
-            aria-describedby={helpId}
-            defaultValue={currentNeighborhoodReference}
-            name="neighborhoodReference"
-          >
-            <option value="">No neighborhood</option>
-            {pinnedCurrentNeighborhood === null ? null : (
-              <option value={pinnedCurrentNeighborhood.reference}>
-                {pinnedCurrentNeighborhood.name} — version{' '}
-                {pinnedCurrentNeighborhood.version} (current pinned version)
-              </option>
-            )}
-            {availableNeighborhoods.map((neighborhood) => (
-              <option
-                key={neighborhoodReference(neighborhood)}
-                value={neighborhoodReference(neighborhood)}
-              >
-                {neighborhood.name} — version {neighborhood.version}
-              </option>
-            ))}
-          </select>
-        </label>
-        <fieldset>
-          <legend>Optional others sources</legend>
-          <p>
-            Google Group sources extend staff audiences. The server rejects any
-            selection that does not match the current staff roster population.
-          </p>
-          {othersGroups.length === 0 ? (
-            <p>No others sources are available.</p>
-          ) : (
-            othersGroups.map((group) => {
-              const inputId = `audience-${facility.id}-others-${group.id}`;
-              const selected = currentOthersIds.has(group.id);
-              return (
-                <label
-                  className="checkbox-label"
-                  htmlFor={inputId}
-                  key={group.id}
-                >
-                  <input
-                    defaultChecked={selected}
-                    disabled={!group.active && !selected}
-                    id={inputId}
-                    name={
-                      group.kind === 'google-group'
-                        ? 'googleOthersGroupSourceId'
-                        : 'syntheticOthersGroupSourceId'
-                    }
-                    type="checkbox"
-                    value={group.id}
-                  />
-                  <span>
-                    {group.displayName} ({group.kind})
-                    {group.active
-                      ? ''
-                      : selected
-                        ? ' — inactive, currently selected'
-                        : ' — inactive, unavailable'}
-                  </span>
-                </label>
-              );
-            })
-          )}
-        </fieldset>
-        <button type="submit">
-          {audience === undefined
-            ? 'Create audience configuration'
-            : `Create audience version ${audience.version + 1}`}
-        </button>
-      </fieldset>
-      {!facility.active ? (
-        <p role="status">Reactivate this facility before saving an audience.</p>
-      ) : facilityBuildingGroups.length === 0 ? (
-        <p role="status">
-          Add an active building source before saving this audience.
-        </p>
-      ) : null}
-    </form>
-  );
-}
-
-function AudiencesSection({
-  audienceConfigs,
-  buildingGroups,
-  csrfToken,
-  facilities,
-  neighborhoods,
-  othersGroups,
-}: Readonly<{
-  audienceConfigs: readonly AudienceConfig[];
-  buildingGroups: readonly GroupSource[];
-  csrfToken: string;
-  facilities: readonly Facility[];
-  neighborhoods: readonly Neighborhood[];
-  othersGroups: readonly GroupSource[];
-}>) {
-  const audienceByFacility = new Map(
-    audienceConfigs.map((audience) => [audience.facilityId, audience]),
-  );
-  const othersById = new Map(othersGroups.map((group) => [group.id, group]));
-  const neighborhoodsByReference = new Map(
-    neighborhoods.map((neighborhood) => [
-      neighborhoodReference(neighborhood),
-      neighborhood,
-    ]),
-  );
-  return (
-    <section aria-labelledby="audiences-heading">
-      <h2 id="audiences-heading">Per-facility audiences</h2>
-      <p>
-        Every saved audience includes its own building. Optionally pin the
-        latest neighborhood membership and any configured others sources. Saving
-        never rewrites an earlier audience version.
-      </p>
-      {facilities.length === 0 ? (
-        <p role="status">Add a facility before configuring an audience.</p>
-      ) : (
-        facilities.map((facility) => {
-          const audience = audienceByFacility.get(facility.id);
-          return (
-            <details key={facility.id} open={audience === undefined}>
-              <summary>
-                {facility.code} — {facility.name}
-              </summary>
-              <CurrentAudience
-                audience={audience}
-                neighborhoodsByReference={neighborhoodsByReference}
-                othersById={othersById}
-              />
-              <AudienceForm
-                audience={audience}
-                buildingGroups={buildingGroups}
-                csrfToken={csrfToken}
-                facility={facility}
-                neighborhoods={neighborhoods}
-                othersGroups={othersGroups}
-              />
-            </details>
-          );
-        })
-      )}
-    </section>
-  );
-}
-
 /** Pure facilities administration presentation; all reads and writes stay upstream. */
 export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
   if (props.view.kind === 'forbidden') {
@@ -1003,9 +718,9 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
           </h1>
           <p role="alert">
             Your PSD EOC session is active, but only district administrators can
-            manage facilities, roster sources, neighborhoods, and audiences.
+            manage facilities, roster sources, and neighborhoods.
           </p>
-          <p>No facility or audience configuration was displayed.</p>
+          <p>No facility configuration was displayed.</p>
         </section>
       </main>
     );
@@ -1016,12 +731,6 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
     throw new Error('Authorized facilities administration requires CSRF data.');
   }
 
-  const buildingGroups = props.view.buildingGroupOptions.filter(
-    (group) => group.purpose === 'building',
-  );
-  const othersGroups = props.view.othersGroupOptions.filter(
-    (group) => group.purpose === 'others',
-  );
   return (
     <main
       aria-labelledby="facilities-admin-heading"
@@ -1032,7 +741,7 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
       <header>
         <p>Administration</p>
         <h1 id="facilities-admin-heading">
-          Facilities, neighborhoods, and audiences
+          Facilities, neighborhoods, and group sources
         </h1>
         <p className="lede">
           Configure a site from start to finish without code changes. These
@@ -1063,14 +772,6 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
         currentCursors={props.view.currentCursors}
         facilities={props.view.facilityOptions}
         page={props.view.neighborhoods}
-      />
-      <AudiencesSection
-        audienceConfigs={props.view.audienceConfigs}
-        buildingGroups={buildingGroups}
-        csrfToken={csrfToken}
-        facilities={props.view.facilities.items}
-        neighborhoods={props.view.neighborhoodOptions}
-        othersGroups={othersGroups}
       />
     </main>
   );

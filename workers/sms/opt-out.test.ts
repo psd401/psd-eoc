@@ -68,7 +68,6 @@ function workItem(): WorkerAttemptWorkItem {
     eventTypeVersion: { id: IDS.eventType, templateMode: 'drill' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
-    audienceConfig: { id: IDS.audience, version: 1 },
     requestId: IDS.request,
     authorization: {
       kind: 'synthetic-training',

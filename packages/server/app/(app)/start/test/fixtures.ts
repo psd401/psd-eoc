@@ -177,7 +177,6 @@ export function activationResultFixture(
       eventTypeVersion: preview.eventTypeVersion,
       rosterSnapshotId: preview.rosterSnapshotId,
       rosterPopulation: 'staff',
-      audienceConfig: preview.audienceConfig,
       createdBy: actor,
       source: 'web',
       requestId: PLAYWRIGHT_IDS.request,
@@ -306,7 +305,6 @@ export function activationPreviewFixture(
     eventTypeVersion: selection.eventTypeVersion,
     rosterSnapshotId: PLAYWRIGHT_IDS.rosterSnapshot,
     rosterPopulation: 'staff',
-    audienceConfig: { id: PLAYWRIGHT_IDS.audience, version: 1 },
     recipientCount: 4,
     channels: channelConsequences({
       kind: selection.kind,
