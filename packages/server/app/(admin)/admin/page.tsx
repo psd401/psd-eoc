@@ -1,10 +1,8 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
-import {
-  WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
-} from '../../../lib/auth/sessions';
+import { WEB_SESSION_COOKIE_NAME } from '../../../lib/auth/sessions';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 import { AdminCapabilityError } from '../facilities/admin-core';
 import {
   AdminReadinessView,
@@ -23,10 +21,7 @@ export default async function AdminReadinessPage() {
   }
   let authenticated;
   try {
-    authenticated = await getDefaultSessionService().authenticate(
-      sessionToken,
-      'web',
-    );
+    authenticated = await authenticateWebSession(sessionToken);
   } catch {
     redirect('/login?reason=session-expired');
   }
