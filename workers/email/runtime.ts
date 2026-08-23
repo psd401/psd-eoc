@@ -6,15 +6,16 @@ import {
   type ProviderSendAuthorizer,
   type WorkerAttemptProcessResult,
 } from '../shared';
+import { awsPartitionSupportsRegion } from './aws-arn';
 import {
-  SES_FROM_EMAIL_ADDRESS,
   SesV2EmailAdapter,
+  validSesFromEmailAddress,
   type DurableSesSendLedger,
   type SesV2Client,
 } from './ses-adapter';
 
-export const SES_EMAIL_QUEUE_ARN =
-  'arn:aws:sqs:us-west-2:<aws-account-id>:psd-eoc-email' as const;
+const SQS_QUEUE_ARN_PATTERN =
+  /^arn:(aws|aws-cn|aws-us-gov):sqs:([a-z]{2}(?:-gov)?-[a-z]+-\d):[0-9]{12}:[A-Za-z0-9_-]{1,80}$/u;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -42,7 +43,9 @@ export type SesEmailRuntimeMode =
 
 export interface SesEmailRuntimeOptions {
   readonly authorizeQueueInvocation: SesEmailQueueInvocationAuthorizer;
+  readonly fromEmailAddress: string;
   readonly mode?: SesEmailRuntimeMode;
+  readonly queueArn: string;
 }
 
 export type SesEmailRuntimeErrorCode =
@@ -82,6 +85,11 @@ function enabledModeIsComplete(
     typeof mode.authorizeLiveProvider === 'function' &&
     typeof mode.authorizeProviderSend === 'function'
   );
+}
+
+function validSqsQueueArn(value: string): boolean {
+  const match = SQS_QUEUE_ARN_PATTERN.exec(value);
+  return awsPartitionSupportsRegion(match?.[1], match?.[2]);
 }
 
 async function authorizeInvocation(
@@ -131,13 +139,15 @@ export class SesEmailRuntime {
     const mode = options.mode ?? { state: 'dark' as const };
     if (
       typeof options.authorizeQueueInvocation !== 'function' ||
+      !validSqsQueueArn(options.queueArn) ||
+      !validSesFromEmailAddress(options.fromEmailAddress) ||
       (mode.state !== 'dark' && mode.state !== 'enabled') ||
       (mode.state === 'enabled' && !enabledModeIsComplete(mode))
     ) {
       throw new SesEmailRuntimeError('INVALID_CONFIGURATION');
     }
 
-    this.#queueArn = SES_EMAIL_QUEUE_ARN;
+    this.#queueArn = options.queueArn;
     this.#authorizeQueueInvocation = options.authorizeQueueInvocation;
     this.#mode = mode.state;
     this.#attemptProcessor =
@@ -147,7 +157,7 @@ export class SesEmailRuntime {
             adapter: new SesV2EmailAdapter({
               client: mode.client,
               sendLedger: mode.sendLedger,
-              fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+              fromEmailAddress: options.fromEmailAddress,
               truthLabel: 'live-verified',
             }),
             executionStore: mode.executionStore,

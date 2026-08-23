@@ -1,5 +1,6 @@
 import { WEB_CSRF_COOKIE_NAME } from '../../lib/auth/sessions';
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { loadOperationalViewData } from './start/_lib/data';
 import { startSelectionReturnPath } from './start/_lib/return-path';
 import { requirePageSession } from './start/_lib/session';
@@ -35,9 +36,9 @@ export default async function DashboardPage() {
             a separate incident or drill.
           </p>
         </div>
-        <a className="button button--secondary" href="/records">
+        <Link className="button button--secondary" href="/records">
           View drill records
-        </a>
+        </Link>
       </header>
 
       <Call911Affordance />

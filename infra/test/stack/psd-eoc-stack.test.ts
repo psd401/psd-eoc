@@ -24,6 +24,7 @@ import {
   SES_IDENTITY_DOMAIN,
   SES_VERIFICATION_REFERENCE,
   STACK_NAME,
+  readDeploymentIdentity,
 } from '../../src/stack/config';
 import { PsdEocStack } from '../../src/stack/psd-eoc-stack';
 import {
@@ -153,6 +154,7 @@ const app = new App({
     'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
     'psdEoc:hostedDomain': 'example.invalid',
     'psdEoc:iosBundleId': 'invalid.example.eoc',
+    'psdEoc:organizationName': 'Example School District',
   },
 });
 const stack = new PsdEocStack(app, STACK_NAME, {
@@ -167,6 +169,35 @@ const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
 describe('deployment boundary', () => {
+  it('uses the canonical organization identity contract at synth time', () => {
+    const identityFor = (organizationName: string) =>
+      readDeploymentIdentity({
+        tryGetContext(key) {
+          return {
+            'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+            'psdEoc:hostedDomain': 'example.invalid',
+            'psdEoc:iosBundleId': 'invalid.example.eoc',
+            'psdEoc:organizationName': organizationName,
+          }[key];
+        },
+      });
+
+    expect(identityFor('😀'.repeat(80)).organizationName).toBe('😀'.repeat(80));
+    expect(identityFor('界'.repeat(106)).organizationName).toBe(
+      '界'.repeat(106),
+    );
+    for (const invalid of [
+      '😀'.repeat(81),
+      '界'.repeat(107),
+      'District\u202eName',
+      'District\u2028Name',
+    ]) {
+      expect(() => identityFor(invalid)).toThrow(
+        'CDK context psdEoc:organizationName',
+      );
+    }
+  });
+
   it('labels the immutable server image as the staff-minimized live pilot', async () => {
     const dockerfile = await Bun.file(
       new URL(
@@ -178,10 +209,11 @@ describe('deployment boundary', () => {
     expect(dockerfile).toContain(
       'org.opencontainers.image.title="PSD EOC live pilot"',
     );
-    expect(dockerfile).toContain('net.psd401.environment="live-pilot"');
+    expect(dockerfile).toContain('org.psd-eoc.environment="live-pilot"');
     expect(dockerfile).toContain(
-      'net.psd401.data-classification="staff-minimized"',
+      'org.psd-eoc.data-classification="staff-minimized"',
     );
+    expect(dockerfile).not.toMatch(/psd401|<aws-account-id>/iu);
     expect(dockerfile).not.toContain('synthetic-only');
   });
 
@@ -198,6 +230,7 @@ describe('deployment boundary', () => {
               'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
+              'psdEoc:organizationName': 'Example School District',
             },
           }),
           'WrongAccount',
@@ -214,6 +247,7 @@ describe('deployment boundary', () => {
               'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
+              'psdEoc:organizationName': 'Example School District',
             },
           }),
           'WrongRegion',
@@ -784,6 +818,7 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
+        'PSD_EOC_ORGANIZATION_NAME',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',
@@ -804,6 +839,9 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toEqual({
       Ref: 'RuntimeDatabaseIdleTimeoutSeconds',
     });
+    expect(variables.get('PSD_EOC_ORGANIZATION_NAME')).toBe(
+      'Example School District',
+    );
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
     expect(variables.get('PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('OperationsAlarmTopic'),

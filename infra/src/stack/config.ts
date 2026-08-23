@@ -1,3 +1,5 @@
+import { OrganizationNameSchema } from '@psd-eoc/contracts';
+
 export const AWS_ACCOUNT_ALIAS = 'psd401';
 export const AWS_ACCOUNT = '<aws-account-id>';
 export const AWS_REGION = 'us-west-2';
@@ -78,6 +80,7 @@ export interface DeploymentIdentity {
   readonly applicationOrigin: string;
   readonly hostedDomain: string;
   readonly iosBundleId: string;
+  readonly organizationName: string;
 }
 
 /**
@@ -192,6 +195,14 @@ export function readDeploymentIdentity(node: {
     }
     return value.trim();
   };
+  const organizationName = OrganizationNameSchema.safeParse(
+    node.tryGetContext('psdEoc:organizationName'),
+  );
+  if (!organizationName.success) {
+    throw new Error(
+      'CDK context psdEoc:organizationName must be a display-safe name of at most 160 UTF-16 code units and 320 UTF-8 bytes.',
+    );
+  }
   return Object.freeze({
     applicationOrigin: read(
       'psdEoc:applicationOrigin',
@@ -205,5 +216,6 @@ export function readDeploymentIdentity(node: {
       'psdEoc:iosBundleId',
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
     ),
+    organizationName: organizationName.data,
   });
 }

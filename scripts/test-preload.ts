@@ -19,6 +19,7 @@ const SYNTHETIC_DEPLOYMENT: Readonly<Record<string, string>> = Object.freeze({
   GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
   GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
   PSD_EOC_IOS_BUNDLE_ID: 'invalid.example.eoc',
+  PSD_EOC_ORGANIZATION_NAME: 'Example School District',
 });
 
 for (const [name, value] of Object.entries(SYNTHETIC_DEPLOYMENT)) {

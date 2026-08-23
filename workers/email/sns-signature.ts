@@ -6,11 +6,13 @@ import {
 
 import { TimestampSchema, UuidSchema } from '@psd-eoc/contracts';
 
-const DEPLOYMENT_ACCOUNT = '<aws-account-id>';
-const DEPLOYMENT_REGION = 'us-west-2';
-const SNS_CERTIFICATE_HOST = `sns.${DEPLOYMENT_REGION}.amazonaws.com`;
+import {
+  awsPartitionSupportsRegion,
+  type SupportedAwsPartition,
+} from './aws-arn';
+
 const TOPIC_ARN_PATTERN =
-  /^arn:aws:sns:us-west-2:<aws-account-id>:[A-Za-z0-9_-]{1,256}$/u;
+  /^arn:(aws|aws-cn|aws-us-gov):sns:([a-z]{2}(?:-gov)?-[a-z]+-\d):([0-9]{12}):([A-Za-z0-9_-]{1,256})$/u;
 const CERTIFICATE_PATH_PATTERN =
   /^\/SimpleNotificationService-[A-Za-z0-9_-]{16,128}\.pem$/u;
 const BASE64_PATTERN =
@@ -69,6 +71,13 @@ export interface SnsSignatureVerificationOptions {
   readonly now?: () => Date;
 }
 
+export interface SnsTopicArn {
+  readonly accountId: string;
+  readonly partition: SupportedAwsPartition;
+  readonly region: string;
+  readonly topicName: string;
+}
+
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -87,18 +96,33 @@ function boundedString(
   return value;
 }
 
-function assertExpectedTopicArn(expectedTopicArn: string): void {
+/** Parses the operator-configured topic that anchors account and region trust. */
+export function parseSnsTopicArn(expectedTopicArn: string): SnsTopicArn {
+  const match = TOPIC_ARN_PATTERN.exec(expectedTopicArn);
+  const partition = match?.[1];
+  const region = match?.[2];
+  const accountId = match?.[3];
+  const topicName = match?.[4];
   if (
-    !TOPIC_ARN_PATTERN.test(expectedTopicArn) ||
-    !expectedTopicArn.startsWith(
-      `arn:aws:sns:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:`,
-    )
+    !awsPartitionSupportsRegion(partition, region) ||
+    region === undefined ||
+    accountId === undefined ||
+    topicName === undefined
   ) {
     throw new SnsSignatureError('WRONG_TOPIC');
   }
+  return Object.freeze({ accountId, partition, region, topicName });
 }
 
-function assertSigningCertificateUrl(value: string): void {
+function assertSigningCertificateUrl(
+  value: string,
+  expectedTopicArn: string,
+): void {
+  const topic = parseSnsTopicArn(expectedTopicArn);
+  const certificateHost =
+    topic.partition === 'aws-cn'
+      ? `sns.${topic.region}.amazonaws.com.cn`
+      : `sns.${topic.region}.amazonaws.com`;
   let url: URL;
   try {
     url = new URL(value);
@@ -107,7 +131,7 @@ function assertSigningCertificateUrl(value: string): void {
   }
   if (
     url.protocol !== 'https:' ||
-    url.hostname !== SNS_CERTIFICATE_HOST ||
+    url.hostname !== certificateHost ||
     url.port !== '' ||
     url.username !== '' ||
     url.password !== '' ||
@@ -142,7 +166,7 @@ export function parseSnsEnvelope(
   value: unknown,
   expectedTopicArn: string,
 ): SnsNotificationEnvelope {
-  assertExpectedTopicArn(expectedTopicArn);
+  parseSnsTopicArn(expectedTopicArn);
   if (
     !isRecord(value) ||
     Object.keys(value).some((key) => !NOTIFICATION_KEYS.has(key)) ||
@@ -183,7 +207,7 @@ export function parseSnsEnvelope(
   ) {
     throw new SnsSignatureError('INVALID_ENVELOPE');
   }
-  assertSigningCertificateUrl(signingCertUrl);
+  assertSigningCertificateUrl(signingCertUrl, expectedTopicArn);
 
   return Object.freeze({
     Type: 'Notification',
@@ -291,8 +315,8 @@ export async function verifySnsSignature(
   envelope: SnsNotificationEnvelope,
   options: SnsSignatureVerificationOptions = {},
 ): Promise<void> {
-  assertExpectedTopicArn(envelope.TopicArn);
-  assertSigningCertificateUrl(envelope.SigningCertURL);
+  parseSnsTopicArn(envelope.TopicArn);
+  assertSigningCertificateUrl(envelope.SigningCertURL, envelope.TopicArn);
   const signature = strictBase64(envelope.Signature);
   if (signature === undefined) {
     throw new SnsSignatureError('INVALID_SIGNATURE');

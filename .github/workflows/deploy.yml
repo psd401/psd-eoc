@@ -127,7 +127,9 @@ jobs:
         with:
           context: .
           file: packages/server/container/psd-eoc.Dockerfile
-          build-args: SOURCE_SHA=${{ github.sha }}
+          build-args: |
+            SOURCE_REPOSITORY_URL=${{ github.server_url }}/${{ github.repository }}
+            SOURCE_SHA=${{ github.sha }}
           platforms: linux/amd64
           provenance: false
           sbom: false

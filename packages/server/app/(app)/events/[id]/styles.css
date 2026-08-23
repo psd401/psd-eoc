@@ -626,6 +626,7 @@ dd {
 .timeline-photo {
   display: block;
   width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 32rem;
   border: 1px solid #64748b;
