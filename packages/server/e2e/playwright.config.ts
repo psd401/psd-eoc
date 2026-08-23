@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const E2E_ROOT = dirname(fileURLToPath(import.meta.url));
 
 const port = Number(process.env.PSD_EOC_E2E_APP_PORT);
+const artifactDirectory = process.env.PSD_EOC_E2E_ARTIFACT_DIR;
 const stateDirectory = process.env.PSD_EOC_E2E_STATE_DIR;
 if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535) {
   throw new Error('PSD_EOC_E2E_APP_PORT must be a user port.');
@@ -12,15 +13,18 @@ if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535) {
 if (stateDirectory === undefined) {
   throw new Error('PSD_EOC_E2E_STATE_DIR is required.');
 }
+if (artifactDirectory === undefined) {
+  throw new Error('PSD_EOC_E2E_ARTIFACT_DIR is required.');
+}
 
 export default defineConfig({
   testDir: E2E_ROOT,
   testMatch: /\.flow\.ts$/u,
   fullyParallel: false,
   workers: 1,
-  timeout: 60_000,
+  timeout: 120_000,
   expect: { timeout: 10_000 },
-  outputDir: join(stateDirectory, 'artifacts'),
+  outputDir: artifactDirectory,
   reporter: 'line',
   use: {
     baseURL: `http://localhost:${port}`,

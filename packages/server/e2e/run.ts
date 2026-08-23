@@ -310,12 +310,20 @@ async function main(): Promise<void> {
   try {
     const createdStateDirectory = await mkdtemp(join(tmpdir(), 'psd-eoc-340-'));
     stateDirectory = createdStateDirectory;
-    const evidenceDirectory = join(
+    const committedEvidenceDirectory = join(
       REPOSITORY_ROOT,
       '.verification',
       'issue-340',
     );
-    await mkdir(evidenceDirectory, { recursive: true });
+    const evidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedEvidenceDirectory
+        : join(createdStateDirectory, 'evidence');
+    const artifactDirectory = join(
+      committedEvidenceDirectory,
+      'playwright-artifacts',
+    );
+    await mkdir(committedEvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -367,15 +375,18 @@ async function main(): Promise<void> {
         capturedAt: now,
       })),
     );
-    const issued = await Promise.all(
-      identities.map((identity) =>
-        issueIdentity(opened, {
+    const issued: IssuedIdentity[] = [];
+    // Session issuance appends to the global security journal. Keep setup
+    // serial so the harness never creates an artificial audit-chain race.
+    for (const identity of identities) {
+      issued.push(
+        await issueIdentity(opened, {
           ...identity,
           now,
           statePath: join(createdStateDirectory, identity.stateName),
         }),
-      ),
-    );
+      );
+    }
     const districtAdministrator = issued[0];
     if (districtAdministrator === undefined) {
       throw new Error('The synthetic district administrator was not issued.');
@@ -416,6 +427,7 @@ async function main(): Promise<void> {
           DATABASE_URL: disposable.url,
           TEST_DATABASE_URL: disposable.url,
           PSD_EOC_E2E_APP_PORT: String(port),
+          PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
           PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
@@ -429,6 +441,7 @@ async function main(): Promise<void> {
     );
     const exitCode = await child.exited;
     if (exitCode !== 0) process.exitCode = exitCode;
+    else await rm(artifactDirectory, { recursive: true, force: true });
   } finally {
     try {
       await connection?.close();

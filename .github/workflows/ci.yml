@@ -297,6 +297,15 @@ jobs:
       - name: Run the operator browser flows
         run: bun run test:e2e:issue-340
 
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: issue-340-browser-failure
+          path: .verification/issue-340/playwright-artifacts
+          if-no-files-found: warn
+          retention-days: 7
+
   mobile:
     name: Mobile
     needs: changes

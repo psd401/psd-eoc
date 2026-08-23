@@ -15,6 +15,7 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun scripts/test.ts && bun run --cwd packages/mobile test:native",
     "test:e2e:issue-340": "bun packages/server/e2e/run.ts",
+    "test:e2e:issue-340:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
   },
   "devDependencies": {
