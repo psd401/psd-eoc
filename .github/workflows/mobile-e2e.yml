@@ -114,20 +114,6 @@ jobs:
       - name: Verify the provider-free harness
         run: bun run test:e2e:mobile:verify
 
-      - name: Install pinned Maestro
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
-          root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
-          curl --fail --location --retry 3 --retry-all-errors \
-            --output "$archive" \
-            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
-          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$archive" | sha256sum --check
-          unzip -q "$archive" -d "$root"
-          rm -f "$archive"
-          test -x "$root/maestro/bin/maestro"
-          echo "$root/maestro/bin" >> "$GITHUB_PATH"
-
       - name: Create an Android 35 emulator
         run: |
           set -euo pipefail
@@ -181,6 +167,20 @@ jobs:
           adb shell settings put global window_animation_scale 0
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
+
+      - name: Install pinned Maestro
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$archive" | sha256sum --check
+          unzip -q "$archive" -d "$root"
+          rm -f "$archive"
+          test -x "$root/maestro/bin/maestro"
+          echo "$root/maestro/bin" >> "$GITHUB_PATH"
 
       - name: Run Android drill lifecycle
         run: bun packages/mobile/e2e/run.ts android
