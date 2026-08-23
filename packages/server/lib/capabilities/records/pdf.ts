@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import {
   JournalEntryReadProjectionSchema,
@@ -117,6 +117,35 @@ const FONT_NAME = 'NotoSans';
 const FONT_SHA256 =
   'b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5';
 
+/** Resolves a Next-emitted asset from any nested server route chunk. */
+export function resolveBundledFontFilePath(
+  serverChunkDirectory: string,
+  bundledAssetPath: string,
+  fileExists: (path: string) => boolean = existsSync,
+): string {
+  const bundledAssetPrefix = '/_next/static/media/';
+  if (
+    !bundledAssetPath.startsWith(bundledAssetPrefix) ||
+    bundledAssetPath.includes('..')
+  ) {
+    throw new Error('The embedded Noto Sans PDF font path is invalid.');
+  }
+  const relativeAssetPath = bundledAssetPath.slice('/_next/'.length);
+  let candidateDirectory = serverChunkDirectory;
+  while (true) {
+    const candidate = join(candidateDirectory, relativeAssetPath);
+    if (fileExists(candidate)) return candidate;
+    if (
+      basename(candidateDirectory) === 'server' ||
+      dirname(candidateDirectory) === candidateDirectory
+    ) {
+      break;
+    }
+    candidateDirectory = dirname(candidateDirectory);
+  }
+  throw new Error('The emitted Noto Sans PDF font is unavailable.');
+}
+
 function readFontBytes(): Uint8Array {
   const fontAssetUrl = new URL(
     './assets/NotoSans-Regular.ttf',
@@ -129,16 +158,14 @@ function readFontBytes(): Uint8Array {
   // Next's server compiler emits a URL-compatible asset object whose path is
   // rooted at /_next/. Convert that narrowly validated path to the colocated
   // server chunk asset; Node's fs API intentionally rejects the foreign URL.
-  const bundledAssetPrefix = '/_next/static/media/';
   if (
     fontAssetUrl.protocol !== '' ||
-    !fontAssetUrl.pathname.startsWith(bundledAssetPrefix) ||
-    fontAssetUrl.pathname.includes('..')
+    !fontAssetUrl.pathname.startsWith('/_next/static/media/')
   ) {
     throw new Error('The embedded Noto Sans PDF font path is invalid.');
   }
   return readFileSync(
-    join(__dirname, fontAssetUrl.pathname.slice('/_next/'.length)),
+    resolveBundledFontFilePath(__dirname, fontAssetUrl.pathname),
   );
 }
 
