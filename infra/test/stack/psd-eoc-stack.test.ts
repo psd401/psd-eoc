@@ -518,6 +518,31 @@ describe('minimal isolated resource shape', () => {
     expect(ingressSources).toContain(applicationSecurityGroup[0]);
     expect(ingressSources).toContain('AppRunnerConnectorSecurityGroup');
 
+    // The HTTPS egress rule, which nothing asserted before. CDK inlines it into
+    // each group's own SecurityGroupEgress array rather than emitting a
+    // standalone resource, so it is invisible to the checks above — a widened
+    // port range or a second destination here would have shipped unnoticed.
+    const groupsWithEgress = Object.values(
+      template.findResources('AWS::EC2::SecurityGroup'),
+    )
+      .map(
+        (resource) =>
+          (resource as { Properties: Record<string, unknown> }).Properties,
+      )
+      .filter((group) => Array.isArray(group.SecurityGroupEgress));
+    const httpsRules = groupsWithEgress.flatMap((group) =>
+      (group.SecurityGroupEgress as Record<string, unknown>[]).filter(
+        (rule) => rule.CidrIp === '0.0.0.0/0',
+      ),
+    );
+    // One for the task group, one for the App Runner connector group.
+    expect(httpsRules).toHaveLength(2);
+    for (const rule of httpsRules) {
+      expect(rule.FromPort).toBe(443);
+      expect(rule.ToPort).toBe(443);
+      expect(rule.IpProtocol).toBe('tcp');
+    }
+
     // Also two: each group that reaches the writer has its own egress rule to
     // it. Every one must be the database port to the database group, so neither
     // path can be widened without this failing.
@@ -676,6 +701,10 @@ describe('App Runner runtime safety boundary', () => {
     });
 
     const connector = properties(onlyResource('AWS::AppRunner::VpcConnector'));
+    // Asserted by value. App Runner creates a replacement connector before
+    // deleting the original, so the name must differ from any live one — a typo
+    // here fails the deploy at the point the service is already gone.
+    expect(connector.VpcConnectorName).toBe('psd-eoc-apprunner');
     expect(asArray(connector.Subnets)).toHaveLength(2);
     expect(JSON.stringify(connector.Subnets)).toContain(
       'DatabaseNetworkApplicationSubnet1',
