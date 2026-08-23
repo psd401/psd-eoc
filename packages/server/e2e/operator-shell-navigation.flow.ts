@@ -8,7 +8,7 @@ const DISTRICT_ADMIN_DESTINATIONS = [
   ['Records', '/records', 'Drill records'],
   ['Delivery tests', '/delivery-tests', 'Monthly live delivery test'],
   ['Readiness', '/admin', 'Deployment readiness'],
-  ['Schools', '/facilities', 'Facilities, neighborhoods, and audiences'],
+  ['Schools', '/facilities', /^Facilities, neighborhoods,/u],
   ['Event types', '/event-types', 'Event types and message templates'],
   ['Access', '/access', 'Access groups and the roles they grant'],
   ['Devices', '/devices', 'Device sessions'],
