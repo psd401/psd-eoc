@@ -6,6 +6,7 @@ import {
   SnsSignatureError,
   canonicalSnsEnvelopeDigest,
   parseSnsEnvelope,
+  parseSnsTopicArn,
   verifySnsSignature,
   type SnsNotificationEnvelope,
   type SnsSignatureVersion,
@@ -218,19 +219,41 @@ describe('SNS Notification signature verification', () => {
       ).toThrow(SnsSignatureError);
     }
 
-    const otherTopic =
-      'arn:aws:sns:eu-central-1:111111111111:second-district-email-events';
-    expect(
-      parseSnsEnvelope(
-        {
-          ...valid,
-          TopicArn: otherTopic,
-          SigningCertURL:
-            'https://sns.eu-central-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
-        },
-        otherTopic,
-      ).TopicArn,
-    ).toBe(otherTopic);
+    for (const [otherTopic, signingCertificateUrl] of [
+      [
+        'arn:aws:sns:eu-central-1:111111111111:second-district-email-events',
+        'https://sns.eu-central-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+      ],
+      [
+        'arn:aws-cn:sns:cn-north-1:111111111111:second-district-email-events',
+        'https://sns.cn-north-1.amazonaws.com.cn/SimpleNotificationService-00000000000000000000000000000000.pem',
+      ],
+      [
+        'arn:aws-us-gov:sns:us-gov-west-1:111111111111:second-district-email-events',
+        'https://sns.us-gov-west-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+      ],
+    ] as const) {
+      expect(
+        parseSnsEnvelope(
+          {
+            ...valid,
+            TopicArn: otherTopic,
+            SigningCertURL: signingCertificateUrl,
+          },
+          otherTopic,
+        ).TopicArn,
+      ).toBe(otherTopic);
+    }
+
+    for (const impossibleTopic of [
+      'arn:aws-cn:sns:us-east-1:111111111111:second-district-email-events',
+      'arn:aws-us-gov:sns:eu-west-1:111111111111:second-district-email-events',
+      'arn:aws:sns:cn-north-1:111111111111:second-district-email-events',
+    ]) {
+      expect(() => parseSnsTopicArn(impossibleTopic)).toThrow(
+        expect.objectContaining({ code: 'WRONG_TOPIC' }),
+      );
+    }
   });
 
   test('rejects non-AWS, cross-region, redirected, or decorated certificate URLs', () => {

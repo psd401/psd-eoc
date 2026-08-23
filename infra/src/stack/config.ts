@@ -1,3 +1,5 @@
+import { OrganizationNameSchema } from '@psd-eoc/contracts';
+
 export const AWS_ACCOUNT_ALIAS = 'psd401';
 export const AWS_ACCOUNT = '338414773271';
 export const AWS_REGION = 'us-west-2';
@@ -193,6 +195,14 @@ export function readDeploymentIdentity(node: {
     }
     return value.trim();
   };
+  const organizationName = OrganizationNameSchema.safeParse(
+    node.tryGetContext('psdEoc:organizationName'),
+  );
+  if (!organizationName.success) {
+    throw new Error(
+      'CDK context psdEoc:organizationName must be set for this deployment. See docs/guides/first-administrator.md.',
+    );
+  }
   return Object.freeze({
     applicationOrigin: read(
       'psdEoc:applicationOrigin',
@@ -206,9 +216,6 @@ export function readDeploymentIdentity(node: {
       'psdEoc:iosBundleId',
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
     ),
-    organizationName: read(
-      'psdEoc:organizationName',
-      /^(?=.{1,160}$)[^\p{Cc}\p{Cs}]+$/u,
-    ),
+    organizationName: organizationName.data,
   });
 }

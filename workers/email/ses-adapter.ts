@@ -133,7 +133,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-const EMAIL_LOCAL_PART_PATTERN = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/u;
+const EMAIL_LOCAL_ATOM = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+";
+const EMAIL_LOCAL_PART_PATTERN = new RegExp(
+  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*$`,
+  'u',
+);
 const EMAIL_DOMAIN_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/iu;
 
@@ -147,9 +151,11 @@ export function validSesFromEmailAddress(value: string): boolean {
     return false;
   }
   const separator = value.lastIndexOf('@');
+  const localPart = value.slice(0, separator);
   return (
     separator > 0 &&
-    EMAIL_LOCAL_PART_PATTERN.test(value.slice(0, separator)) &&
+    localPart.length <= 64 &&
+    EMAIL_LOCAL_PART_PATTERN.test(localPart) &&
     EMAIL_DOMAIN_PATTERN.test(value.slice(separator + 1))
   );
 }

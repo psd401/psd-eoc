@@ -28,7 +28,23 @@ describe('deployment configuration', () => {
   });
 
   test('fails closed for absent, unbounded, or control-bearing organization names', () => {
-    for (const value of [undefined, '', 'x'.repeat(161), 'District\nName']) {
+    expect(
+      organizationName({ PSD_EOC_ORGANIZATION_NAME: '😀'.repeat(80) }),
+    ).toBe('😀'.repeat(80));
+    expect(
+      organizationName({ PSD_EOC_ORGANIZATION_NAME: '界'.repeat(106) }),
+    ).toBe('界'.repeat(106));
+
+    for (const value of [
+      undefined,
+      '',
+      'x'.repeat(161),
+      '😀'.repeat(81),
+      '界'.repeat(107),
+      'District\nName',
+      'District\u202eName',
+      'District\u2028Name',
+    ]) {
       expect(() =>
         organizationName({ PSD_EOC_ORGANIZATION_NAME: value }),
       ).toThrow(DeploymentConfigurationError);

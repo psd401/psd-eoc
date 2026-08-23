@@ -6,6 +6,7 @@ import {
   type ProviderSendAuthorizer,
   type WorkerAttemptProcessResult,
 } from '../shared';
+import { awsPartitionSupportsRegion } from './aws-arn';
 import {
   SesV2EmailAdapter,
   validSesFromEmailAddress,
@@ -14,7 +15,7 @@ import {
 } from './ses-adapter';
 
 const SQS_QUEUE_ARN_PATTERN =
-  /^arn:(?:aws|aws-cn|aws-us-gov):sqs:[a-z]{2}(?:-gov)?-[a-z]+-\d:[0-9]{12}:[A-Za-z0-9_-]{1,80}$/u;
+  /^arn:(aws|aws-cn|aws-us-gov):sqs:([a-z]{2}(?:-gov)?-[a-z]+-\d):[0-9]{12}:[A-Za-z0-9_-]{1,80}$/u;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -86,6 +87,11 @@ function enabledModeIsComplete(
   );
 }
 
+function validSqsQueueArn(value: string): boolean {
+  const match = SQS_QUEUE_ARN_PATTERN.exec(value);
+  return awsPartitionSupportsRegion(match?.[1], match?.[2]);
+}
+
 async function authorizeInvocation(
   value: unknown,
   queueArn: string,
@@ -133,7 +139,7 @@ export class SesEmailRuntime {
     const mode = options.mode ?? { state: 'dark' as const };
     if (
       typeof options.authorizeQueueInvocation !== 'function' ||
-      !SQS_QUEUE_ARN_PATTERN.test(options.queueArn) ||
+      !validSqsQueueArn(options.queueArn) ||
       !validSesFromEmailAddress(options.fromEmailAddress) ||
       (mode.state !== 'dark' && mode.state !== 'enabled') ||
       (mode.state === 'enabled' && !enabledModeIsComplete(mode))

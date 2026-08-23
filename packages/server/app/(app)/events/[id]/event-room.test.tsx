@@ -244,6 +244,15 @@ function render(
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('keeps private-photo dimensions aspect-neutral', async () => {
+    const styles = await Bun.file(
+      new URL('./styles.css', import.meta.url),
+    ).text();
+    expect(styles).toMatch(
+      /\.timeline-photo\s*\{[^}]*width:\s*auto;[^}]*height:\s*auto;/u,
+    );
+  });
+
   test('keeps private-photo coordination reusable across StrictMode-style cleanup and setup', () => {
     const coordinator = new PrivatePhotoLoadCoordinator();
     let cleanupCancelled = false;
