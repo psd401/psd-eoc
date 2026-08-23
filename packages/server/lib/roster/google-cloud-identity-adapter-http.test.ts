@@ -15,6 +15,8 @@ const CLOUD_IDENTITY_ENDPOINT = 'https://cloudidentity.googleapis.com/v1';
 const READONLY_SCOPE =
   'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
 const PROVIDER_PAYLOAD_SECRET = 'provider-payload-must-never-leak';
+const SYNTHETIC_SERVICE_ACCOUNT =
+  'roster-sync-reader@example-eoc-project.iam.gserviceaccount.com';
 
 const GOOGLE_SOURCE = GroupSourceSchema.parse({
   id: '00000000-0000-4000-8000-000000000101',
@@ -43,8 +45,7 @@ function configuration(
   timeoutMilliseconds = 1_000,
 ): GoogleCloudIdentityRosterConfiguration {
   return Object.freeze({
-    serviceAccountEmail:
-      'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+    serviceAccountEmail: SYNTHETIC_SERVICE_ACCOUNT,
     privateKeyId: 'a'.repeat(40),
     privateKey: syntheticPrivateKey,
     timeoutMilliseconds,
@@ -225,7 +226,7 @@ describe('non-delegated Cloud Identity roster adapter HTTP boundaries', () => {
     const claims = decodedJwtPart(assertion, 1);
     expect(claims).toMatchObject({
       aud: TOKEN_ENDPOINT,
-      iss: 'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+      iss: SYNTHETIC_SERVICE_ACCOUNT,
       scope: READONLY_SCOPE,
     });
     expect(claims).not.toHaveProperty('sub');

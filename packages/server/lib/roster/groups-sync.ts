@@ -69,9 +69,6 @@ const GOOGLE_CLOUD_IDENTITY_ENDPOINT =
   'https://cloudidentity.googleapis.com/v1';
 const GOOGLE_GROUP_MEMBER_SCOPE =
   'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
-const GOOGLE_ROSTER_PROJECT_ID = 'psd401-eoc';
-const GOOGLE_ROSTER_SERVICE_ACCOUNT_EMAIL =
-  'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com';
 const GOOGLE_ROSTER_WORKSPACE_ROLE = '_GROUPS_READER_ROLE';
 const DEFAULT_GOOGLE_TIMEOUT_MILLISECONDS = 10_000;
 const MAX_GOOGLE_RESPONSE_BYTES = 512 * 1024;
@@ -1254,19 +1251,17 @@ const GoogleTokenResponseSchema = z
 const GoogleCloudIdentityCredentialSchema = z
   .object({
     type: z.literal('service_account'),
-    project_id: z.literal(GOOGLE_ROSTER_PROJECT_ID),
+    project_id: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u),
     private_key_id: z.string().regex(/^[a-f0-9]{40}$/u),
     private_key: z.string().min(1).max(16_384),
-    client_email: z.literal(GOOGLE_ROSTER_SERVICE_ACCOUNT_EMAIL),
+    client_email: z.string().trim().email().max(320),
     client_id: z.string().regex(/^\d+$/u),
     auth_uri: z.literal('https://accounts.google.com/o/oauth2/auth'),
     token_uri: z.literal(GOOGLE_TOKEN_ENDPOINT),
     auth_provider_x509_cert_url: z.literal(
       'https://www.googleapis.com/oauth2/v1/certs',
     ),
-    client_x509_cert_url: z.literal(
-      'https://www.googleapis.com/robot/v1/metadata/x509/roster-sync-reader%40psd401-eoc.iam.gserviceaccount.com',
-    ),
+    client_x509_cert_url: z.string().url().max(2_048),
     universe_domain: z.literal('googleapis.com'),
     // Required retained-secret provenance only. Runtime source authority comes
     // from the exact versioned database configuration loaded by syncRoster.
@@ -1277,6 +1272,32 @@ const GoogleCloudIdentityCredentialSchema = z
     workspace_admin_role: z.literal(GOOGLE_ROSTER_WORKSPACE_ROLE),
   })
   .strict()
+  .superRefine((credential, context) => {
+    const serviceAccountSuffix = `@${credential.project_id}.iam.gserviceaccount.com`;
+    const serviceAccountName = credential.client_email.slice(
+      0,
+      -serviceAccountSuffix.length,
+    );
+    const expectedCertificateUrl = `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(credential.client_email)}`;
+    if (
+      !credential.client_email.endsWith(serviceAccountSuffix) ||
+      !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(serviceAccountName)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'The service account email must belong to its GCP project.',
+        path: ['client_email'],
+      });
+    }
+    if (credential.client_x509_cert_url !== expectedCertificateUrl) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'The service account certificate URL must identify the same account.',
+        path: ['client_x509_cert_url'],
+      });
+    }
+  })
   .readonly();
 
 export interface GoogleCloudIdentityRosterConfiguration {
