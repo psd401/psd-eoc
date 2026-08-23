@@ -181,6 +181,14 @@ of the four human-only critical actions.
 
 ## 2. Current release security boundary
 
+> **Installed on devices.** The product owner attests on 2026-08-23 that PSD EOC
+> is installed and running on a physical iPhone and a physical Android device.
+> That is further than anything below records: the last iOS upload this runbook
+> knows about failed Apple processing, and the Android release it knows about was
+> an unexposed draft. Whoever next touches a store operation should read the
+> installed build numbers off the devices and record them here and in
+> `docs/INTEGRATIONS.md`, so the runbook stops trailing reality.
+
 The current repository candidate is app/runtime 1.0.3. It preserves the
 embedded-only boundary while adding the truthful Apple motion-framework purpose
 string required to replace the failed iOS 1.0.1/build-2 upload. The already
