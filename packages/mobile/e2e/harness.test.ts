@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 import {
   expoDevelopmentClientUrl,
+  IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS,
   mobileE2EIdentity,
   requireSyntheticMobileE2E,
+  shouldRetryIosDevelopmentClientOpen,
 } from './harness';
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,6 +43,14 @@ describe('issue-32 mobile E2E harness', () => {
         requireSyntheticMobileE2E({ ...safe, [key]: 'unsafe' }),
       ).toThrow('exact synthetic fixtures');
     }
+  });
+
+  test('retries only the bounded iOS simulator URL-open timeout', () => {
+    expect(IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS).toBe(3);
+    expect(shouldRetryIosDevelopmentClientOpen(60, 1)).toBe(true);
+    expect(shouldRetryIosDevelopmentClientOpen(60, 2)).toBe(true);
+    expect(shouldRetryIosDevelopmentClientOpen(60, 3)).toBe(false);
+    expect(shouldRetryIosDevelopmentClientOpen(1, 1)).toBe(false);
   });
 
   test('keeps every Maestro flow config-derived and synthetic-guarded', async () => {
@@ -104,6 +114,7 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain("'emu', 'avd', 'name'");
     expect(runner).toContain("await maestro('activation-result.yaml')");
     expect(runner).toContain("const metroUrl = 'http://127.0.0.1:8081'");
+    expect(runner).toContain('await openIosDevelopmentClient');
     expect(runner).not.toContain('http://10.0.2.2:8081');
   });
 });

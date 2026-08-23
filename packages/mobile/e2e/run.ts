@@ -5,8 +5,10 @@ import { resolve } from 'node:path';
 
 import {
   expoDevelopmentClientUrl,
+  IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS,
   mobileE2EIdentity,
   requireSyntheticMobileE2E,
+  shouldRetryIosDevelopmentClientOpen,
   type MobileE2EPlatform,
 } from './harness';
 
@@ -55,6 +57,15 @@ const childEnvironment: Record<string, string | undefined> = {
   SYSTEM_APP_ID: 'com.apple.springboard',
 };
 
+class CommandExitError extends Error {
+  constructor(
+    readonly exitCode: number,
+    arguments_: readonly string[],
+  ) {
+    super(`${arguments_.join(' ')} exited with ${exitCode}.`);
+  }
+}
+
 async function command(
   arguments_: readonly string[],
   cwd = repositoryRoot,
@@ -68,7 +79,35 @@ async function command(
   });
   const exitCode = await child.exited;
   if (exitCode !== 0) {
-    throw new Error(`${arguments_.join(' ')} exited with ${exitCode}.`);
+    throw new CommandExitError(exitCode, arguments_);
+  }
+}
+
+async function openIosDevelopmentClient(
+  deviceId: string,
+  developmentUrl: string,
+): Promise<void> {
+  const arguments_ = ['xcrun', 'simctl', 'openurl', deviceId, developmentUrl];
+  for (
+    let attempt = 1;
+    attempt <= IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      await command(arguments_);
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof CommandExitError) ||
+        !shouldRetryIosDevelopmentClientOpen(error.exitCode, attempt)
+      ) {
+        throw error;
+      }
+      console.warn(
+        `The iOS simulator timed out opening the development client on attempt ${attempt}; retrying.`,
+      );
+      await Bun.sleep(5_000);
+    }
   }
 }
 
@@ -342,7 +381,10 @@ try {
     metroUrl,
   );
   if (platform === 'ios') {
-    await deviceCommand(['openurl', deviceId, developmentUrl]);
+    // A recently exercised hosted simulator can transiently time out while
+    // SpringBoard dispatches the development-client URL. Keep this bounded,
+    // but tolerate that simulator-level flake before starting Maestro.
+    await openIosDevelopmentClient(deviceId, developmentUrl);
   } else {
     await deviceCommand([
       'shell',

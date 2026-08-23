@@ -1,5 +1,7 @@
 export type MobileE2EPlatform = 'ios' | 'android';
 
+export const IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS = 3;
+
 interface ExpoAppConfiguration {
   readonly expo?: {
     readonly slug?: unknown;
@@ -65,4 +67,11 @@ export function expoDevelopmentClientUrl(
     throw new TypeError('The E2E Metro URL must stay on the local machine.');
   }
   return `${scheme}://expo-development-client/?url=${encodeURIComponent(parsed.toString())}`;
+}
+
+export function shouldRetryIosDevelopmentClientOpen(
+  exitCode: number,
+  attempt: number,
+): boolean {
+  return exitCode === 60 && attempt < IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS;
 }
