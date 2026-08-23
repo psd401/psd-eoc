@@ -54,5 +54,7 @@ bun run test:e2e:mobile:verify
 ```
 
 The dedicated `Mobile E2E` workflow runs both platforms after every push to
-`main` and supports manual dispatch. Pull requests run the web Playwright and
+`main` and supports manual dispatch once the workflow exists on the default
+branch. Before merge, a maintainer can apply the `mobile-e2e` pull-request
+label to opt into both native jobs. Pull requests run the web Playwright and
 axe journeys in the ordinary CI workflow.
