@@ -20,6 +20,10 @@ import {
   describeNeighborhoodOutcome,
 } from '../../db/bootstrap-facilities';
 import {
+  bootstrapSyntheticGroups,
+  describeSyntheticGroupOutcome,
+} from '../../db/bootstrap-synthetic-groups';
+import {
   configureAndVerifyApplicationRole,
   verifyApplicationLogin,
   verifyDatabaseTls,
@@ -411,7 +415,14 @@ export function createBootstrapDependencies(
         () => bootstrapNeighborhoods(administratorConnection.db),
       );
       console.info(describeNeighborhoodOutcome(neighborhoods));
+      const syntheticGroups = await withReducedDriverErrors(
+        'synthetic group bootstrap',
+        () => bootstrapSyntheticGroups(administratorConnection.db),
+      );
+      console.info(describeSyntheticGroupOutcome(syntheticGroups));
       return Object.freeze({
+        syntheticGroupsConfigured: syntheticGroups.configured,
+        syntheticGroupsCreated: syntheticGroups.created.length,
         facilitiesConfigured: facilities.configured,
         facilitiesCreated: facilities.created.length,
         neighborhoodsConfigured: neighborhoods.configured,
