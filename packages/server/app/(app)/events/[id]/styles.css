@@ -681,6 +681,7 @@ dd {
 }
 
 .lifecycle-panel {
+  margin-top: 1rem;
   border-width: 2px;
 }
 
@@ -760,6 +761,12 @@ dialog::backdrop {
   padding-left: 1.3rem;
 }
 
+.consequence-summary {
+  border-left: 0.35rem solid #174ea6;
+  background: #eff6ff;
+  padding: 0.8rem 1rem;
+}
+
 .channel-preview {
   margin-top: 0.7rem;
   border: 1px solid #b8c3d1;
@@ -772,6 +779,25 @@ dialog::backdrop {
   cursor: pointer;
   font-weight: 750;
   padding: 0.45rem 0;
+}
+
+.technical-consequence-details {
+  margin-top: 0.8rem;
+  border: 1px solid #94a3b8;
+  border-radius: 0.4rem;
+  background: #f8fafc;
+  padding: 0.65rem;
+}
+
+.technical-consequence-details summary {
+  min-height: 2.75rem;
+  cursor: pointer;
+  font-weight: 750;
+  padding: 0.45rem 0;
+}
+
+.technical-consequence-details code {
+  overflow-wrap: anywhere;
 }
 
 .channel-copy {

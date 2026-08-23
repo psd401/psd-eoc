@@ -136,38 +136,33 @@ const EVENT_TYPE_ITEM = {
 } as unknown as EventTypeListItem;
 
 describe('monthly delivery-test browser safety', () => {
-  test('renders an unmistakable DRILL confirmation and requires an explicit human check', () => {
+  test('renders a plain-language DRILL consequence summary without an extra approval checkbox', () => {
     const preview = deliveryTestPreview();
-    const unchecked = renderToStaticMarkup(
+    const markup = renderToStaticMarkup(
       <DeliveryTestPreviewConfirmation
         activateOutcomeUnknown={false}
         activatePending={false}
         activated={false}
-        humanChecked={false}
         onActivate={() => undefined}
-        onHumanCheckedChange={() => undefined}
-        preview={preview}
-      />,
-    );
-    const checked = renderToStaticMarkup(
-      <DeliveryTestPreviewConfirmation
-        activateOutcomeUnknown={false}
-        activatePending={false}
-        activated={false}
-        humanChecked
-        onActivate={() => undefined}
-        onHumanCheckedChange={() => undefined}
         preview={preview}
       />,
     );
 
-    expect(unchecked).toContain('DRILL — LIVE CANARY — TRAINING ONLY');
-    expect(unchecked).toContain('not a real incident');
-    expect(unchecked).toContain('Nothing sends automatically');
-    expect(unchecked).toMatch(
-      /<button[^>]*disabled=""[^>]*>Confirm and start DRILL live canary<\/button>/u,
+    expect(markup).toContain('DRILL — LIVE CANARY — TRAINING ONLY');
+    expect(markup).toContain('not a real incident');
+    expect(markup).toContain('Nothing sends automatically');
+    expect(markup).toContain('approved recipients across');
+    expect(markup).toContain('Technical preview details');
+    expect(markup).toContain(preview.endpointReferenceDigest);
+    expect(markup.indexOf('approved recipients across')).toBeLessThan(
+      markup.indexOf('Technical preview details'),
     );
-    expect(checked).toMatch(
+    expect(markup).toContain(
+      '<details class="delivery-test-technical-details">',
+    );
+    expect(markup).not.toContain('I am an authenticated human');
+    expect(markup).not.toContain('type="checkbox"');
+    expect(markup).toMatch(
       /<button class="button delivery-test-activate" type="button">Confirm and start DRILL live canary<\/button>/u,
     );
   });
@@ -181,13 +176,13 @@ describe('monthly delivery-test browser safety', () => {
           activateOutcomeUnknown={false}
           activatePending={false}
           activated={false}
-          humanChecked
           onActivate={() => undefined}
-          onHumanCheckedChange={() => undefined}
           preview={preview}
         />,
       );
       expect(markup).toContain('Live canary run blocked');
+      expect(markup).toContain('Technical preview details');
+      expect(markup).toContain('INTEGRATION_NOT_LIVE_VERIFIED');
       expect(markup).toMatch(
         /<button[^>]*disabled=""[^>]*>Confirm and start DRILL live canary<\/button>/u,
       );

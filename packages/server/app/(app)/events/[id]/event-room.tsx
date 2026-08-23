@@ -122,12 +122,24 @@ type CommandBody =
   | Readonly<{
       operation: 'all-clear';
       lifecyclePreviewId: string;
-      confirmationPhrase: 'ALL CLEAR';
     }>
   | Readonly<{
       operation: 'close';
-      confirmationPhrase: 'CLOSE EVENT';
     }>;
+
+type LifecycleCommandBody = Extract<
+  CommandBody,
+  Readonly<{ operation: 'all-clear' | 'close' }>
+>;
+
+/** Browser lifecycle requests carry intent, not acknowledgement ceremony. */
+export function webLifecycleCommandBody(
+  input:
+    | Readonly<{ operation: 'all-clear'; lifecyclePreviewId: string }>
+    | Readonly<{ operation: 'close' }>,
+): LifecycleCommandBody {
+  return Object.freeze({ ...input });
+}
 
 interface RetainedCommand {
   readonly version: typeof RECOVERY_RECORD_VERSION;
@@ -676,13 +688,8 @@ function parseMutationResult(
           ? parsed.data.transition.notificationAuthorization
           : null;
       if (
-        !hasExactKeys(body, [
-          'operation',
-          'lifecyclePreviewId',
-          'confirmationPhrase',
-        ]) ||
+        !hasExactKeys(body, ['operation', 'lifecyclePreviewId']) ||
         body.operation !== 'all-clear' ||
-        body.confirmationPhrase !== 'ALL CLEAR' ||
         expectedPreviewId === null ||
         authorization?.lifecyclePreviewId !== expectedPreviewId
       ) {
@@ -692,9 +699,8 @@ function parseMutationResult(
         );
       }
     } else if (
-      !hasExactKeys(body, ['operation', 'confirmationPhrase']) ||
-      body.operation !== 'close' ||
-      body.confirmationPhrase !== 'CLOSE EVENT'
+      !hasExactKeys(body, ['operation']) ||
+      body.operation !== 'close'
     ) {
       throw new EventRoomRequestError(
         'PSD EOC returned close evidence for a different command. The exact request is retained for verification.',
@@ -3179,24 +3185,28 @@ function renderedMessageContent(channel: ChannelConsequencePreview): ReactNode {
 function PreviewDetails({
   preview,
 }: Readonly<{ preview: LifecycleConsequencePreview }>) {
+  const channelSummary = preview.channels
+    .map(
+      (channel) =>
+        `${channel.channel.toUpperCase()} (${channel.endpointCount} endpoint${
+          channel.endpointCount === 1 ? '' : 's'
+        })`,
+    )
+    .join(', ');
   return (
     <section aria-labelledby="all-clear-consequences-heading">
       <h3 id="all-clear-consequences-heading">Notification consequences</h3>
-      <ul className="consequence-list">
-        <li>{preview.recipientCount} authorized roster recipients</li>
-        <li>
-          Roster population: {preview.rosterPopulation}
-          {preview.rosterPopulation === 'synthetic'
-            ? ' (provably unroutable training data)'
-            : ''}
-        </li>
-        <li>
-          Preview expires {readableDateTime(preview.expiresAt)}; an expired
-          preview cannot be sent.
-        </li>
-      </ul>
+      <p className="consequence-summary">
+        <strong>
+          {preview.recipientCount} authorized recipients across{' '}
+          {preview.channels.length} channels:
+        </strong>{' '}
+        {channelSummary}. Select “Issue all-clear and notify” to send the exact
+        messages shown below and append the all-clear, or select “Cancel” to
+        make no change.
+      </p>
       {preview.channels.map((channel) => (
-        <details className="channel-preview" key={channel.channel} open>
+        <details className="channel-preview" key={channel.channel}>
           <summary>
             {channel.channel.toUpperCase()}: {channel.endpointCount} endpoints —{' '}
             {channel.integrationStatus.label}
@@ -3208,16 +3218,61 @@ function PreviewDetails({
         <div className="blocked-preview" role="alert">
           <strong>Sending is blocked.</strong>
           <p>
-            PSD EOC will not issue this all-clear until the consequence preview
-            is ready.
+            The all-clear action remains unavailable until every recipient and
+            channel consequence is ready. Cancel, correct the blocked
+            configuration, and load a fresh preview.
           </p>
-          <ul>
-            {preview.blockingReasonCodes.map((code) => (
-              <li key={code}>{code}</li>
-            ))}
-          </ul>
         </div>
       ) : null}
+      <details className="technical-consequence-details">
+        <summary>Technical consequence details</summary>
+        <dl className="event-facts">
+          <dt>Preview ID</dt>
+          <dd>
+            <code>{preview.id}</code>
+          </dd>
+          <dt>Event ID</dt>
+          <dd>
+            <code>{preview.eventId}</code>
+          </dd>
+          <dt>Event type version ID</dt>
+          <dd>
+            <code>{preview.eventTypeVersion.id}</code>
+          </dd>
+          <dt>Roster snapshot ID</dt>
+          <dd>
+            <code>{preview.rosterSnapshotId}</code>
+          </dd>
+          <dt>Consequence digest</dt>
+          <dd>
+            <code>{preview.consequenceDigest}</code>
+          </dd>
+          <dt>Preview expires</dt>
+          <dd>
+            <time dateTime={preview.expiresAt}>
+              {readableDateTime(preview.expiresAt)}
+            </time>
+          </dd>
+        </dl>
+        <p>
+          Roster population: <code>{preview.rosterPopulation}</code>
+          {preview.rosterPopulation === 'synthetic'
+            ? ' — provably unroutable training data.'
+            : '.'}
+        </p>
+        {preview.blockingReasonCodes.length > 0 ? (
+          <>
+            <h4>Blocking reason codes</h4>
+            <ul>
+              {preview.blockingReasonCodes.map((code) => (
+                <li key={code}>
+                  <code>{code}</code>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </details>
     </section>
   );
 }
@@ -3297,7 +3352,6 @@ export function EventRoom({
   const [dialogLocationDraft, setDialogLocationDraft] =
     useState<LocationDraft>(EMPTY_LOCATION_DRAFT);
   const [dialogReason, setDialogReason] = useState('');
-  const [confirmationPhrase, setConfirmationPhrase] = useState('');
   const [pollRefreshVersion, setPollRefreshVersion] = useState(0);
 
   const cursorRef = useRef(initialCursor);
@@ -3759,7 +3813,6 @@ export function EventRoom({
     setDialogText('');
     setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
     setDialogReason('');
-    setConfirmationPhrase('');
     if (
       !requestWasAttempted &&
       !pendingRef.current &&
@@ -3815,7 +3868,6 @@ export function EventRoom({
     setDialog(null);
     setDialogText('');
     setDialogReason('');
-    setConfirmationPhrase('');
     if (!requestWasAttempted && loadingHistory) {
       setMutationError(null);
       setMutationStatus(
@@ -3862,7 +3914,6 @@ export function EventRoom({
         : EMPTY_LOCATION_DRAFT,
     );
     setDialogReason('');
-    setConfirmationPhrase('');
     setDialog(next);
   }
 
@@ -3875,7 +3926,6 @@ export function EventRoom({
     setDialogText('');
     setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
     setDialogReason('');
-    setConfirmationPhrase('');
   }
 
   async function loadAllClearPreview(idempotencyKey: string): Promise<void> {
@@ -4077,7 +4127,6 @@ export function EventRoom({
         setDialog(null);
         setDialogText('');
         setDialogReason('');
-        setConfirmationPhrase('');
       }
       return requestError.ambiguous ? 'ambiguous' : 'rejected';
     } finally {
@@ -4124,7 +4173,6 @@ export function EventRoom({
         setDialog(null);
         setDialogText('');
         setDialogReason('');
-        setConfirmationPhrase('');
       }
       return null;
     }
@@ -4491,28 +4539,29 @@ export function EventRoom({
     if (
       dialog?.kind !== 'all-clear' ||
       dialog.preview === null ||
-      dialog.preview.sendReadiness !== 'ready' ||
-      confirmationPhrase !== 'ALL CLEAR'
+      dialog.preview.sendReadiness !== 'ready'
     ) {
       return;
     }
-    const succeeded = await executeNewCommand({
-      operation: 'all-clear',
-      lifecyclePreviewId: dialog.preview.id,
-      confirmationPhrase: 'ALL CLEAR',
-    });
+    const succeeded = await executeNewCommand(
+      webLifecycleCommandBody({
+        operation: 'all-clear',
+        lifecyclePreviewId: dialog.preview.id,
+      }),
+    );
     if (succeeded) closeDialog();
   }
 
   async function submitClose(submission: FormEvent<HTMLFormElement>) {
     submission.preventDefault();
-    if (dialog?.kind !== 'close' || confirmationPhrase !== 'CLOSE EVENT') {
+    if (dialog?.kind !== 'close') {
       return;
     }
-    const succeeded = await executeNewCommand({
-      operation: 'close',
-      confirmationPhrase: 'CLOSE EVENT',
-    });
+    const succeeded = await executeNewCommand(
+      webLifecycleCommandBody({
+        operation: 'close',
+      }),
+    );
     if (succeeded) closeDialog();
   }
 
@@ -4707,8 +4756,7 @@ export function EventRoom({
             <p>
               A lifecycle action cannot be retried from browser storage. After
               verification, clear this record. If the action is still needed,
-              PSD EOC will require a fresh consequence review and typed
-              confirmation.
+              PSD EOC will require a fresh consequence review and confirmation.
             </p>
           ) : null}
           {retainedPhotoRecoveryConflict ? (
@@ -4762,6 +4810,46 @@ export function EventRoom({
       >
         {dialog === null ? mutationStatus : null}
       </p>
+
+      <section
+        aria-labelledby="lifecycle-heading"
+        className={`lifecycle-panel ${realEvent ? 'mode-real' : 'mode-drill'}`}
+      >
+        <h2 id="lifecycle-heading">Event state</h2>
+        <p>
+          Current state: <strong>{statusLabel(currentEvent)}</strong>. State
+          changes append journal evidence; they never rewrite history.
+        </p>
+        <div className="lifecycle-actions">
+          {currentEvent.status === 'active' ? (
+            <button
+              aria-haspopup="dialog"
+              className="danger"
+              disabled={lifecycleCommandsBlocked}
+              onClick={(click) => beginAllClear(click.currentTarget)}
+              type="button"
+            >
+              Review all-clear
+            </button>
+          ) : null}
+          {currentEvent.status === 'all-clear' ? (
+            <button
+              aria-haspopup="dialog"
+              className="caution"
+              disabled={lifecycleCommandsBlocked}
+              onClick={(click) =>
+                openDialog({ kind: 'close' }, click.currentTarget)
+              }
+              type="button"
+            >
+              Review event close
+            </button>
+          ) : null}
+          {currentEvent.status === 'closed' ? (
+            <p>The event is closed. Its complete journal remains retained.</p>
+          ) : null}
+        </div>
+      </section>
 
       <div className="room-grid">
         <section
@@ -5108,48 +5196,6 @@ export function EventRoom({
               </p>
             ) : null}
           </section>
-
-          <section
-            aria-labelledby="lifecycle-heading"
-            className={`lifecycle-panel ${realEvent ? 'mode-real' : 'mode-drill'}`}
-          >
-            <h2 id="lifecycle-heading">Event state</h2>
-            <p>
-              Current state: <strong>{statusLabel(currentEvent)}</strong>. State
-              changes append journal evidence; they never rewrite history.
-            </p>
-            <div className="lifecycle-actions">
-              {currentEvent.status === 'active' ? (
-                <button
-                  aria-haspopup="dialog"
-                  className="danger"
-                  disabled={lifecycleCommandsBlocked}
-                  onClick={(click) => beginAllClear(click.currentTarget)}
-                  type="button"
-                >
-                  Review all-clear
-                </button>
-              ) : null}
-              {currentEvent.status === 'all-clear' ? (
-                <button
-                  aria-haspopup="dialog"
-                  className="caution"
-                  disabled={lifecycleCommandsBlocked}
-                  onClick={(click) =>
-                    openDialog({ kind: 'close' }, click.currentTarget)
-                  }
-                  type="button"
-                >
-                  Review event close
-                </button>
-              ) : null}
-              {currentEvent.status === 'closed' ? (
-                <p>
-                  The event is closed. Its complete journal remains retained.
-                </p>
-              ) : null}
-            </div>
-          </section>
         </div>
       </div>
 
@@ -5169,7 +5215,6 @@ export function EventRoom({
             setDialogText('');
             setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
             setDialogReason('');
-            setConfirmationPhrase('');
           }
         }}
         ref={dialogRef}
@@ -5319,7 +5364,6 @@ export function EventRoom({
                 <h3>Preview unavailable</h3>
                 <p>{dialog.error}</p>
                 <button
-                  data-autofocus
                   disabled={lifecycleCommandsBlocked}
                   onClick={() =>
                     void loadAllClearPreview(dialog.idempotencyKey)
@@ -5333,42 +5377,12 @@ export function EventRoom({
             {dialog.preview === null ? null : (
               <>
                 <PreviewDetails preview={dialog.preview} />
-                <fieldset
-                  disabled={
-                    lifecycleCommandsBlocked ||
-                    dialog.preview.sendReadiness !== 'ready'
-                  }
-                >
-                  <legend>Human confirmation</legend>
-                  <div className="field">
-                    <label htmlFor="all-clear-phrase">
-                      Type ALL CLEAR exactly
-                    </label>
-                    <input
-                      aria-describedby="all-clear-confirm-help"
-                      autoComplete="off"
-                      data-autofocus
-                      id="all-clear-phrase"
-                      onChange={(change) =>
-                        setConfirmationPhrase(change.target.value)
-                      }
-                      spellCheck={false}
-                      type="text"
-                      value={confirmationPhrase}
-                    />
-                  </div>
-                  <p className="field-help" id="all-clear-confirm-help">
-                    This confirmation is case-sensitive and applies only to the
-                    fresh preview shown above.
-                  </p>
-                </fieldset>
                 <div className="form-actions">
                   <button
                     className="danger"
                     disabled={
                       lifecycleCommandsBlocked ||
-                      dialog.preview.sendReadiness !== 'ready' ||
-                      confirmationPhrase !== 'ALL CLEAR'
+                      dialog.preview.sendReadiness !== 'ready'
                     }
                     type="submit"
                   >
@@ -5392,6 +5406,7 @@ export function EventRoom({
               <div className="form-actions">
                 <button
                   className="secondary"
+                  data-autofocus
                   onClick={closeDialog}
                   type="button"
                 >
@@ -5412,43 +5427,35 @@ export function EventRoom({
               real={realEvent}
             />
             {dialogFeedback}
-            <ul className="consequence-list">
-              <li>The event has already reached the all-clear state.</li>
-              <li>Closing appends a distinct journal entry.</li>
-              <li>No journal history is deleted or rewritten.</li>
-              <li>Closing does not send another all-clear notification.</li>
-            </ul>
-            <fieldset disabled={lifecycleCommandsBlocked}>
-              <legend>Human confirmation</legend>
-              <div className="field">
-                <label htmlFor="close-event-phrase">
-                  Type CLOSE EVENT exactly
-                </label>
-                <input
-                  aria-describedby="close-confirm-help"
-                  autoComplete="off"
-                  data-autofocus
-                  id="close-event-phrase"
-                  onChange={(change) =>
-                    setConfirmationPhrase(change.target.value)
-                  }
-                  spellCheck={false}
-                  type="text"
-                  value={confirmationPhrase}
-                />
-              </div>
-              <p className="field-help" id="close-confirm-help">
-                This confirmation is case-sensitive. Closing preserves the full
-                append-only event record.
+            <p className="consequence-summary">
+              <strong>
+                No recipients or notification channels are contacted.
+              </strong>{' '}
+              Select “Close event” to append a distinct close entry while
+              preserving the complete journal, or select “Cancel” to make no
+              change.
+            </p>
+            <details className="technical-consequence-details">
+              <summary>Technical close details</summary>
+              <dl className="event-facts">
+                <dt>Event ID</dt>
+                <dd>
+                  <code>{currentEvent.id}</code>
+                </dd>
+                <dt>Current state</dt>
+                <dd>
+                  <code>{currentEvent.status}</code>
+                </dd>
+              </dl>
+              <p>
+                Closing appends a distinct journal entry. It never deletes or
+                rewrites history and does not send another all-clear.
               </p>
-            </fieldset>
+            </details>
             <div className="form-actions">
               <button
                 className="caution"
-                disabled={
-                  lifecycleCommandsBlocked ||
-                  confirmationPhrase !== 'CLOSE EVENT'
-                }
+                disabled={lifecycleCommandsBlocked}
                 type="submit"
               >
                 {pendingOperation === 'close'
@@ -5457,6 +5464,7 @@ export function EventRoom({
               </button>
               <button
                 className="secondary"
+                data-autofocus
                 disabled={pendingOperation !== null}
                 onClick={closeDialog}
                 type="button"
