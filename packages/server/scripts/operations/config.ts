@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { readInitialAccessGroupConfiguration } from '../../db/bootstrap-access';
+
 import { invalidConfigurationFields } from './failure-diagnostics';
 
 export const DATABASE_LOGIN = 'psd_eoc_application' as const;
@@ -34,15 +36,6 @@ const normalizedValue = (maximum: number) =>
     .refine((value) => value === value.trim() && !/[\0\r\n]/u.test(value), {
       message: 'must be a normalized single-line value',
     });
-
-const optionalDeploymentValue = (minimum: number, maximum: number) =>
-  z.preprocess(
-    (value) =>
-      typeof value === 'string' && value.trim().length === 0
-        ? undefined
-        : value,
-    z.string().trim().min(minimum).max(maximum).optional(),
-  );
 
 const DatabaseIdentifierSchema = normalizedValue(63).regex(
   /^[A-Za-z_][A-Za-z0-9_$]*$/u,
@@ -97,14 +90,6 @@ const BootstrapEnvironmentSchema = z
     DATABASE_APPLICATION_PASSWORD: DatabasePasswordSchema,
     SOURCE_SHA: SourceShaSchema,
     BOOTSTRAP_MODE: z.enum(BOOTSTRAP_MODES).default('migrate'),
-    // First-run configuration. All three are optional: a district already
-    // configured through the admin UI supplies none of them. CloudFormation
-    // represents omitted parameters as empty strings in the task definition,
-    // so empty and whitespace-only values are normalized back to absence before
-    // this strict schema validates the rest of the bootstrap environment.
-    PSD_EOC_INITIAL_ACCESS_GROUP_ID: optionalDeploymentValue(1, 200),
-    PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: optionalDeploymentValue(3, 320),
-    PSD_EOC_INITIAL_ACCESS_GROUP_NAME: optionalDeploymentValue(1, 200),
     /** JSON list of the district's facilities; see db/bootstrap-facilities.ts. */
     PSD_EOC_FACILITIES: z.string().max(200_000).optional(),
     /** JSON list of facility groupings notified together. */
@@ -168,6 +153,11 @@ export function readBootstrapConfig(
       `Invalid bootstrap configuration: ${forbidden.join(', ')}.`,
     );
   }
+
+  // Validate the optional first-run group before opening a database connection
+  // or applying migrations. The same value-redacting parser is used by the
+  // GitHub preflight and by the create-only database step.
+  readInitialAccessGroupConfiguration(environment);
 
   const parsed = BootstrapEnvironmentSchema.safeParse({
     AWS_ACCOUNT_ID: environment.AWS_ACCOUNT_ID,
