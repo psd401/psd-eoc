@@ -604,7 +604,7 @@ class FakeRdsDataClient {
             // granted_role: null. Only access sources carry a role, and this
             // fixture is a building source.
             { isNull: true },
-            // members_captured_at: null; only access sources are synced.
+            // members_captured_at: null; this fixture has not been synced.
             { isNull: true },
             { stringValue: source.googleGroupId },
             { stringValue: source.email },
@@ -643,7 +643,7 @@ class FakeRdsDataClient {
             // granted_role: null. Only access sources carry a role, and this
             // fixture is a building source.
             { isNull: true },
-            // members_captured_at: null; only access sources are synced.
+            // members_captured_at: null; this fixture has not been synced.
             { isNull: true },
             { stringValue: source.googleGroupId },
             { stringValue: source.email },
@@ -750,7 +750,7 @@ class FakeRdsDataClient {
           { booleanValue: true },
           // granted_role: null on a building source.
           { isNull: true },
-          // members_captured_at: null; only access sources are synced.
+          // members_captured_at: null; this fixture has not been synced.
           { isNull: true },
           { stringValue: source.googleGroupId },
           { stringValue: source.email },

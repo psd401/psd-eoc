@@ -112,6 +112,7 @@ export type GroupSourceRef = z.infer<typeof GroupSourceRefSchema>;
 const groupSourceMetadataShape = {
   displayName: z.string().trim().min(1).max(160),
   active: z.boolean(),
+  membersCapturedAt: TimestampSchema.nullable(),
   createdAt: TimestampSchema,
 };
 

@@ -1838,6 +1838,7 @@ interface ConfiguredSourceRow {
   readonly displayName: string;
   readonly active: boolean;
   readonly grantedRole: 'staff' | 'admin' | null;
+  readonly membersCapturedAt: Date | null;
   readonly googleGroupId: string | null;
   readonly email: string | null;
   readonly fixtureKey: string | null;
@@ -1854,6 +1855,7 @@ function parseConfiguredSource(row: ConfiguredSourceRow): GroupSource {
     active: row.active,
     // Access sources carry the role they grant; roster purposes never do.
     grantedRole: row.grantedRole,
+    membersCapturedAt: row.membersCapturedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };
   return GroupSourceSchema.parse(
@@ -1865,6 +1867,19 @@ function parseConfiguredSource(row: ConfiguredSourceRow): GroupSource {
         }
       : { ...common, fixtureKey: row.fixtureKey },
   );
+}
+
+/** Hashes roster configuration while excluding volatile membership-read evidence. */
+export function rosterSourceConfigurationRevisionDigest(
+  configuration: RosterSourceConfiguration,
+  sources: readonly GroupSource[],
+): string {
+  const configurationSources = sources.map((source) => {
+    const { membersCapturedAt, ...configuredSource } = source;
+    void membersCapturedAt;
+    return configuredSource;
+  });
+  return digest({ configuration, sources: configurationSources });
 }
 
 function assembleLoadedConfiguration(
@@ -1891,7 +1906,12 @@ function assembleLoadedConfiguration(
   return Object.freeze({
     configuration,
     sources,
-    revisionDigest: digest({ configuration, sources }),
+    // Membership reads are liveness evidence, not source configuration. A
+    // scheduled read may update this stamp while a roster sync is in flight.
+    revisionDigest: rosterSourceConfigurationRevisionDigest(
+      configuration,
+      sources,
+    ),
   });
 }
 
@@ -2108,6 +2128,7 @@ export function createDrizzleRosterSyncStore(
         displayName: groupSources.displayName,
         active: groupSources.active,
         grantedRole: groupSources.grantedRole,
+        membersCapturedAt: groupSources.membersCapturedAt,
         googleGroupId: groupSources.googleGroupId,
         email: groupSources.email,
         fixtureKey: groupSources.fixtureKey,
@@ -2736,6 +2757,7 @@ export function createDrizzleRosterSyncStore(
             displayName: groupSources.displayName,
             active: groupSources.active,
             grantedRole: groupSources.grantedRole,
+            membersCapturedAt: groupSources.membersCapturedAt,
             googleGroupId: groupSources.googleGroupId,
             email: groupSources.email,
             fixtureKey: groupSources.fixtureKey,

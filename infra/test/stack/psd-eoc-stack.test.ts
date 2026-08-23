@@ -718,7 +718,9 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_SSL_ROOT_CERT',
         'DELIVERY_QUEUE_URL',
         'NODE_ENV',
+        'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
         'PSD_EOC_IOS_BUNDLE_ID',
+        'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',
@@ -740,6 +742,12 @@ describe('App Runner runtime safety boundary', () => {
       Ref: 'RuntimeDatabaseIdleTimeoutSeconds',
     });
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
+    expect(variables.get('PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN')).toEqual({
+      Ref: expect.stringContaining('OperationsAlarmTopic'),
+    });
+    expect(variables.get('PSD_EOC_CRITICAL_ALARM_TOPIC_ARN')).toEqual({
+      Ref: expect.stringContaining('CriticalAlarmTopic'),
+    });
     expect(variables.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE')).toBe(
       SES_VERIFICATION_REFERENCE,
     );
@@ -802,7 +810,7 @@ describe('App Runner runtime safety boundary', () => {
     }
   });
 
-  it('gives the runtime only application-secret and health-read permissions', () => {
+  it('gives the runtime only application, health, and alarm-read permissions', () => {
     const runtimeRole = roleLogicalIdForServicePrincipal(
       'tasks.apprunner.amazonaws.com',
     );
@@ -813,6 +821,7 @@ describe('App Runner runtime safety boundary', () => {
       [
         'secretsmanager:DescribeSecret',
         'secretsmanager:GetSecretValue',
+        'sns:ListSubscriptionsByTopic',
         'sqs:GetQueueAttributes',
         'sqs:SendMessage',
       ].sort(),
@@ -820,24 +829,47 @@ describe('App Runner runtime safety boundary', () => {
     // sqs:SendMessage is deliberate and is not a provider grant: an activation
     // hands its own notification batch to its own delivery queue after the
     // event commits. Reaching a person still requires a channel worker, and the
-    // runtime has no provider authority at all — asserted just below.
+    // runtime has no provider write authority at all — asserted just below.
     expect(actions).not.toContain('ses:SendEmail');
     expect(actions).not.toContain('ses:SendRawEmail');
     expect(actions.some((action) => action.startsWith('rds-data:'))).toBe(
       false,
     );
     expect(actions.every((action) => !action.includes('*'))).toBe(true);
-    for (const forbiddenPrefix of [
-      'events:',
-      'lambda:',
-      'ses:',
-      'sns:',
-      's3:',
-    ]) {
+    for (const forbiddenPrefix of ['events:', 'lambda:', 'ses:', 's3:']) {
       expect(actions.some((action) => action.startsWith(forbiddenPrefix))).toBe(
         false,
       );
     }
+    expect(actions.filter((action) => action.startsWith('sns:'))).toEqual([
+      'sns:ListSubscriptionsByTopic',
+    ]);
+    for (const forbiddenAction of [
+      'sns:Publish',
+      'sns:SetTopicAttributes',
+      'sns:Subscribe',
+    ]) {
+      expect(actions).not.toContain(forbiddenAction);
+    }
+    const snsStatement = statements.find((statement) =>
+      asStringArray(statement.Action).includes('sns:ListSubscriptionsByTopic'),
+    );
+    expect(asStringArray(snsStatement?.Action)).toEqual([
+      'sns:ListSubscriptionsByTopic',
+    ]);
+    const snsResources = asArray(snsStatement?.Resource);
+    expect(snsResources).toHaveLength(2);
+    expect(snsResources).toEqual(
+      expect.arrayContaining([
+        { Ref: expect.stringContaining('OperationsAlarmTopic') },
+        { Ref: expect.stringContaining('CriticalAlarmTopic') },
+      ]),
+    );
+    const snsTargets = JSON.stringify(snsResources);
+    expect(snsTargets).toContain('OperationsAlarmTopic');
+    expect(snsTargets).toContain('CriticalAlarmTopic');
+    expect(snsTargets).not.toContain('EmailEventsTopic');
+    expect(snsResources).not.toContain('*');
 
     // The runtime reads the health queue's attributes, and both reads and
     // writes the delivery queue. It can reach no other queue.
