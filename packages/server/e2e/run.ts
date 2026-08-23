@@ -304,9 +304,10 @@ async function createSyntheticDrill(
 }
 
 async function main(): Promise<void> {
-  if (process.env.PSD_EOC_E2E_SYNTHETIC_ONLY !== 'true') {
+  const serverMode = process.env.PSD_EOC_E2E_SERVER_MODE ?? 'development';
+  if (serverMode !== 'development' && serverMode !== 'production') {
     throw new Error(
-      'Issue 340 browser acceptance is synthetic-only. Set PSD_EOC_E2E_SYNTHETIC_ONLY=true to run it.',
+      'PSD_EOC_E2E_SERVER_MODE must be development or production.',
     );
   }
   const disposable = await createDisposableDatabase('issue_340');
@@ -435,6 +436,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
           PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
+          PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,
           GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',

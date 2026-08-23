@@ -271,7 +271,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      PSD_EOC_E2E_SYNTHETIC_ONLY: 'true'
+      PSD_EOC_E2E_SERVER_MODE: production
       TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
     steps:
       - name: Check out repository
@@ -294,6 +294,9 @@ jobs:
 
       - name: Install Chromium
         run: bunx playwright install --with-deps chromium
+
+      - name: Build the production server
+        run: bun run --cwd packages/server build
 
       - name: Run the operator browser flows
         run: bun run test:e2e:issue-340
