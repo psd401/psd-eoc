@@ -105,6 +105,7 @@
     "psdEoc:applicationOrigin": "https://eoc.psd401.net",
     "psdEoc:hostedDomain": "psd401.net",
     "psdEoc:iosBundleId": "net.psd401.eoc",
+    "psdEoc:organizationName": "Peninsula School District",
     "psdEoc:facilities": [
       {
         "code": "AES",

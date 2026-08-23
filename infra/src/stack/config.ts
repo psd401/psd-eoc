@@ -78,6 +78,7 @@ export interface DeploymentIdentity {
   readonly applicationOrigin: string;
   readonly hostedDomain: string;
   readonly iosBundleId: string;
+  readonly organizationName: string;
 }
 
 /**
@@ -204,6 +205,10 @@ export function readDeploymentIdentity(node: {
     iosBundleId: read(
       'psdEoc:iosBundleId',
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
+    ),
+    organizationName: read(
+      'psdEoc:organizationName',
+      /^(?=.{1,160}$)[^\p{Cc}\p{Cs}]+$/u,
     ),
   });
 }

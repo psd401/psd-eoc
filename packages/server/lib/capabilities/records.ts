@@ -10,6 +10,7 @@ import {
   readDatabaseConfig,
   type DatabaseConnection,
 } from '../../db/client';
+import { organizationName } from '../config/deployment';
 import {
   executeCapability,
   readCapabilityTime,
@@ -121,7 +122,7 @@ function exportEventSummaryRegistration(
         generatedAt.toISOString(),
       );
       const artifact = await artifactStore.store({
-        bytes: await renderEventSummaryPdf(snapshot),
+        bytes: await renderEventSummaryPdf(snapshot, organizationName()),
         format: 'pdf',
         fileName: `event-summary-${snapshot.event.id}.pdf`,
         rowCount: snapshot.journal.length,

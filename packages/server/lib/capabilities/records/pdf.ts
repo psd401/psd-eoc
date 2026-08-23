@@ -1040,8 +1040,18 @@ function collectPdf(
  */
 export async function renderEventSummaryPdf(
   snapshot: EventSummarySnapshot,
+  organizationName: string,
 ): Promise<Uint8Array> {
   const prepared = prepareSnapshot(snapshot);
+  assertString(organizationName, 'organizationName', 320);
+  if (
+    organizationName.length > 160 ||
+    /[\p{Cc}\p{Cs}]/u.test(organizationName)
+  ) {
+    throw invalid(
+      'organizationName is not printable or exceeds its safe length.',
+    );
+  }
   const generatedAt = new Date(prepared.generatedAt);
   const document = new PDFDocument({
     autoFirstPage: false,
@@ -1050,7 +1060,7 @@ export async function renderEventSummaryPdf(
     displayTitle: true,
     fontLayoutCache: false,
     info: {
-      Author: 'Peninsula School District',
+      Author: organizationName,
       CreationDate: generatedAt,
       Creator: 'PSD EOC',
       ModDate: generatedAt,

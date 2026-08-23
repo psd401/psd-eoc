@@ -56,6 +56,23 @@ export function staffHostedDomain(
 
 const ORIGIN_PATTERN = /^https:\/\/[^\s/?#]+$/u;
 
+/** Human-readable name of the organization operating this deployment. */
+export function organizationName(
+  environment: DeploymentEnvironment = process.env,
+): string {
+  const name = required(environment, 'PSD_EOC_ORGANIZATION_NAME');
+  if (
+    name.length > 160 ||
+    Buffer.byteLength(name, 'utf8') > 320 ||
+    /[\p{Cc}\p{Cs}]/u.test(name)
+  ) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_ORGANIZATION_NAME must be a printable name of at most 160 characters.',
+    );
+  }
+  return name;
+}
+
 /**
  * The browser-visible origin this deployment serves, used wherever a redirect
  * must not trust a proxy header.
