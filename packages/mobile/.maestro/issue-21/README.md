@@ -7,7 +7,9 @@ These flows are intentionally synthetic-only. Before running either flow:
    fail-closed operational fixture: one synthetic site, one synthetic drill,
    only mocked integration labels, and no network or provider I/O for start
    operations. The fixture rejects real mode and all unexpected requests.
-2. Launching that exact development build seeds a process-local synthetic staff
+2. Read `expo.ios.bundleIdentifier` or `expo.android.package` from `app.json`
+   and pass it as `APP_ID` to Maestro; the flows never hardcode a tenant app
+   identity. Launching that exact development build seeds a process-local synthetic staff
    enrollment. Complete the real OS Face ID, biometric, or device-passcode
    prompt, then leave PSD EOC open in the foreground. No Google, auth-server,
    SecureStore credential, or provider path is used. The flows use

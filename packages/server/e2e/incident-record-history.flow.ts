@@ -31,7 +31,7 @@ test.describe('incident-record-history', () => {
     );
     await expect(
       page.getByText('DRILL — TRAINING ONLY', { exact: true }),
-    ).toHaveCount(2);
+    ).toHaveCount(3);
     await expect(
       page.getByText('TEST — NOT A REAL INCIDENT', { exact: true }),
     ).toHaveCount(1);

@@ -1,4 +1,4 @@
-appId: net.psd401.eoc
+appId: ${APP_ID}
 name: Issue 21 - start a synthetic drill in exactly three taps
 tags:
   - issue-21

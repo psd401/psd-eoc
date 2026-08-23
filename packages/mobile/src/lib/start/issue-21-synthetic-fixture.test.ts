@@ -4,12 +4,14 @@ import {
   ActivationPreviewSchema,
   CreateActivationPreviewInputSchema,
   FacilityPageSchema,
+  PushTokenUnregistrationReceiptSchema,
   type CreateActivationPreviewInput,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedRequestOptions } from '../api';
 import { MobileAuthController, type AuthTimer } from '../auth/auth-controller';
 import { OfflineMutationDeniedError } from '../auth/auth-errors';
+import { EventRoomApi } from '../../features/event-room/api';
 import {
   activate,
   createPreview,
@@ -134,6 +136,36 @@ describe('issue-21 synthetic Maestro transport', () => {
           FIXTURE_NOW.getTime(),
       ).toBe(true);
     }
+  });
+
+  test('confirms provider-free push cleanup only for its synthetic enrollment', async () => {
+    const request = fixtureRequest();
+    await expect(
+      request({
+        method: 'POST',
+        path: '/api/devices/push-token/unregister',
+        body: {
+          deviceEnrollmentId: '71000000-0000-4000-8000-000000000017',
+        },
+        idempotencyKey: 'issue-32-synthetic-push-cleanup-0001',
+        schema: PushTokenUnregistrationReceiptSchema,
+      }),
+    ).resolves.toEqual({
+      deviceEnrollmentId: '71000000-0000-4000-8000-000000000017',
+      status: 'unregistered',
+    });
+
+    await expect(
+      request({
+        method: 'POST',
+        path: '/api/devices/push-token/unregister',
+        body: {
+          deviceEnrollmentId: '71000000-0000-4000-8000-999999999999',
+        },
+        idempotencyKey: 'issue-32-synthetic-push-cleanup-0002',
+        schema: PushTokenUnregistrationReceiptSchema,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 
   test('requires local device authentication before any synthetic request', async () => {
@@ -295,6 +327,59 @@ describe('issue-21 synthetic Maestro transport', () => {
     await expect(activate(request, preview, IDEMPOTENCY_KEY)).resolves.toEqual(
       result,
     );
+  });
+
+  test('opens the activated drill room, posts text, and all-clears with mocked consequences', async () => {
+    const request = fixtureRequest();
+    const home = await loadStartHomeData(request);
+    const facility = home.facilities[0];
+    const eventType = home.eventTypes[0];
+    if (facility === undefined || eventType === undefined) {
+      throw new Error('The exact synthetic fixture was not loaded.');
+    }
+    const preview = await createPreview(
+      request,
+      selection(facility.id, eventType.latestVersion.id),
+      PREVIEW_IDEMPOTENCY_KEY,
+    );
+    const started = await activate(request, preview, IDEMPOTENCY_KEY);
+    const room = new EventRoomApi(request);
+    const firstPage = await room.sync(started.event.id, null);
+    expect(firstPage.event).toEqual(started.event);
+    expect(firstPage.entries).toHaveLength(1);
+
+    const clientTime = FIXTURE_NOW.toISOString();
+    const posted = await room.postText(
+      started.event.id,
+      '71000000-0000-4000-8000-000000000007',
+      'Synthetic mobile issue 32 update.',
+      'issue-32-synthetic-text-idempotency-0001',
+      clientTime,
+    );
+    expect(posted.entry).toMatchObject({
+      eventId: started.event.id,
+      kind: 'text',
+      payload: { text: 'Synthetic mobile issue 32 update.' },
+    });
+
+    const consequence = await room.previewAllClear(
+      started.event.id,
+      'issue-32-synthetic-all-clear-preview-0001',
+    );
+    expect(consequence.rosterPopulation).toBe('synthetic');
+    expect(
+      consequence.channels.every(
+        (channel) => channel.integrationStatus.label === 'mocked',
+      ),
+    ).toBe(true);
+    const allClear = await room.allClear(
+      started.event.id,
+      consequence.id,
+      'ALL CLEAR',
+      'issue-32-synthetic-all-clear-0001',
+    );
+    expect(allClear.event.status).toBe('all-clear');
+    expect(allClear.notificationIntent?.rosterPopulation).toBe('synthetic');
   });
 
   test('joins the exact seeded event without creating notification truth', async () => {

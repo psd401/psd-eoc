@@ -1,22 +1,30 @@
 import {
+  AllClearEventResultSchema,
   ActivationPreviewSchema,
   CreateActivationPreviewInputSchema,
   EventPageSchema,
+  EventRoomSyncResultSchema,
   EventSchema,
   EventTypePageSchema,
   EventTypeVersionSchema,
   FacilityPageSchema,
   IdempotencyKeySchema,
+  JournalEntrySchema,
   JoinEventResultSchema,
+  LifecycleConsequencePreviewSchema,
   MobileSessionResponseSchema,
   NativeDevicePlatformSchema,
   OpaqueSessionBearerSchema,
+  PushTokenUnregistrationReceiptSchema,
   SessionEstablishmentResultSchema,
   StartEventInputSchema,
   StartEventResultSchema,
+  UnregisterPushTokenInputSchema,
+  projectJournalEntryForRead,
   type ActivationPreview,
   type Event,
   type EventTypeVersion,
+  type JournalEntry,
   type MobileSessionResponse,
   type NativeDevicePlatform,
   type NotificationPurpose,
@@ -56,6 +64,12 @@ const IDS = Object.freeze({
   deviceEnrollment: uuid(17),
   membershipSnapshot: uuid(18),
   initialConnectivityEpoch: uuid(19),
+  textEntry: uuid(20),
+  lifecyclePreview: uuid(21),
+  allClearTransition: uuid(22),
+  allClearJournal: uuid(23),
+  allClearIntentJournal: uuid(24),
+  allClearIntent: uuid(25),
 });
 
 const FIXTURE_CREATED_AT = '2026-08-11T17:00:00.000Z';
@@ -212,6 +226,172 @@ function mockedChannelConsequences() {
       integrationStatus: integrationStatus('email'),
     },
   ] as const;
+}
+
+function mockedAllClearChannels(createdAt: string) {
+  const integrationStatus = (channel: 'push' | 'email') => ({
+    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
+    label: 'mocked' as const,
+    verifiedAt: null,
+    verifiedByUserId: null,
+    authorizationReference: null,
+    reasonCode: null,
+    observedAt: createdAt,
+  });
+  return [
+    {
+      channel: 'push' as const,
+      endpointCount: 2,
+      renderedMessage: {
+        channel: 'push' as const,
+        eventKind: 'drill' as const,
+        templateMode: 'drill' as const,
+        purpose: 'all-clear' as const,
+        classificationMarker: 'DRILL' as const,
+        title: '[DRILL] Synthetic earthquake drill all-clear',
+        body: '[DRILL] Synthetic exercise all-clear.',
+      },
+      integrationStatus: integrationStatus('push'),
+    },
+    {
+      channel: 'email' as const,
+      endpointCount: 2,
+      renderedMessage: {
+        channel: 'email' as const,
+        eventKind: 'drill' as const,
+        templateMode: 'drill' as const,
+        purpose: 'all-clear' as const,
+        classificationMarker: 'DRILL' as const,
+        subject: '[DRILL] Synthetic earthquake drill all-clear',
+        textBody: '[DRILL] Synthetic exercise all-clear.',
+      },
+      integrationStatus: integrationStatus('email'),
+    },
+  ] as const;
+}
+
+function lifecyclePreview(event: Event, now: Date) {
+  return LifecycleConsequencePreviewSchema.parse({
+    id: IDS.lifecyclePreview,
+    eventId: event.id,
+    purpose: 'all-clear',
+    kind: event.kind,
+    templateMode: event.templateMode,
+    eventTypeVersion: event.eventTypeVersion,
+    rosterSnapshotId: event.rosterSnapshotId,
+    rosterPopulation: event.rosterPopulation,
+    recipientCount: 2,
+    channels: mockedAllClearChannels(now.toISOString()),
+    sendReadiness: 'ready',
+    blockingReasonCodes: [],
+    consequenceDigest: 'b'.repeat(64),
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(),
+  });
+}
+
+function allClearResult(
+  event: Event,
+  preview: ReturnType<typeof lifecyclePreview>,
+  occurredAt: string,
+) {
+  const actor = {
+    kind: 'human' as const,
+    userId: IDS.user,
+    sessionId: IDS.session,
+  };
+  const targeting = {
+    kind: 'drill' as const,
+    templateMode: 'drill' as const,
+    rosterPopulation: 'synthetic' as const,
+  };
+  const authorization = {
+    kind: 'synthetic-lifecycle' as const,
+    purpose: 'all-clear' as const,
+    targeting,
+    lifecyclePreviewId: preview.id,
+    transitionId: IDS.allClearTransition,
+    consequenceDigest: preview.consequenceDigest,
+    requestId: IDS.request,
+  };
+  const transition = {
+    id: IDS.allClearTransition,
+    sequence: 2,
+    actor,
+    source: 'mobile' as const,
+    occurredAt,
+    requestId: IDS.request,
+    confirmationId: null,
+    consequenceDigest: null,
+    targeting,
+    idempotencyKey: 'f'.repeat(64),
+    transition: 'all-clear' as const,
+    eventId: event.id,
+    from: 'active' as const,
+    to: 'all-clear' as const,
+    notificationAuthorization: authorization,
+  };
+  const allClearEvent = {
+    ...event,
+    status: 'all-clear' as const,
+    allClearAt: occurredAt,
+  };
+  const notificationIntent = {
+    id: IDS.allClearIntent,
+    eventId: event.id,
+    eventKind: 'drill' as const,
+    templateMode: 'drill' as const,
+    purpose: 'all-clear' as const,
+    eventTypeVersion: event.eventTypeVersion,
+    rosterSnapshotId: event.rosterSnapshotId,
+    rosterPopulation: 'synthetic' as const,
+    createdBy: actor,
+    source: 'mobile' as const,
+    requestId: IDS.request,
+    authorization,
+    channels: preview.channels,
+    createdAt: occurredAt,
+  };
+  return AllClearEventResultSchema.parse({
+    event: allClearEvent,
+    transition,
+    journalEntries: [
+      {
+        id: IDS.allClearJournal,
+        eventId: event.id,
+        sequence: 3,
+        author: actor,
+        source: 'mobile',
+        serverTime: occurredAt,
+        clientTime: null,
+        supersedes: null,
+        kind: 'system',
+        payload: {
+          code: 'all-clear-issued',
+          summary: 'Synthetic drill is all-clear.',
+          transition,
+        },
+      },
+      {
+        id: IDS.allClearIntentJournal,
+        eventId: event.id,
+        sequence: 4,
+        author: actor,
+        source: 'mobile',
+        serverTime: occurredAt,
+        clientTime: null,
+        supersedes: null,
+        kind: 'system',
+        payload: {
+          code: 'notification-intent-recorded',
+          summary: 'Synthetic all-clear notification intent recorded.',
+          relatedRecordId: IDS.allClearIntent,
+        },
+      },
+    ],
+    notificationIntent,
+    preparedActivationConsumption: null,
+  });
 }
 
 function activationPreview(now: Date): ActivationPreview {
@@ -561,6 +741,10 @@ export function createIssue21SyntheticFixtureTransport(
     ReturnType<typeof activationResult>
   >();
   let currentPreview: ActivationPreview | null = null;
+  let currentLifecyclePreview: ReturnType<typeof lifecyclePreview> | null =
+    null;
+  let roomEvent: Event | null = null;
+  let roomEntries: JournalEntry[] = [];
 
   return Object.freeze({
     async request<Output>(
@@ -629,6 +813,26 @@ export function createIssue21SyntheticFixtureTransport(
 
       if (
         input.method === 'POST' &&
+        input.path === '/api/devices/push-token/unregister'
+      ) {
+        IdempotencyKeySchema.parse(input.idempotencyKey);
+        const unregister = UnregisterPushTokenInputSchema.parse(
+          requireBody(input),
+        );
+        if (unregister.deviceEnrollmentId !== IDS.deviceEnrollment) {
+          throw new TypeError(
+            'The synthetic fixture rejected an unexpected device enrollment.',
+          );
+        }
+        payload = PushTokenUnregistrationReceiptSchema.parse({
+          deviceEnrollmentId: unregister.deviceEnrollmentId,
+          status: 'unregistered',
+        });
+        return input.schema.parse(payload);
+      }
+
+      if (
+        input.method === 'POST' &&
         input.path === '/api/mobile/start/preview'
       ) {
         IdempotencyKeySchema.parse(input.idempotencyKey);
@@ -671,6 +875,17 @@ export function createIssue21SyntheticFixtureTransport(
           );
           activationResults.set(idempotencyKey, result);
           activatedEvents.push(result.event);
+          roomEvent = result.event;
+          roomEntries = [...result.journalEntries];
+          if (
+            process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE ===
+            'issue-32'
+          ) {
+            const { scheduleIssue32SyntheticPush } = await import(
+              './issue-32-synthetic-push'
+            );
+            await scheduleIssue32SyntheticPush(result.event);
+          }
         }
         return input.schema.parse(result);
       }
@@ -699,6 +914,136 @@ export function createIssue21SyntheticFixtureTransport(
           joined: true,
         });
         return input.schema.parse(payload);
+      }
+
+      const eventRoomMatch =
+        /^\/events\/([0-9a-f-]+)\/api(?:\?cursor=[A-Za-z0-9_-]+)?$/u.exec(
+          input.path,
+        );
+      if (eventRoomMatch?.[1] !== undefined) {
+        const requestedEventId = eventRoomMatch[1];
+        const currentEvent = roomEvent;
+        if (
+          requestedEventId !== IDS.activatedEvent ||
+          currentEvent === null ||
+          currentEvent.id !== requestedEventId
+        ) {
+          throw new TypeError(
+            'The synthetic event-room target is unavailable.',
+          );
+        }
+
+        if (input.method === 'GET') {
+          const initial = !input.path.includes('?cursor=');
+          payload = EventRoomSyncResultSchema.parse({
+            eventId: currentEvent.id,
+            header: {
+              facility: {
+                id: IDS.facility,
+                code: 'SYNTH',
+                name: 'Synthetic Test School',
+              },
+              eventType: {
+                id: IDS.eventTypeVersion,
+                name: version.name,
+                templateMode: 'drill',
+              },
+            },
+            event: currentEvent,
+            entries: initial
+              ? roomEntries.map((entry) =>
+                  projectJournalEntryForRead(entry, false),
+                )
+              : [],
+            cursor: `issue21_${roomEntries.length}`,
+            hasMore: false,
+            snapshotSequence: roomEntries.at(-1)?.sequence ?? 0,
+          });
+          return input.schema.parse(payload);
+        }
+
+        if (input.method === 'POST') {
+          IdempotencyKeySchema.parse(input.idempotencyKey);
+          const body = requireBody(input);
+          if (
+            typeof body !== 'object' ||
+            body === null ||
+            Array.isArray(body)
+          ) {
+            throw new TypeError(
+              'The synthetic event-room body must be an object.',
+            );
+          }
+          const command = body as Readonly<Record<string, unknown>>;
+
+          if (command.operation === 'post-text') {
+            if (
+              currentEvent.status !== 'active' ||
+              typeof command.text !== 'string' ||
+              command.text.trim().length === 0 ||
+              typeof command.clientTime !== 'string'
+            ) {
+              throw new TypeError(
+                'The synthetic text timeline request is invalid.',
+              );
+            }
+            if (roomEntries.some((entry) => entry.id === IDS.textEntry)) {
+              throw new TypeError(
+                'The issue-21 fixture permits only one text update.',
+              );
+            }
+            const entry = JournalEntrySchema.parse({
+              id: IDS.textEntry,
+              eventId: currentEvent.id,
+              sequence: 2,
+              author: {
+                kind: 'human',
+                userId: IDS.user,
+                sessionId: IDS.session,
+              },
+              source: 'mobile',
+              serverTime: now().toISOString(),
+              clientTime: command.clientTime,
+              supersedes: null,
+              kind: 'text',
+              payload: { text: command.text.trim() },
+            });
+            roomEntries.push(entry);
+            return input.schema.parse({ entry });
+          }
+
+          if (command.operation === 'preview-all-clear') {
+            if (currentEvent.status !== 'active') {
+              throw new TypeError(
+                'The synthetic event is not active for all-clear preview.',
+              );
+            }
+            currentLifecyclePreview = lifecyclePreview(currentEvent, now());
+            return input.schema.parse({ preview: currentLifecyclePreview });
+          }
+
+          if (command.operation === 'all-clear') {
+            if (
+              currentEvent.status !== 'active' ||
+              currentLifecyclePreview === null ||
+              command.lifecyclePreviewId !== currentLifecyclePreview.id ||
+              command.confirmationPhrase !== 'ALL CLEAR' ||
+              !roomEntries.some((entry) => entry.id === IDS.textEntry)
+            ) {
+              throw new TypeError(
+                'The synthetic all-clear request is invalid.',
+              );
+            }
+            const result = allClearResult(
+              currentEvent,
+              currentLifecyclePreview,
+              now().toISOString(),
+            );
+            roomEvent = result.event;
+            roomEntries.push(...result.journalEntries);
+            return input.schema.parse(result);
+          }
+        }
       }
 
       throw new TypeError(

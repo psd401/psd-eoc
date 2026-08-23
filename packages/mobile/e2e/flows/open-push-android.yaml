@@ -1,0 +1,13 @@
+appId: ${APP_ID}
+name: Issue 32 - open the synthetic drill notification on Android
+tags: [issue-32, synthetic-only, notification, android]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse notification taps outside the synthetic harness
+- extendedWaitUntil:
+    visible: '\[DRILL\] Synthetic earthquake drill'
+    timeout: 15000
+- assertVisible: '.*Synthetic recipients only.*'
+- assertNotVisible: '.*\[INCIDENT\].*'
+- tapOn: '\[DRILL\] Synthetic earthquake drill'

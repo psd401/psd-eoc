@@ -1,0 +1,146 @@
+name: Mobile E2E
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false'
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: issue-32
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: issue-21
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: issue-32
+  MAESTRO_CLI_NO_ANALYTICS: '1'
+  MAESTRO_VERSION: '2.7.0'
+  MAESTRO_ZIP_SHA256: a4ccab6b604617e7aef6db4f885666056eabe5cfa32befaa3bc994041b8fcbb5
+  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true'
+
+jobs:
+  ios:
+    name: Maestro iOS (synthetic only)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Set up Java for Maestro
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify the provider-free harness
+        run: bun run test:e2e:mobile:verify
+
+      - name: Install pinned Maestro
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$archive" | shasum -a 256 --check
+          unzip -q "$archive" -d "$root"
+          test -x "$root/maestro/bin/maestro"
+          echo "$root/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Verify iOS build tools
+        run: |
+          set -euo pipefail
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          xcodebuild -version
+          pod --version
+          xcrun simctl list runtimes available
+
+      - name: Run iOS drill lifecycle
+        env:
+          PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-ios
+          TMPDIR: ${{ runner.temp }}
+        run: bun packages/mobile/e2e/run.ts ios
+
+      - name: Upload iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mobile-e2e-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mobile-e2e-ios
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    name: Maestro Android (synthetic only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Set up Java for Gradle and Maestro
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify the provider-free harness
+        run: bun run test:e2e:mobile:verify
+
+      - name: Install pinned Maestro
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$archive" | sha256sum --check
+          unzip -q "$archive" -d "$root"
+          test -x "$root/maestro/bin/maestro"
+          echo "$root/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Run Android drill lifecycle
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          disable-animations: true
+          profile: pixel_6
+          script: bun packages/mobile/e2e/run.ts android
+        env:
+          PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-android
+
+      - name: Upload Android evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mobile-e2e-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mobile-e2e-android
+          if-no-files-found: warn
+          retention-days: 14

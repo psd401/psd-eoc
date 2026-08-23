@@ -1,0 +1,26 @@
+appId: ${SYSTEM_APP_ID}
+name: Issue 32 - open the synthetic drill notification on iOS
+tags: [issue-32, synthetic-only, notification, ios]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse notification taps outside the synthetic harness
+- extendedWaitUntil:
+    visible: '\[DRILL\] Synthetic earthquake drill'
+    timeout: 15000
+- assertVisible: '.*Synthetic recipients only.*'
+- assertNotVisible: '.*\[INCIDENT\].*'
+- swipe:
+    start: 50%, 82%
+    end: 95%, 82%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 5000
+- runFlow:
+    when:
+      visible: 'Open'
+    commands:
+      - tapOn: 'Open'
+- extendedWaitUntil:
+    visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
+    timeout: 30000
