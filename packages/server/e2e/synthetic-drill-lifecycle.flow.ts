@@ -92,6 +92,9 @@ test.describe('synthetic-drill-lifecycle', () => {
     const allClearCancel = allClearDialog.getByRole('button', {
       name: 'Cancel',
     });
+    await expect(
+      allClearDialog.getByText(/recipients across .* channels/i),
+    ).toBeVisible();
     await expect(allClearCancel).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(allClearDialog).toBeHidden();
