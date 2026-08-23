@@ -43,6 +43,8 @@ const SYNC_TIME = '2026-08-08T12:00:00.000Z';
 const HISTORICAL_TIME = '2026-08-07T12:00:00.000Z';
 const REVISION_DIGEST = 'a'.repeat(64);
 let syntheticPrivateKey = '';
+const SYNTHETIC_GOOGLE_PROJECT = 'example-eoc-project';
+const SYNTHETIC_SERVICE_ACCOUNT = `roster-sync-reader@${SYNTHETIC_GOOGLE_PROJECT}.iam.gserviceaccount.com`;
 
 beforeAll(async () => {
   const { privateKey } = await generateKeyPair('RS256', {
@@ -56,16 +58,15 @@ function serializedCloudIdentityCredential(
 ): string {
   return JSON.stringify({
     type: 'service_account',
-    project_id: 'psd401-eoc',
+    project_id: SYNTHETIC_GOOGLE_PROJECT,
     private_key_id: 'a'.repeat(40),
     private_key: syntheticPrivateKey,
-    client_email: 'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+    client_email: SYNTHETIC_SERVICE_ACCOUNT,
     client_id: '123456789012345678901',
     auth_uri: 'https://accounts.google.com/o/oauth2/auth',
     token_uri: 'https://oauth2.googleapis.com/token',
     auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
-    client_x509_cert_url:
-      'https://www.googleapis.com/robot/v1/metadata/x509/roster-sync-reader%40psd401-eoc.iam.gserviceaccount.com',
+    client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(SYNTHETIC_SERVICE_ACCOUNT)}`,
     universe_domain: 'googleapis.com',
     approved_staff_group_sha256: 'b'.repeat(64),
     credential_created_at: HISTORICAL_TIME,
@@ -1965,8 +1966,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
       GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '12000',
     });
     expect(runtimeConfiguration).toEqual({
-      serviceAccountEmail:
-        'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+      serviceAccountEmail: SYNTHETIC_SERVICE_ACCOUNT,
       privateKeyId: 'a'.repeat(40),
       privateKey: syntheticPrivateKey,
       timeoutMilliseconds: 12_000,
@@ -1980,9 +1980,31 @@ describe('adapter, authorization, and configuration boundaries', () => {
       }),
     ).toEqual(runtimeConfiguration);
 
+    const otherProject = 'second-district-eoc';
+    const otherServiceAccount = `groups-reader@${otherProject}.iam.gserviceaccount.com`;
+    expect(
+      readGoogleCloudIdentityRosterConfiguration({
+        GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential({
+          project_id: otherProject,
+          client_email: otherServiceAccount,
+          client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(otherServiceAccount)}`,
+        }),
+      }).serviceAccountEmail,
+    ).toBe(otherServiceAccount);
+
     for (const override of [
-      { project_id: 'wrong-project' },
-      { client_email: 'other-reader@psd401-eoc.iam.gserviceaccount.com' },
+      { project_id: 'invalid_project' },
+      {
+        client_email: 'other-reader@other-project.iam.gserviceaccount.com',
+      },
+      {
+        client_x509_cert_url:
+          'https://www.googleapis.com/robot/v1/metadata/x509/other-reader%40other-project.iam.gserviceaccount.com',
+      },
+      {
+        client_x509_cert_url:
+          'https://www.googleapis.com.evil.invalid/robot/v1/metadata/x509/account',
+      },
       {
         oauth_scopes: [
           'https://www.googleapis.com/auth/admin.directory.group.member.readonly',
