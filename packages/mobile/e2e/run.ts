@@ -407,7 +407,6 @@ try {
   }
   await Bun.sleep(5_000);
   await maestro('start-drill.yaml');
-  await maestro('activation-result.yaml');
   await Bun.sleep(6_000);
 
   if (platform === 'ios') {

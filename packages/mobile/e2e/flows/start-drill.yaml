@@ -64,3 +64,4 @@ tags: [issue-32, synthetic-only]
     direction: DOWN
 - assertVisible: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
 - tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
+- runFlow: activation-result.yaml

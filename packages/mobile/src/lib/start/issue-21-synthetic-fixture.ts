@@ -728,6 +728,20 @@ export function createIssue21SyntheticAuthFixture(
 export function createIssue21SyntheticFixtureTransport(
   now: () => Date = () => new Date(),
 ): AuthenticatedRequestTransport {
+  requireIssue21SyntheticFixture();
+  const issue32SyntheticPushPreload =
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE === 'issue-32'
+      ? import('./issue-32-synthetic-push')
+          .then(async (module) => {
+            await module.preloadIssue32SyntheticPush();
+            return module;
+          })
+          .then(
+            (module) => Object.freeze({ kind: 'ready' as const, module }),
+            (error: unknown) =>
+              Object.freeze({ kind: 'failed' as const, error }),
+          )
+      : null;
   const version = eventTypeVersion();
   const seededEvent = activeEvent(
     IDS.initialEvent,
@@ -881,10 +895,17 @@ export function createIssue21SyntheticFixtureTransport(
             process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE ===
             'issue-32'
           ) {
-            const { scheduleIssue32SyntheticPush } = await import(
-              './issue-32-synthetic-push'
-            );
-            await scheduleIssue32SyntheticPush(result.event);
+            const preload = issue32SyntheticPushPreload;
+            if (preload === null) {
+              throw new TypeError(
+                'The issue-32 local push preload was not initialized.',
+              );
+            }
+            const outcome = await preload;
+            if (outcome.kind === 'failed') {
+              throw outcome.error;
+            }
+            await outcome.module.scheduleIssue32SyntheticPush(result.event);
           }
         }
         return input.schema.parse(result);

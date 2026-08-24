@@ -40,6 +40,25 @@ export function issue32SyntheticPushContent(event: Event) {
   });
 }
 
+function loadIssue32NotificationModules() {
+  return Promise.all([
+    import('expo-notifications/build/NotificationPermissions'),
+    import('expo-notifications/build/scheduleNotificationAsync'),
+    import('expo-notifications/build/Notifications.types'),
+    import('../../notifications/alert-channel'),
+    import('expo-notifications/build/cancelAllScheduledNotificationsAsync'),
+    import('expo-notifications/build/dismissAllNotificationsAsync'),
+  ] as const);
+}
+
+/** Warms the exact-gated native modules before the timed activation request. */
+export async function preloadIssue32SyntheticPush(): Promise<void> {
+  if (!isIssue32SyntheticPushFixtureEnabled()) {
+    throw new TypeError('The issue-32 local push fixture is disabled.');
+  }
+  await loadIssue32NotificationModules();
+}
+
 /**
  * Schedules one provider-free OS notification for the issue-32 native journey.
  * The extra fixture flag, development-build check, and synthetic event checks
@@ -58,14 +77,7 @@ export async function scheduleIssue32SyntheticPush(
     alertChannel,
     pendingNotifications,
     presentedNotifications,
-  ] = await Promise.all([
-    import('expo-notifications/build/NotificationPermissions'),
-    import('expo-notifications/build/scheduleNotificationAsync'),
-    import('expo-notifications/build/Notifications.types'),
-    import('../../notifications/alert-channel'),
-    import('expo-notifications/build/cancelAllScheduledNotificationsAsync'),
-    import('expo-notifications/build/dismissAllNotificationsAsync'),
-  ]);
+  ] = await loadIssue32NotificationModules();
   const permission = await permissions.requestPermissionsAsync({
     android: {},
     ios: { allowAlert: true, allowBadge: true, allowSound: true },

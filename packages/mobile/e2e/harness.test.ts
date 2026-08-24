@@ -96,6 +96,7 @@ describe('issue-32 mobile E2E harness', () => {
     expect(start).toContain(
       "- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'",
     );
+    expect(start).toContain('- runFlow: activation-result.yaml');
     expect(start).not.toContain("visible: 'Allow'");
     const activationResult = await Bun.file(
       resolve(flowRoot, 'activation-result.yaml'),
@@ -118,11 +119,24 @@ describe('issue-32 mobile E2E harness', () => {
     expect(lifecycle).toContain("inputText: 'ALL CLEAR'");
     expect(lifecycle).not.toContain('Close event');
 
+    const syntheticFixture = await Bun.file(
+      resolve(mobileRoot, 'src/lib/start/issue-21-synthetic-fixture.ts'),
+    ).text();
+    const preloadIndex = syntheticFixture.indexOf(
+      'preloadIssue32SyntheticPush()',
+    );
+    const activationIndex = syntheticFixture.indexOf(
+      "input.path === '/api/mobile/start/activate'",
+    );
+    expect(preloadIndex).toBeGreaterThan(-1);
+    expect(activationIndex).toBeGreaterThan(preloadIndex);
+    expect(syntheticFixture).toContain("kind: 'failed' as const");
+
     const runner = await Bun.file(resolve(mobileRoot, 'e2e/run.ts')).text();
     expect(runner).toContain('childEnvironment.ANDROID_SERIAL = deviceId');
     expect(runner).toContain("'run:android',\n          '--device'");
     expect(runner).toContain("'emu', 'avd', 'name'");
-    expect(runner).toContain("await maestro('activation-result.yaml')");
+    expect(runner).not.toContain("await maestro('activation-result.yaml')");
     expect(runner).toContain("const metroUrl = 'http://127.0.0.1:8081'");
     expect(runner).toContain("'simctl', 'launch', deviceId, appId");
     expect(runner).toContain('await openIosDevelopmentClient');
