@@ -109,7 +109,11 @@ describe('issue-32 mobile E2E harness', () => {
       resolve(flowRoot, 'open-push-ios.yaml'),
     ).text();
     expect(iosNotification).toStartWith('appId: ${SYSTEM_APP_ID}\n');
-    expect(iosNotification).toContain("visible: 'Open'");
+    expect(iosNotification).toContain(
+      "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
+    );
+    expect(iosNotification).not.toContain("visible: 'Open'");
+    expect(iosNotification).not.toContain('- swipe:');
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
     const lifecycle = await Bun.file(
