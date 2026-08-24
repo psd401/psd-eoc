@@ -203,7 +203,7 @@ Internal-testing draft. The committed 1.0.4 configuration must remain exactly:
 - no `channel` in any EAS build profile; and
 - no OTA-verification build profile.
 
-Expo SDK 57's current compatible patch set includes `expo-updates` 57.0.14.
+Expo SDK 57's current compatible patch set includes `expo-updates` 57.0.17.
 That patch rejects unsafe asset paths. The earlier Android v1.0.0 artifact has
 57.0.13, unsigned on-load remote-update configuration, and cannot be changed
 after build. It remains append-only evidence but is **SUPERSEDED — NOT ELIGIBLE

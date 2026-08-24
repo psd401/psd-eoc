@@ -66,18 +66,19 @@ describe('mobile distribution configuration', () => {
 
   test('pins the complete current Expo SDK 57 compatibility patch set', () => {
     expect(packageManifest.dependencies).toMatchObject({
-      expo: '~57.0.15',
-      'expo-auth-session': '~57.0.8',
-      'expo-constants': '~57.0.13',
-      'expo-dev-client': '~57.0.14',
+      expo: '~57.0.16',
+      'expo-auth-session': '~57.0.9',
+      'expo-constants': '~57.0.14',
+      'expo-crypto': '~57.0.2',
+      'expo-dev-client': '~57.0.15',
       'expo-file-system': '~57.0.5',
-      'expo-image-picker': '~57.0.12',
+      'expo-image-picker': '~57.0.13',
       'expo-linking': '~57.0.7',
-      'expo-location': '~57.0.12',
-      'expo-notifications': '~57.0.13',
-      'expo-router': '~57.0.15',
-      'expo-splash-screen': '~57.0.7',
-      'expo-updates': '~57.0.16',
+      'expo-location': '~57.0.13',
+      'expo-notifications': '~57.0.14',
+      'expo-router': '~57.0.16',
+      'expo-splash-screen': '~57.0.8',
+      'expo-updates': '~57.0.17',
     });
     expect(packageManifest.dependencies['expo-application']).toBe('~57.0.2');
     expect(packageManifest.scripts['expo:check']).toBe('expo install --check');
