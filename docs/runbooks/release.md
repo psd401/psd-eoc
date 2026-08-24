@@ -18,7 +18,7 @@ Release 1 targets are fixed:
   testing** with at most 100 approved testers. Play **Closed testing — Alpha**
   (`alpha`) remains the durable staff path; later EAS submissions target that
   track and remain unreleased drafts until a human separately reviews them.
-- Current app/runtime 1.0.3 uses only code and assets embedded in its store binary.
+- Current app/runtime 1.0.4 uses only code and assets embedded in its store binary.
   Remote updates are disabled and no EAS update channel is attached.
 - No build is promoted to an App Store public release or Play `beta` or
   `production` track by this runbook.
@@ -78,7 +78,7 @@ PSD EOC notification. Its preview binds:
 
 - exact clean Git SHA and reviewed diff;
 - platform and `production` profile;
-- `net.psd401.eoc`, app/runtime 1.0.3, and embedded-only update policy;
+- `net.psd401.eoc`, app/runtime 1.0.4, and embedded-only update policy;
 - the exact public API origin and compiled push-registration switch;
 - existing remote signing-credential identity;
 - current remote native-version counter and exact predicted transition;
@@ -96,7 +96,7 @@ Before BUILD:
       not authorize installation, sign-in, registration, provider testing, or
       any notification.
 - [ ] Resolved production config for both platforms contains those values,
-      app/runtime 1.0.3, remote updates disabled, automatic checks set to
+      app/runtime 1.0.4, remote updates disabled, automatic checks set to
       `NEVER`, no update URL, and no EAS channel.
 - [ ] Required remote signing credentials already exist and are read back.
       BUILD must stop instead of creating, selecting, repairing, or refreshing
@@ -189,11 +189,11 @@ of the four human-only critical actions.
 > installed build numbers off the devices and record them here and in
 > `docs/INTEGRATIONS.md`, so the runbook stops trailing reality.
 
-The current repository candidate is app/runtime 1.0.3. It preserves the
+The current repository candidate is app/runtime 1.0.4. It preserves the
 embedded-only boundary while adding the truthful Apple motion-framework purpose
 string required to replace the failed iOS 1.0.1/build-2 upload. The already
 built Android 1.0.1/code-3 artifact remains the exact eligible saved Play
-Internal-testing draft. The committed 1.0.3 configuration must remain exactly:
+Internal-testing draft. The committed 1.0.4 configuration must remain exactly:
 
 - `updates.enabled: false`;
 - `updates.checkAutomatically: "NEVER"`;
@@ -291,7 +291,7 @@ and App Store Connect app `6801607849`. App Store Connect Build Uploads then
 marked version 1.0.1/build 2 **Failed** with error 90683 because the binary lacks
 `NSMotionUsageDescription`. That immutable binary is not eligible for retry or
 TestFlight. No processed build, group assignment, tester, invitation, or
-physical-device installation exists. A 1.0.3 replacement BUILD and later
+physical-device installation exists. A 1.0.4 replacement BUILD and later
 upload remain pending separate fresh approvals.
 
 ## 3. Version/build automation and commands
@@ -395,7 +395,7 @@ installation, it is acceptable evidence only when every row says:
 - Evidence status: `Identity available`
 - Application ID: `net.psd401.eoc`
 - Application version: exact provider release version (`1.0.1` for the saved
-  Android draft; `1.0.3` for the pending replacement iOS candidate)
+  Android draft; `1.0.4` for the pending replacement iOS candidate)
 - Native build version: exact provider build number in the release record
 - Remote updates: `Disabled — embedded store bundle only`
 - Launch source: `Embedded in this installed binary`
@@ -547,7 +547,7 @@ drift, or incomplete evidence. Removing access does not uninstall a build.
 
 ## 9. Remote-update policy and rollback story
 
-Remote updates are **blocked for current app/runtime 1.0.3**. The existing
+Remote updates are **blocked for current app/runtime 1.0.4**. The existing
 embedded-only 1.0.1 provider artifacts are also incapable of remote updates.
 There is no update URL, channel, verification build, automatic check, download
 path, publication path, rollout, or OTA rollback command for these runtimes.
@@ -610,7 +610,7 @@ cannot replace them.
 ### iOS internal TestFlight install
 
 - Status: **BLOCKED — Apple processing failed for uploaded iOS v1.0.1/build 2;
-  no eligible 1.0.3 replacement, TestFlight group assignment, or human install
+  no eligible 1.0.4 replacement, TestFlight group assignment, or human install
   evidence exists**
 - App record read-back: provider `372148`, Apple ID `6801607849`, name
   `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, `en-US`, initial
@@ -622,7 +622,7 @@ cannot replace them.
   `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
 - EAS submission / App Store processing:
   `dcd24fd9-16ef-455d-92a8-c3852b4cfcd3` finished transport; Apple processing
-  failed with 90683; replacement 1.0.3 identity is `PENDING — not built yet`
+  failed with 90683; replacement 1.0.4 identity is `PENDING — not built yet`
 - `District Technology` group read-back: `BLOCKED`
 - Section 4 embedded-only diagnostic read-back: `BLOCKED`
 - Physical device/OS and TestFlight-install timestamp: `BLOCKED`
