@@ -14,12 +14,40 @@ tags: [issue-32, synthetic-only, notification, ios]
     from:
       text: '\[DRILL\] Synthetic earthquake drill'
     direction: RIGHT
-    duration: 350
+    duration: 700
 - runFlow:
     when:
       visible: 'Open'
     commands:
       - tapOn: 'Open'
+- runFlow:
+    when:
+      visible: '\[DRILL\] Synthetic earthquake drill'
+    commands:
+      - swipe:
+          from:
+            text: '\[DRILL\] Synthetic earthquake drill'
+          direction: RIGHT
+          duration: 900
+      - runFlow:
+          when:
+            visible: 'Open'
+          commands:
+            - tapOn: 'Open'
+- runFlow:
+    when:
+      visible: '\[DRILL\] Synthetic earthquake drill'
+    commands:
+      - swipe:
+          from:
+            text: '\[DRILL\] Synthetic earthquake drill'
+          direction: RIGHT
+          duration: 1100
+      - runFlow:
+          when:
+            visible: 'Open'
+          commands:
+            - tapOn: 'Open'
 - extendedWaitUntil:
     visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
     timeout: 30000

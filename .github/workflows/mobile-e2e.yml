@@ -199,6 +199,9 @@ jobs:
       - name: Run Android drill lifecycle
         run: bun packages/mobile/e2e/run.ts android
         env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs=-Xmx4096m
+            -Dorg.gradle.workers.max=1
           PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-android
 
       - name: Upload Android evidence

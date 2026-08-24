@@ -112,6 +112,10 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosNotification).toContain(
       "- swipe:\n    from:\n      text: '\\[DRILL\\] Synthetic earthquake drill'\n    direction: RIGHT",
     );
+    expect(iosNotification.match(/direction: RIGHT/gu)).toHaveLength(3);
+    expect(iosNotification).toContain('duration: 700');
+    expect(iosNotification).toContain('duration: 900');
+    expect(iosNotification).toContain('duration: 1100');
     expect(iosNotification).toContain("visible: 'Open'");
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
@@ -164,5 +168,11 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain('await openIosDevelopmentClient');
     expect(runner).toContain('iOS mobile E2E cannot skip the native build');
     expect(runner).not.toContain('http://10.0.2.2:8081');
+
+    const workflow = await Bun.file(
+      resolve(mobileRoot, '../../.github/workflows/mobile-e2e.yml'),
+    ).text();
+    expect(workflow).toContain('-Dorg.gradle.jvmargs=-Xmx4096m');
+    expect(workflow).toContain('-Dorg.gradle.workers.max=1');
   });
 });
