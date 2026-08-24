@@ -28,6 +28,13 @@
     }
   },
   "submit": {
+    "internal": {
+      "android": {
+        "track": "internal",
+        "releaseStatus": "completed",
+        "changesNotSentForReview": true
+      }
+    },
     "production": {
       "android": {
         "track": "alpha",

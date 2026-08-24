@@ -490,6 +490,20 @@ The exact eligible AAB is already saved manually as artifact
 the approved bounded interim for no more than 100 testers. It is not the durable
 D-022 path and does not satisfy issue #37's later closed-test bootstrap.
 
+Once EAS holds the app-scoped Play submission credential, a reviewed build can
+be delivered to the existing bounded Internal testing audience without another
+manual Console upload:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 submit --platform android --profile internal \
+  --id 'EXACT_REVIEWED_EAS_BUILD_ID' --non-interactive
+```
+
+The `internal` submission profile completes only the Internal testing release.
+It does not promote the app to closed, open, or production tracks. The separate
+`production` submission profile below remains an unreleased closed-test draft.
+
 After closed-track app-signing, tester-group, and release-scoped service-account
 evidence exist, later EAS Submit uses this fail-closed profile:
 
