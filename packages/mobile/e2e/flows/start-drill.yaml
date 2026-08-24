@@ -1,0 +1,67 @@
+appId: ${APP_ID}
+name: Issue 32 - start the provider-free synthetic drill
+tags: [issue-32, synthetic-only]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse to run outside the synthetic mobile harness
+- extendedWaitUntil:
+    visible: 'Continue|Close|Synthetic test mode\. Synthetic recipients only\. No live provider sends\.'
+    timeout: 90000
+- tapOn:
+    text: '^Continue$'
+    waitUntilVisible: true
+    optional: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          id: 'xmark'
+          waitUntilVisible: true
+          optional: true
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn:
+          text: '^Close$'
+          waitUntilVisible: true
+          optional: true
+- extendedWaitUntil:
+    notVisible: 'Continue|Close'
+    timeout: 10000
+- extendedWaitUntil:
+    visible:
+      id: 'issue-21-synthetic-mode'
+    timeout: 60000
+- assertVisible: 'Synthetic test mode. Synthetic recipients only. No live provider sends.'
+- scrollUntilVisible:
+    element:
+      id: 'issue-21-start-drill'
+    direction: DOWN
+- assertVisible: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'
+- tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'
+- scroll
+- assertVisible:
+    id: 'issue-21-drill-event-type'
+- assertVisible: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'
+- tapOn:
+    id: 'issue-21-drill-event-type'
+- scrollUntilVisible:
+    element:
+      text: '2 synthetic recipients'
+    direction: DOWN
+- assertVisible: '2 synthetic recipients'
+- scrollUntilVisible:
+    element:
+      text: '.*Integration: Mocked — training data only.*'
+    direction: DOWN
+- assertVisible: '.*Integration: Mocked — training data only.*'
+- scrollUntilVisible:
+    element:
+      id: 'issue-21-confirm-drill'
+    direction: DOWN
+- assertVisible: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
+- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
+- runFlow: activation-result.yaml

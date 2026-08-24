@@ -1,0 +1,241 @@
+name: Mobile E2E
+
+on:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false'
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: issue-32
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: issue-21
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: issue-32
+  MAESTRO_CLI_NO_ANALYTICS: '1'
+  MAESTRO_VERSION: '2.7.0'
+  MAESTRO_ZIP_SHA256: a4ccab6b604617e7aef6db4f885666056eabe5cfa32befaa3bc994041b8fcbb5
+  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true'
+
+jobs:
+  ios:
+    name: Maestro iOS (synthetic only)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Set up Java for Maestro
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify the provider-free harness
+        run: bun run test:e2e:mobile:verify
+
+      - name: Install pinned Maestro
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$archive" | shasum -a 256 --check
+          unzip -q "$archive" -d "$root"
+          rm -f "$archive"
+          test -x "$root/maestro/bin/maestro"
+          echo "$root/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Verify iOS build tools
+        run: |
+          set -euo pipefail
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          xcodebuild -version
+          pod --version
+          xcrun simctl list runtimes available
+
+      - name: Run iOS drill lifecycle
+        env:
+          PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-ios
+          TMPDIR: ${{ runner.temp }}
+        run: bun packages/mobile/e2e/run.ts ios
+
+      - name: Upload iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mobile-e2e-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mobile-e2e-ios
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    name: Maestro Android (synthetic only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Set up Java for Gradle and Maestro
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Reclaim space for the Android native build
+        run: |
+          set -euo pipefail
+          sudo rm -rf -- /opt/hostedtoolcache/CodeQL
+          sudo rm -rf -- /usr/local/.ghcup
+          sudo rm -rf -- /usr/share/dotnet
+          df -h /
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify the provider-free harness
+        run: bun run test:e2e:mobile:verify
+
+      - name: Build the synthetic Android development client
+        working-directory: packages/mobile
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs=-Xmx4096m
+            -Dorg.gradle.workers.max=2
+        run: |
+          set -euo pipefail
+          bunx expo prebuild --platform android --no-install
+          ./android/gradlew \
+            --project-dir android \
+            app:assembleDebug \
+            -x lint \
+            -x test \
+            --configure-on-demand \
+            --no-daemon \
+            -PreactNativeArchitectures=x86_64 \
+            -PreactNativeDevServerPort=8081
+          test -f android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Create an Android 35 emulator
+        run: |
+          set -euo pipefail
+          system_image='system-images;android-35;google_apis;x86_64'
+          sdkmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          avdmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          emulator_bin="$ANDROID_HOME/emulator/emulator"
+          platform_tools_dir="$ANDROID_HOME/platform-tools"
+          avd_home="$RUNNER_TEMP/android-avd"
+          test -x "$sdkmanager_bin"
+          test -x "$avdmanager_bin"
+          "$sdkmanager_bin" --install platform-tools "$system_image"
+          test -x "$emulator_bin"
+          test -x "$platform_tools_dir/adb"
+          available_kib="$(df --output=avail -k / | tail -n 1)"
+          if (( available_kib < 8 * 1024 * 1024 )); then
+            df -h /
+            echo "Android E2E needs at least 8 GiB free after the native build and system-image install." >&2
+            exit 1
+          fi
+          printf '%s\n' "$platform_tools_dir" >> "$GITHUB_PATH"
+          export PATH="$platform_tools_dir:$PATH"
+          mkdir -p "$avd_home"
+          export ANDROID_AVD_HOME="$avd_home"
+          printf 'no\n' | "$avdmanager_bin" create avd \
+            --force \
+            --name issue32_api35 \
+            --package "$system_image" \
+            --device pixel_6
+          test -f "$avd_home/issue32_api35.ini"
+          sudo chmod 0666 /dev/kvm
+          "$emulator_bin" \
+            -avd issue32_api35 \
+            -no-window \
+            -noaudio \
+            -no-boot-anim \
+            -no-metrics \
+            -no-snapshot \
+            -gpu swiftshader_indirect \
+            > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
+          if ! timeout 120s adb wait-for-device; then
+            cat "$RUNNER_TEMP/android-emulator.log"
+            exit 1
+          fi
+          boot_completed=''
+          for _attempt in {1..60}; do
+            boot_completed=$(adb shell getprop sys.boot_completed | tr -d '\r')
+            if test "$boot_completed" = '1'; then
+              break
+            fi
+            sleep 5
+          done
+          if test "$boot_completed" != '1'; then
+            cat "$RUNNER_TEMP/android-emulator.log"
+            exit 1
+          fi
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+
+      - name: Install pinned Maestro
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$archive" | sha256sum --check
+          unzip -q "$archive" -d "$root"
+          rm -f "$archive"
+          test -x "$root/maestro/bin/maestro"
+          echo "$root/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Install the synthetic Android development client
+        run: |
+          set -euo pipefail
+          android_apk="$GITHUB_WORKSPACE/packages/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$android_apk"
+          adb install -r "$android_apk"
+
+      - name: Run Android drill lifecycle
+        run: bun packages/mobile/e2e/run.ts android
+        env:
+          PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-android
+          PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD: 'true'
+
+      - name: Upload Android evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mobile-e2e-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mobile-e2e-android
+            ${{ runner.temp }}/android-emulator.log
+          if-no-files-found: warn
+          retention-days: 14

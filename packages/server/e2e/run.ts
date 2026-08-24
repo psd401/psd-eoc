@@ -24,6 +24,8 @@ import {
   events,
   groupMembers,
   groupSources,
+  mediaRecords,
+  mediaUploadIntents,
   rosterSnapshots,
   rosterSourceConfigurations,
   userFacilityScopes,
@@ -315,6 +317,43 @@ interface SyntheticRecordsFixture {
   readonly southIncidentId: string;
 }
 
+async function seedIssue32ReadyMedia(
+  connection: PostgresDatabaseConnection,
+  eventId: string,
+  now: Date,
+): Promise<Readonly<{ mediaId: string; uploadIntentId: string }>> {
+  const uploadIntentId = randomUUID();
+  const mediaId = randomUUID();
+  await connection.db.insert(mediaUploadIntents).values({
+    id: uploadIntentId,
+    eventId,
+    facilityId: SYNTHETIC_FACILITY_ID,
+    budgetPrincipalDigest: 'e'.repeat(64),
+    budgetPrincipalAttributed: true,
+    byteLength: 68,
+    contentSha256: 'c'.repeat(64),
+    declaredContentType: 'image/png',
+    storageKey: `quarantine/${eventId}/${uploadIntentId}`,
+    status: 'completed',
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 10 * 60 * 1_000),
+  });
+  await connection.db.insert(mediaRecords).values({
+    id: mediaId,
+    uploadIntentId,
+    eventId,
+    status: 'ready',
+    detectedContentType: 'image/png',
+    sanitizedByteLength: 68,
+    sanitizedContentSha256: 'd'.repeat(64),
+    storageKey: `ready/${eventId}/${mediaId}`,
+    malwareScan: 'clean',
+    exifStripped: true,
+    createdAt: now,
+  });
+  return Object.freeze({ mediaId, uploadIntentId });
+}
+
 /**
  * Seeds retained record fixtures without invoking a real-event capability.
  * The incident row is inert, closed, and exists only inside the disposable
@@ -446,6 +485,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-340',
     );
+    const committedIssue32EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-32',
+    );
     const committedIssue341EvidenceDirectory = join(
       REPOSITORY_ROOT,
       '.verification',
@@ -465,6 +509,11 @@ async function main(): Promise<void> {
         ? committedIssue341EvidenceDirectory
         : join(createdStateDirectory, 'evidence-341');
     await mkdir(issue341EvidenceDirectory, { recursive: true });
+    const issue32EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue32EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-32');
+    await mkdir(issue32EvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -533,6 +582,15 @@ async function main(): Promise<void> {
       throw new Error('The synthetic district administrator was not issued.');
     }
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
+    const issue32EventId = await createSyntheticDrill(
+      opened,
+      districtAdministrator,
+    );
+    const issue32Media = await seedIssue32ReadyMedia(
+      opened,
+      issue32EventId,
+      now,
+    );
     const records = await seedSyntheticRecords(
       opened,
       districtAdministrator,
@@ -542,6 +600,8 @@ async function main(): Promise<void> {
       join(createdStateDirectory, 'fixture.json'),
       JSON.stringify({
         eventId,
+        issue32EventId,
+        issue32Media,
         districtAdministratorUserId: districtAdministrator.userId,
         records,
       }),
@@ -577,6 +637,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
           PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
+          PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR: issue32EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',

@@ -27,8 +27,10 @@ import {
   type StartMutationCompletion,
   type StartMutationCoordinator,
   type StartMutationOwner,
+  type StartMutationPersistence,
   type StartMutationSnapshot,
 } from './start-mutation-coordinator';
+import { isIssue21SyntheticFixtureEnabled } from './issue-21-synthetic-fixture';
 import { createStartMutationStore } from './start-mutation-store';
 
 export interface SubmitStartActivationInput {
@@ -96,6 +98,22 @@ const CHECKING_RECOVERY_SNAPSHOT: StartMutationSnapshot = Object.freeze({
   phase: 'checking-recovery',
 });
 
+function createRuntimeStartMutationPersistence(): StartMutationPersistence {
+  if (!isIssue21SyntheticFixtureEnabled()) return createStartMutationStore();
+
+  // The synthetic native journey has no device state to recover. Keep its
+  // recovery journal in this JavaScript process so simulator SecureStore
+  // behavior cannot block the provider-free fixture, while every ordinary
+  // runtime continues to use the device-protected store above.
+  let value: string | null = null;
+  return createStartMutationStore({
+    getItem: () => value,
+    setItem: (_key, nextValue) => {
+      value = nextValue;
+    },
+  });
+}
+
 function ownerFromAuth(auth: StartMutationAuth): StartMutationOwner | null {
   const established = auth.state.session;
   if (established === null) return null;
@@ -135,7 +153,7 @@ export class StartMutationProviderController {
   ) {
     this.coordinator =
       dependencies.coordinator ??
-      createStartMutationCoordinator(createStartMutationStore());
+      createStartMutationCoordinator(createRuntimeStartMutationPersistence());
     this.createIdempotencyKey =
       dependencies.createIdempotencyKey ?? (() => Crypto.randomUUID());
     this.runActivation = dependencies.activate ?? activate;

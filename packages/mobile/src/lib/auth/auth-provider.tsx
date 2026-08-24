@@ -29,6 +29,10 @@ import {
 } from './auth-controller';
 import { MobileAuthError } from './auth-errors';
 import { expoOidcBrowser, expoPkceSource } from './expo-oidc';
+import {
+  createIssue32SyntheticAuthenticator,
+  isIssue32SyntheticAuthenticatorEnabled,
+} from './issue-32-synthetic-authenticator';
 import { createLocalAuthenticator } from './local-authenticator';
 import { MobileOidcClient } from './oidc-client';
 import { createSecurePendingOidcFlowStore } from './secure-pending-oidc-flow';
@@ -88,9 +92,11 @@ function createRuntime(): AuthRuntime {
     return Object.freeze({
       controller: new MobileAuthController({
         api: fixture.api,
-        authenticatedApi: createIssue21SyntheticFixtureTransport(),
+        authenticatedApi: createIssue21SyntheticFixtureTransport(Platform.OS),
         storage: fixture.storage,
-        localAuthenticator: createLocalAuthenticator(),
+        localAuthenticator: isIssue32SyntheticAuthenticatorEnabled()
+          ? createIssue32SyntheticAuthenticator()
+          : createLocalAuthenticator(),
         createIdempotencyKey: () => Crypto.randomUUID(),
       }),
       storage: fixture.storage,
