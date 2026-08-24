@@ -48,6 +48,7 @@ function loadIssue32NotificationModules() {
     import('../../notifications/alert-channel'),
     import('expo-notifications/build/cancelAllScheduledNotificationsAsync'),
     import('expo-notifications/build/dismissAllNotificationsAsync'),
+    import('react-native'),
   ] as const);
 }
 
@@ -77,16 +78,20 @@ export async function scheduleIssue32SyntheticPush(
     alertChannel,
     pendingNotifications,
     presentedNotifications,
+    reactNative,
   ] = await loadIssue32NotificationModules();
-  const [permission] = await Promise.all([
-    permissions.requestPermissionsAsync({
-      android: {},
-      ios: { allowAlert: true, allowBadge: true, allowSound: true },
-    }),
+  const permission =
+    reactNative.Platform.OS === 'android'
+      ? permissions.getPermissionsAsync()
+      : permissions.requestPermissionsAsync({
+          ios: { allowAlert: true, allowBadge: true, allowSound: true },
+        });
+  const [permissionStatus] = await Promise.all([
+    permission,
     pendingNotifications.cancelAllScheduledNotificationsAsync(),
     presentedNotifications.dismissAllNotificationsAsync(),
   ]);
-  if (permission.granted !== true) {
+  if (permissionStatus.granted !== true) {
     throw new Error('Synthetic notification permission was not granted.');
   }
   await scheduler.scheduleNotificationAsync({

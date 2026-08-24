@@ -135,6 +135,12 @@ describe('issue-32 mobile E2E harness', () => {
     expect(activationIndex).toBeGreaterThan(preloadIndex);
     expect(syntheticFixture).toContain("kind: 'failed' as const");
 
+    const syntheticPush = await Bun.file(
+      resolve(mobileRoot, 'src/lib/start/issue-32-synthetic-push.ts'),
+    ).text();
+    expect(syntheticPush).toContain("reactNative.Platform.OS === 'android'");
+    expect(syntheticPush).toContain('permissions.getPermissionsAsync()');
+
     const runner = await Bun.file(resolve(mobileRoot, 'e2e/run.ts')).text();
     expect(runner).toContain('childEnvironment.ANDROID_SERIAL = deviceId');
     expect(runner).toContain("'run:android',\n          '--device'");
