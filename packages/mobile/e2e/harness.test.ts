@@ -115,6 +115,14 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosNotification).toContain("visible: 'Open'");
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
+    const iosReveal = await Bun.file(
+      resolve(flowRoot, 'reveal-push-ios.yaml'),
+    ).text();
+    expect(iosReveal).toContain('start: 50%, 5%');
+    expect(iosReveal).toContain(
+      "notVisible: '\\[DRILL\\] Synthetic earthquake drill'",
+    );
+    expect(iosReveal.match(/end: 50%, (85|90)%/gu)).toHaveLength(2);
     const lifecycle = await Bun.file(
       resolve(flowRoot, 'event-room-lifecycle.yaml'),
     ).text();
