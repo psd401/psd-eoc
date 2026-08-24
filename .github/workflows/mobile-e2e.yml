@@ -132,6 +132,7 @@ jobs:
           set -euo pipefail
           bunx expo prebuild --platform android --no-install
           ./android/gradlew \
+            --project-dir android \
             app:assembleDebug \
             -x lint \
             -x test \

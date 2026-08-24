@@ -174,6 +174,7 @@ describe('issue-32 mobile E2E harness', () => {
     ).text();
     expect(workflow).toContain('-Dorg.gradle.jvmargs=-Xmx4096m');
     expect(workflow).toContain('-Dorg.gradle.workers.max=2');
+    expect(workflow).toContain('--project-dir android');
     expect(workflow).toContain('-PreactNativeArchitectures=x86_64');
     expect(workflow).toContain('--no-daemon');
     expect(workflow).not.toContain('--build-cache');
