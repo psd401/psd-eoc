@@ -80,9 +80,14 @@ describe('issue-32 mobile E2E harness', () => {
 
     const start = await Bun.file(resolve(flowRoot, 'start-drill.yaml')).text();
     expect(start).toContain(
-      "visible: 'Continue|Synthetic test mode\\. Synthetic recipients only\\. No live provider sends\\.'",
+      "visible: 'Continue|Close|Synthetic test mode\\. Synthetic recipients only\\. No live provider sends\\.'",
     );
     expect(start).toContain("text: '^Continue$'");
+    expect(start).toContain("id: 'xmark'");
+    expect(start).toContain('platform: iOS');
+    expect(start).toContain('platform: Android');
+    expect(start).toContain("text: '^Close$'");
+    expect(start).toContain("notVisible: 'Continue|Close'");
     expect(start).toContain('timeout: 90000');
     expect(start).toContain(
       "- tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'",

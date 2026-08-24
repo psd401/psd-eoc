@@ -6,12 +6,31 @@ tags: [issue-32, synthetic-only]
     condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
     label: Refuse to run outside the synthetic mobile harness
 - extendedWaitUntil:
-    visible: 'Continue|Synthetic test mode\. Synthetic recipients only\. No live provider sends\.'
+    visible: 'Continue|Close|Synthetic test mode\. Synthetic recipients only\. No live provider sends\.'
     timeout: 90000
 - tapOn:
     text: '^Continue$'
     waitUntilVisible: true
     optional: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          id: 'xmark'
+          waitUntilVisible: true
+          optional: true
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn:
+          text: '^Close$'
+          waitUntilVisible: true
+          optional: true
+- extendedWaitUntil:
+    notVisible: 'Continue|Close'
+    timeout: 10000
 - extendedWaitUntil:
     visible:
       id: 'issue-21-synthetic-mode'

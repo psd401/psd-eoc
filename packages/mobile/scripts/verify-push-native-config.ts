@@ -51,7 +51,6 @@ const channelSource = await Bun.file(
 ).text();
 for (const requirement of [
   'AndroidImportance.MAX',
-  "sound: 'default'",
   'enableVibrate: true',
   'AndroidNotificationVisibility.PUBLIC',
 ] as const) {
@@ -60,6 +59,10 @@ for (const requirement of [
     `Android alert channel is missing ${requirement}.`,
   );
 }
+assert(
+  !/\bsound\s*:/u.test(channelSource),
+  'Android alert channel must use the system default sound, not a custom resource name.',
+);
 
 const runtimeSources: Array<Readonly<{ path: string; source: string }>> = [];
 const reviewedNotificationModules = new Set([
@@ -127,6 +130,10 @@ assert(
     'disableExpoAutoRegistration(serverRegistrationModule)',
   ),
   'Expo automatic server registration must be disabled before listener setup.',
+);
+assert(
+  nativePortSource.includes('channel.sound !== null'),
+  'Android permission checks must reject a muted alert channel.',
 );
 assert(
   DISABLED_EXPO_AUTO_REGISTRATION_INFO === '{"isEnabled":false}',

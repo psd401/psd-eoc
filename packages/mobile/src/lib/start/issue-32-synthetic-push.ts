@@ -80,7 +80,6 @@ export async function scheduleIssue32SyntheticPush(
   await scheduler.scheduleNotificationAsync({
     content: {
       ...issue32SyntheticPushContent(event),
-      sound: 'default',
     },
     trigger: {
       type: notificationTypes.SchedulableTriggerInputTypes.TIME_INTERVAL,

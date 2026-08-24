@@ -22,7 +22,6 @@ export async function configureAlertChannel(): Promise<void> {
     name: 'PSD EOC incident and drill alerts',
     description: 'Incident and drill notifications from PSD EOC.',
     importance: AndroidImportance.MAX,
-    sound: 'default',
     enableVibrate: true,
     vibrationPattern: [0, 500, 250, 500],
     lockscreenVisibility: AndroidNotificationVisibility.PUBLIC,
