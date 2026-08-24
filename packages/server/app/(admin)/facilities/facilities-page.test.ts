@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
-import { AdminCapabilityError } from './admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import {
   facilitiesAdminQueryRecoveryPath,
   facilitiesAdminStatusMessage,

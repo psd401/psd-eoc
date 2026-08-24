@@ -17,6 +17,7 @@ import { and, eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  type Database,
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
@@ -31,9 +32,13 @@ import {
   createDrizzleSecurityAuditRepository,
   SecurityAuditRequestConflictError,
 } from '../audit';
-import type { EventTypeMutationMetadata } from '../capabilities/event-types';
+import {
+  DrizzleEventTypeStore,
+  createDrizzleEventTypeCapabilityStore,
+  executeCreateEventTypeDraftCapability,
+  type EventTypeMutationMetadata,
+} from '../capabilities/event-types';
 import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
-import { createAtomicAgentEventTypeStore } from './event-types';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -123,6 +128,31 @@ function createInput(key: string) {
   };
 }
 
+function executeCreate(
+  database: Database,
+  command: ReturnType<typeof createInput>,
+  metadata: EventTypeMutationMetadata,
+) {
+  if (metadata.actor.kind !== 'agent') {
+    throw new Error('The event-type atomicity fixture requires an agent.');
+  }
+  return executeCreateEventTypeDraftCapability({
+    store: new DrizzleEventTypeStore(database),
+    capabilityStore: createDrizzleEventTypeCapabilityStore(database),
+    authenticated: {
+      actor: metadata.actor,
+      source: 'agent-rest',
+      scope: { facilityScope: { kind: 'district' } },
+      grantedCapabilityIds: ['create-event-type-draft'],
+    },
+    command,
+    idempotencyKey: metadata.idempotencyKey,
+    transport: { kind: 'agent-rest-command', method: 'POST' },
+    requestId: metadata.requestId,
+    now: metadata.now,
+  });
+}
+
 describeWithDatabase('atomic agent event-type database adapter', () => {
   beforeAll(async () => {
     const opened = createDatabaseClient({
@@ -144,11 +174,11 @@ describeWithDatabase('atomic agent event-type database adapter', () => {
 
   test('commits the canonical draft, idempotency record, and audit together', async () => {
     const db = databaseConnection().db;
-    const store = createAtomicAgentEventTypeStore(db);
     const requestId = randomUUID();
     const idempotencyKey = `agent-atomic-success-${randomUUID()}`;
     const key = `agent-atomic-success-${randomUUID()}`;
-    const draft = await store.createDraft(
+    const draft = await executeCreate(
+      db,
       createInput(key),
       mutationMetadata(
         requestId,
@@ -190,7 +220,6 @@ describeWithDatabase('atomic agent event-type database adapter', () => {
 
   test('rolls back canonical writes when the audit request conflicts', async () => {
     const db = databaseConnection().db;
-    const store = createAtomicAgentEventTypeStore(db);
     const requestId = randomUUID();
     const idempotencyKey = `agent-atomic-rollback-${randomUUID()}`;
     const key = `agent-atomic-rollback-${randomUUID()}`;
@@ -214,7 +243,7 @@ describeWithDatabase('atomic agent event-type database adapter', () => {
     );
 
     await expect(
-      store.createDraft(createInput(key), metadata),
+      executeCreate(db, createInput(key), metadata),
     ).rejects.toBeInstanceOf(SecurityAuditRequestConflictError);
 
     const [identityRows, ledgerRows, auditRows] = await Promise.all([

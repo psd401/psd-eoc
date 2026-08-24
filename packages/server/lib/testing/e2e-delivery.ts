@@ -83,7 +83,7 @@ export interface DeliveryTestExecutionDependencies {
   readonly resolveAudience: (
     preview: DeliveryTestPreview,
   ) => Promise<ResolvedDeliveryTestAudience>;
-  /** The sole mutation seam. Production injects canonical executeCapability(start-event). */
+  /** The sole mutation seam. Production injects canonical executeAuditedCapabilityTransaction(start-event). */
   readonly executeStartEvent: (
     input: StartEventInput,
     invocation: TrustedCapabilityInvocation,

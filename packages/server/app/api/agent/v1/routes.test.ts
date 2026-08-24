@@ -445,7 +445,7 @@ describe('agent REST capability route', () => {
     expect(harness.audits).toEqual([
       expect.objectContaining({
         outcome: 'denied',
-        reasonCode: 'FORBIDDEN',
+        reasonCode: 'CAPABILITY_INVOCATION_DENIED',
       }),
     ]);
   });

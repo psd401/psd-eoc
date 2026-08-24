@@ -472,6 +472,15 @@ export class AgentApiKeyService {
     }
 
     const key = toSummary(stored);
+    const capabilityIds = stored.capabilityIds.filter(
+      isAgentGrantableCapabilityId,
+    );
+    if (capabilityIds.length !== stored.capabilityIds.length) {
+      throw new AgentApiKeyError(
+        'INVALID_CREDENTIAL',
+        'The agent API key is invalid.',
+      );
+    }
     return Object.freeze({
       actor: Object.freeze({
         kind: 'agent' as const,
@@ -479,7 +488,7 @@ export class AgentApiKeyService {
         apiKeyId: stored.id,
       }),
       scope: Object.freeze({ facilityScope: stored.facilityScope }),
-      capabilityIds: Object.freeze([...stored.capabilityIds]),
+      capabilityIds: Object.freeze(capabilityIds),
       key,
     });
   }

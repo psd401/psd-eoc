@@ -35,7 +35,7 @@ import {
   getDefaultSessionService,
   SessionAccessError,
 } from '../../../lib/auth/sessions';
-import { getDefaultAdminDatabase } from '../../(admin)/facilities/admin-core';
+import { getDefaultAdminDatabase } from '../../../lib/capabilities/admin';
 
 const DEFAULT_HEALTH_TIMEOUT_MILLISECONDS = 4_000;
 const MAX_HEALTH_TIMEOUT_MILLISECONDS = 5_000;
@@ -983,9 +983,7 @@ interface CanaryAuthorizedCalls {
   readonly serverTime: Date;
 }
 
-function hasExactCanaryCapabilities(
-  capabilityIds: readonly AgentGrantableCapabilityId[],
-): boolean {
+function hasExactCanaryCapabilities(capabilityIds: readonly string[]): boolean {
   return (
     capabilityIds.length === CANARY_CAPABILITY_IDS.length &&
     CANARY_CAPABILITY_IDS.every(

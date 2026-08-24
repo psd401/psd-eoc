@@ -1,8 +1,40 @@
 import { sql } from 'drizzle-orm';
 import {
   AGENT_GRANTABLE_CAPABILITY_IDS,
-  CAPABILITY_MUTATION_SAFETY_MANIFEST,
+  ActorKindSchema,
+  ClassificationMarkerSchema,
+  DeliveryEvidenceSubjectKindSchema,
+  DeliveryTruthStateSchema,
+  DevicePlatformSchema,
+  DeviceUnlockMethodSchema,
+  EndpointStatusSchema,
+  EventKindSchema,
+  EventStatusSchema,
+  EventTransitionKindSchema,
+  FacilityScopeKindSchema,
+  GroupCompletionKindSchema,
+  GroupPurposeSchema,
+  GroupSourceKindSchema,
   HUMAN_ONLY_ACTION_IDS,
+  HumanConfirmationStatusSchema,
+  IdempotencyStatusSchema,
+  IntegrationTruthLabelSchema,
+  InvocationSourceSchema,
+  JournalEntryKindSchema,
+  JournalSupersessionKindSchema,
+  MediaContentTypeSchema,
+  MonthlyDeliveryTestReportStatusSchema,
+  MUTATION_CAPABILITY_IDS,
+  NotificationChannelSchema,
+  NotificationPurposeSchema,
+  OutboxStatusSchema,
+  PushPlatformSchema,
+  RoleSchema,
+  RosterPopulationSchema,
+  RosterSyncOutcomeSchema,
+  SecurityAuditCategorySchema,
+  SecurityAuditOutcomeSchema,
+  TemplateModeSchema,
 } from '@psd-eoc/contracts';
 import {
   boolean,
@@ -23,185 +55,181 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 
+function contractEnumValues<Value extends string>(
+  values: readonly Value[],
+): readonly [Value, ...Value[]] {
+  if (values.length === 0) {
+    throw new Error('Contract enum values must be non-empty.');
+  }
+  return values as [Value, ...Value[]];
+}
+
+export interface ContractDerivedDatabaseEnum {
+  readonly enumName: string;
+  readonly enumValues: readonly string[];
+}
+
+const contractDerivedDatabaseEnums: ContractDerivedDatabaseEnum[] = [];
+
+function contractPgEnum<Value extends string>(
+  enumName: string,
+  values: readonly [Value, ...Value[]],
+) {
+  const definition = pgEnum(enumName, values);
+  contractDerivedDatabaseEnums.push(definition);
+  return definition;
+}
+
+/** Complete database vocabulary registry used by exhaustive drift tests. */
+export function listContractDerivedDatabaseEnums(): readonly ContractDerivedDatabaseEnum[] {
+  return Object.freeze([...contractDerivedDatabaseEnums]);
+}
+
 /**
  * PostgreSQL persists the same closed vocabularies owned by
  * `@psd-eoc/contracts`. Changing an enum is therefore a contracts-first
  * migration, never an ad-hoc database edit.
  */
-export const actorKindEnum = pgEnum('actor_kind', ['human', 'agent', 'system']);
-export const roleEnum = pgEnum('role', ['staff', 'admin']);
-export const facilityScopeKindEnum = pgEnum('facility_scope_kind', [
-  'district',
-  'facilities',
-]);
-export const devicePlatformEnum = pgEnum('device_platform', [
-  'web',
-  'ios',
-  'android',
-]);
-export const deviceUnlockMethodEnum = pgEnum('device_unlock_method', [
-  'secure-session-cookie',
-  'biometric',
-]);
-export const groupSourceKindEnum = pgEnum('group_source_kind', [
-  'google-group',
-  'synthetic',
-]);
-export const groupPurposeEnum = pgEnum('group_purpose', [
-  'access',
-  'building',
-  'others',
-]);
-export const groupCompletionKindEnum = pgEnum('group_completion_kind', [
-  'expected',
-  'completed',
-]);
-export const rosterPopulationEnum = pgEnum('roster_population', [
-  'staff',
-  'synthetic',
-]);
-export const endpointStatusEnum = pgEnum('endpoint_status', [
-  'active',
-  'invalid',
-  'disabled',
-]);
-export const notificationChannelEnum = pgEnum('notification_channel', [
-  'push',
-  'email',
-  'sms',
-]);
-export const pushPlatformEnum = pgEnum('push_platform', ['ios', 'android']);
-export const eventKindEnum = pgEnum('event_kind', [
-  'incident',
-  'drill',
-  'test',
-]);
-export const templateModeEnum = pgEnum('template_mode', ['real', 'drill']);
-export const notificationPurposeEnum = pgEnum('notification_purpose', [
-  'activation',
-  'all-clear',
-  'reactivation',
-]);
-export const classificationMarkerEnum = pgEnum('classification_marker', [
-  'INCIDENT',
-  'DRILL',
-]);
-export const eventStatusEnum = pgEnum('event_status', [
-  'draft',
-  'active',
-  'all-clear',
-  'closed',
-]);
-export const eventTransitionKindEnum = pgEnum('event_transition_kind', [
-  'activate',
-  'all-clear',
-  'reactivate',
-  'close',
-  'reopen-as-correction',
-]);
-export const invocationSourceEnum = pgEnum('invocation_source', [
-  'web',
-  'mobile',
-  'agent-rest',
-  'mcp',
-  'worker',
-  'scheduled-job',
-  'webhook',
-]);
-export const journalEntryKindEnum = pgEnum('journal_entry_kind', [
-  'text',
-  'photo',
-  'location',
-  'system',
-]);
-export const journalSupersessionKindEnum = pgEnum('journal_supersession_kind', [
-  'correction',
-  'redaction',
-]);
-export const mediaContentTypeEnum = pgEnum('media_content_type', [
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/heic',
-]);
-export const deliveryTruthStateEnum = pgEnum('delivery_truth_state', [
-  'accepted',
-  'recorded',
-  'attempted',
-  'provider-accepted',
-  'delivered',
-  'failed',
-  'expired',
-  'unknown',
-]);
-export const deliveryEvidenceSubjectKindEnum = pgEnum(
+export const actorKindEnum = contractPgEnum(
+  'actor_kind',
+  contractEnumValues(ActorKindSchema.options),
+);
+export const roleEnum = contractPgEnum(
+  'role',
+  contractEnumValues(RoleSchema.options),
+);
+export const facilityScopeKindEnum = contractPgEnum(
+  'facility_scope_kind',
+  contractEnumValues(FacilityScopeKindSchema.options),
+);
+export const devicePlatformEnum = contractPgEnum(
+  'device_platform',
+  contractEnumValues(DevicePlatformSchema.options),
+);
+export const deviceUnlockMethodEnum = contractPgEnum(
+  'device_unlock_method',
+  contractEnumValues(DeviceUnlockMethodSchema.options),
+);
+export const groupSourceKindEnum = contractPgEnum(
+  'group_source_kind',
+  contractEnumValues(GroupSourceKindSchema.options),
+);
+export const groupPurposeEnum = contractPgEnum(
+  'group_purpose',
+  contractEnumValues(GroupPurposeSchema.options),
+);
+export const groupCompletionKindEnum = contractPgEnum(
+  'group_completion_kind',
+  contractEnumValues(GroupCompletionKindSchema.options),
+);
+export const rosterPopulationEnum = contractPgEnum(
+  'roster_population',
+  contractEnumValues(RosterPopulationSchema.options),
+);
+export const endpointStatusEnum = contractPgEnum(
+  'endpoint_status',
+  contractEnumValues(EndpointStatusSchema.options),
+);
+export const notificationChannelEnum = contractPgEnum(
+  'notification_channel',
+  contractEnumValues(NotificationChannelSchema.options),
+);
+export const pushPlatformEnum = contractPgEnum(
+  'push_platform',
+  contractEnumValues(PushPlatformSchema.options),
+);
+export const eventKindEnum = contractPgEnum(
+  'event_kind',
+  contractEnumValues(EventKindSchema.options),
+);
+export const templateModeEnum = contractPgEnum(
+  'template_mode',
+  contractEnumValues(TemplateModeSchema.options),
+);
+export const notificationPurposeEnum = contractPgEnum(
+  'notification_purpose',
+  contractEnumValues(NotificationPurposeSchema.options),
+);
+export const classificationMarkerEnum = contractPgEnum(
+  'classification_marker',
+  contractEnumValues(ClassificationMarkerSchema.options),
+);
+export const eventStatusEnum = contractPgEnum(
+  'event_status',
+  contractEnumValues(EventStatusSchema.options),
+);
+export const eventTransitionKindEnum = contractPgEnum(
+  'event_transition_kind',
+  contractEnumValues(EventTransitionKindSchema.options),
+);
+export const invocationSourceEnum = contractPgEnum(
+  'invocation_source',
+  contractEnumValues(InvocationSourceSchema.options),
+);
+export const journalEntryKindEnum = contractPgEnum(
+  'journal_entry_kind',
+  contractEnumValues(JournalEntryKindSchema.options),
+);
+export const journalSupersessionKindEnum = contractPgEnum(
+  'journal_supersession_kind',
+  contractEnumValues(JournalSupersessionKindSchema.options),
+);
+export const mediaContentTypeEnum = contractPgEnum(
+  'media_content_type',
+  contractEnumValues(MediaContentTypeSchema.options),
+);
+export const deliveryTruthStateEnum = contractPgEnum(
+  'delivery_truth_state',
+  contractEnumValues(DeliveryTruthStateSchema.options),
+);
+export const deliveryEvidenceSubjectKindEnum = contractPgEnum(
   'delivery_evidence_subject_kind',
-  ['intent', 'attempt'],
+  contractEnumValues(DeliveryEvidenceSubjectKindSchema.options),
 );
-export const deliveryTestReportStatusEnum = pgEnum(
+export const deliveryTestReportStatusEnum = contractPgEnum(
   'delivery_test_report_status',
-  ['succeeded', 'failed', 'incomplete'],
+  contractEnumValues(MonthlyDeliveryTestReportStatusSchema.options),
 );
-export const outboxStatusEnum = pgEnum('outbox_status', [
-  'pending',
-  'processing',
-  'published',
-  'failed',
-]);
-export const integrationTruthLabelEnum = pgEnum('integration_truth_label', [
-  'mocked',
-  'configured-unverified',
-  'live-verified',
-  'blocked',
-]);
-export const securityAuditCategoryEnum = pgEnum('security_audit_category', [
-  'sign-in',
-  'access-denial',
-  'admin-change',
-  'agent-access',
-  'session-revocation',
-  'human-only-rejection',
-  'capability-execution',
-  'audit-query',
-]);
-export const securityAuditOutcomeEnum = pgEnum('security_audit_outcome', [
-  'success',
-  'denied',
-  'failure',
-]);
-export const agentCapabilityGrantEnum = pgEnum(
+export const outboxStatusEnum = contractPgEnum(
+  'outbox_status',
+  contractEnumValues(OutboxStatusSchema.options),
+);
+export const integrationTruthLabelEnum = contractPgEnum(
+  'integration_truth_label',
+  contractEnumValues(IntegrationTruthLabelSchema.options),
+);
+export const securityAuditCategoryEnum = contractPgEnum(
+  'security_audit_category',
+  contractEnumValues(SecurityAuditCategorySchema.options),
+);
+export const securityAuditOutcomeEnum = contractPgEnum(
+  'security_audit_outcome',
+  contractEnumValues(SecurityAuditOutcomeSchema.options),
+);
+export const agentCapabilityGrantEnum = contractPgEnum(
   'agent_capability_grant',
   AGENT_GRANTABLE_CAPABILITY_IDS,
 );
-const mutationCapabilityIds = Object.keys(
-  CAPABILITY_MUTATION_SAFETY_MANIFEST,
-) as [
-  keyof typeof CAPABILITY_MUTATION_SAFETY_MANIFEST,
-  ...(keyof typeof CAPABILITY_MUTATION_SAFETY_MANIFEST)[],
-];
-export const mutationCapabilityEnum = pgEnum(
+export const mutationCapabilityEnum = contractPgEnum(
   'mutation_capability',
-  mutationCapabilityIds,
+  MUTATION_CAPABILITY_IDS,
 );
-export const humanOnlyActionEnum = pgEnum(
+export const humanOnlyActionEnum = contractPgEnum(
   'human_only_action',
   HUMAN_ONLY_ACTION_IDS,
 );
-export const idempotencyStatusEnum = pgEnum('idempotency_status', [
-  'in-progress',
-  'completed',
-  'failed',
-]);
-export const humanConfirmationStatusEnum = pgEnum('human_confirmation_status', [
-  'issued',
-  'consumed',
-  'expired',
-]);
-export const rosterSyncOutcomeEnum = pgEnum('roster_sync_outcome', [
-  'complete',
-  'failed',
-  'partial-rejected',
-]);
+export const idempotencyStatusEnum = contractPgEnum(
+  'idempotency_status',
+  contractEnumValues(IdempotencyStatusSchema.options),
+);
+export const humanConfirmationStatusEnum = contractPgEnum(
+  'human_confirmation_status',
+  contractEnumValues(HumanConfirmationStatusSchema.options),
+);
+export const rosterSyncOutcomeEnum = contractPgEnum(
+  'roster_sync_outcome',
+  contractEnumValues(RosterSyncOutcomeSchema.options),
+);
 
 const auditCode = (name: string) => varchar(name, { length: 100 });
 const digest = (name: string) => varchar(name, { length: 64 });

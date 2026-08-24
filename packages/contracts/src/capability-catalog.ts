@@ -7,8 +7,6 @@ import {
   VerifySecurityAuditChainInputSchema,
 } from './audit';
 import {
-  CAPABILITY_MUTATION_SAFETY_MANIFEST,
-  CAPABILITY_QUERY_MANIFEST,
   CapabilityEnvelopeSchema,
   CapabilityIdSchema,
   CapabilitySafetyEffectSchema,
@@ -25,6 +23,7 @@ import {
   type InvocationSource,
   type PreSessionOidcPrincipal,
 } from './capability';
+import { installCapabilityViews } from './capability-derived-registry';
 import {
   EventRoomSyncResultSchema,
   JournalEntryReadProjectionSchema,
@@ -186,16 +185,10 @@ import {
   IssueAgentApiKeyInputSchema,
   ListAgentApiKeysInputSchema,
   RevokeAgentApiKeyInputSchema,
-  isAgentGrantableCapabilityId,
 } from './agent-api';
 import { TimestampSchema } from './shared';
 
-export {
-  AGENT_GRANTABLE_CAPABILITY_IDS,
-  AgentGrantableCapabilityIdSchema,
-  isAgentGrantableCapabilityId,
-} from './agent-api';
-export type { AgentGrantableCapabilityId } from './agent-api';
+export { AgentGrantableCapabilityIdSchema } from './agent-api';
 
 type CapabilityOperation = 'query' | 'mutation';
 
@@ -277,6 +270,77 @@ export const CapabilityAuditPolicySchema = z.enum([
 /** Canonical security-audit policy inferred from its schema. */
 export type CapabilityAuditPolicy = z.infer<typeof CapabilityAuditPolicySchema>;
 
+type DerivedInvocationPolicy<
+  PrincipalKinds extends readonly [
+    CapabilityPrincipalKind,
+    ...CapabilityPrincipalKind[],
+  ],
+  Sources extends readonly [InvocationSource, ...InvocationSource[]],
+> = Readonly<{
+  principalKinds: PrincipalKinds;
+  sources: Sources;
+  agentGrantable: 'agent' extends PrincipalKinds[number] ? true : false;
+}>;
+
+function invocationPolicy<
+  const PrincipalKinds extends readonly [
+    CapabilityPrincipalKind,
+    ...CapabilityPrincipalKind[],
+  ],
+  const Sources extends readonly [InvocationSource, ...InvocationSource[]],
+>(
+  principalKinds: PrincipalKinds,
+  sources: Sources,
+): DerivedInvocationPolicy<PrincipalKinds, Sources> {
+  return CapabilityInvocationPolicySchema.parse({
+    principalKinds,
+    sources,
+    agentGrantable: principalKinds.includes('agent'),
+  }) as DerivedInvocationPolicy<PrincipalKinds, Sources>;
+}
+
+const preSessionOidcInvocationPolicy = invocationPolicy(
+  ['pre-session-oidc'],
+  ['web', 'mobile'],
+);
+const verifiedRefreshInvocationPolicy = invocationPolicy(
+  ['verified-refresh-credential'],
+  ['web', 'mobile'],
+);
+const humanInteractiveInvocationPolicy = invocationPolicy(
+  ['human'],
+  ['web', 'mobile'],
+);
+const humanWebAdministrationInvocationPolicy = invocationPolicy(
+  ['human'],
+  ['web'],
+);
+const humanAgentInvocationPolicy = invocationPolicy(
+  ['human', 'agent'],
+  ['web', 'mobile', 'agent-rest', 'mcp'],
+);
+const humanAgentScheduledInvocationPolicy = invocationPolicy(
+  ['human', 'agent', 'system'],
+  ['web', 'mobile', 'agent-rest', 'mcp', 'scheduled-job'],
+);
+const humanAgentWorkerInvocationPolicy = invocationPolicy(
+  ['human', 'agent', 'system'],
+  ['web', 'mobile', 'agent-rest', 'mcp', 'worker'],
+);
+const systemWorkerScheduledInvocationPolicy = invocationPolicy(
+  ['system'],
+  ['worker', 'scheduled-job'],
+);
+const systemScheduledInvocationPolicy = invocationPolicy(
+  ['system'],
+  ['scheduled-job'],
+);
+const systemWorkerInvocationPolicy = invocationPolicy(['system'], ['worker']);
+const systemWorkerWebhookInvocationPolicy = invocationPolicy(
+  ['system'],
+  ['worker', 'webhook'],
+);
+
 /**
  * Owns one immutable catalog entry. Callers choose only the ID; operation,
  * safety effect, human-action policy, and both runtime schemas remain fixed by
@@ -290,12 +354,19 @@ export interface CanonicalCapabilityDefinition<
   InputSchema extends z.ZodType = z.ZodType,
   OutputSchema extends z.ZodType = z.ZodType,
   AuditPolicy extends CapabilityAuditPolicy = CapabilityAuditPolicy,
+  InvocationPolicy extends
+    CapabilityInvocationPolicy = CapabilityInvocationPolicy,
 > {
   readonly id: Id;
   readonly operation: Operation;
   readonly safetyEffect: Effect;
   readonly humanActionPolicy: HumanActionPolicy;
+  readonly invocationPolicy: InvocationPolicy;
   readonly auditPolicy: AuditPolicy;
+  /** Stable insertion point for the persisted PostgreSQL mutation enum. */
+  readonly mutationOrderAfter?: string;
+  /** Stable insertion point for the persisted PostgreSQL grant enum. */
+  readonly agentGrantOrderAfter?: string;
   readonly inputSchema: InputSchema;
   readonly outputSchema: OutputSchema;
 }
@@ -310,11 +381,16 @@ function canonicalCapability<
   InputSchema extends z.ZodType,
   OutputSchema extends z.ZodType,
   const AuditPolicy extends CapabilityAuditPolicy = 'all-outcomes',
+  const InvocationPolicy extends
+    CapabilityInvocationPolicy = CapabilityInvocationPolicy,
 >(definition: {
   readonly id: Id;
   readonly operation: Operation;
   readonly safetyEffect: Effect;
+  readonly invocationPolicy: InvocationPolicy;
   readonly auditPolicy?: AuditPolicy;
+  readonly mutationOrderAfter?: string;
+  readonly agentGrantOrderAfter?: string;
   readonly inputSchema: InputSchema;
   readonly outputSchema: OutputSchema;
 }): Readonly<
@@ -324,11 +400,15 @@ function canonicalCapability<
     Effect,
     InputSchema,
     OutputSchema,
-    AuditPolicy
+    AuditPolicy,
+    InvocationPolicy
   >
 > {
   CapabilityIdSchema.parse(definition.id);
   CapabilitySafetyEffectSchema.parse(definition.safetyEffect);
+  const parsedInvocationPolicy = CapabilityInvocationPolicySchema.parse(
+    definition.invocationPolicy,
+  ) as InvocationPolicy;
   if (definition.operation === 'query' && definition.safetyEffect !== 'none') {
     throw new Error('Query capabilities cannot have a mutation safety effect.');
   }
@@ -342,7 +422,12 @@ function canonicalCapability<
     definition.safetyEffect === 'none'
       ? noHumanActionPolicy
       : centralHumanActionPolicy;
-  return Object.freeze({ ...definition, auditPolicy, humanActionPolicy });
+  return Object.freeze({
+    ...definition,
+    auditPolicy,
+    humanActionPolicy,
+    invocationPolicy: parsedInvocationPolicy,
+  });
 }
 
 /**
@@ -948,11 +1033,12 @@ export type ReopenAsCorrectionResult = z.infer<
  * may normalize untrusted input before invocation, but they may not substitute
  * a different operation, effect, policy, input schema, or output schema.
  */
-export const CAPABILITY_CATALOG = Object.freeze({
+const CAPABILITY_CATALOG_BASE = Object.freeze({
   'complete-oidc-sign-in': canonicalCapability({
     id: 'complete-oidc-sign-in',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: preSessionOidcInvocationPolicy,
     inputSchema: CompleteOidcSignInInputSchema,
     outputSchema: SessionEstablishmentResultSchema,
   }),
@@ -960,6 +1046,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'refresh-session',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: verifiedRefreshInvocationPolicy,
     inputSchema: RefreshSessionInputSchema,
     outputSchema: SessionEstablishmentResultSchema,
   }),
@@ -967,6 +1054,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'revoke-session',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: RevokeSessionInputSchema,
     outputSchema: SessionRevocationSchema,
   }),
@@ -974,6 +1062,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'sync-roster',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: SyncRosterInputSchema,
     outputSchema: RosterSyncResultSchema,
   }),
@@ -981,6 +1070,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'sync-access-membership',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemScheduledInvocationPolicy,
     inputSchema: SyncAccessMembershipInputSchema,
     outputSchema: SyncAccessMembershipResultSchema,
   }),
@@ -988,6 +1078,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'record-delivery-test-canary-eligibility',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
     inputSchema: RecordDeliveryTestCanaryEligibilityInputSchema,
     outputSchema: DeliveryTestCanaryEligibilityFactSchema,
   }),
@@ -995,6 +1086,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-delivery-test-target-set-version',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
     inputSchema: CreateDeliveryTestTargetSetVersionInputSchema,
     outputSchema: DeliveryTestTargetSetVersionSchema,
   }),
@@ -1002,6 +1094,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'prepare-activation',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: PrepareActivationInputSchema,
     outputSchema: PreparedActivationSchema,
   }),
@@ -1009,6 +1102,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'start-event',
     operation: 'mutation',
     safetyEffect: 'start-event',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: StartEventInputSchema,
     outputSchema: StartEventResultSchema,
   }),
@@ -1016,6 +1110,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'join-event',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: JoinEventInputSchema,
     outputSchema: JoinEventResultSchema,
   }),
@@ -1023,6 +1118,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'all-clear-event',
     operation: 'mutation',
     safetyEffect: 'all-clear-event',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: AllClearEventInputSchema,
     outputSchema: AllClearEventResultSchema,
   }),
@@ -1030,6 +1126,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'reactivate-event',
     operation: 'mutation',
     safetyEffect: 'start-event',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: ReactivateEventInputSchema,
     outputSchema: ReactivateEventResultSchema,
   }),
@@ -1037,6 +1134,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'close-event',
     operation: 'mutation',
     safetyEffect: 'close-event',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: CloseEventInputSchema,
     outputSchema: CloseEventResultSchema,
   }),
@@ -1044,6 +1142,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'reopen-as-correction',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ReopenAsCorrectionInputSchema,
     outputSchema: ReopenAsCorrectionResultSchema,
   }),
@@ -1051,6 +1150,8 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'append-journal-entry',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    mutationOrderAfter: 'join-event',
     inputSchema: AppendJournalEntryInputSchema,
     outputSchema: JournalEntrySchema,
   }),
@@ -1058,6 +1159,8 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'correct-journal-entry',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    mutationOrderAfter: 'append-journal-entry',
     inputSchema: CorrectJournalEntryInputSchema,
     outputSchema: JournalEntrySchema,
   }),
@@ -1065,6 +1168,8 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'redact-journal-entry',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    mutationOrderAfter: 'correct-journal-entry',
     inputSchema: RedactJournalEntryInputSchema,
     outputSchema: JournalEntrySchema,
   }),
@@ -1072,6 +1177,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-media-upload-intent',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateMediaUploadIntentInputSchema,
     outputSchema: MediaUploadIntentSchema,
   }),
@@ -1079,6 +1185,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'complete-media-upload',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentWorkerInvocationPolicy,
     inputSchema: CompleteMediaUploadInputSchema,
     outputSchema: MediaRecordSchema,
   }),
@@ -1086,6 +1193,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-event-type-draft',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateEventTypeDraftInputSchema,
     outputSchema: EventTypeVersionDraftSchema,
   }),
@@ -1093,6 +1201,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'update-event-type-draft',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: UpdateEventTypeDraftInputSchema,
     outputSchema: EventTypeVersionDraftSchema,
   }),
@@ -1100,6 +1209,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'publish-event-type-version',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: PublishEventTypeVersionInputSchema,
     outputSchema: EventTypeVersionSchema,
   }),
@@ -1107,6 +1217,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'dispatch-outbox',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemWorkerScheduledInvocationPolicy,
     inputSchema: DispatchOutboxInputSchema,
     outputSchema: DispatchOutboxResultSchema,
   }),
@@ -1114,6 +1225,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'record-delivery-evidence',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemWorkerWebhookInvocationPolicy,
     inputSchema: RecordDeliveryEvidenceInputSchema,
     outputSchema: DeliveryEvidenceSchema,
   }),
@@ -1121,6 +1233,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'reconcile-delivery-attempts',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemWorkerScheduledInvocationPolicy,
     inputSchema: ReconcileDeliveryAttemptsInputSchema,
     outputSchema: ReconcileDeliveryAttemptsResultSchema,
   }),
@@ -1128,6 +1241,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'record-endpoint-status',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemWorkerWebhookInvocationPolicy,
     inputSchema: RecordEndpointStatusInputSchema,
     outputSchema: EndpointStatusRecordSchema,
   }),
@@ -1135,6 +1249,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'record-sms-opt-out',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemWorkerScheduledInvocationPolicy,
     inputSchema: RecordSmsOptOutInputSchema,
     outputSchema: SmsOptOutRecordSchema,
   }),
@@ -1142,6 +1257,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'finalize-delivery-test-report',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: systemWorkerInvocationPolicy,
     inputSchema: FinalizeDeliveryTestReportInputSchema,
     outputSchema: MonthlyDeliveryTestReportSchema,
   }),
@@ -1149,6 +1265,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'register-push-token',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: RegisterPushTokenInputSchema,
     outputSchema: PushTokenRegistrationReceiptSchema,
   }),
@@ -1156,6 +1273,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'unregister-push-token',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: UnregisterPushTokenInputSchema,
     outputSchema: PushTokenUnregistrationReceiptSchema,
   }),
@@ -1163,6 +1281,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-facility',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateFacilityInputSchema,
     outputSchema: FacilitySchema,
   }),
@@ -1170,6 +1289,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'update-facility',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: UpdateFacilityInputSchema,
     outputSchema: FacilitySchema,
   }),
@@ -1177,6 +1297,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-neighborhood-version',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateNeighborhoodVersionInputSchema,
     outputSchema: NeighborhoodSchema,
   }),
@@ -1184,6 +1305,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-group-source',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateGroupSourceInputSchema,
     outputSchema: GroupSourceSchema,
   }),
@@ -1191,6 +1313,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'update-group-source',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: UpdateGroupSourceInputSchema,
     outputSchema: GroupSourceSchema,
   }),
@@ -1198,27 +1321,15 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'set-channel-enabled',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: SetChannelEnabledInputSchema,
     outputSchema: ChannelConfigurationSchema,
-  }),
-  'issue-agent-api-key': canonicalCapability({
-    id: 'issue-agent-api-key',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    inputSchema: IssueAgentApiKeyInputSchema,
-    outputSchema: AgentApiKeyIssuanceSchema,
-  }),
-  'revoke-agent-api-key': canonicalCapability({
-    id: 'revoke-agent-api-key',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    inputSchema: RevokeAgentApiKeyInputSchema,
-    outputSchema: AgentApiKeyRevocationSchema,
   }),
   'create-activation-preview': canonicalCapability({
     id: 'create-activation-preview',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateActivationPreviewInputSchema,
     outputSchema: ActivationPreviewSchema,
   }),
@@ -1226,6 +1337,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-delivery-test-preview',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: CreateDeliveryTestPreviewInputSchema,
     outputSchema: DeliveryTestPreviewSchema,
   }),
@@ -1233,6 +1345,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'create-lifecycle-consequence-preview',
     operation: 'mutation',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateLifecycleConsequencePreviewInputSchema,
     outputSchema: LifecycleConsequencePreviewSchema,
   }),
@@ -1240,6 +1353,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-prepared-activation',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetPreparedActivationInputSchema,
     outputSchema: PreparedActivationSchema,
   }),
@@ -1247,6 +1361,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-current-session',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: z.object({}).strict().readonly(),
     outputSchema: CurrentSessionResultSchema,
   }),
@@ -1254,6 +1369,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-device-sessions',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: ListDeviceSessionsInputSchema,
     outputSchema: DeviceSessionPageSchema,
   }),
@@ -1261,6 +1377,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-roster-snapshot',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetRosterSnapshotInputSchema,
     outputSchema: RosterSnapshotSchema,
   }),
@@ -1268,6 +1385,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-group-sources',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListGroupSourcesInputSchema,
     outputSchema: GroupSourcePageSchema,
   }),
@@ -1275,6 +1393,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-roster-health',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: RosterHealthQuerySchema,
     outputSchema: StaleRosterReportSchema,
   }),
@@ -1282,6 +1401,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-stale-roster-report',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: RosterHealthQuerySchema,
     outputSchema: StaleRosterReportSchema,
   }),
@@ -1289,6 +1409,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-active-events',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListActiveEventsInputSchema,
     outputSchema: EventPageSchema,
   }),
@@ -1296,6 +1417,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-event',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetEventInputSchema,
     outputSchema: EventSchema,
   }),
@@ -1303,6 +1425,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'sync-event-room',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     // Binding issue #77 operational sign-off: this human-interactive,
     // read-only high-frequency sync omits successful chain writes so 1,200
     // pollers do not serialize incident mutations. Denials/failures remain
@@ -1316,6 +1439,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-journal-entries',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListJournalEntriesInputSchema,
     outputSchema: JournalEntryPageSchema,
   }),
@@ -1323,6 +1447,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'search-journal-entries',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: SearchJournalEntriesInputSchema,
     outputSchema: JournalEntryPageSchema,
   }),
@@ -1330,6 +1455,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-media-read-grant',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetMediaReadGrantInputSchema,
     outputSchema: MediaReadGrantSchema,
   }),
@@ -1337,6 +1463,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-event-types',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListEventTypesInputSchema,
     outputSchema: EventTypePageSchema,
   }),
@@ -1344,6 +1471,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-event-type-version',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetEventTypeVersionInputSchema,
     outputSchema: EventTypeVersionSchema,
   }),
@@ -1351,6 +1479,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-event-type-draft',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetEventTypeDraftInputSchema,
     outputSchema: EventTypeVersionDraftSchema,
   }),
@@ -1358,6 +1487,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'preview-event-type-rendering',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: PreviewEventTypeRenderingInputSchema,
     outputSchema: EventTypeRenderingPreviewSchema,
   }),
@@ -1365,6 +1495,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-notification-status',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetNotificationStatusInputSchema,
     outputSchema: NotificationStatusSchema,
   }),
@@ -1372,6 +1503,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'run-delivery-report',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: RunDeliveryReportInputSchema,
     outputSchema: DeliveryReportSchema,
   }),
@@ -1379,6 +1511,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-delivery-test-reports',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListDeliveryTestReportsInputSchema,
     outputSchema: MonthlyDeliveryTestReportPageSchema,
   }),
@@ -1386,6 +1519,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-integration-health',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: GetIntegrationHealthInputSchema,
     outputSchema: IntegrationHealthSchema,
   }),
@@ -1393,6 +1527,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-admin-readiness',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
     inputSchema: GetAdminReadinessInputSchema,
     outputSchema: AdminReadinessSchema,
   }),
@@ -1400,6 +1535,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-my-devices',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: ListMyDevicesInputSchema,
     outputSchema: DeviceEnrollmentPageSchema,
   }),
@@ -1407,6 +1543,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-facilities',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListFacilitiesInputSchema,
     outputSchema: FacilityPageSchema,
   }),
@@ -1414,6 +1551,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-facility',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetFacilityInputSchema,
     outputSchema: FacilitySchema,
   }),
@@ -1421,6 +1559,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-neighborhoods',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListNeighborhoodsInputSchema,
     outputSchema: NeighborhoodPageSchema,
   }),
@@ -1428,6 +1567,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-neighborhood-versions',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListNeighborhoodVersionsInputSchema,
     outputSchema: NeighborhoodPageSchema,
   }),
@@ -1435,6 +1575,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'get-neighborhood-version',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: GetNeighborhoodVersionInputSchema,
     outputSchema: NeighborhoodSchema,
   }),
@@ -1442,20 +1583,15 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-users',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListUsersInputSchema,
     outputSchema: UserPageSchema,
-  }),
-  'list-agent-api-keys': canonicalCapability({
-    id: 'list-agent-api-keys',
-    operation: 'query',
-    safetyEffect: 'none',
-    inputSchema: ListAgentApiKeysInputSchema,
-    outputSchema: AgentApiKeyPageSchema,
   }),
   'list-drill-records': canonicalCapability({
     id: 'list-drill-records',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListDrillRecordsInputSchema,
     outputSchema: DrillRecordPageSchema,
   }),
@@ -1463,6 +1599,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'list-event-records',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: ListEventRecordsInputSchema,
     outputSchema: EventRecordPageSchema,
   }),
@@ -1470,6 +1607,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'export-drill-records',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ExportDrillRecordsInputSchema,
     outputSchema: RecordsExportSchema,
   }),
@@ -1477,6 +1615,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'export-event-summary',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ExportEventSummaryInputSchema,
     outputSchema: EventSummaryExportSchema,
   }),
@@ -1484,6 +1623,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'query-security-audit',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: SecurityAuditQuerySchema,
     outputSchema: SecurityAuditPageSchema,
   }),
@@ -1491,165 +1631,270 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'verify-security-audit-chain',
     operation: 'query',
     safetyEffect: 'none',
+    invocationPolicy: humanAgentScheduledInvocationPolicy,
     inputSchema: VerifySecurityAuditChainInputSchema,
     outputSchema: SecurityAuditVerificationSchema,
   }),
 });
 
+/*
+ * Agent-key schemas contain the grant enum derived from capability policy.
+ * Keep their policy metadata independent of those schemas so the exact grant
+ * type can be established before the schemas consume it.
+ */
+const AGENT_API_CAPABILITY_METADATA = Object.freeze({
+  'issue-agent-api-key': Object.freeze({
+    id: 'issue-agent-api-key',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    mutationOrderAfter: 'set-channel-enabled',
+  }),
+  'revoke-agent-api-key': Object.freeze({
+    id: 'revoke-agent-api-key',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    mutationOrderAfter: 'issue-agent-api-key',
+  }),
+  'list-agent-api-keys': Object.freeze({
+    id: 'list-agent-api-keys',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    agentGrantOrderAfter: 'list-users',
+  }),
+});
+
+type GrantableCapabilityId<Catalog> = {
+  [Id in Extract<keyof Catalog, string>]: Catalog[Id] extends {
+    readonly invocationPolicy: { readonly agentGrantable: true };
+  }
+    ? Id
+    : never;
+}[Extract<keyof Catalog, string>];
+
+/** Capability IDs whose canonical invocation policy admits agent principals. */
+export type AgentGrantableCapabilityId =
+  | GrantableCapabilityId<typeof CAPABILITY_CATALOG_BASE>
+  | GrantableCapabilityId<typeof AGENT_API_CAPABILITY_METADATA>;
+
+const AGENT_API_CAPABILITY_CATALOG = Object.freeze({
+  'issue-agent-api-key': canonicalCapability({
+    ...AGENT_API_CAPABILITY_METADATA['issue-agent-api-key'],
+    inputSchema: IssueAgentApiKeyInputSchema,
+    outputSchema: AgentApiKeyIssuanceSchema,
+  }),
+  'revoke-agent-api-key': canonicalCapability({
+    ...AGENT_API_CAPABILITY_METADATA['revoke-agent-api-key'],
+    inputSchema: RevokeAgentApiKeyInputSchema,
+    outputSchema: AgentApiKeyRevocationSchema,
+  }),
+  'list-agent-api-keys': canonicalCapability({
+    ...AGENT_API_CAPABILITY_METADATA['list-agent-api-keys'],
+    inputSchema: ListAgentApiKeysInputSchema,
+    outputSchema: AgentApiKeyPageSchema,
+  }),
+} satisfies Readonly<
+  Record<
+    keyof typeof AGENT_API_CAPABILITY_METADATA,
+    CanonicalCapabilityDefinition
+  >
+>);
+
+export const CAPABILITY_CATALOG = Object.freeze({
+  ...CAPABILITY_CATALOG_BASE,
+  ...AGENT_API_CAPABILITY_CATALOG,
+});
+
 /** Stable callable capability identifier inferred from the closed catalog. */
 export type RegisteredCapabilityId = keyof typeof CAPABILITY_CATALOG;
 
-function invocationPolicy(
-  principalKinds: readonly [
-    CapabilityPrincipalKind,
-    ...CapabilityPrincipalKind[],
-  ],
-  sources: readonly [InvocationSource, ...InvocationSource[]],
-): CapabilityInvocationPolicy {
-  return CapabilityInvocationPolicySchema.parse({
-    principalKinds,
-    sources,
-    agentGrantable: principalKinds.includes('agent'),
-  });
+/** Exact public grant type derived from the canonical catalog policy. */
+export type AgentCapabilityGrant = AgentGrantableCapabilityId;
+
+type CanonicalMutationSafetyManifest = Readonly<{
+  [Id in RegisteredCapabilityId as (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'mutation'
+    ? Id
+    : never]: (typeof CAPABILITY_CATALOG)[Id]['safetyEffect'];
+}>;
+
+type CanonicalQueryManifest = Readonly<{
+  [Id in RegisteredCapabilityId as (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'query'
+    ? Id
+    : never]: 'none';
+}>;
+
+type CanonicalInvocationPolicyMap = Readonly<{
+  [Id in RegisteredCapabilityId]: (typeof CAPABILITY_CATALOG)[Id]['invocationPolicy'];
+}>;
+
+type CanonicalAuditPolicyMap = Readonly<{
+  [Id in RegisteredCapabilityId]: (typeof CAPABILITY_CATALOG)[Id]['auditPolicy'];
+}>;
+
+type AnyCanonicalCapabilityDefinition = CanonicalCapabilityDefinition<
+  string,
+  CapabilityOperation,
+  CapabilitySafetyEffect,
+  z.ZodType,
+  z.ZodType,
+  CapabilityAuditPolicy
+>;
+
+type CatalogKey<Catalog> = Extract<keyof Catalog, string>;
+
+interface DerivedOrderedEntry<Value> {
+  readonly id: string;
+  readonly value: Value;
+  readonly orderAfter: string | undefined;
 }
 
-const preSessionOidcInvocationPolicy = invocationPolicy(
-  ['pre-session-oidc'],
-  ['web', 'mobile'],
+function applyDerivedOrder<Value>(
+  entries: readonly DerivedOrderedEntry<Value>[],
+): readonly DerivedOrderedEntry<Value>[] {
+  const ordered = entries.filter((entry) => entry.orderAfter === undefined);
+  for (const entry of entries) {
+    if (entry.orderAfter === undefined) continue;
+    const targetIndex = ordered.findIndex(
+      (candidate) => candidate.id === entry.orderAfter,
+    );
+    if (targetIndex === -1) {
+      throw new Error(
+        `Derived capability order target ${entry.orderAfter} is missing.`,
+      );
+    }
+    ordered.splice(targetIndex + 1, 0, entry);
+  }
+  return ordered;
+}
+
+export type CapabilityDerivedViews<
+  Catalog extends Readonly<Record<string, AnyCanonicalCapabilityDefinition>>,
+> = Readonly<{
+  registeredCapabilityIds: readonly CatalogKey<Catalog>[];
+  mutationSafetyManifest: Readonly<{
+    [Id in CatalogKey<Catalog> as Catalog[Id]['operation'] extends 'mutation'
+      ? Id
+      : never]: Catalog[Id]['safetyEffect'];
+  }>;
+  queryManifest: Readonly<{
+    [Id in CatalogKey<Catalog> as Catalog[Id]['operation'] extends 'query'
+      ? Id
+      : never]: 'none';
+  }>;
+  invocationPolicy: Readonly<{
+    [Id in CatalogKey<Catalog>]: Catalog[Id]['invocationPolicy'];
+  }>;
+  auditPolicy: Readonly<{
+    [Id in CatalogKey<Catalog>]: Catalog[Id]['auditPolicy'];
+  }>;
+  agentGrantableCapabilityIds: readonly {
+    [Id in CatalogKey<Catalog>]: Catalog[Id]['invocationPolicy']['agentGrantable'] extends true
+      ? Id
+      : never;
+  }[CatalogKey<Catalog>][];
+}>;
+
+/** Derives every public policy and manifest from one immutable catalog. */
+export function deriveCapabilityViews<
+  const Catalog extends Readonly<
+    Record<string, AnyCanonicalCapabilityDefinition>
+  >,
+>(catalog: Catalog): CapabilityDerivedViews<Catalog> {
+  const registeredCapabilityIds: string[] = [];
+  const mutationEntries: DerivedOrderedEntry<CapabilitySafetyEffect>[] = [];
+  const queryManifest: Record<string, 'none'> = {};
+  const invocationPolicies: Record<string, CapabilityInvocationPolicy> = {};
+  const auditPolicies: Record<string, CapabilityAuditPolicy> = {};
+  const agentGrantableEntries: DerivedOrderedEntry<null>[] = [];
+
+  for (const [key, definition] of Object.entries(catalog)) {
+    if (key !== definition.id) {
+      throw new Error(`Capability catalog key must match ${definition.id}.`);
+    }
+    registeredCapabilityIds.push(definition.id);
+    invocationPolicies[definition.id] = definition.invocationPolicy;
+    auditPolicies[definition.id] = definition.auditPolicy;
+    if (definition.operation === 'mutation') {
+      mutationEntries.push({
+        id: definition.id,
+        value: definition.safetyEffect,
+        orderAfter: definition.mutationOrderAfter,
+      });
+    } else {
+      queryManifest[definition.id] = 'none';
+    }
+    if (definition.invocationPolicy.agentGrantable) {
+      agentGrantableEntries.push({
+        id: definition.id,
+        value: null,
+        orderAfter: definition.agentGrantOrderAfter,
+      });
+    }
+  }
+
+  const mutationSafetyManifest: Record<string, CapabilitySafetyEffect> = {};
+  for (const entry of applyDerivedOrder(mutationEntries)) {
+    mutationSafetyManifest[entry.id] = entry.value;
+  }
+  const agentGrantableCapabilityIds = applyDerivedOrder(
+    agentGrantableEntries,
+  ).map((entry) => entry.id);
+
+  return Object.freeze({
+    registeredCapabilityIds: Object.freeze(registeredCapabilityIds),
+    mutationSafetyManifest: Object.freeze(mutationSafetyManifest),
+    queryManifest: Object.freeze(queryManifest),
+    invocationPolicy: Object.freeze(invocationPolicies),
+    auditPolicy: Object.freeze(auditPolicies),
+    agentGrantableCapabilityIds: Object.freeze(agentGrantableCapabilityIds),
+  }) as CapabilityDerivedViews<Catalog>;
+}
+
+const CAPABILITY_VIEWS = deriveCapabilityViews(CAPABILITY_CATALOG);
+
+export const CAPABILITY_MUTATION_SAFETY_MANIFEST =
+  CAPABILITY_VIEWS.mutationSafetyManifest as CanonicalMutationSafetyManifest;
+export const CAPABILITY_QUERY_MANIFEST =
+  CAPABILITY_VIEWS.queryManifest as CanonicalQueryManifest;
+export const CAPABILITY_INVOCATION_POLICY =
+  CAPABILITY_VIEWS.invocationPolicy as CanonicalInvocationPolicyMap;
+export const CAPABILITY_AUDIT_POLICY =
+  CAPABILITY_VIEWS.auditPolicy as CanonicalAuditPolicyMap;
+export const MUTATION_CAPABILITY_IDS = Object.freeze(
+  Object.keys(CAPABILITY_MUTATION_SAFETY_MANIFEST),
+) as readonly [
+  RegisteredMutationCapabilityId,
+  ...RegisteredMutationCapabilityId[],
+];
+export const AGENT_GRANTABLE_CAPABILITY_IDS =
+  CAPABILITY_VIEWS.agentGrantableCapabilityIds as readonly [
+    AgentGrantableCapabilityId,
+    ...AgentGrantableCapabilityId[],
+  ];
+
+const agentGrantableCapabilityIdSet = new Set<string>(
+  AGENT_GRANTABLE_CAPABILITY_IDS,
 );
-const verifiedRefreshInvocationPolicy = invocationPolicy(
-  ['verified-refresh-credential'],
-  ['web', 'mobile'],
-);
-const humanInteractiveInvocationPolicy = invocationPolicy(
-  ['human'],
-  ['web', 'mobile'],
-);
-const humanWebAdministrationInvocationPolicy = invocationPolicy(
-  ['human'],
-  ['web'],
-);
-const humanAgentInvocationPolicy = invocationPolicy(
-  ['human', 'agent'],
-  ['web', 'mobile', 'agent-rest', 'mcp'],
-);
-const humanAgentScheduledInvocationPolicy = invocationPolicy(
-  ['human', 'agent', 'system'],
-  ['web', 'mobile', 'agent-rest', 'mcp', 'scheduled-job'],
-);
-const humanAgentWorkerInvocationPolicy = invocationPolicy(
-  ['human', 'agent', 'system'],
-  ['web', 'mobile', 'agent-rest', 'mcp', 'worker'],
-);
-const systemWorkerScheduledInvocationPolicy = invocationPolicy(
-  ['system'],
-  ['worker', 'scheduled-job'],
-);
-const systemScheduledInvocationPolicy = invocationPolicy(
-  ['system'],
-  ['scheduled-job'],
-);
-const systemWorkerInvocationPolicy = invocationPolicy(['system'], ['worker']);
-const systemWorkerWebhookInvocationPolicy = invocationPolicy(
-  ['system'],
-  ['worker', 'webhook'],
-);
-/**
- * Closed principal/source exposure policy for every callable capability.
- * Internal workers and provider callbacks remain system-only even though
- * their capability safety effect is `none`; agent-facing IDs exactly match
- * {@link AGENT_GRANTABLE_CAPABILITY_IDS}.
- */
-export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
-  'complete-oidc-sign-in': preSessionOidcInvocationPolicy,
-  'refresh-session': verifiedRefreshInvocationPolicy,
-  'revoke-session': humanInteractiveInvocationPolicy,
-  'sync-roster': humanAgentScheduledInvocationPolicy,
-  'sync-access-membership': systemScheduledInvocationPolicy,
-  'record-delivery-test-canary-eligibility':
-    humanWebAdministrationInvocationPolicy,
-  'create-delivery-test-target-set-version':
-    humanWebAdministrationInvocationPolicy,
-  'prepare-activation': humanAgentInvocationPolicy,
-  'start-event': humanAgentScheduledInvocationPolicy,
-  'join-event': humanAgentInvocationPolicy,
-  'all-clear-event': humanAgentScheduledInvocationPolicy,
-  'reactivate-event': humanAgentScheduledInvocationPolicy,
-  'close-event': humanAgentScheduledInvocationPolicy,
-  'reopen-as-correction': humanAgentInvocationPolicy,
-  'append-journal-entry': humanAgentInvocationPolicy,
-  'correct-journal-entry': humanAgentInvocationPolicy,
-  'redact-journal-entry': humanAgentInvocationPolicy,
-  'create-media-upload-intent': humanAgentInvocationPolicy,
-  'complete-media-upload': humanAgentWorkerInvocationPolicy,
-  'create-event-type-draft': humanAgentInvocationPolicy,
-  'update-event-type-draft': humanAgentInvocationPolicy,
-  'publish-event-type-version': humanAgentInvocationPolicy,
-  'dispatch-outbox': systemWorkerScheduledInvocationPolicy,
-  'record-delivery-evidence': systemWorkerWebhookInvocationPolicy,
-  'reconcile-delivery-attempts': systemWorkerScheduledInvocationPolicy,
-  'record-endpoint-status': systemWorkerWebhookInvocationPolicy,
-  'record-sms-opt-out': systemWorkerScheduledInvocationPolicy,
-  'finalize-delivery-test-report': systemWorkerInvocationPolicy,
-  'register-push-token': humanInteractiveInvocationPolicy,
-  'unregister-push-token': humanInteractiveInvocationPolicy,
-  'create-facility': humanAgentInvocationPolicy,
-  'update-facility': humanAgentInvocationPolicy,
-  'create-neighborhood-version': humanAgentInvocationPolicy,
-  'create-group-source': humanAgentInvocationPolicy,
-  'update-group-source': humanAgentInvocationPolicy,
-  'set-channel-enabled': humanAgentInvocationPolicy,
-  'issue-agent-api-key': humanWebAdministrationInvocationPolicy,
-  'revoke-agent-api-key': humanWebAdministrationInvocationPolicy,
-  'create-activation-preview': humanAgentInvocationPolicy,
-  'create-delivery-test-preview': humanInteractiveInvocationPolicy,
-  'create-lifecycle-consequence-preview': humanAgentInvocationPolicy,
-  'get-prepared-activation': humanAgentInvocationPolicy,
-  'get-current-session': humanInteractiveInvocationPolicy,
-  'list-device-sessions': humanInteractiveInvocationPolicy,
-  'get-roster-snapshot': humanAgentInvocationPolicy,
-  'list-group-sources': humanAgentInvocationPolicy,
-  'get-roster-health': humanAgentInvocationPolicy,
-  'get-stale-roster-report': humanAgentInvocationPolicy,
-  'list-active-events': humanAgentInvocationPolicy,
-  'get-event': humanAgentInvocationPolicy,
-  'sync-event-room': humanInteractiveInvocationPolicy,
-  'list-journal-entries': humanAgentInvocationPolicy,
-  'search-journal-entries': humanAgentInvocationPolicy,
-  'get-media-read-grant': humanAgentInvocationPolicy,
-  'list-event-types': humanAgentInvocationPolicy,
-  'get-event-type-version': humanAgentInvocationPolicy,
-  'get-event-type-draft': humanAgentInvocationPolicy,
-  'preview-event-type-rendering': humanAgentInvocationPolicy,
-  'get-notification-status': humanAgentInvocationPolicy,
-  'run-delivery-report': humanAgentInvocationPolicy,
-  'list-delivery-test-reports': humanAgentInvocationPolicy,
-  'get-integration-health': humanAgentScheduledInvocationPolicy,
-  'get-admin-readiness': humanWebAdministrationInvocationPolicy,
-  'list-my-devices': humanInteractiveInvocationPolicy,
-  'list-facilities': humanAgentInvocationPolicy,
-  'get-facility': humanAgentInvocationPolicy,
-  'list-neighborhoods': humanAgentInvocationPolicy,
-  'list-neighborhood-versions': humanAgentInvocationPolicy,
-  'get-neighborhood-version': humanAgentInvocationPolicy,
-  'list-users': humanAgentInvocationPolicy,
-  'list-agent-api-keys': humanAgentInvocationPolicy,
-  'list-drill-records': humanAgentInvocationPolicy,
-  'list-event-records': humanInteractiveInvocationPolicy,
-  'export-drill-records': humanAgentInvocationPolicy,
-  'export-event-summary': humanAgentInvocationPolicy,
-  'query-security-audit': humanAgentInvocationPolicy,
-  'verify-security-audit-chain': humanAgentScheduledInvocationPolicy,
-} satisfies Record<RegisteredCapabilityId, CapabilityInvocationPolicy>);
+
+/** Returns true only for IDs derived as grantable to agent API keys. */
+export function isAgentGrantableCapabilityId(
+  value: unknown,
+): value is AgentGrantableCapabilityId {
+  return typeof value === 'string' && agentGrantableCapabilityIdSet.has(value);
+}
+
+installCapabilityViews(CAPABILITY_VIEWS);
 
 /** Returns the immutable principal/source policy for one canonical ID. */
 export function getCapabilityInvocationPolicy<
   Id extends RegisteredCapabilityId,
 >(id: Id): (typeof CAPABILITY_INVOCATION_POLICY)[Id] {
-  return CAPABILITY_INVOCATION_POLICY[id];
+  return CAPABILITY_INVOCATION_POLICY[id]!;
 }
 
-const registeredCapabilityIds = Object.keys(CAPABILITY_CATALOG) as [
+const registeredCapabilityIds = CAPABILITY_VIEWS.registeredCapabilityIds as [
   RegisteredCapabilityId,
   ...RegisteredCapabilityId[],
 ];
@@ -1764,17 +2009,20 @@ function assertCapabilityInvocationAllowed(
   envelope: CapabilityEnvelope,
 ): void {
   const policy = getCapabilityInvocationPolicy(capabilityId);
+  const principalKinds = new Set<CapabilityPrincipalKind>(
+    policy.principalKinds,
+  );
+  const sources = new Set<InvocationSource>(policy.sources);
   z.object({
     principalKind: CapabilityPrincipalKindSchema.refine(
-      (principalKind) => policy.principalKinds.includes(principalKind),
+      (principalKind) => principalKinds.has(principalKind),
       {
         message: `${capabilityId} rejects this authenticated principal class.`,
       },
     ),
-    source: InvocationSourceSchema.refine(
-      (source) => policy.sources.includes(source),
-      { message: `${capabilityId} rejects this invocation source.` },
-    ),
+    source: InvocationSourceSchema.refine((source) => sources.has(source), {
+      message: `${capabilityId} rejects this invocation source.`,
+    }),
   })
     .strict()
     .parse({
@@ -1854,7 +2102,7 @@ export function parseCapabilityEnvelopeFor<Id extends RegisteredCapabilityId>(
 /** Alias for the complete registered capability-envelope parser. */
 export const parseCapabilityEnvelope = parseRegisteredCapabilityEnvelope;
 
-function deriveHumanOnlyActionIds(
+export function deriveHumanOnlyActionIds(
   safetyEffect: CapabilitySafetyEffect,
   resolution: CapabilitySafetyResolution,
 ): HumanOnlyActionId[] {
@@ -2014,7 +2262,7 @@ export interface CapabilityExecutionDependencies<Context> {
  * server authorizer, executes exactly one registered handler, and parses its
  * output. There is no overload that omits authorization.
  */
-export async function executeCapability<
+export async function invokeAuthorizedCapabilityHandler<
   Id extends RegisteredCapabilityId,
   Context,
 >(
@@ -2062,55 +2310,12 @@ export async function executeCapability<
   );
 }
 
-function assertCatalogMatchesBaseManifests(): void {
-  const mutationManifest = CAPABILITY_MUTATION_SAFETY_MANIFEST as Readonly<
-    Record<string, CapabilitySafetyEffect>
-  >;
-  const queryManifest = CAPABILITY_QUERY_MANIFEST as Readonly<
-    Record<string, 'none'>
-  >;
-  Object.values(CAPABILITY_CATALOG).forEach((definition) => {
-    const manifest =
-      definition.operation === 'mutation' ? mutationManifest : queryManifest;
-    if (manifest[definition.id] !== definition.safetyEffect) {
-      throw new Error(
-        `Base capability manifest disagrees with canonical catalog for ${definition.id}.`,
-      );
-    }
-  });
-  [...Object.keys(mutationManifest), ...Object.keys(queryManifest)].forEach(
-    (id) => {
-      if (!Object.hasOwn(CAPABILITY_CATALOG, id)) {
-        throw new Error(
-          `Base capability manifest contains uncataloged ID ${id}.`,
-        );
-      }
-    },
-  );
-}
-
-function assertCatalogInvocationPolicies(): void {
+function assertCanonicalAuditPolicies(): void {
   const catalogIds = Object.keys(CAPABILITY_CATALOG).sort();
-  const policyIds = Object.keys(CAPABILITY_INVOCATION_POLICY).sort();
-  if (
-    catalogIds.length !== policyIds.length ||
-    catalogIds.some((id, index) => id !== policyIds[index])
-  ) {
-    throw new Error(
-      'Canonical capability catalog and invocation-policy IDs must match exactly.',
-    );
-  }
   catalogIds.forEach((id) => {
     const capabilityId = RegisteredCapabilityIdSchema.parse(id);
-    const policy = CapabilityInvocationPolicySchema.parse(
-      getCapabilityInvocationPolicy(capabilityId),
-    );
-    if (policy.agentGrantable !== isAgentGrantableCapabilityId(capabilityId)) {
-      throw new Error(
-        `Agent grant manifest disagrees with invocation policy for ${capabilityId}.`,
-      );
-    }
     const definition = defineCapability(capabilityId);
+    const policy = definition.invocationPolicy;
     if (
       definition.auditPolicy === 'denied-and-failed' &&
       (capabilityId !== 'sync-event-room' ||
@@ -2119,8 +2324,8 @@ function assertCatalogInvocationPolicies(): void {
         policy.principalKinds.length !== 1 ||
         policy.principalKinds[0] !== 'human' ||
         policy.sources.length !== 2 ||
-        !policy.sources.includes('web') ||
-        !policy.sources.includes('mobile'))
+        !policy.sources.some((source) => source === 'web') ||
+        !policy.sources.some((source) => source === 'mobile'))
     ) {
       throw new Error(
         `Reduced success auditing is not permitted for ${capabilityId}.`,
@@ -2151,5 +2356,4 @@ function assertCatalogInvocationPolicies(): void {
   }
 }
 
-assertCatalogMatchesBaseManifests();
-assertCatalogInvocationPolicies();
+assertCanonicalAuditPolicies();

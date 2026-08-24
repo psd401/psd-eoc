@@ -90,7 +90,7 @@ import {
 import {
   CapabilityEngineError,
   digestCapabilityValue,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   type CapabilityAuditEvent,
   type CapabilityEngineStore,
@@ -1187,7 +1187,12 @@ export async function executeJournalCapability<Id extends JournalCapabilityId>(
   const registration = registrations[
     capabilityId
   ] as ServerCapabilityRegistration<Id, JournalCapabilityTransaction>;
-  return executeCapability(registration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input,
+    invocation,
+    store,
+  );
 }
 
 type JournalQueryDatabase = DatabaseQuery;

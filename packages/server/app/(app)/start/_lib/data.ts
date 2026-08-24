@@ -16,7 +16,7 @@ import {
 } from '../../../../lib/capabilities/event-types';
 import { resolveHumanCapabilityInvocation } from '../../../../lib/capabilities/engine';
 import { getDefaultEventCapabilityRuntime } from '../../../../lib/capabilities/events';
-import { getDefaultStartFlowCapabilityRuntime } from './capabilities';
+import { getDefaultStartFlowCapabilityRuntime } from '../../../../lib/capabilities/start';
 
 export interface NamedActiveEvent {
   readonly event: Event;

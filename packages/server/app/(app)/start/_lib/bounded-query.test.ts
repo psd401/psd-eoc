@@ -5,7 +5,7 @@ import {
   collectBoundedDatabaseRows,
   START_FLOW_DATABASE_PAGE_SIZE,
   START_FLOW_ENDPOINT_PAGE_SIZE,
-} from './bounded-query';
+} from '../../../../lib/capabilities/start-bounded-query';
 
 describe('start-flow bounded database reads', () => {
   test('loads every page in stable order without concurrent statements', async () => {

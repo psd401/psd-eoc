@@ -4,10 +4,9 @@ import {
   RevokeAgentApiKeyInputSchema,
 } from '@psd-eoc/contracts';
 
-import {
-  AgentApiKeyAdministrationCommitError,
-  type AgentApiKeyAdministration,
-  type AgentApiKeyAdministrationAccess,
+import type {
+  AgentApiKeyAdministration,
+  AgentApiKeyAdministrationAccess,
 } from '../../../lib/agents/admin-capabilities';
 import {
   AgentApiKeyError,
@@ -108,20 +107,6 @@ export async function handleIssueAgentApiKeyAction(
         },
       };
     }
-    if (
-      error instanceof AgentApiKeyAdministrationCommitError &&
-      error.committed.kind === 'issued'
-    ) {
-      revalidateAgents(dependencies);
-      return {
-        issuedKey: null,
-        idempotencyKey: retainedIdempotencyKey,
-        notice: {
-          kind: 'error',
-          message: `Key prefix ${error.committed.key.keyPrefix} was issued, but audit confirmation failed. Its credential was withheld and cannot be recovered. Refresh, revoke that key, and issue a replacement.`,
-        },
-      };
-    }
     return {
       issuedKey: null,
       idempotencyKey: retainedIdempotencyKey,
@@ -173,19 +158,6 @@ export async function handleRevokeAgentApiKeyAction(
       },
     };
   } catch (error) {
-    if (
-      error instanceof AgentApiKeyAdministrationCommitError &&
-      error.committed.kind === 'revoked'
-    ) {
-      revalidateAgents(dependencies);
-      return {
-        notice: {
-          kind: 'info',
-          message:
-            'The key was revoked and can no longer authenticate, but audit confirmation failed. Refresh before taking another action.',
-        },
-      };
-    }
     if (
       error instanceof AgentApiKeyError &&
       error.code === 'KEY_ALREADY_REVOKED'

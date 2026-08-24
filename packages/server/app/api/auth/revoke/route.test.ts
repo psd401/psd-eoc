@@ -15,12 +15,14 @@ import {
 import {
   SessionService,
   hashRefreshToken,
+  type SessionCapabilityStore,
   type CompletedSelfRevocationRetryInput,
   type RevokeStoredSessionInput,
   type SessionStore,
   type StoredCredential,
   type StoredSessionContext,
 } from '../../../../lib/auth/sessions';
+import type { CapabilityAuditEvent } from '../../../../lib/capabilities/engine';
 import { createRevokeSessionRouteHandler } from './runtime';
 
 const IDS = {
@@ -41,6 +43,40 @@ const UNKNOWN_TOKEN = 'B'.repeat(43);
 const IDEMPOTENCY_KEY = 'issue-23-self-revoke-route-0001';
 const REASON_CODE = 'USER_REQUESTED_REVOCATION';
 const CREATED_AT = new Date('2026-08-12T08:00:00.000Z');
+
+function routeFor(
+  store: SessionStore,
+  auditHistory: CapabilityAuditEvent[] = [],
+): (request: NextRequest) => Promise<Response> {
+  const service = new SessionService(store);
+  const capabilityStore: SessionCapabilityStore = {
+    transaction: (operation) =>
+      operation({
+        sessions: service,
+        readCurrentTime: (receivedAt) => Promise.resolve(receivedAt),
+        claimIdempotency: () =>
+          Promise.reject(new Error('Unexpected engine idempotency claim.')),
+        completeIdempotency: () =>
+          Promise.reject(
+            new Error('Unexpected engine idempotency completion.'),
+          ),
+        getHumanConfirmation: () => Promise.resolve(null),
+        consumeHumanConfirmation: () => Promise.resolve(false),
+        appendCapabilityAudit: (event) => {
+          auditHistory.push(event);
+          return Promise.resolve();
+        },
+      }),
+    appendCapabilityAudit: (event) => {
+      auditHistory.push(event);
+      return Promise.resolve();
+    },
+  };
+  return createRevokeSessionRouteHandler(
+    () => service,
+    () => capabilityStore,
+  );
+}
 
 function activeContext(): StoredSessionContext {
   const result = SessionEstablishmentResultSchema.parse({
@@ -152,6 +188,7 @@ class RouteSessionStore implements SessionStore {
     if (this.retired) {
       return Object.freeze({
         kind: 'retired',
+        userId: IDS.user,
         sessionId: IDS.session,
         deviceEnrollmentId: IDS.device,
         rotationId: IDS.rotation,
@@ -284,18 +321,15 @@ function webRequest(): NextRequest {
 describe('POST /api/auth/revoke', () => {
   test('recovers the canonical self-revocation receipt after response loss and a route restart', async () => {
     const store = new RouteSessionStore();
-    const firstRoute = createRevokeSessionRouteHandler(
-      () => new SessionService(store),
-    );
+    const auditHistory: CapabilityAuditEvent[] = [];
+    const firstRoute = routeFor(store, auditHistory);
     const committed = await firstRoute(mobileRequest());
     expect(committed.status).toBe(200);
     const canonical = SessionRevocationSchema.parse(await committed.json());
     expect(store.mutationCount).toBe(1);
     expect(store.recoveryCount).toBe(0);
 
-    const restartedRoute = createRevokeSessionRouteHandler(
-      () => new SessionService(store),
-    );
+    const restartedRoute = routeFor(store, auditHistory);
     const retried = await restartedRoute(mobileRequest());
     expect(retried.status).toBe(200);
     expect(SessionRevocationSchema.parse(await retried.json())).toEqual(
@@ -304,13 +338,17 @@ describe('POST /api/auth/revoke', () => {
     expect(retried.headers.get('cache-control')).toContain('no-store');
     expect(store.mutationCount).toBe(1);
     expect(store.recoveryCount).toBe(1);
+    expect(
+      auditHistory.map(({ action, outcome }) => ({ action, outcome })),
+    ).toEqual([
+      { action: 'revoke-session', outcome: 'success' },
+      { action: 'revoke-session', outcome: 'success' },
+    ]);
   });
 
   test('rejects wrong target, key, body, source, and unknown or retired credentials without another mutation', async () => {
     const store = new RouteSessionStore();
-    const route = createRevokeSessionRouteHandler(
-      () => new SessionService(store),
-    );
+    const route = routeFor(store);
     expect((await route(mobileRequest())).status).toBe(200);
 
     const rejected = [
@@ -338,9 +376,7 @@ describe('POST /api/auth/revoke', () => {
   test('rejects a revoked credential when no completed idempotency record exists', async () => {
     const store = new RouteSessionStore();
     store.forceIncompleteRevocation();
-    const route = createRevokeSessionRouteHandler(
-      () => new SessionService(store),
-    );
+    const route = routeFor(store);
 
     const response = await route(mobileRequest());
     expect(response.status).toBe(401);

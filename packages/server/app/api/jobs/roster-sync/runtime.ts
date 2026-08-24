@@ -3,7 +3,7 @@ import {
   SyncRosterInputSchema,
   TimestampSchema,
   UuidSchema,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   parseCapabilityEnvelopeFor,
   type CapabilityExecutionAuthorizer,
   type RegisteredCapabilityHandler,
@@ -428,12 +428,16 @@ export function createRosterSyncRouteHandler(
       occurredAt = readTrustedTime(clock);
       const { envelope, context } = buildScheduledEnvelope(event, occurredAt);
       runtime = await createRuntime();
-      result = await executeCapability(runtime.handler, envelope.input, {
-        context,
-        humanActionResolutionContext: null,
-        safetyResolver: null,
-        authorizer: runtime.authorizer,
-      });
+      result = await invokeAuthorizedCapabilityHandler(
+        runtime.handler,
+        envelope.input,
+        {
+          context,
+          humanActionResolutionContext: null,
+          safetyResolver: null,
+          authorizer: runtime.authorizer,
+        },
+      );
     } catch (error) {
       executionError = error;
       try {

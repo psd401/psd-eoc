@@ -18,7 +18,7 @@ import { eventTypesForMode, loadOperationalViewData } from '../start/_lib/data';
 import {
   DELIVERY_TEST_PRODUCT_OWNER_USER_ID_ENV,
   executeListDeliveryTestReports,
-} from './capabilities';
+} from '../../../lib/capabilities/delivery-tests';
 import { DeliveryTestConsole } from './delivery-test-console';
 import { DeliveryTestReportList } from './report-list';
 import '../start/styles.css';

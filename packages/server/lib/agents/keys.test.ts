@@ -10,6 +10,7 @@ import {
   type AgentApiKey,
   type AgentApiKeyRevocation,
   type AgentApiKeySummary,
+  type AgentGrantableCapabilityId,
   type IssueAgentApiKeyInput,
 } from '@psd-eoc/contracts';
 
@@ -319,7 +320,9 @@ describe('AgentApiKeyService', () => {
         facilityIds: [IDS.facilityA, IDS.facilityB],
       },
     });
-    expect(authenticated.capabilityIds).toEqual(issueInput().capabilityIds);
+    expect(authenticated.capabilityIds).toEqual(
+      issueInput().capabilityIds as readonly AgentGrantableCapabilityId[],
+    );
     expect('credentialDigest' in authenticated.key).toBe(false);
     expect(
       service.authorizeCapability(authenticated, 'prepare-activation'),

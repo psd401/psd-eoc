@@ -270,6 +270,7 @@ describe('session credential read batching', () => {
           [
             IDS.issuance,
             tokenDigest,
+            IDS.user,
             IDS.device,
             IDS.rotation,
             tokenDigest,
@@ -286,6 +287,7 @@ describe('session credential read batching', () => {
       ),
     ).resolves.toEqual({
       kind: 'retired',
+      userId: IDS.user,
       sessionId: IDS.session,
       deviceEnrollmentId: IDS.device,
       rotationId: IDS.rotation,
@@ -311,7 +313,9 @@ describe('session credential read batching', () => {
         case 0:
           return [[IDS.session]];
         case 1:
-          return [[IDS.issuance, tokenDigest, IDS.device, null, null, null]];
+          return [
+            [IDS.issuance, tokenDigest, IDS.user, IDS.device, null, null, null],
+          ];
         case 2:
           return [];
         case 3:

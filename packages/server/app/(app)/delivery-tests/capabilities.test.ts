@@ -28,7 +28,7 @@ import {
   finalizeDeliveryTestReportRegistration,
   resolveReadyDeliveryTestReportRunIdByIntent,
   type DeliveryTestCapabilityStore,
-} from './capabilities';
+} from '../../../lib/capabilities/delivery-tests';
 
 type DeliveryTestTransaction = Parameters<
   DeliveryTestCapabilityStore['transaction']

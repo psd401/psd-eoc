@@ -31,7 +31,7 @@ import {
   type AdminCapabilityTransaction,
   type AdminQueryDatabase,
   type AdminQueryMetadata,
-} from '../facilities/admin-core';
+} from '../../../lib/capabilities/admin';
 
 function invalid(message: string): AdminCapabilityError {
   return new AdminCapabilityError('VALIDATION_ERROR', message, 400);

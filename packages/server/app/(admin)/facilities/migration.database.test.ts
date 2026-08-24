@@ -40,7 +40,7 @@ import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from './owned-database-lifecycle';
+} from '../../../lib/testing/owned-database-lifecycle';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =

@@ -10,7 +10,8 @@ import {
   IdempotencyPrincipalSchema,
   MessageTemplateCatalogSchema,
   UuidSchema,
-  executeCapability,
+  defineCapability,
+  getCapabilityInvocationPolicy,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type Actor,
@@ -58,6 +59,20 @@ import {
   assertApprovedEventTypeName,
   renderTemplateSet,
 } from '../notify/render';
+import {
+  createDrizzleCapabilityStore,
+  type AdminCapabilityTransaction,
+} from './admin';
+import {
+  CapabilityEngineError,
+  executeAuditedCapabilityTransaction,
+  executeAuthorizedCapabilityQuery,
+  type CapabilityAuditEvent,
+  type CapabilityEngineStore,
+  type CapabilityEngineTransaction,
+  type ServerCapabilityRegistration,
+  type TrustedCapabilityInvocation,
+} from './engine';
 
 const EVENT_TYPE_MUTATION_IDS = [
   'create-event-type-draft',
@@ -135,16 +150,22 @@ const ERROR_STATUS = {
 } as const satisfies Record<EventTypeCapabilityErrorCode, number>;
 
 /** Stable, non-sensitive failure suitable for an owned HTTP adapter. */
-export class EventTypeCapabilityError extends Error {
-  public readonly status: number;
-
-  public constructor(
-    public readonly code: EventTypeCapabilityErrorCode,
-    message: string,
-  ) {
-    super(message);
+export class EventTypeCapabilityError extends CapabilityEngineError {
+  public constructor(code: EventTypeCapabilityErrorCode, message: string) {
+    super(
+      code,
+      code === 'FORBIDDEN'
+        ? 'CAPABILITY_INVOCATION_DENIED'
+        : code === 'IDEMPOTENCY_CONFLICT'
+          ? 'IDEMPOTENCY_REQUEST_MISMATCH'
+          : code === 'VALIDATION_ERROR'
+            ? 'CAPABILITY_INPUT_INVALID'
+            : 'PERSISTENCE_CONFLICT',
+      message,
+      ERROR_STATUS[code],
+      false,
+    );
     this.name = 'EventTypeCapabilityError';
-    this.status = ERROR_STATUS[code];
   }
 }
 
@@ -174,6 +195,16 @@ export interface EventTypeStore {
     metadata: EventTypeMutationMetadata,
   ): Promise<EventTypeVersion>;
 }
+
+/** Transaction-scoped event-type repository used by the audited engine. */
+export interface EventTypeCapabilityTransaction
+  extends CapabilityEngineTransaction {
+  readonly eventTypes: EventTypeStore;
+}
+
+/** Atomic domain/idempotency/audit store for event-type mutations. */
+export type EventTypeCapabilityStore =
+  CapabilityEngineStore<EventTypeCapabilityTransaction>;
 
 type StoredTemplateRow = Readonly<{
   templateMode: 'real' | 'drill';
@@ -1605,25 +1636,6 @@ interface EventTypeCapabilityContext {
   }> | null;
 }
 
-function mutationMetadata(
-  context: EventTypeCapabilityContext,
-  capabilityId: EventTypeMutationId,
-): EventTypeMutationMetadata {
-  if (context.mutation === null) {
-    throw new EventTypeCapabilityError(
-      'FORBIDDEN',
-      'Mutation transport metadata is required.',
-    );
-  }
-  return {
-    actor: context.authenticated.actor,
-    capabilityId,
-    idempotencyKey: context.mutation.idempotencyKey,
-    requestId: context.requestId,
-    now: context.now,
-  };
-}
-
 const listEventTypesHandler = registerCapabilityHandler(
   'list-event-types',
   (input, context: EventTypeCapabilityContext) => context.store.list(input),
@@ -1676,106 +1688,92 @@ const previewEventTypeRenderingHandler = registerCapabilityHandler(
   },
 );
 
-const createEventTypeDraftHandler = registerCapabilityHandler(
-  'create-event-type-draft',
-  (input, context: EventTypeCapabilityContext) =>
-    context.store.createDraft(
-      input,
-      mutationMetadata(context, 'create-event-type-draft'),
-    ),
-);
+function assertEventTypeCapabilityAuthorized(
+  capabilityId: RegisteredCapabilityId,
+  input: unknown,
+  context: EventTypeCapabilityContext,
+): void {
+  const definition = defineCapability(capabilityId);
+  const invocationPolicy = getCapabilityInvocationPolicy(capabilityId);
+  const principalKinds: ReadonlySet<string> = new Set(
+    invocationPolicy.principalKinds,
+  );
+  const sources: ReadonlySet<string> = new Set(invocationPolicy.sources);
+  const authenticated = context.authenticated;
+  if (
+    !principalKinds.has(authenticated.actor.kind) ||
+    !sources.has(authenticated.source)
+  ) {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Event-type capability authorization failed.',
+    );
+  }
 
-const updateEventTypeDraftHandler = registerCapabilityHandler(
-  'update-event-type-draft',
-  (input, context: EventTypeCapabilityContext) =>
-    context.store.updateDraft(
-      input,
-      mutationMetadata(context, 'update-event-type-draft'),
-    ),
-);
+  const staffPublishedList =
+    definition.id === 'list-event-types' &&
+    typeof input === 'object' &&
+    input !== null &&
+    'enabled' in input &&
+    input.enabled === true;
+  const globalConfigurationAccess =
+    EVENT_TYPE_ADMIN_CAPABILITY_IDS.has(definition.id) ||
+    (definition.id === 'list-event-types' && !staffPublishedList);
+  if (
+    globalConfigurationAccess &&
+    authenticated.scope.facilityScope.kind !== 'district'
+  ) {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'District scope is required for event-type configuration.',
+    );
+  }
 
-const publishEventTypeVersionHandler = registerCapabilityHandler(
-  'publish-event-type-version',
-  (input, context: EventTypeCapabilityContext) =>
-    context.store.publishVersion(
-      input,
-      mutationMetadata(context, 'publish-event-type-version'),
-    ),
-);
+  if (isAuthenticatedEventTypeAgent(authenticated)) {
+    if (
+      !authenticated.grantedCapabilityIds.some(
+        (grantedCapabilityId) => grantedCapabilityId === definition.id,
+      )
+    ) {
+      throw new EventTypeCapabilityError(
+        'FORBIDDEN',
+        'The agent is not granted this event-type capability.',
+      );
+    }
+  } else {
+    const isAdmin = authenticated.roles.includes('admin');
+    const publishedVersionRead = definition.id === 'get-event-type-version';
+    if (
+      !isAdmin &&
+      (EVENT_TYPE_ADMIN_CAPABILITY_IDS.has(definition.id) ||
+        (!staffPublishedList && !publishedVersionRead))
+    ) {
+      throw new EventTypeCapabilityError(
+        'FORBIDDEN',
+        'Administrator access is required.',
+      );
+    }
+  }
+
+  if (definition.operation === 'mutation') {
+    if (context.mutation === null) {
+      throw new EventTypeCapabilityError(
+        'FORBIDDEN',
+        'The event-type mutation transport was not verified.',
+      );
+    }
+  } else if (context.mutation !== null) {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Query capabilities cannot use mutation transport metadata.',
+    );
+  }
+}
 
 const eventTypeAuthorizer: CapabilityExecutionAuthorizer<EventTypeCapabilityContext> =
   {
-    authorize: ({ definition, invocationPolicy, input, context }) => {
-      const authenticated = context.authenticated;
-      if (
-        !invocationPolicy.principalKinds.includes(authenticated.actor.kind) ||
-        !invocationPolicy.sources.includes(authenticated.source)
-      ) {
-        throw new EventTypeCapabilityError(
-          'FORBIDDEN',
-          'Event-type capability authorization failed.',
-        );
-      }
-
-      const staffPublishedList =
-        definition.id === 'list-event-types' &&
-        typeof input === 'object' &&
-        input !== null &&
-        'enabled' in input &&
-        input.enabled === true;
-      const globalConfigurationAccess =
-        EVENT_TYPE_ADMIN_CAPABILITY_IDS.has(definition.id) ||
-        (definition.id === 'list-event-types' && !staffPublishedList);
-      if (
-        globalConfigurationAccess &&
-        authenticated.scope.facilityScope.kind !== 'district'
-      ) {
-        throw new EventTypeCapabilityError(
-          'FORBIDDEN',
-          'District scope is required for event-type configuration.',
-        );
-      }
-
-      if (isAuthenticatedEventTypeAgent(authenticated)) {
-        if (
-          !authenticated.grantedCapabilityIds.some(
-            (capabilityId) => capabilityId === definition.id,
-          )
-        ) {
-          throw new EventTypeCapabilityError(
-            'FORBIDDEN',
-            'The agent is not granted this event-type capability.',
-          );
-        }
-      } else {
-        const isAdmin = authenticated.roles.includes('admin');
-        const publishedVersionRead = definition.id === 'get-event-type-version';
-        if (
-          !isAdmin &&
-          (EVENT_TYPE_ADMIN_CAPABILITY_IDS.has(definition.id) ||
-            (!staffPublishedList && !publishedVersionRead))
-        ) {
-          throw new EventTypeCapabilityError(
-            'FORBIDDEN',
-            'Administrator access is required.',
-          );
-        }
-      }
-
-      if (definition.operation === 'mutation') {
-        if (context.mutation === null) {
-          throw new EventTypeCapabilityError(
-            'FORBIDDEN',
-            'The event-type mutation transport was not verified.',
-          );
-        }
-      } else if (context.mutation !== null) {
-        throw new EventTypeCapabilityError(
-          'FORBIDDEN',
-          'Query capabilities cannot use mutation transport metadata.',
-        );
-      }
-    },
+    authorize: ({ definition, input, context }) =>
+      assertEventTypeCapabilityAuthorized(definition.id, input, context),
   };
 
 interface ExecuteEventTypeQueryInput<Input> {
@@ -1788,6 +1786,7 @@ interface ExecuteEventTypeQueryInput<Input> {
 
 interface ExecuteEventTypeMutationInput<Input> {
   readonly store: EventTypeStore;
+  readonly capabilityStore: EventTypeCapabilityStore;
   readonly authenticated: AuthenticatedEventTypePrincipal;
   readonly command: Input;
   readonly idempotencyKey: string;
@@ -1869,39 +1868,6 @@ function queryEnvelope(
   });
 }
 
-function mutationEnvelope(
-  capabilityId: EventTypeMutationId,
-  input: unknown,
-  execution: ReturnType<typeof mutationContext>,
-) {
-  const authenticated = execution.context.authenticated;
-  const mutation = execution.context.mutation;
-  if (mutation === null) {
-    throw new EventTypeCapabilityError(
-      'FORBIDDEN',
-      'Mutation transport metadata is required.',
-    );
-  }
-  return parseCapabilityEnvelopeFor(capabilityId, {
-    capabilityId,
-    operation: 'mutation',
-    actor: authenticated.actor,
-    source: authenticated.source,
-    scope: authenticated.scope,
-    requestId: execution.requestId,
-    serverTime: execution.now.toISOString(),
-    input,
-    idempotencyKey: mutation.idempotencyKey,
-    transport: mutation.transport,
-    connectivityEpochId: isAuthenticatedEventTypeAgent(authenticated)
-      ? null
-      : authenticated.result.connectivityEpoch.id,
-    requiredHumanActionIds: [],
-    requiredConsequenceDigest: null,
-    humanConfirmation: null,
-  });
-}
-
 const executionDependencies = (context: EventTypeCapabilityContext) => ({
   context,
   humanActionResolutionContext: null,
@@ -1914,7 +1880,7 @@ export async function executeListEventTypesCapability(
 ): Promise<EventTypePage> {
   const execution = queryContext(input);
   const envelope = queryEnvelope('list-event-types', input.query, execution);
-  return executeCapability(
+  return executeAuthorizedCapabilityQuery(
     listEventTypesHandler,
     envelope.input,
     executionDependencies(execution.context),
@@ -1930,7 +1896,7 @@ export async function executeGetEventTypeVersionCapability(
     input.query,
     execution,
   );
-  return executeCapability(
+  return executeAuthorizedCapabilityQuery(
     getEventTypeVersionHandler,
     envelope.input,
     executionDependencies(execution.context),
@@ -1946,7 +1912,7 @@ export async function executeGetEventTypeDraftCapability(
     input.query,
     execution,
   );
-  return executeCapability(
+  return executeAuthorizedCapabilityQuery(
     getEventTypeDraftHandler,
     envelope.input,
     executionDependencies(execution.context),
@@ -1962,26 +1928,122 @@ export async function executePreviewEventTypeRenderingCapability(
     input.query,
     execution,
   );
-  return executeCapability(
+  return executeAuthorizedCapabilityQuery(
     previewEventTypeRenderingHandler,
     envelope.input,
     executionDependencies(execution.context),
   );
 }
 
+function eventTypeMutationInvocation(
+  execution: ReturnType<typeof mutationContext>,
+): TrustedCapabilityInvocation {
+  const authenticated = execution.context.authenticated;
+  const mutation = execution.context.mutation;
+  if (mutation === null) {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Mutation transport metadata is required.',
+    );
+  }
+  return Object.freeze({
+    actor: authenticated.actor,
+    source: authenticated.source,
+    scope: authenticated.scope,
+    requestId: execution.requestId,
+    serverTime: execution.now,
+    connectivityEpochId: isAuthenticatedEventTypeAgent(authenticated)
+      ? null
+      : authenticated.result.connectivityEpoch.id,
+    mutation: Object.freeze({
+      idempotencyKey: mutation.idempotencyKey,
+      transport: mutation.transport,
+      humanConfirmationId: null,
+    }),
+  });
+}
+
+function engineMutationMetadata(
+  context: Readonly<{
+    invocation: TrustedCapabilityInvocation;
+  }>,
+  capabilityId: EventTypeMutationId,
+): EventTypeMutationMetadata {
+  if (context.invocation.actor.kind === 'system') {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Event-type configuration requires a human or agent actor.',
+    );
+  }
+  const idempotencyKey = context.invocation.mutation?.idempotencyKey;
+  if (idempotencyKey === undefined) {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Mutation transport metadata is required.',
+    );
+  }
+  return {
+    actor: context.invocation.actor,
+    capabilityId,
+    idempotencyKey,
+    requestId: context.invocation.requestId,
+    now: context.invocation.serverTime,
+  };
+}
+
+function authorizeEngineEventTypeMutation(
+  capabilityId: EventTypeMutationId,
+  input: unknown,
+  authenticated: AuthenticatedEventTypePrincipal,
+  invocation: TrustedCapabilityInvocation,
+): void {
+  assertEventTypeCapabilityAuthorized(capabilityId, input, {
+    store: Object.freeze({}) as EventTypeStore,
+    authenticated,
+    requestId: invocation.requestId,
+    now: invocation.serverTime,
+    mutation:
+      invocation.mutation === null
+        ? null
+        : {
+            idempotencyKey: invocation.mutation.idempotencyKey,
+            transport: invocation.mutation.transport as NonNullable<
+              EventTypeCapabilityContext['mutation']
+            >['transport'],
+          },
+  });
+}
+
 export async function executeCreateEventTypeDraftCapability(
   input: ExecuteEventTypeMutationInput<CreateEventTypeDraftInput>,
 ): Promise<EventTypeVersionDraft> {
   const execution = mutationContext(input);
-  const envelope = mutationEnvelope(
+  const registration: ServerCapabilityRegistration<
     'create-event-type-draft',
+    EventTypeCapabilityTransaction
+  > = {
+    id: 'create-event-type-draft',
+    mutationPersistence: 'repository-owned',
+    resolveFacilityId(command, context) {
+      authorizeEngineEventTypeMutation(
+        'create-event-type-draft',
+        command,
+        input.authenticated,
+        context.invocation,
+      );
+      return null;
+    },
+    handler: (command, context) =>
+      context.transaction.eventTypes.createDraft(
+        command,
+        engineMutationMetadata(context, 'create-event-type-draft'),
+      ),
+  };
+  return executeAuditedCapabilityTransaction(
+    registration,
     input.command,
-    execution,
-  );
-  return executeCapability(
-    createEventTypeDraftHandler,
-    envelope.input,
-    executionDependencies(execution.context),
+    eventTypeMutationInvocation(execution),
+    input.capabilityStore,
   );
 }
 
@@ -1989,15 +2051,32 @@ export async function executeUpdateEventTypeDraftCapability(
   input: ExecuteEventTypeMutationInput<UpdateEventTypeDraftInput>,
 ): Promise<EventTypeVersionDraft> {
   const execution = mutationContext(input);
-  const envelope = mutationEnvelope(
+  const registration: ServerCapabilityRegistration<
     'update-event-type-draft',
+    EventTypeCapabilityTransaction
+  > = {
+    id: 'update-event-type-draft',
+    mutationPersistence: 'repository-owned',
+    resolveFacilityId(command, context) {
+      authorizeEngineEventTypeMutation(
+        'update-event-type-draft',
+        command,
+        input.authenticated,
+        context.invocation,
+      );
+      return null;
+    },
+    handler: (command, context) =>
+      context.transaction.eventTypes.updateDraft(
+        command,
+        engineMutationMetadata(context, 'update-event-type-draft'),
+      ),
+  };
+  return executeAuditedCapabilityTransaction(
+    registration,
     input.command,
-    execution,
-  );
-  return executeCapability(
-    updateEventTypeDraftHandler,
-    envelope.input,
-    executionDependencies(execution.context),
+    eventTypeMutationInvocation(execution),
+    input.capabilityStore,
   );
 }
 
@@ -2005,28 +2084,95 @@ export async function executePublishEventTypeVersionCapability(
   input: ExecuteEventTypeMutationInput<PublishEventTypeVersionInput>,
 ): Promise<EventTypeVersion> {
   const execution = mutationContext(input);
-  const envelope = mutationEnvelope(
+  const registration: ServerCapabilityRegistration<
     'publish-event-type-version',
+    EventTypeCapabilityTransaction
+  > = {
+    id: 'publish-event-type-version',
+    mutationPersistence: 'repository-owned',
+    resolveFacilityId(command, context) {
+      authorizeEngineEventTypeMutation(
+        'publish-event-type-version',
+        command,
+        input.authenticated,
+        context.invocation,
+      );
+      return null;
+    },
+    handler: (command, context) =>
+      context.transaction.eventTypes.publishVersion(
+        command,
+        engineMutationMetadata(context, 'publish-event-type-version'),
+      ),
+  };
+  return executeAuditedCapabilityTransaction(
+    registration,
     input.command,
-    execution,
+    eventTypeMutationInvocation(execution),
+    input.capabilityStore,
   );
-  return executeCapability(
-    publishEventTypeVersionHandler,
-    envelope.input,
-    executionDependencies(execution.context),
-  );
+}
+
+/** Creates the production atomic engine store around transaction-scoped repositories. */
+export function createDrizzleEventTypeCapabilityStore(
+  database: Database,
+): EventTypeCapabilityStore {
+  const engineStore = createDrizzleCapabilityStore(database);
+  return Object.freeze({
+    transaction<Result>(
+      operation: (
+        transaction: EventTypeCapabilityTransaction,
+      ) => Promise<Result>,
+    ): Promise<Result> {
+      return engineStore.transaction((transaction) =>
+        operation({
+          readCurrentTime: (receivedAt) =>
+            transaction.readCurrentTime(receivedAt),
+          claimIdempotency: (claim) => transaction.claimIdempotency(claim),
+          completeIdempotency: (completion) =>
+            transaction.completeIdempotency(completion),
+          getHumanConfirmation: (id) => transaction.getHumanConfirmation(id),
+          consumeHumanConfirmation: (confirmation) =>
+            transaction.consumeHumanConfirmation(confirmation),
+          appendCapabilityAudit: (event) =>
+            transaction.appendCapabilityAudit(event),
+          eventTypes: new DrizzleEventTypeStore(
+            (transaction as AdminCapabilityTransaction).database as Database,
+          ),
+        }),
+      );
+    },
+    appendCapabilityAudit: (event: CapabilityAuditEvent) =>
+      engineStore.appendCapabilityAudit(event),
+  });
 }
 
 let defaultConnection: DatabaseConnection | undefined;
 let defaultStore: DrizzleEventTypeStore | undefined;
+let defaultCapabilityStore: EventTypeCapabilityStore | undefined;
 
 /** Lazily creates the production event-type repository for Next.js routes. */
 export function getDefaultEventTypeStore(): DrizzleEventTypeStore {
   if (defaultStore === undefined) {
     defaultConnection = createDatabaseClient(readDatabaseConfig());
     defaultStore = new DrizzleEventTypeStore(defaultConnection.db);
+    defaultCapabilityStore = createDrizzleEventTypeCapabilityStore(
+      defaultConnection.db,
+    );
   }
   return defaultStore;
+}
+
+/** Returns the engine store paired with the process-default event-type repository. */
+export function getDefaultEventTypeCapabilityStore(): EventTypeCapabilityStore {
+  getDefaultEventTypeStore();
+  if (defaultCapabilityStore === undefined) {
+    throw new EventTypeCapabilityError(
+      'CONFLICT',
+      'The event-type capability store is unavailable.',
+    );
+  }
+  return defaultCapabilityStore;
 }
 
 /** Test/script lifecycle hook; the normal Next.js process retains its pool. */
@@ -2034,6 +2180,7 @@ export async function closeDefaultEventTypeStore(): Promise<void> {
   const connection = defaultConnection;
   defaultConnection = undefined;
   defaultStore = undefined;
+  defaultCapabilityStore = undefined;
   await connection?.close();
 }
 

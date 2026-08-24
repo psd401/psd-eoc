@@ -24,13 +24,13 @@ import {
   resolveHumanCapabilityInvocation,
   type TrustedCapabilityInvocation,
 } from '../../../lib/capabilities/engine';
-import { getDefaultStartFlowCapabilityRuntime } from '../start/_lib/capabilities';
+import { getDefaultStartFlowCapabilityRuntime } from '../../../lib/capabilities/start';
 import {
   executeCreateDeliveryTestTargetSetVersion,
   executeRecordDeliveryTestCanaryEligibility,
   type CreateDeliveryTestTargetSetVersionExecution,
   type RecordDeliveryTestCanaryEligibilityExecution,
-} from './capabilities';
+} from '../../../lib/capabilities/delivery-tests';
 
 export const DELIVERY_TEST_IDEMPOTENCY_HEADER = 'idempotency-key' as const;
 

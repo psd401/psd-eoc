@@ -5,7 +5,6 @@ import {
   ApiErrorSchema,
   MobileOidcExchangeRequestSchema,
   MobileSessionResponseSchema,
-  executeCapability,
   parseCapabilityEnvelopeFor,
 } from '@psd-eoc/contracts';
 import { NextResponse, type NextRequest } from 'next/server';
@@ -24,6 +23,7 @@ import {
   parseInitialMobileTransitionEmailDigest,
   type AccessGateAuditSink,
 } from '../../../../../../lib/auth/sign-in-audit';
+import { executeRepositoryAuditedOidcCompletion } from '../../../../../../lib/capabilities/engine';
 import {
   GoogleOidcCallbackError,
   GoogleOidcConfigurationError,
@@ -136,7 +136,7 @@ function errorResponse(error: unknown, requestId: string): NextResponse {
 
 /**
  * Exchanges verified Google transport evidence for one opaque app bearer. Raw
- * provider credentials are removed before executeCapability is invoked.
+ * provider credentials are removed before canonical capability execution.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const requestId = randomUUID();
@@ -203,7 +203,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       responseDigest: exchange.responseDigest,
     });
     const policy = readSessionPolicy();
-    const result = await executeCapability(
+    const result = await executeRepositoryAuditedOidcCompletion(
       createCompleteOidcSignInHandler({
         store: createDrizzleInitialWebSessionStore(connection.db, {
           initialMobileTransitionEmailDigest,

@@ -6,7 +6,7 @@ import {
   WEB_SESSION_COOKIE_NAME,
 } from '../../../lib/auth/sessions';
 import { authenticateWebSession } from '../../../lib/auth/request-session';
-import { AdminCapabilityError } from '../facilities/admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import { executeIntegrationHealthProjection } from './capabilities';
 import { IntegrationsAdminView } from './integrations-admin-view';
 import {

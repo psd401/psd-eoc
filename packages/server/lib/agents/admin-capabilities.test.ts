@@ -10,7 +10,6 @@ import {
 import type { SecurityAuditFact } from '../audit/model';
 import {
   AgentApiKeyAdministration,
-  AgentApiKeyAdministrationCommitError,
   AgentApiKeyAdministrationError,
   type AgentApiKeyAdministrationAccess,
 } from './admin-capabilities';
@@ -111,6 +110,19 @@ function harness(options: Readonly<{ auditFails?: boolean }> = {}) {
     },
   };
   const auditFacts: SecurityAuditFact[] = [];
+  const appendAudit = async (fact: unknown) => {
+    if (options.auditFails === true) {
+      throw new Error('Synthetic audit outage.');
+    }
+    const event = fact as SecurityAuditFact;
+    auditFacts.push(
+      event.outcome === 'success' &&
+        (event.action === 'issue-agent-api-key' ||
+          event.action === 'revoke-agent-api-key')
+        ? ({ ...event, category: 'admin-change' } as SecurityAuditFact)
+        : event,
+    );
+  };
   const administration = new AgentApiKeyAdministration({
     keys,
     audit: {
@@ -121,6 +133,31 @@ function harness(options: Readonly<{ auditFails?: boolean }> = {}) {
         auditFacts.push(fact as SecurityAuditFact);
         return undefined as unknown as SecurityAuditEntry;
       },
+    },
+    capabilityStore: {
+      async transaction(operation) {
+        const before = { ...calls };
+        try {
+          return await operation({
+            keys,
+            setAuditTarget: () => undefined,
+            readCurrentTime: (receivedAt) => Promise.resolve(receivedAt),
+            claimIdempotency: () =>
+              Promise.reject(new Error('Unexpected engine idempotency claim.')),
+            completeIdempotency: () =>
+              Promise.reject(
+                new Error('Unexpected engine idempotency completion.'),
+              ),
+            getHumanConfirmation: () => Promise.resolve(null),
+            consumeHumanConfirmation: () => Promise.resolve(false),
+            appendCapabilityAudit: appendAudit,
+          });
+        } catch (error) {
+          Object.assign(calls, before);
+          throw error;
+        }
+      },
+      appendCapabilityAudit: appendAudit,
     },
   });
   return { administration, calls, auditFacts };
@@ -231,15 +268,15 @@ describe('canonical agent API-key administration', () => {
           csrfVerified: true,
           now,
         }),
-      ).rejects.toBeInstanceOf(AgentApiKeyAdministrationError);
+      ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
 
       expect(calls.issue).toBe(0);
       expect(auditFacts).toHaveLength(1);
       expect(auditFacts[0]).toMatchObject({
         action: 'issue-agent-api-key',
-        category: 'admin-change',
+        category: 'access-denial',
         outcome: 'denied',
-        reasonCode: 'AGENT_KEY_ADMIN_FORBIDDEN',
+        reasonCode: 'CAPABILITY_INVOCATION_DENIED',
       });
     },
   );
@@ -332,12 +369,13 @@ describe('canonical agent API-key administration', () => {
     expect(calls.issue).toBe(0);
     expect(auditFacts[0]).toMatchObject({
       action: 'issue-agent-api-key',
+      category: 'access-denial',
       outcome: 'denied',
-      reasonCode: 'AGENT_KEY_ADMIN_FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
     });
   });
 
-  test('reports committed issuance truth without exposing its credential when audit append fails', async () => {
+  test('fails closed when issuance audit cannot commit', async () => {
     const { administration, calls } = harness({ auditFails: true });
     let committedError: unknown;
 
@@ -360,15 +398,15 @@ describe('canonical agent API-key administration', () => {
       committedError = error;
     }
 
-    expect(calls.issue).toBe(1);
-    expect(committedError).toBeInstanceOf(AgentApiKeyAdministrationCommitError);
+    expect(calls.issue).toBe(0);
     expect(committedError).toMatchObject({
-      committed: { kind: 'issued', key: { id: key.id } },
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
     });
     expect(JSON.stringify(committedError)).not.toContain(oneTimeCredential);
   });
 
-  test('reports committed revocation truth when audit append fails', async () => {
+  test('fails closed when revocation audit cannot commit', async () => {
     const { administration, calls } = harness({ auditFails: true });
 
     await expect(
@@ -384,8 +422,9 @@ describe('canonical agent API-key administration', () => {
         now,
       }),
     ).rejects.toMatchObject({
-      committed: { kind: 'revoked', revocation: { apiKeyId: ids.key } },
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
     });
-    expect(calls.revoke).toBe(1);
+    expect(calls.revoke).toBe(0);
   });
 });

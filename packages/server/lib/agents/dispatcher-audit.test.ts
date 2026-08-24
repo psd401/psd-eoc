@@ -9,7 +9,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import type { EventTypeStore } from '../capabilities/event-types';
-import type { StartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
+import type { StartFlowCapabilityRuntime } from '../capabilities/start';
 import {
   executeEventCapability,
   type EventCapabilityRuntime,
@@ -105,6 +105,7 @@ function dispatcher(eventTypes: EventTypeStore) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes,
+    eventTypeCapabilities: unavailableDependency,
     deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
@@ -123,6 +124,7 @@ function dispatcherWithEvents(events: EventCapabilityRuntime) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    eventTypeCapabilities: unavailableDependency,
     deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
@@ -141,6 +143,7 @@ function dispatcherWithJournal(journal: JournalCapabilityRuntime) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    eventTypeCapabilities: unavailableDependency,
     deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
@@ -161,6 +164,7 @@ function dispatcherWithActivationPreviews(
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    eventTypeCapabilities: unavailableDependency,
     deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
@@ -179,6 +183,7 @@ function dispatcherWithRecords(records: RecordsCapabilityRuntime) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    eventTypeCapabilities: unavailableDependency,
     deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
@@ -199,6 +204,7 @@ function dispatcherWithDeliveryTestReports(
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    eventTypeCapabilities: unavailableDependency,
     deliveryTestReports,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,

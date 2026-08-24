@@ -183,7 +183,7 @@ integrations are not live-verified.
 
 - [ ] The explicit opt-in synthetic canary recipient set is stored outside the
       repository and excludes every unlisted endpoint.
-- [ ] A human launched the exact test through `executeCapability` after a fresh
+- [ ] A human launched the exact test through the audited capability engine after a fresh
       consequence preview, product-owner approval, and authenticated confirmation.
 - [ ] No scheduled job or automation sent a notification; scheduling only
       reminded/paged a human that the test was due.

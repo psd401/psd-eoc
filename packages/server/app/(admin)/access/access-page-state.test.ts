@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { AdminCapabilityError } from '../facilities/admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import {
   accessAdminStatusMessage,
   isInvalidAccessAdminQueryError,

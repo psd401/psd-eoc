@@ -9,7 +9,7 @@ import {
 
 import {
   CapabilityEngineError,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   type CapabilityEngineStore,
   type CapabilityEngineTransaction,
@@ -170,5 +170,10 @@ export async function executePreparedActivationCapability<
     Id,
     PreparedActivationCapabilityTransaction
   >;
-  return executeCapability(registration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input,
+    invocation,
+    store,
+  );
 }

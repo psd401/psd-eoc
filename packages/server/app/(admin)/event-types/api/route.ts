@@ -27,6 +27,7 @@ import {
   executePreviewEventTypeRenderingCapability,
   executePublishEventTypeVersionCapability,
   executeUpdateEventTypeDraftCapability,
+  getDefaultEventTypeCapabilityStore,
   getDefaultEventTypeStore,
 } from '../../../../lib/capabilities/event-types';
 import { TemplateRenderError } from '../../../../lib/notify/render';
@@ -212,6 +213,7 @@ export async function POST(request: Request): Promise<Response> {
             interaction: 'explicit-user-submit',
           } as const);
     const store = getDefaultEventTypeStore();
+    const capabilityStore = getDefaultEventTypeCapabilityStore();
     const body = await readBoundedJson(request);
     if (typeof body !== 'object' || body === null || !('action' in body)) {
       return errorResponse(
@@ -228,6 +230,7 @@ export async function POST(request: Request): Promise<Response> {
         return json(
           await executeCreateEventTypeDraftCapability({
             store,
+            capabilityStore,
             authenticated,
             requestId,
             idempotencyKey,
@@ -243,6 +246,7 @@ export async function POST(request: Request): Promise<Response> {
         return json(
           await executeUpdateEventTypeDraftCapability({
             store,
+            capabilityStore,
             authenticated,
             requestId,
             idempotencyKey,
@@ -257,6 +261,7 @@ export async function POST(request: Request): Promise<Response> {
         return json(
           await executePublishEventTypeVersionCapability({
             store,
+            capabilityStore,
             authenticated,
             requestId,
             idempotencyKey,

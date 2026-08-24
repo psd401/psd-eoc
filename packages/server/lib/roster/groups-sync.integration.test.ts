@@ -22,7 +22,7 @@ import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../../app/(admin)/facilities/owned-database-lifecycle';
+} from '../testing/owned-database-lifecycle';
 import {
   createDrizzleRosterSyncStore,
   createMockGoogleGroupsAdapter,

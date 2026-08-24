@@ -44,7 +44,7 @@ import {
   createDrizzleInitialWebSessionStore,
   type PersistInitialWebSessionRequest,
 } from '../../../lib/auth/session-cookie';
-import { executeCapability } from '../../../lib/capabilities/engine';
+import { executeAuditedCapabilityTransaction } from '../../../lib/capabilities/engine';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
@@ -59,11 +59,11 @@ import { executeRosterHealthProjection } from '../integrations/roster-health';
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
-} from './admin-core';
+} from '../../../lib/capabilities/admin';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from './owned-database-lifecycle';
+} from '../../../lib/testing/owned-database-lifecycle';
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
@@ -2938,7 +2938,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       apiKeyId: randomUUID(),
     };
     try {
-      await executeCapability(
+      await executeAuditedCapabilityTransaction(
         setChannelEnabledRegistration,
         {
           integrationId: liveIntegrationId,

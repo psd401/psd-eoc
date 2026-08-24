@@ -1,5 +1,4 @@
 import {
-  executeCapability,
   parseCapabilityEnvelopeFor,
   type CapabilityAuthorizationRequest,
   type CapabilityExecutionAuthorizer,
@@ -15,6 +14,7 @@ import {
 } from '../roster/stale-report';
 import {
   CapabilityEngineError,
+  executeAuthorizedCapabilityQuery,
   type TrustedCapabilityInvocation,
 } from '../capabilities/engine';
 import type { AuthenticatedAgentApiKey } from './keys';
@@ -152,7 +152,7 @@ export function createAgentRosterReportRuntime(
           dependencies.staleThresholdSeconds ??
           AGENT_ROSTER_STALE_THRESHOLD_SECONDS,
       });
-      return executeCapability(handler, envelope.input, {
+      return executeAuthorizedCapabilityQuery(handler, envelope.input, {
         context,
         humanActionResolutionContext: null,
         safetyResolver: null,

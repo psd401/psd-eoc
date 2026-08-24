@@ -1,4 +1,4 @@
-import { AdminCapabilityError } from '../facilities/admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
 
 const STATUS_MESSAGES = Object.freeze({

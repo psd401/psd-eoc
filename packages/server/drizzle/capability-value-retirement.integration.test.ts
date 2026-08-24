@@ -24,7 +24,7 @@ import { migrate as migrateWithPostgres } from 'drizzle-orm/postgres-js/migrator
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../app/(admin)/facilities/owned-database-lifecycle';
+} from '../lib/testing/owned-database-lifecycle';
 import {
   createDatabaseClient,
   databaseExecuteRows,

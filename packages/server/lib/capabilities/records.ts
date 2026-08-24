@@ -13,7 +13,7 @@ import {
 } from '../../db/client';
 import { organizationName } from '../config/deployment';
 import {
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
@@ -160,7 +160,7 @@ export function executeRecordsCapability(
   invocation: TrustedCapabilityInvocation,
   store: JournalCapabilityStore,
 ): Promise<CapabilityOutput<'list-drill-records'>> {
-  return executeCapability(
+  return executeAuditedCapabilityTransaction(
     listDrillRecordsRegistration,
     input,
     invocation,
@@ -174,7 +174,7 @@ export function executeEventRecordsCapability(
   invocation: TrustedCapabilityInvocation,
   store: JournalCapabilityStore,
 ): Promise<CapabilityOutput<'list-event-records'>> {
-  return executeCapability(
+  return executeAuditedCapabilityTransaction(
     listEventRecordsRegistration,
     input,
     invocation,
@@ -196,7 +196,7 @@ export function executeRecordsExportCapability<
     capabilityId === 'export-drill-records'
       ? exportDrillRecordsRegistration(artifactStore)
       : exportEventSummaryRegistration(artifactStore);
-  return executeCapability(
+  return executeAuditedCapabilityTransaction(
     registration as ServerCapabilityRegistration<
       Id,
       JournalCapabilityTransaction

@@ -73,7 +73,7 @@ import {
   type AdminMutationMetadata,
   type AdminQueryDatabase,
   type AdminQueryMetadata,
-} from './admin-core';
+} from '../../../lib/capabilities/admin';
 
 type AdminContext = CapabilityHandlerContext<AdminCapabilityTransaction>;
 

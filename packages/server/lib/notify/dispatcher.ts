@@ -10,7 +10,7 @@ import {
   NotificationOutboxMessageSchema,
   OutboxRecordSchema,
   UuidSchema,
-  executeCapability as executeCanonicalCapability,
+  invokeAuthorizedCapabilityHandler as executeCanonicalCapability,
   registerCapabilityHandler,
   type Actor,
   type CapabilityAuthorizationRequest,
@@ -2773,7 +2773,7 @@ export function createDispatchOutboxAuthorizer(): Readonly<
   });
 }
 
-/** Executes one dispatch through the canonical executeCapability boundary. */
+/** Executes one dispatch through the canonical invokeAuthorizedCapabilityHandler boundary. */
 export function executeDispatchOutboxCapability(
   outboxId: string,
   context: DispatchOutboxCapabilityContext,

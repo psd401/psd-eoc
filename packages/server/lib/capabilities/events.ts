@@ -95,11 +95,11 @@ import {
   loadRosterSnapshot,
   readDeliveryTestCredentialVerificationReferences,
   requireCurrentDeliveryTestTargetEligibility,
-} from '../../app/(app)/start/_lib/capabilities';
+} from '../capabilities/start';
 import {
   CapabilityEngineError,
   digestCapabilityValue,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   requireCapabilityAuthorization,
   scopeTransitionIdempotencyKey,
@@ -1340,7 +1340,12 @@ export async function executeEventCapability<Id extends EventCapabilityId>(
   const registration = registrations[
     capabilityId
   ] as ServerCapabilityRegistration<Id, EventCapabilityTransaction>;
-  return executeCapability(registration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input,
+    invocation,
+    store,
+  );
 }
 
 export interface EventCapabilityRuntime {

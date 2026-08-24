@@ -21,7 +21,7 @@ import {
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
-} from '../facilities/admin-core';
+} from '../../../lib/capabilities/admin';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 
 const OBSERVED_AT = new Date('2026-08-22T18:00:00.000Z');

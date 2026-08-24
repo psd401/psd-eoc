@@ -6,7 +6,7 @@ import {
   RecordDeliveryEvidenceInputSchema,
   RecordEndpointStatusInputSchema,
   UuidSchema,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   registerCapabilityHandler,
   type Actor,
   type CapabilityAuthorizationRequest,
@@ -487,7 +487,7 @@ async function executeMappedEvent(
           `${event.mailMessageId}:${event.eventType}:${input.reasonCode}`,
         ),
     );
-    await executeCapability(endpointHandler, endpointInput, {
+    await invokeAuthorizedCapabilityHandler(endpointHandler, endpointInput, {
       context,
       humanActionResolutionContext: null,
       safetyResolver: null,
@@ -505,7 +505,7 @@ async function executeMappedEvent(
           attemptEvidenceInput(input, attempt.id),
         ),
     );
-    await executeCapability(evidenceHandler, evidenceInput, {
+    await invokeAuthorizedCapabilityHandler(evidenceHandler, evidenceInput, {
       context,
       humanActionResolutionContext: null,
       safetyResolver: null,
@@ -516,7 +516,7 @@ async function executeMappedEvent(
 
 /**
  * POST-only SNS adapter. Signature and topic verification finish before the
- * database opens, and every domain write crosses executeCapability.
+ * database opens, and every domain write crosses invokeAuthorizedCapabilityHandler.
  */
 export function createSesWebhookRouteHandler(
   dependencies: SesWebhookRouteDependencies,

@@ -24,7 +24,7 @@ import {
   liveChannelChangeRequestDigest,
 } from '../integrations/capabilities';
 import { executeRosterHealthProjection } from '../integrations/roster-health';
-import { createDrizzleAdminCapabilityStore } from './admin-core';
+import { createDrizzleAdminCapabilityStore } from '../../../lib/capabilities/admin';
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,

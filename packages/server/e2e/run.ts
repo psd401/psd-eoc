@@ -13,7 +13,7 @@ import { eq, inArray } from 'drizzle-orm';
 import {
   createDrizzleStartFlowCapabilityStore,
   executeStartFlowCapability,
-} from '../app/(app)/start/_lib/capabilities';
+} from '../lib/capabilities/start';
 import {
   createDatabaseClient,
   type PostgresDatabaseConnection,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { executeCapability } from '@psd-eoc/contracts';
+import { invokeAuthorizedCapabilityHandler } from '@psd-eoc/contracts';
 
 import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 import {
@@ -314,7 +314,7 @@ describe('access-membership sync capability core', () => {
       now: () => new Date(TEST_TIME),
     });
     await expect(
-      executeCapability(
+      invokeAuthorizedCapabilityHandler(
         handler,
         {},
         {

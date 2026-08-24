@@ -30,6 +30,13 @@ export const GroupPurposeSchema = z.enum(['access', 'building', 'others']);
 /** Configured group purpose inferred from its schema. */
 export type GroupPurpose = z.infer<typeof GroupPurposeSchema>;
 
+/** Closed vocabulary for expected and completed roster group sets. */
+export const GROUP_COMPLETION_KINDS = ['expected', 'completed'] as const;
+export const GroupCompletionKindSchema = z.enum(GROUP_COMPLETION_KINDS);
+
+/** Roster group-set completion kind inferred from its canonical schema. */
+export type GroupCompletionKind = z.infer<typeof GroupCompletionKindSchema>;
+
 /**
  * Owns a reference to a designated Google access group. Access references can
  * never be synthetic or facility-bound and are excluded from roster schemas.
