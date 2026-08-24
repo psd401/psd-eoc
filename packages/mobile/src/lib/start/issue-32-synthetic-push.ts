@@ -1,4 +1,8 @@
-import { MobilePushReceivePayloadSchema, type Event } from '@psd-eoc/contracts';
+import {
+  MobilePushReceivePayloadSchema,
+  type Event,
+  type NativeDevicePlatform,
+} from '@psd-eoc/contracts';
 
 import { isIssue21SyntheticFixtureEnabled } from './issue-21-synthetic-fixture';
 
@@ -48,7 +52,6 @@ function loadIssue32NotificationModules() {
     import('../../notifications/alert-channel'),
     import('expo-notifications/build/cancelAllScheduledNotificationsAsync'),
     import('expo-notifications/build/dismissAllNotificationsAsync'),
-    import('react-native'),
   ] as const);
 }
 
@@ -67,6 +70,7 @@ export async function preloadIssue32SyntheticPush(): Promise<void> {
  */
 export async function scheduleIssue32SyntheticPush(
   event: Event,
+  platform: NativeDevicePlatform,
 ): Promise<void> {
   if (!isIssue32SyntheticPushFixtureEnabled()) {
     throw new TypeError('The issue-32 local push fixture is disabled.');
@@ -78,10 +82,9 @@ export async function scheduleIssue32SyntheticPush(
     alertChannel,
     pendingNotifications,
     presentedNotifications,
-    reactNative,
   ] = await loadIssue32NotificationModules();
   const permission =
-    reactNative.Platform.OS === 'android'
+    platform === 'android'
       ? permissions.getPermissionsAsync()
       : permissions.requestPermissionsAsync({
           ios: { allowAlert: true, allowBadge: true, allowSound: true },

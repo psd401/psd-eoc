@@ -92,7 +92,7 @@ function createRuntime(): AuthRuntime {
     return Object.freeze({
       controller: new MobileAuthController({
         api: fixture.api,
-        authenticatedApi: createIssue21SyntheticFixtureTransport(),
+        authenticatedApi: createIssue21SyntheticFixtureTransport(Platform.OS),
         storage: fixture.storage,
         localAuthenticator: isIssue32SyntheticAuthenticatorEnabled()
           ? createIssue32SyntheticAuthenticator()

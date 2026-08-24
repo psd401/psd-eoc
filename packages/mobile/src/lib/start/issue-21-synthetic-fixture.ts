@@ -726,9 +726,11 @@ export function createIssue21SyntheticAuthFixture(
  * Authentication remains owned by MobileAuthController before this seam runs.
  */
 export function createIssue21SyntheticFixtureTransport(
+  rawPlatform: NativeDevicePlatform,
   now: () => Date = () => new Date(),
 ): AuthenticatedRequestTransport {
   requireIssue21SyntheticFixture();
+  const platform = NativeDevicePlatformSchema.parse(rawPlatform);
   const issue32SyntheticPushPreload =
     process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE === 'issue-32'
       ? import('./issue-32-synthetic-push')
@@ -905,7 +907,10 @@ export function createIssue21SyntheticFixtureTransport(
             if (outcome.kind === 'failed') {
               throw outcome.error;
             }
-            await outcome.module.scheduleIssue32SyntheticPush(result.event);
+            await outcome.module.scheduleIssue32SyntheticPush(
+              result.event,
+              platform,
+            );
           }
         }
         return input.schema.parse(result);

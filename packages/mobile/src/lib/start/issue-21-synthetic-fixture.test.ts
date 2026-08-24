@@ -57,6 +57,7 @@ afterAll(() => {
 
 function fixtureRequest(): StartAuthenticatedRequest {
   const transport = createIssue21SyntheticFixtureTransport(
+    'ios',
     () => new Date(FIXTURE_NOW),
   );
   return (input) =>
@@ -86,6 +87,7 @@ function selection(
 describe('issue-21 synthetic Maestro transport', () => {
   test('is unavailable outside an explicitly flagged development build', async () => {
     const transport = createIssue21SyntheticFixtureTransport(
+      'ios',
       () => new Date(FIXTURE_NOW),
     );
     developmentGlobal.__DEV__ = false;
@@ -174,6 +176,7 @@ describe('issue-21 synthetic Maestro transport', () => {
       () => new Date(FIXTURE_NOW),
     );
     const fixtureTransport = createIssue21SyntheticFixtureTransport(
+      'ios',
       () => new Date(FIXTURE_NOW),
     );
     let authenticationCount = 0;
@@ -398,6 +401,7 @@ describe('issue-21 synthetic Maestro transport', () => {
 
   test('fails closed for real, staff, or unexpected operational requests', async () => {
     const transport = createIssue21SyntheticFixtureTransport(
+      'ios',
       () => new Date(FIXTURE_NOW),
     );
 
