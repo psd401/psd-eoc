@@ -1,0 +1,11 @@
+appId: ${APP_ID}
+name: Issue 32 - normalize the iOS simulator home state
+tags: [issue-32, synthetic-only, ios]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse simulator preparation outside the synthetic harness
+- swipe:
+    start: 50%, 95%
+    end: 50%, 30%
+    duration: 500

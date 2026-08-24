@@ -1,4 +1,4 @@
-appId: net.psd401.eoc
+appId: ${APP_ID}
 name: Issue 21 - join an existing synthetic drill
 tags:
   - issue-21

@@ -1,0 +1,22 @@
+appId: ${APP_ID}
+name: Issue 32 - finish synthetic drill activation
+tags: [issue-32, synthetic-only]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse to run outside the synthetic mobile harness
+- runFlow:
+    when:
+      platform: ios
+    commands:
+      - tapOn:
+          text: 'Allow'
+          waitUntilVisible: true
+          optional: true
+- extendedWaitUntil:
+    visible:
+      id: 'issue-21-activation-result'
+    timeout: 15000
+- assertVisible: 'Drill started'
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- pressKey: HOME

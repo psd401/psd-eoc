@@ -1,11 +1,15 @@
-import { expect, test } from '@playwright/test';
+import { EventTransitionSchema } from '@psd-eoc/contracts';
+import { expect, test, type Page } from '@playwright/test';
 import { and, asc, eq } from 'drizzle-orm';
 
 import { createDatabaseClient, readDatabaseConfig } from '../db/client';
 import { securityAuditEntries } from '../db/schema';
 import { evidencePath, expectAxeClean, readFixture } from './support';
 
-async function lifecycleAudit(action: 'all-clear-event' | 'close-event') {
+async function lifecycleAudit(
+  action: 'all-clear-event' | 'close-event',
+  requestId: string,
+) {
   const connection = createDatabaseClient(readDatabaseConfig());
   try {
     return await connection.db
@@ -21,12 +25,27 @@ async function lifecycleAudit(action: 'all-clear-event' | 'close-event') {
         and(
           eq(securityAuditEntries.action, action),
           eq(securityAuditEntries.outcome, 'success'),
+          eq(securityAuditEntries.requestId, requestId),
         ),
       )
       .orderBy(asc(securityAuditEntries.sequence));
   } finally {
     await connection.close();
   }
+}
+
+function waitForLifecycleResponse(
+  page: Page,
+  eventId: string,
+  operation: 'all-clear' | 'close',
+) {
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/events/${eventId}/api` &&
+      (response.request().postDataJSON() as { operation?: unknown })
+        .operation === operation,
+  );
 }
 
 test.describe('synthetic-drill-lifecycle', () => {
@@ -126,7 +145,17 @@ test.describe('synthetic-drill-lifecycle', () => {
         name: 'Issue all-clear and notify',
       }),
     ).toBeFocused();
+    const allClearResponsePromise = waitForLifecycleResponse(
+      page,
+      fixture.eventId,
+      'all-clear',
+    );
     await page.keyboard.press('Enter');
+    const allClearResponse = await allClearResponsePromise;
+    expect(allClearResponse.status()).toBe(200);
+    const allClearTransition = EventTransitionSchema.parse(
+      ((await allClearResponse.json()) as { transition?: unknown }).transition,
+    );
     await expect(
       page.getByText('All-clear issued', { exact: true }).first(),
     ).toBeVisible();
@@ -134,7 +163,10 @@ test.describe('synthetic-drill-lifecycle', () => {
       page.getByRole('button', { name: 'Review event close' }),
     ).toBeVisible();
 
-    const allClearAudits = await lifecycleAudit('all-clear-event');
+    const allClearAudits = await lifecycleAudit(
+      'all-clear-event',
+      allClearTransition.requestId,
+    );
     expect(allClearAudits).toHaveLength(1);
     expect(allClearAudits[0]).toMatchObject({
       category: 'capability-execution',
@@ -173,12 +205,25 @@ test.describe('synthetic-drill-lifecycle', () => {
     await expect(
       closeDialog.getByRole('button', { name: 'Close event' }),
     ).toBeFocused();
+    const closeResponsePromise = waitForLifecycleResponse(
+      page,
+      fixture.eventId,
+      'close',
+    );
     await page.keyboard.press('Enter');
+    const closeResponse = await closeResponsePromise;
+    expect(closeResponse.status()).toBe(200);
+    const closeTransition = EventTransitionSchema.parse(
+      ((await closeResponse.json()) as { transition?: unknown }).transition,
+    );
     await expect(
       page.getByText('Closed', { exact: true }).first(),
     ).toBeVisible();
 
-    const closeAudits = await lifecycleAudit('close-event');
+    const closeAudits = await lifecycleAudit(
+      'close-event',
+      closeTransition.requestId,
+    );
     expect(closeAudits).toHaveLength(1);
     expect(closeAudits[0]).toMatchObject({
       category: 'capability-execution',

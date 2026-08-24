@@ -51,7 +51,6 @@ const channelSource = await Bun.file(
 ).text();
 for (const requirement of [
   'AndroidImportance.MAX',
-  "sound: 'default'",
   'enableVibrate: true',
   'AndroidNotificationVisibility.PUBLIC',
 ] as const) {
@@ -60,6 +59,10 @@ for (const requirement of [
     `Android alert channel is missing ${requirement}.`,
   );
 }
+assert(
+  !/\bsound\s*:/u.test(channelSource),
+  'Android alert channel must use the system default sound, not a custom resource name.',
+);
 
 const runtimeSources: Array<Readonly<{ path: string; source: string }>> = [];
 const reviewedNotificationModules = new Set([
@@ -74,6 +77,12 @@ const reviewedNotificationModules = new Set([
   'expo-notifications/build/getNotificationChannelAsync',
   'expo-notifications/build/setNotificationChannelAsync',
 ]);
+const syntheticFixtureNotificationModules = new Set([
+  'expo-notifications/build/cancelAllScheduledNotificationsAsync',
+  'expo-notifications/build/dismissAllNotificationsAsync',
+  'expo-notifications/build/scheduleNotificationAsync',
+]);
+const syntheticFixturePath = '/src/lib/start/issue-32-synthetic-push.ts';
 const runtimeGlob = new Bun.Glob('src/**/*.{ts,tsx}');
 for await (const path of runtimeGlob.scan({
   absolute: true,
@@ -83,6 +92,9 @@ for await (const path of runtimeGlob.scan({
   runtimeSources.push({ path, source: await Bun.file(path).text() });
 }
 for (const { path, source } of runtimeSources) {
+  const isIssue32SyntheticFixture = path
+    .replaceAll('\\', '/')
+    .endsWith(syntheticFixturePath);
   const imports = source.matchAll(
     /(?:from\s+|import\s*\()\s*(['"])(expo-notifications[^'"]*)\1/gu,
   );
@@ -98,7 +110,9 @@ for (const { path, source } of runtimeSources) {
       `${path} must not load Expo's import-time automatic-registration path.`,
     );
     assert(
-      reviewedNotificationModules.has(specifier),
+      reviewedNotificationModules.has(specifier) ||
+        (isIssue32SyntheticFixture &&
+          syntheticFixtureNotificationModules.has(specifier)),
       `${path} imports an unreviewed expo-notifications runtime boundary: ${specifier}.`,
     );
   }
@@ -116,6 +130,10 @@ assert(
     'disableExpoAutoRegistration(serverRegistrationModule)',
   ),
   'Expo automatic server registration must be disabled before listener setup.',
+);
+assert(
+  nativePortSource.includes('channel.sound !== null'),
+  'Android permission checks must reject a muted alert channel.',
 );
 assert(
   DISABLED_EXPO_AUTO_REGISTRATION_INFO === '{"isEnabled":false}',

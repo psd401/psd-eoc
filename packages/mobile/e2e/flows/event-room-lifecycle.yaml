@@ -1,0 +1,56 @@
+appId: ${APP_ID}
+name: Issue 32 - post text and all-clear the opened drill
+tags: [issue-32, synthetic-only, event-room]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse lifecycle mutations outside the synthetic harness
+- extendedWaitUntil:
+    visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
+    timeout: 30000
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertNotVisible: '^REAL INCIDENT$'
+- assertVisible: 'Status: active'
+- tapOn: 'Timeline text update.*'
+- inputText: 'Synthetic mobile issue 32 update.'
+- hideKeyboard
+- tapOn:
+    text: 'Post'
+    enabled: true
+- extendedWaitUntil:
+    visible: '.*Synthetic mobile issue 32 update.*'
+    timeout: 15000
+- tapOn:
+    text: 'All-clear…'
+    enabled: true
+- extendedWaitUntil:
+    visible:
+      id: 'all-clear-preview'
+    timeout: 15000
+- assertVisible: 'Confirm all-clear'
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertVisible: '.*Integration mocked.*'
+- scrollUntilVisible:
+    element:
+      id: 'lifecycle-confirmation-input'
+    direction: DOWN
+- tapOn:
+    id: 'lifecycle-confirmation-input'
+- inputText: 'ALL CLEAR'
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      id: 'lifecycle-confirm-button'
+    direction: DOWN
+- assertVisible:
+    id: 'lifecycle-confirm-button'
+    enabled: true
+- tapOn:
+    id: 'lifecycle-confirm-button'
+    enabled: true
+- extendedWaitUntil:
+    visible: 'Status: all clear'
+    timeout: 15000
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertNotVisible: '^REAL INCIDENT$'
+- assertVisible: '.*Synthetic mobile issue 32 update.*'
