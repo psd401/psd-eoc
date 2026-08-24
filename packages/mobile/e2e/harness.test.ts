@@ -110,15 +110,9 @@ describe('issue-32 mobile E2E harness', () => {
     ).text();
     expect(iosNotification).toStartWith('appId: ${SYSTEM_APP_ID}\n');
     expect(iosNotification).toContain(
-      "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
+      "- swipe:\n    from:\n      text: '\\[DRILL\\] Synthetic earthquake drill'\n    direction: RIGHT",
     );
-    expect(
-      iosNotification.split(
-        "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
-      ),
-    ).toHaveLength(3);
-    expect(iosNotification).not.toContain("visible: 'Open'");
-    expect(iosNotification).not.toContain('- swipe:');
+    expect(iosNotification).toContain("visible: 'Open'");
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
     const lifecycle = await Bun.file(

@@ -78,17 +78,17 @@ export async function scheduleIssue32SyntheticPush(
     pendingNotifications,
     presentedNotifications,
   ] = await loadIssue32NotificationModules();
-  const permission = await permissions.requestPermissionsAsync({
-    android: {},
-    ios: { allowAlert: true, allowBadge: true, allowSound: true },
-  });
-  if (permission.granted !== true) {
-    throw new Error('Synthetic notification permission was not granted.');
-  }
-  await Promise.all([
+  const [permission] = await Promise.all([
+    permissions.requestPermissionsAsync({
+      android: {},
+      ios: { allowAlert: true, allowBadge: true, allowSound: true },
+    }),
     pendingNotifications.cancelAllScheduledNotificationsAsync(),
     presentedNotifications.dismissAllNotificationsAsync(),
   ]);
+  if (permission.granted !== true) {
+    throw new Error('Synthetic notification permission was not granted.');
+  }
   await scheduler.scheduleNotificationAsync({
     content: {
       ...issue32SyntheticPushContent(event),
