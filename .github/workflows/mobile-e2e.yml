@@ -122,6 +122,25 @@ jobs:
       - name: Verify the provider-free harness
         run: bun run test:e2e:mobile:verify
 
+      - name: Build the synthetic Android development client
+        working-directory: packages/mobile
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs=-Xmx4096m
+            -Dorg.gradle.workers.max=2
+        run: |
+          set -euo pipefail
+          bunx expo prebuild --platform android --no-install
+          ./android/gradlew \
+            app:assembleDebug \
+            -x lint \
+            -x test \
+            --configure-on-demand \
+            --no-daemon \
+            -PreactNativeArchitectures=x86_64 \
+            -PreactNativeDevServerPort=8081
+          test -f android/app/build/outputs/apk/debug/app-debug.apk
+
       - name: Create an Android 35 emulator
         run: |
           set -euo pipefail
@@ -136,6 +155,12 @@ jobs:
           "$sdkmanager_bin" --install platform-tools "$system_image"
           test -x "$emulator_bin"
           test -x "$platform_tools_dir/adb"
+          available_kib="$(df --output=avail -k / | tail -n 1)"
+          if (( available_kib < 8 * 1024 * 1024 )); then
+            df -h /
+            echo "Android E2E needs at least 8 GiB free after the native build and system-image install." >&2
+            exit 1
+          fi
           printf '%s\n' "$platform_tools_dir" >> "$GITHUB_PATH"
           export PATH="$platform_tools_dir:$PATH"
           mkdir -p "$avd_home"
@@ -189,20 +214,19 @@ jobs:
           rm -f "$archive"
           test -x "$root/maestro/bin/maestro"
           echo "$root/maestro/bin" >> "$GITHUB_PATH"
-          available_kib="$(df --output=avail -k / | tail -n 1)"
-          if (( available_kib < 8 * 1024 * 1024 )); then
-            df -h /
-            echo "Android E2E needs at least 8 GiB free before the native build." >&2
-            exit 1
-          fi
+
+      - name: Install the synthetic Android development client
+        run: |
+          set -euo pipefail
+          android_apk="$GITHUB_WORKSPACE/packages/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$android_apk"
+          adb install -r "$android_apk"
 
       - name: Run Android drill lifecycle
         run: bun packages/mobile/e2e/run.ts android
         env:
-          GRADLE_OPTS: >-
-            -Dorg.gradle.jvmargs=-Xmx4096m
-            -Dorg.gradle.workers.max=1
           PSD_EOC_MOBILE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/mobile-e2e-android
+          PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD: 'true'
 
       - name: Upload Android evidence
         if: always()

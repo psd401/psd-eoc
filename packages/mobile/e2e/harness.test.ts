@@ -173,6 +173,20 @@ describe('issue-32 mobile E2E harness', () => {
       resolve(mobileRoot, '../../.github/workflows/mobile-e2e.yml'),
     ).text();
     expect(workflow).toContain('-Dorg.gradle.jvmargs=-Xmx4096m');
-    expect(workflow).toContain('-Dorg.gradle.workers.max=1');
+    expect(workflow).toContain('-Dorg.gradle.workers.max=2');
+    expect(workflow).toContain('-PreactNativeArchitectures=x86_64');
+    expect(workflow).toContain('--no-daemon');
+    expect(workflow).not.toContain('--build-cache');
+    expect(workflow).toContain('adb install -r "$android_apk"');
+    expect(workflow).toContain("PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD: 'true'");
+    expect(workflow.indexOf('app:assembleDebug')).toBeLessThan(
+      workflow.indexOf('Create an Android 35 emulator'),
+    );
+    expect(
+      workflow.indexOf('"$sdkmanager_bin" --install platform-tools'),
+    ).toBeLessThan(workflow.indexOf('available_kib='));
+    expect(workflow.indexOf('available_kib=')).toBeLessThan(
+      workflow.indexOf('-avd issue32_api35'),
+    );
   });
 });
