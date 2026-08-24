@@ -28,10 +28,8 @@ import {
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { parseSecurityAuditFact } from '../audit/model';
-import {
-  createDrizzleSecurityAuditRepository,
-  SecurityAuditRequestConflictError,
-} from '../audit';
+import { createDrizzleSecurityAuditRepository } from '../audit';
+import { AdminCapabilityError } from '../capabilities/admin';
 import {
   DrizzleEventTypeStore,
   createDrizzleEventTypeCapabilityStore,
@@ -242,9 +240,14 @@ describeWithDatabase('atomic agent event-type database adapter', () => {
       }),
     );
 
-    await expect(
-      executeCreate(db, createInput(key), metadata),
-    ).rejects.toBeInstanceOf(SecurityAuditRequestConflictError);
+    await expect(executeCreate(db, createInput(key), metadata)).rejects.toEqual(
+      expect.objectContaining({
+        name: AdminCapabilityError.name,
+        code: 'CONFLICT',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 409,
+      }),
+    );
 
     const [identityRows, ledgerRows, auditRows] = await Promise.all([
       db.select().from(eventTypes).where(eq(eventTypes.key, key)),

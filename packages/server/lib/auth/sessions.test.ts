@@ -1000,7 +1000,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const verifiedAt = new Date(snapshotAt.getTime() + 1_000);
     const rotatedAt = new Date(snapshotAt.getTime() + 2_000);
     const expiresAt = new Date(snapshotAt.getTime() + 3 * 60 * 60 * 1_000);
-    const presentedToken = `issue-23-concurrent-refresh-presented-${suffix}`;
+    const presentedToken = suffix.replaceAll('-', '').repeat(2);
     const presentedTokenDigest = digest(presentedToken);
     const googleSubject = `issue-23-concurrent-refresh-${suffix}`;
 
