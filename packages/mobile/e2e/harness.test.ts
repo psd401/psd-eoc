@@ -112,6 +112,11 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosNotification).toContain(
       "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
     );
+    expect(
+      iosNotification.split(
+        "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
+      ),
+    ).toHaveLength(3);
     expect(iosNotification).not.toContain("visible: 'Open'");
     expect(iosNotification).not.toContain('- swipe:');
     expect(iosNotification).not.toContain('launchApp');

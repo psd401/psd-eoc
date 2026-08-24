@@ -11,6 +11,11 @@ tags: [issue-32, synthetic-only, notification, ios]
 - assertVisible: '.*Synthetic recipients only.*'
 - assertNotVisible: '.*\[INCIDENT\].*'
 - tapOn: '\[DRILL\] Synthetic earthquake drill'
+- runFlow:
+    when:
+      visible: '\[DRILL\] Synthetic earthquake drill'
+    commands:
+      - tapOn: '\[DRILL\] Synthetic earthquake drill'
 - extendedWaitUntil:
     visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
     timeout: 30000
