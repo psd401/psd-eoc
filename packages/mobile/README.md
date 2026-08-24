@@ -126,7 +126,7 @@ The profiles in `eas.json` are:
 - `preview`: internal iOS and Android distribution builds.
 - `production`: store-signed artifacts for TestFlight and Google Play.
 
-Remote updates are disabled for app/runtime 1.0.3. No profile may check,
+Remote updates are disabled for app/runtime 1.0.4. No profile may check,
 download, publish, or route an OTA update. JavaScript changes use a new app
 version and store build until a separately scoped change provisions district-
 held update signing, embeds its public certificate in a new runtime, and adds a
