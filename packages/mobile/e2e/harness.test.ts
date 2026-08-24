@@ -80,6 +80,11 @@ describe('issue-32 mobile E2E harness', () => {
 
     const start = await Bun.file(resolve(flowRoot, 'start-drill.yaml')).text();
     expect(start).toContain(
+      "visible: 'Continue|Synthetic test mode\\. Synthetic recipients only\\. No live provider sends\\.'",
+    );
+    expect(start).toContain("text: '^Continue$'");
+    expect(start).toContain('timeout: 90000');
+    expect(start).toContain(
       "- tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'",
     );
     expect(start.match(/id: 'issue-21-drill-event-type'/gu)).toHaveLength(2);
@@ -114,7 +119,9 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain("'emu', 'avd', 'name'");
     expect(runner).toContain("await maestro('activation-result.yaml')");
     expect(runner).toContain("const metroUrl = 'http://127.0.0.1:8081'");
+    expect(runner).toContain("'simctl', 'launch', deviceId, appId");
     expect(runner).toContain('await openIosDevelopmentClient');
+    expect(runner).toContain('iOS mobile E2E cannot skip the native build');
     expect(runner).not.toContain('http://10.0.2.2:8081');
   });
 });

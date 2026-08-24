@@ -85,6 +85,7 @@ async function command(
 
 async function openIosDevelopmentClient(
   deviceId: string,
+  appId: string,
   developmentUrl: string,
 ): Promise<void> {
   const arguments_ = ['xcrun', 'simctl', 'openurl', deviceId, developmentUrl];
@@ -93,6 +94,10 @@ async function openIosDevelopmentClient(
     attempt <= IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS;
     attempt += 1
   ) {
+    // SpringBoard can report a successful URL open while leaving the home
+    // screen in front. Launch the config-derived client before each bounded
+    // URL attempt so a successful dispatch has a foreground recipient.
+    await command(['xcrun', 'simctl', 'launch', deviceId, appId]);
     try {
       await command(arguments_);
       return;
@@ -266,12 +271,15 @@ async function capture(name: string): Promise<void> {
   await Bun.write(destination, bytes);
 }
 
-if (process.env.PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD === 'true') {
-  if (platform === 'ios') {
-    await deviceCommand(['appinfo', deviceId, identity.appId]);
-  } else {
-    await deviceCommand(['shell', 'pm', 'path', identity.appId]);
-  }
+const skipNativeBuild =
+  process.env.PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD === 'true';
+if (skipNativeBuild && platform === 'ios') {
+  throw new Error(
+    'iOS mobile E2E cannot skip the native build because the installed development client must be created by this exact synthetic run.',
+  );
+}
+if (skipNativeBuild) {
+  await deviceCommand(['shell', 'pm', 'path', identity.appId]);
 } else {
   if (platform === 'android' && androidExpoName === undefined) {
     throw new Error('The Android emulator AVD name was not resolved.');
@@ -384,7 +392,7 @@ try {
     // A recently exercised hosted simulator can transiently time out while
     // SpringBoard dispatches the development-client URL. Keep this bounded,
     // but tolerate that simulator-level flake before starting Maestro.
-    await openIosDevelopmentClient(deviceId, developmentUrl);
+    await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);
   } else {
     await deviceCommand([
       'shell',
