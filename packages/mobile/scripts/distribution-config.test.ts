@@ -116,6 +116,14 @@ describe('mobile distribution configuration', () => {
     });
   });
 
+  test('can distribute reviewed Android builds to the existing internal testers', () => {
+    expect(easConfig.submit.internal.android).toEqual({
+      track: 'internal',
+      releaseStatus: 'completed',
+      changesNotSentForReview: true,
+    });
+  });
+
   test('pins the verified App Store identity and separate write approvals', () => {
     expect(easConfig.submit.production.ios).toEqual({
       ascAppId: '6801607849',
