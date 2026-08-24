@@ -118,11 +118,13 @@ describe('issue-32 mobile E2E harness', () => {
     const iosReveal = await Bun.file(
       resolve(flowRoot, 'reveal-push-ios.yaml'),
     ).text();
-    expect(iosReveal).toContain('start: 50%, 5%');
+    expect(iosReveal).toContain('start: 25%, 1%');
+    expect(iosReveal).toContain('start: 50%, 1%');
+    expect(iosReveal).toContain('start: 35%, 1%');
     expect(iosReveal).toContain(
       "notVisible: '\\[DRILL\\] Synthetic earthquake drill'",
     );
-    expect(iosReveal.match(/end: 50%, (85|90)%/gu)).toHaveLength(2);
+    expect(iosReveal.match(/end: (25|35|50)%, (80|85|90)%/gu)).toHaveLength(3);
     const lifecycle = await Bun.file(
       resolve(flowRoot, 'event-room-lifecycle.yaml'),
     ).text();
