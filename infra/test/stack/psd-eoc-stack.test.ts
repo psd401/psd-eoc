@@ -170,6 +170,7 @@ const app = new App({
     'psdEoc:hostedDomain': 'example.invalid',
     'psdEoc:iosBundleId': 'invalid.example.eoc',
     'psdEoc:organizationName': 'Example School District',
+    'psdEoc:displayTimeZone': 'America/New_York',
   },
 });
 const stack = new PsdEocStack(app, STACK_NAME, {
@@ -224,6 +225,7 @@ describe('deployment boundary', () => {
             'psdEoc:hostedDomain': 'example.invalid',
             'psdEoc:iosBundleId': 'invalid.example.eoc',
             'psdEoc:organizationName': organizationName,
+            'psdEoc:displayTimeZone': 'America/New_York',
           }[key];
         },
       });
@@ -273,6 +275,7 @@ describe('deployment boundary', () => {
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
               'psdEoc:organizationName': 'Example School District',
+              'psdEoc:displayTimeZone': 'America/New_York',
             },
           }),
           'WrongAccount',
@@ -291,6 +294,7 @@ describe('deployment boundary', () => {
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
               'psdEoc:organizationName': 'Example School District',
+              'psdEoc:displayTimeZone': 'America/New_York',
             },
           }),
           'WrongRegion',
@@ -314,6 +318,7 @@ describe('deployment boundary', () => {
           'psdEoc:hostedDomain': 'example.invalid',
           'psdEoc:iosBundleId': 'invalid.example.eoc',
           'psdEoc:organizationName': 'Example School District',
+          'psdEoc:displayTimeZone': 'America/New_York',
         },
       });
       const partitionStack = new PsdEocStack(
@@ -945,6 +950,7 @@ describe('App Runner runtime safety boundary', () => {
         'DELIVERY_QUEUE_URL',
         'NODE_ENV',
         'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
+        'PSD_EOC_DISPLAY_TIME_ZONE',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
         'PSD_EOC_ORGANIZATION_NAME',
@@ -971,6 +977,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('PSD_EOC_ORGANIZATION_NAME')).toBe(
       'Example School District',
     );
+    expect(variables.get('PSD_EOC_DISPLAY_TIME_ZONE')).toBe('America/New_York');
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
     expect(variables.get('PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('OperationsAlarmTopic'),

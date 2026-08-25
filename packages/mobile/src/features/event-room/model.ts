@@ -3,6 +3,8 @@ import {
   EventSchema,
   JournalEntryReadProjectionSchema,
   LocationPayloadSchema,
+  hasSameImmutableEventIdentity,
+  mergeJournalEntryReadProjections,
   type Event,
   type EventRoomHeader,
   type EventRoomSyncResult,
@@ -117,25 +119,8 @@ export function journalEntryActionEligibility(
   return Object.freeze({ correction, redaction });
 }
 
-function immutableEventIdentity(event: Event): string {
-  return JSON.stringify({
-    id: event.id,
-    facilityId: event.facilityId,
-    kind: event.kind,
-    templateMode: event.templateMode,
-    eventTypeVersion: event.eventTypeVersion,
-    rosterSnapshotId: event.rosterSnapshotId,
-    rosterPopulation: event.rosterPopulation,
-    createdBy: event.createdBy,
-    createdAt: event.createdAt,
-    correctionOfEventId: event.correctionOfEventId,
-    correctionReason: event.correctionReason,
-    activationAuthorization: event.activationAuthorization,
-  });
-}
-
 function assertSameEventIdentity(current: Event, candidate: Event): void {
-  if (immutableEventIdentity(current) !== immutableEventIdentity(candidate)) {
+  if (!hasSameImmutableEventIdentity(current, candidate)) {
     throw new Error(
       'PSD EOC returned event identity or classification that does not match this room.',
     );
@@ -184,96 +169,6 @@ function assertSameHeader(
   }
 }
 
-function mergeEntries(
-  existing: readonly JournalEntryReadProjection[],
-  incoming: readonly JournalEntryReadProjection[],
-): readonly JournalEntryReadProjection[] {
-  const byId = new Map(existing.map((entry) => [entry.entry.id, entry]));
-  for (const projection of incoming) {
-    const parsed = JournalEntryReadProjectionSchema.parse(projection);
-    const prior = byId.get(parsed.entry.id);
-    if (
-      prior !== undefined &&
-      JSON.stringify(prior) !== JSON.stringify(parsed)
-    ) {
-      const visibleToRedacted =
-        prior.visibility === 'visible' &&
-        parsed.visibility === 'redacted' &&
-        JSON.stringify(redactProjection(prior)) === JSON.stringify(parsed);
-      if (!visibleToRedacted) {
-        throw new Error(
-          'An immutable timeline entry changed after it was read.',
-        );
-      }
-    }
-    byId.set(parsed.entry.id, parsed);
-  }
-
-  // A live delta carries the append-only redaction entry, not a rewritten
-  // target row. Hide the target locally as soon as that provenance arrives.
-  for (const projection of byId.values()) {
-    const supersession = projection.entry.supersedes;
-    if (supersession?.kind !== 'redaction') continue;
-    const target = byId.get(supersession.entryId);
-    if (
-      target === undefined ||
-      target.entry.sequence !== supersession.entrySequence
-    ) {
-      continue;
-    }
-    byId.set(target.entry.id, redactProjection(target));
-  }
-  const merged = [...byId.values()].sort((left, right) => {
-    const sequence = left.entry.sequence - right.entry.sequence;
-    return sequence === 0
-      ? left.entry.id.localeCompare(right.entry.id)
-      : sequence;
-  });
-  for (let index = 1; index < merged.length; index += 1) {
-    const previous = merged[index - 1];
-    const current = merged[index];
-    if (
-      previous !== undefined &&
-      current !== undefined &&
-      previous.entry.sequence === current.entry.sequence
-    ) {
-      throw new Error('The event timeline contains a duplicate sequence.');
-    }
-  }
-  return Object.freeze(merged);
-}
-
-function redactProjection(
-  projection: JournalEntryReadProjection,
-): JournalEntryReadProjection {
-  if (projection.visibility === 'redacted') return projection;
-  const {
-    id,
-    eventId,
-    sequence,
-    kind,
-    author,
-    source,
-    serverTime,
-    clientTime,
-    supersedes,
-  } = projection.entry;
-  return JournalEntryReadProjectionSchema.parse({
-    visibility: 'redacted',
-    entry: {
-      id,
-      eventId,
-      sequence,
-      kind,
-      author,
-      source,
-      serverTime,
-      clientTime,
-      supersedes,
-    },
-  });
-}
-
 /** Applies one canonical page without replacing immutable history. */
 export function applyEventRoomPage(
   model: EventRoomModel,
@@ -310,7 +205,7 @@ export function applyEventRoomPage(
   EventSchema.parse(nextEvent);
   EventRoomHeaderSchema.parse(nextHeader);
 
-  const entries = mergeEntries(model.entries, page.entries);
+  const entries = mergeJournalEntryReadProjections(model.entries, page.entries);
   const added = entries.length - model.entries.length;
   return Object.freeze({
     event: nextEvent,
@@ -351,7 +246,7 @@ export function applyConfirmedMutation(
       }
     }
   }
-  const merged = mergeEntries(model.entries, entries);
+  const merged = mergeJournalEntryReadProjections(model.entries, entries);
   return Object.freeze({
     ...model,
     event: nextEvent,

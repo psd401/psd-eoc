@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   EventRoom,
+  type LocationDraft,
   PrivatePhotoLoadCoordinator,
   eventRoomPollDelay,
   locationPayloadFromDraft,
@@ -232,6 +233,7 @@ function render(
       apiUrl={`/events/${event.id}/api`}
       authorDisplayName="Synthetic Event Room Operator"
       csrfCookieName="__Host-psd-eoc-csrf"
+      displayTimeZone="America/New_York"
       event={event}
       eventTypeLabel={
         event.templateMode === 'real' ? 'Lockdown' : 'Lockdown Drill'
@@ -340,7 +342,7 @@ describe('event room server-rendered safety and history state', () => {
         accuracyMeters: '23.4',
         label: ' North staff entrance ',
         reason: '',
-      }),
+      } satisfies LocationDraft),
     ).toEqual({
       state: 'known',
       latitude: 47.385612,
@@ -699,6 +701,7 @@ describe('event room server-rendered safety and history state', () => {
         apiUrl={`/events/${IDS.event}/api`}
         authorDisplayName="Synthetic Event Room Operator"
         csrfCookieName="__Host-psd-eoc-csrf"
+        displayTimeZone="America/New_York"
         event={activeEvent('real')}
         eventTypeLabel="Lockdown"
         exportSummaryPath={`/records/export/events/${encodeURIComponent(IDS.event)}`}

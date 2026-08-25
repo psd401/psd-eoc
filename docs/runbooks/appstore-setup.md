@@ -258,6 +258,11 @@ below are root-relative.
 Set credentials without printing the private key:
 
 ```sh
+export ASC_APP_NAME='PSD EOC'
+export ASC_APP_SKU='PSD-EOC-IOS'
+export ASC_BUNDLE_ID='net.psd401.eoc'
+export ASC_INTERNAL_GROUP_NAME='District Technology'
+export ASC_EXTERNAL_GROUP_NAME='Staff'
 export ASC_KEY_ID='KEY_ID'
 export ASC_ISSUER_ID='ISSUER_ID'
 export ASC_KEY_PATH='/secure/temporary/AuthKey_KEY_ID.p8'
@@ -298,7 +303,7 @@ bun run scripts/ops/appstore/asc.ts sync \
   --external-testers /secure/temporary/staff-testers.csv \
   --review-info /secure/temporary/beta-review.json \
   --apply \
-  --confirm-apply net.psd401.eoc \
+  --confirm-apply "$ASC_BUNDLE_ID" \
   --confirm-plan 'sha256:COPY_EXACT_PLAN_DIGEST'
 ```
 
@@ -537,7 +542,7 @@ bun run scripts/ops/appstore/asc.ts sync \
   --review-info /secure/temporary/beta-review.json \
   --build 'EXACT_BUILD_ID' \
   --apply \
-  --confirm-apply net.psd401.eoc \
+  --confirm-apply "$ASC_BUNDLE_ID" \
   --confirm-plan 'sha256:COPY_EXACT_PLAN_DIGEST'
 ```
 
@@ -575,7 +580,7 @@ bun run scripts/ops/appstore/asc.ts sync \
   --build 'EXACT_BUILD_ID' \
   --submit-beta-review \
   --apply \
-  --confirm-apply net.psd401.eoc \
+  --confirm-apply "$ASC_BUNDLE_ID" \
   --confirm-plan 'sha256:COPY_EXACT_PLAN_DIGEST'
 ```
 

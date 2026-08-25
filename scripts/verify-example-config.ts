@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { readDatabaseConfig } from '../packages/server/db/client';
 import {
   applicationOrigin,
+  displayTimeZone,
   iosBundleId,
   organizationName,
   staffHostedDomain,
@@ -42,6 +43,7 @@ export function validateExampleConfiguration(
   const origin = new URL(applicationOrigin(environment));
   const hostedDomain = staffHostedDomain(environment);
   const bundleId = iosBundleId(environment);
+  displayTimeZone(environment);
   organizationName(environment);
   if (
     !origin.hostname.endsWith('.invalid') ||
