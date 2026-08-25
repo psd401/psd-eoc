@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { validateExampleConfiguration } from './verify-example-config';
+import {
+  parseExampleConfiguration,
+  validateExampleConfiguration,
+} from './verify-example-config';
 
 const EXAMPLE = {
   DATABASE_DRIVER: 'postgres',
@@ -33,5 +36,20 @@ describe('synthetic example configuration', () => {
         TEST_DATABASE_URL: 'postgresql://admin@localhost/production',
       }),
     ).toThrow(/name ends in _test/u);
+  });
+
+  test('parses the committed values without inheriting ambient variables', () => {
+    const parsed = parseExampleConfiguration(
+      'DATABASE_DRIVER=postgres\nPSD_EOC_ORGANIZATION_NAME=Example District\n',
+    );
+    expect(parsed).toEqual({
+      DATABASE_DRIVER: 'postgres',
+      PSD_EOC_ORGANIZATION_NAME: 'Example District',
+    });
+    expect(() =>
+      parseExampleConfiguration(
+        'DATABASE_DRIVER=sqlite\nDATABASE_DRIVER=postgres',
+      ),
+    ).toThrow(/unique KEY=value/u);
   });
 });

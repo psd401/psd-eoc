@@ -1,5 +1,7 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+
+import ts from 'typescript';
 
 const REPOSITORY_ROOT = new URL('..', import.meta.url).pathname;
 const PACKAGE_ROOTS = ['packages', 'workers', 'infra', 'scripts'] as const;
@@ -30,16 +32,23 @@ function discoverNamedFiles(
   return found;
 }
 
-function containsTypeScript(directory: string): boolean {
+export function isTypeScriptSource(name: string): boolean {
+  return /(?<!\.d)\.(?:cts|mts|ts|tsx)$/u.test(name);
+}
+
+function discoverTypeScriptSources(
+  directory: string,
+  found: string[] = [],
+): string[] {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (SKIPPED_DIRECTORIES.has(entry.name)) continue;
-      if (containsTypeScript(join(directory, entry.name))) return true;
-    } else if (/\.(?:ts|tsx)$/u.test(entry.name)) {
-      return true;
+      discoverTypeScriptSources(join(directory, entry.name), found);
+    } else if (isTypeScriptSource(entry.name)) {
+      found.push(join(directory, entry.name));
     }
   }
-  return false;
+  return found;
 }
 
 export function workspacePatternMatches(
@@ -69,29 +78,101 @@ export function verifyWorkspaceContract(
       )
     : [];
   const errors: string[] = [];
-
-  for (const packageRoot of PACKAGE_ROOTS) {
+  const manifests = PACKAGE_ROOTS.flatMap((packageRoot) => {
     const absoluteRoot = join(repositoryRoot, packageRoot);
-    for (const manifest of discoverNamedFiles(absoluteRoot, 'package.json')) {
-      const packageDirectory = relative(repositoryRoot, dirname(manifest));
-      const packageDefinition = JSON.parse(readFileSync(manifest, 'utf8')) as {
-        scripts?: Readonly<Record<string, unknown>>;
-      };
-      if (
-        !workspaces.some((pattern) =>
-          workspacePatternMatches(pattern, packageDirectory),
-        )
-      ) {
+    return existsSync(absoluteRoot)
+      ? discoverNamedFiles(absoluteRoot, 'package.json')
+      : [];
+  });
+  const packageDirectories = manifests
+    .map((manifest) => dirname(manifest))
+    .sort((left, right) => right.length - left.length);
+  const sources = PACKAGE_ROOTS.flatMap((packageRoot) => {
+    const absoluteRoot = join(repositoryRoot, packageRoot);
+    return existsSync(absoluteRoot)
+      ? discoverTypeScriptSources(absoluteRoot)
+      : [];
+  });
+  const ownedSources = new Map<string, string[]>();
+  for (const source of sources) {
+    const owner = packageDirectories.find((directory) =>
+      source.startsWith(`${directory}${sep}`),
+    );
+    if (owner === undefined) {
+      errors.push(
+        `${relative(repositoryRoot, source)} is TypeScript without an owning workspace package.`,
+      );
+      continue;
+    }
+    const current = ownedSources.get(owner) ?? [];
+    current.push(source);
+    ownedSources.set(owner, current);
+  }
+
+  for (const manifest of manifests) {
+    const absolutePackageDirectory = dirname(manifest);
+    const packageDirectory = relative(repositoryRoot, absolutePackageDirectory);
+    const packageDefinition = JSON.parse(readFileSync(manifest, 'utf8')) as {
+      scripts?: Readonly<Record<string, unknown>>;
+    };
+    if (
+      !workspaces.some((pattern) =>
+        workspacePatternMatches(pattern, packageDirectory),
+      )
+    ) {
+      errors.push(
+        `${packageDirectory} has package.json but is absent from the root Bun workspaces.`,
+      );
+    }
+    const packageSources = ownedSources.get(absolutePackageDirectory) ?? [];
+    if (
+      packageSources.length > 0 &&
+      typeof packageDefinition.scripts?.typecheck !== 'string'
+    ) {
+      errors.push(
+        `${packageDirectory} contains TypeScript but has no workspace typecheck script.`,
+      );
+    }
+    if (packageSources.length === 0) continue;
+
+    const configPath = join(absolutePackageDirectory, 'tsconfig.json');
+    if (!existsSync(configPath)) {
+      errors.push(
+        `${packageDirectory} contains TypeScript but has no tsconfig.json.`,
+      );
+      continue;
+    }
+    const config = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (config.error !== undefined) {
+      errors.push(
+        `${relative(repositoryRoot, configPath)} cannot be read: ${ts.flattenDiagnosticMessageText(config.error.messageText, '\n')}`,
+      );
+      continue;
+    }
+    const parsed = ts.parseJsonConfigFileContent(
+      config.config,
+      ts.sys,
+      absolutePackageDirectory,
+      undefined,
+      configPath,
+    );
+    if (parsed.errors.length > 0) {
+      errors.push(
+        `${relative(repositoryRoot, configPath)} is invalid: ${parsed.errors
+          .map((error) =>
+            ts.flattenDiagnosticMessageText(error.messageText, '\n'),
+          )
+          .join('; ')}`,
+      );
+      continue;
+    }
+    const compiledFiles = new Set(
+      parsed.fileNames.map((file) => resolve(file)),
+    );
+    for (const source of packageSources) {
+      if (!compiledFiles.has(resolve(source))) {
         errors.push(
-          `${packageDirectory} has package.json but is absent from the root Bun workspaces.`,
-        );
-      }
-      if (
-        containsTypeScript(dirname(manifest)) &&
-        typeof packageDefinition.scripts?.typecheck !== 'string'
-      ) {
-        errors.push(
-          `${packageDirectory} contains TypeScript but has no workspace typecheck script.`,
+          `${relative(repositoryRoot, source)} is not included by ${relative(repositoryRoot, configPath)}.`,
         );
       }
     }

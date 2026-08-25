@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
 
 import {
+  Arn,
+  ArnFormat,
   CfnCondition,
   CfnOutput,
   CfnParameter,
@@ -30,6 +32,7 @@ import {
   aws_sqs as sqs,
 } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
+import { RegionInfo } from 'aws-cdk-lib/region-info';
 import type { Construct } from 'constructs';
 
 import {
@@ -39,9 +42,6 @@ import {
 } from '../config';
 import { configureInfrastructureMonitoring } from '../monitoring';
 import {
-  AWS_ACCOUNT,
-  AWS_ACCOUNT_ALIAS,
-  AWS_REGION,
   DATABASE_NAME,
   DATABASE_PORT,
   DATABASE_SSL_ROOT_CERT,
@@ -63,14 +63,13 @@ import {
   IMAGE_DIGEST_SENTINEL,
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
-  SES_FROM_ADDRESS,
-  SES_IDENTITY_DOMAIN,
   SES_VERIFICATION_REFERENCE,
   readDeploymentIdentity,
   readFacilityContext,
   readSyntheticGroupContext,
   readNeighborhoodContext,
 } from './config';
+import type { DeploymentTarget } from './config';
 
 const SECRET_PREFIX = '/psd-eoc';
 const APP_RUNNER_PORT = '3000';
@@ -78,6 +77,11 @@ const APPLICATION_SUBNET_GROUP_NAME = 'Application';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
 const ACCESS_SYNC_CONTAINER_NAME = 'access-membership-sync';
 const EMAIL_QUEUE_MAX_RECEIVES = 5;
+
+export interface PsdEocStackProps extends StackProps {
+  /** Cloud/provider identity read from deployment configuration. */
+  readonly deploymentTarget: DeploymentTarget;
+}
 
 function secretJsonKeyArn(secret: secretsmanager.Secret, key: string): string {
   return Fn.join('', [secret.secretArn, `:${key}::`]);
@@ -102,9 +106,21 @@ function ecsSecretJsonKey(
  * the single App Runner service. The same stack owns both phases.
  */
 export class PsdEocStack extends Stack {
-  public constructor(scope: Construct, id: string, props: StackProps) {
+  public constructor(scope: Construct, id: string, props: PsdEocStackProps) {
     super(scope, id, props);
     const deploymentIdentity = readDeploymentIdentity(this.node);
+    const {
+      account,
+      accountAlias,
+      monitoringRunbookBaseUrl,
+      region,
+      sesFromAddress,
+      sesIdentityDomain,
+    } = props.deploymentTarget;
+    const partition = RegionInfo.get(region).partition;
+    if (partition === undefined) {
+      throw new Error(`AWS region ${region} has no known ARN partition.`);
+    }
 
     Validations.of(this).acknowledge({
       id: 'CloudFormation-Validate::W3010',
@@ -113,11 +129,11 @@ export class PsdEocStack extends Stack {
     });
 
     if (
-      Stack.of(this).account !== AWS_ACCOUNT ||
-      Stack.of(this).region !== AWS_REGION
+      Stack.of(this).account !== account ||
+      Stack.of(this).region !== region
     ) {
       throw new Error(
-        `PsdEoc must target AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS}) in ${AWS_REGION}.`,
+        `PsdEoc must target AWS account ${account} (${accountAlias}) in ${region}.`,
       );
     }
 
@@ -125,7 +141,7 @@ export class PsdEocStack extends Stack {
     Tags.of(this).add('DataClassification', DATA_CLASSIFICATION);
     Tags.of(this).add('Environment', DEPLOYMENT_ENVIRONMENT);
     Tags.of(this).add('DataScope', 'staff-minimized');
-    Tags.of(this).add('ExpectedAwsAccountAlias', AWS_ACCOUNT_ALIAS);
+    Tags.of(this).add('ExpectedAwsAccountAlias', accountAlias);
     Tags.of(this).add('ManagedBy', 'AWS CDK');
 
     const provisionApplication = new CfnParameter(
@@ -200,7 +216,7 @@ export class PsdEocStack extends Stack {
         // since been copied to /psd-eoc/google-oauth, so the widening buys
         // nothing and only enlarges the set of ARNs CI will accept without
         // question. A wrong path should fail the deploy, not pass validation.
-        allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
+        allowedPattern: `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
         constraintDescription:
           'Use the complete ARN of the reviewed production Google OAuth secret in the approved account and region.',
         description:
@@ -213,7 +229,7 @@ export class PsdEocStack extends Stack {
       this,
       'GoogleGroupsSecretArn',
       {
-        allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+        allowedPattern: `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
         constraintDescription:
           'Use the complete ARN of the reviewed /psd-eoc/google-groups secret in the approved account and region.',
         description:
@@ -354,7 +370,7 @@ export class PsdEocStack extends Stack {
     });
 
     const network = new ec2.Vpc(this, 'DatabaseNetwork', {
-      availabilityZones: [`${AWS_REGION}a`, `${AWS_REGION}b`],
+      availabilityZones: [`${region}a`, `${region}b`],
       ipAddresses: ec2.IpAddresses.cidr('10.43.0.0/24'),
       natGateways: 1,
       // Nothing in this stack uses the VPC default security group. Avoid the
@@ -615,7 +631,7 @@ export class PsdEocStack extends Stack {
       },
       writer: rds.ClusterInstance.serverlessV2('Writer', {
         autoMinorVersionUpgrade: true,
-        availabilityZone: `${AWS_REGION}a`,
+        availabilityZone: `${region}a`,
         enablePerformanceInsights: false,
         publiclyAccessible: false,
       }),
@@ -812,7 +828,18 @@ export class PsdEocStack extends Stack {
       resourceArns: [emailQueue.queueArn],
     });
 
-    const emailConfigurationSetArn = `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
+    const emailConfigurationSetArn = Arn.format(
+      {
+        account,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        partition,
+        region,
+        resource: 'configuration-set',
+        resourceName: SES_CONFIGURATION_SET_NAME,
+        service: 'ses',
+      },
+      this,
+    );
     const emailEventsKey = new kms.Key(this, 'EmailEventsKey', {
       description:
         'Encrypts configured-unverified SES event evidence for the live pilot.',
@@ -824,7 +851,7 @@ export class PsdEocStack extends Stack {
         actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
         conditions: {
           StringEquals: {
-            'AWS:SourceAccount': AWS_ACCOUNT,
+            'AWS:SourceAccount': account,
             'AWS:SourceArn': emailConfigurationSetArn,
           },
         },
@@ -859,7 +886,7 @@ export class PsdEocStack extends Stack {
         actions: ['sns:Publish'],
         conditions: {
           StringEquals: {
-            'AWS:SourceAccount': AWS_ACCOUNT,
+            'AWS:SourceAccount': account,
             'AWS:SourceArn': emailConfigurationSetArn,
           },
         },
@@ -995,8 +1022,8 @@ export class PsdEocStack extends Stack {
       {
         command: ['bun', 'packages/server/scripts/operations/bootstrap.ts'],
         environment: {
-          AWS_ACCOUNT_ID: AWS_ACCOUNT,
-          AWS_REGION: AWS_REGION,
+          AWS_ACCOUNT_ID: account,
+          AWS_REGION: region,
           DATABASE_DRIVER: 'postgres',
           DATABASE_HOST: database.clusterEndpoint.hostname,
           DATABASE_IDLE_TIMEOUT_SECONDS: '20',
@@ -1099,8 +1126,8 @@ export class PsdEocStack extends Stack {
           'packages/server/scripts/operations/sync-access-membership.ts',
         ],
         environment: {
-          AWS_ACCOUNT_ID: AWS_ACCOUNT,
-          AWS_REGION: AWS_REGION,
+          AWS_ACCOUNT_ID: account,
+          AWS_REGION: region,
           DATABASE_DRIVER: 'postgres',
           DATABASE_HOST: database.clusterEndpoint.hostname,
           DATABASE_IDLE_TIMEOUT_SECONDS: '20',
@@ -1343,7 +1370,7 @@ export class PsdEocStack extends Stack {
               runtimeEnvironmentVariables: [
                 {
                   name: 'AWS_REGION',
-                  value: AWS_REGION,
+                  value: region,
                 },
                 // Who this deployment serves, from cdk.json context.
                 {
@@ -1466,16 +1493,18 @@ export class PsdEocStack extends Stack {
       delivery: queuePairs.Delivery,
       operationsAlarmTopic,
       operationsKey,
+      monitoringRunbookBaseUrl,
+      sesIdentityDomain,
     });
 
     new CfnOutput(this, 'DeploymentAccount', {
-      value: AWS_ACCOUNT,
+      value: account,
     });
     new CfnOutput(this, 'DeploymentRegion', {
-      value: AWS_REGION,
+      value: region,
     });
     new CfnOutput(this, 'ExpectedAwsAccountAlias', {
-      value: AWS_ACCOUNT_ALIAS,
+      value: accountAlias,
     });
     new CfnOutput(this, 'EnvironmentName', {
       value: DEPLOYMENT_ENVIRONMENT,
@@ -1571,13 +1600,24 @@ export class PsdEocStack extends Stack {
       value: emailWorkerLogGroup.logGroupName,
     });
     new CfnOutput(this, 'SesIdentityArn', {
-      value: `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:identity/${SES_IDENTITY_DOMAIN}`,
+      value: Arn.format(
+        {
+          account,
+          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          partition,
+          region,
+          resource: 'identity',
+          resourceName: sesIdentityDomain,
+          service: 'ses',
+        },
+        this,
+      ),
     });
     new CfnOutput(this, 'SesIdentityDomain', {
-      value: SES_IDENTITY_DOMAIN,
+      value: sesIdentityDomain,
     });
     new CfnOutput(this, 'SesFromAddress', {
-      value: SES_FROM_ADDRESS,
+      value: sesFromAddress,
     });
     new CfnOutput(this, 'SesConfigurationSetName', {
       value: emailConfigurationSet.ref,

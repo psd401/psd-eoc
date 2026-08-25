@@ -39,8 +39,15 @@ describe('synthetic PostgreSQL helper', () => {
   });
 
   test('isolates Compose resources by worktree parent', () => {
-    expect(testDatabaseProjectName('/tmp/worktrees/c79c/psd-eoc')).toBe(
-      'psd-eoc-c79c',
+    expect(testDatabaseProjectName('/tmp/worktrees/c79c/psd-eoc')).toMatch(
+      /^psd-eoc-c79c-[a-f0-9]{8}$/u,
     );
+  });
+
+  test('does not collide when two clones share a parent directory', () => {
+    const first = testDatabaseProjectName('/tmp/repos/psd-eoc');
+    const second = testDatabaseProjectName('/tmp/repos/psd-eoc-copy');
+    expect(first).not.toBe(second);
+    expect(testDatabaseProjectName('/tmp/repos/psd-eoc/')).toBe(first);
   });
 });

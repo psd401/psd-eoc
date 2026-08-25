@@ -1,4 +1,5 @@
-import { basename, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { basename, dirname, resolve } from 'node:path';
 
 const REPOSITORY_ROOT = new URL('..', import.meta.url).pathname;
 
@@ -17,10 +18,15 @@ export function parseTestDatabaseCommand(
 export function testDatabaseProjectName(
   repositoryRoot: string = REPOSITORY_ROOT,
 ): string {
-  const worktree = basename(dirname(repositoryRoot))
+  const resolvedRoot = resolve(repositoryRoot);
+  const worktree = basename(dirname(resolvedRoot))
     .toLowerCase()
     .replaceAll(/[^a-z0-9_-]/gu, '-');
-  return `psd-eoc-${worktree}`.slice(0, 63);
+  const digest = createHash('sha256')
+    .update(resolvedRoot)
+    .digest('hex')
+    .slice(0, 8);
+  return `${`psd-eoc-${worktree}`.slice(0, 54)}-${digest}`;
 }
 
 export function composeArguments(

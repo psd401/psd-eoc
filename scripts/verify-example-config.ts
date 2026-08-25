@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { readDatabaseConfig } from '../packages/server/db/client';
 import {
   applicationOrigin,
@@ -7,6 +9,32 @@ import {
   type DeploymentEnvironment,
 } from '../packages/server/lib/config/deployment';
 import { requireSyntheticTestDatabaseUrl } from '../packages/server/lib/testing/database';
+
+const EXAMPLE_CONFIGURATION_PATH = new URL('../.env.example', import.meta.url);
+
+export function parseExampleConfiguration(
+  contents: string,
+): DeploymentEnvironment {
+  const environment: Record<string, string> = {};
+  for (const [index, line] of contents.split(/\r?\n/u).entries()) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
+    const separator = trimmed.indexOf('=');
+    const key = trimmed.slice(0, separator);
+    const value = trimmed.slice(separator + 1);
+    if (
+      separator < 1 ||
+      !/^[A-Z][A-Z0-9_]*$/u.test(key) ||
+      Object.hasOwn(environment, key)
+    ) {
+      throw new Error(
+        `.env.example line ${String(index + 1)} must be one unique KEY=value assignment.`,
+      );
+    }
+    environment[key] = value;
+  }
+  return environment;
+}
 
 export function validateExampleConfiguration(
   environment: DeploymentEnvironment,
@@ -42,6 +70,9 @@ export function validateExampleConfiguration(
 }
 
 if (import.meta.main) {
-  validateExampleConfiguration(process.env);
+  const environment = parseExampleConfiguration(
+    readFileSync(EXAMPLE_CONFIGURATION_PATH, 'utf8'),
+  );
+  validateExampleConfiguration(environment);
   console.info('Synthetic example configuration is valid.');
 }
