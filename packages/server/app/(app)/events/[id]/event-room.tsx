@@ -301,8 +301,8 @@ export function EventRoom({
       const existing = entriesRef.current;
       const merged = mergeJournalEntryReadProjections(existing, incoming);
       const existingIds = new Set(existing.map(({ entry }) => entry.id));
-      const addedCount = incoming.filter(
-        ({ entry }) => entry.eventId === event.id && !existingIds.has(entry.id),
+      const addedCount = merged.filter(
+        ({ entry }) => !existingIds.has(entry.id),
       ).length;
       entriesRef.current = merged;
       setEntries(merged);
@@ -312,7 +312,7 @@ export function EventRoom({
       if (!nearEnd) setUnseenCount((count) => count + addedCount);
       if (announce) queueAnnouncement(addedCount);
     },
-    [event.id, isNearTimelineEnd, queueAnnouncement],
+    [isNearTimelineEnd, queueAnnouncement],
   );
 
   useEffect(() => {

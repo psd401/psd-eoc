@@ -495,6 +495,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-341',
     );
+    const committedIssue344EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-344',
+    );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedEvidenceDirectory
@@ -509,6 +514,11 @@ async function main(): Promise<void> {
         ? committedIssue341EvidenceDirectory
         : join(createdStateDirectory, 'evidence-341');
     await mkdir(issue341EvidenceDirectory, { recursive: true });
+    const issue344EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue344EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-344');
+    await mkdir(issue344EvidenceDirectory, { recursive: true });
     const issue32EvidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedIssue32EvidenceDirectory
@@ -582,6 +592,10 @@ async function main(): Promise<void> {
       throw new Error('The synthetic district administrator was not issued.');
     }
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
+    const issue344EventId = await createSyntheticDrill(
+      opened,
+      districtAdministrator,
+    );
     const issue32EventId = await createSyntheticDrill(
       opened,
       districtAdministrator,
@@ -600,6 +614,7 @@ async function main(): Promise<void> {
       join(createdStateDirectory, 'fixture.json'),
       JSON.stringify({
         eventId,
+        issue344EventId,
         issue32EventId,
         issue32Media,
         districtAdministratorUserId: districtAdministrator.userId,
@@ -639,6 +654,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
           PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR: issue32EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
