@@ -9,13 +9,14 @@ import {
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { EventRoom } from './event-room';
-import { locationPayloadFromDraft } from './event-room-location';
-import { PrivatePhotoLoadCoordinator } from './event-room-media';
 import {
+  EventRoom,
+  type LocationDraft,
+  PrivatePhotoLoadCoordinator,
   eventRoomPollDelay,
+  locationPayloadFromDraft,
   webLifecycleCommandBody,
-} from './event-room-transport';
+} from './event-room';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -341,7 +342,7 @@ describe('event room server-rendered safety and history state', () => {
         accuracyMeters: '23.4',
         label: ' North staff entrance ',
         reason: '',
-      }),
+      } satisfies LocationDraft),
     ).toEqual({
       state: 'known',
       latitude: 47.385612,
