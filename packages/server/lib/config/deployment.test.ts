@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   DeploymentConfigurationError,
   applicationOrigin,
+  displayTimeZone,
   iosBundleId,
   organizationName,
   staffHostedDomain,
@@ -15,6 +16,7 @@ describe('deployment configuration', () => {
       GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
       PSD_EOC_IOS_BUNDLE_ID: 'invalid.example.alerts',
       PSD_EOC_ORGANIZATION_NAME: 'Example Unified School District',
+      PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
     };
 
     expect(applicationOrigin(environment)).toBe(
@@ -25,6 +27,14 @@ describe('deployment configuration', () => {
     expect(organizationName(environment)).toBe(
       'Example Unified School District',
     );
+    expect(displayTimeZone(environment)).toBe('America/New_York');
+  });
+
+  test('requires a valid configured display time zone', () => {
+    expect(() => displayTimeZone({})).toThrow(DeploymentConfigurationError);
+    expect(() =>
+      displayTimeZone({ PSD_EOC_DISPLAY_TIME_ZONE: 'Not/A_Real_Zone' }),
+    ).toThrow(DeploymentConfigurationError);
   });
 
   test('fails closed for absent, unbounded, or control-bearing organization names', () => {

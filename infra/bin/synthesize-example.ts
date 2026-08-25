@@ -41,6 +41,7 @@ const exampleConfiguration = Object.freeze({
     'sample-district',
   ),
   applicationOrigin: `https://eoc.${exampleHostedDomain}`,
+  displayTimeZone: 'America/New_York',
   facilities: [{ code: 'EXAMPLE', name: 'Example Campus' }],
   hostedDomain: exampleHostedDomain,
   iosBundleId: alternative(
@@ -78,6 +79,7 @@ const app = new App({
     'psdEoc:awsAccountAlias': exampleConfiguration.accountAlias,
     'psdEoc:awsRegion': exampleConfiguration.region,
     'psdEoc:facilities': exampleConfiguration.facilities,
+    'psdEoc:displayTimeZone': exampleConfiguration.displayTimeZone,
     'psdEoc:hostedDomain': exampleConfiguration.hostedDomain,
     'psdEoc:iosBundleId': exampleConfiguration.iosBundleId,
     'psdEoc:monitoringRunbookBaseUrl':
@@ -132,6 +134,10 @@ template.hasResourceProperties('AWS::AppRunner::Service', {
           {
             Name: 'PSD_EOC_ORGANIZATION_NAME',
             Value: exampleConfiguration.organizationName,
+          },
+          {
+            Name: 'PSD_EOC_DISPLAY_TIME_ZONE',
+            Value: exampleConfiguration.displayTimeZone,
           },
         ]),
       }),

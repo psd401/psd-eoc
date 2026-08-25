@@ -119,6 +119,7 @@ export function readDeploymentTarget(node: {
  */
 export interface DeploymentIdentity {
   readonly applicationOrigin: string;
+  readonly displayTimeZone: string;
   readonly hostedDomain: string;
   readonly iosBundleId: string;
   readonly organizationName: string;
@@ -244,11 +245,23 @@ export function readDeploymentIdentity(node: {
       'CDK context psdEoc:organizationName must be a display-safe name of at most 160 UTF-16 code units and 320 UTF-8 bytes.',
     );
   }
+  const displayTimeZone = read(
+    'psdEoc:displayTimeZone',
+    /^[A-Za-z0-9_+\-/]+$/u,
+  );
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: displayTimeZone }).format(0);
+  } catch {
+    throw new Error(
+      'CDK context psdEoc:displayTimeZone must be a valid IANA time zone.',
+    );
+  }
   return Object.freeze({
     applicationOrigin: read(
       'psdEoc:applicationOrigin',
       /^https:\/\/[^\s/?#]+$/u,
     ),
+    displayTimeZone,
     hostedDomain: read(
       'psdEoc:hostedDomain',
       /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,

@@ -1390,6 +1390,10 @@ export class PsdEocStack extends Stack {
                   value: deploymentIdentity.organizationName,
                 },
                 {
+                  name: 'PSD_EOC_DISPLAY_TIME_ZONE',
+                  value: deploymentIdentity.displayTimeZone,
+                },
+                {
                   name: 'DATABASE_DRIVER',
                   value: 'postgres',
                 },

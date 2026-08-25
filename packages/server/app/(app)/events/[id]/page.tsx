@@ -23,6 +23,7 @@ import { getDefaultJournalCapabilityRuntime } from '../../../../lib/capabilities
 import { EventRoom } from './event-room';
 import { eventRoomSignInUrl } from './return-to';
 import { authenticateWebSession } from '../../../../lib/auth/request-session';
+import { displayTimeZone } from '../../../../lib/config/deployment';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -101,6 +102,7 @@ export default async function EventRoomPage({
         apiUrl={`/events/${encodeURIComponent(event.id)}/api`}
         authorDisplayName={authenticated.result.user.displayName}
         csrfCookieName={WEB_CSRF_COOKIE_NAME}
+        displayTimeZone={displayTimeZone()}
         event={event}
         eventTypeLabel={eventTypeVersion.name}
         exportSummaryPath={`/records/export/events/${encodeURIComponent(event.id)}`}
