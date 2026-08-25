@@ -102,6 +102,7 @@ export function useEventRoomCommandController({
   const dialogRequestAttemptedRef = useRef(false);
   const mutationErrorRef = useRef<HTMLDivElement>(null);
   const dialogMutationErrorRef = useRef<HTMLDivElement>(null);
+  const dialogOpen = dialog !== null;
 
   useEffect(
     () => () => {
@@ -130,16 +131,10 @@ export function useEventRoomCommandController({
   useEffect(() => {
     const element = dialogRef.current;
     if (element === null) return;
-    if (dialog !== null) {
+    if (dialogOpen) {
       if (!element.open) element.showModal();
       dialogWasOpenRef.current = true;
-      const frame = window.requestAnimationFrame(() => {
-        const target = element.querySelector<HTMLElement>(
-          '[data-autofocus]:not(:disabled)',
-        );
-        target?.focus();
-      });
-      return () => window.cancelAnimationFrame(frame);
+      return;
     }
     if (element.open) element.close();
     if (dialogWasOpenRef.current) {
@@ -150,6 +145,17 @@ export function useEventRoomCommandController({
         document.getElementById('main-content')?.focus();
       }
     }
+  }, [dialogOpen]);
+
+  useEffect(() => {
+    if (dialog === null) return;
+    const frame = window.requestAnimationFrame(() => {
+      const target = dialogRef.current?.querySelector<HTMLElement>(
+        '[data-autofocus]:not(:disabled)',
+      );
+      target?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [dialog]);
 
   useEffect(() => {
