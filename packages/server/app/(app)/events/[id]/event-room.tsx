@@ -3333,9 +3333,7 @@ export function EventRoom({
   const cursorRef = useRef(initialCursor);
   const appliedSnapshotSequenceRef = useRef(initialSnapshotSequence);
   const requiredSyncSequenceRef = useRef<number | null>(null);
-  const knownEntryIdsRef = useRef(
-    new Set(initialEntries.map(({ entry }) => entry.id)),
-  );
+  const entriesRef = useRef(entries);
   const announcementCountRef = useRef(0);
   const announcementSequenceRef = useRef(0);
   const announcementTimerRef = useRef<number | null>(null);
@@ -3400,24 +3398,19 @@ export function EventRoom({
 
   const mergeIncomingEntries = useCallback(
     (incoming: readonly JournalEntryReadProjection[], announce: boolean) => {
-      const newEntries = incoming.filter(({ entry }) => {
-        if (
-          entry.eventId !== event.id ||
-          knownEntryIdsRef.current.has(entry.id)
-        ) {
-          return false;
-        }
-        knownEntryIdsRef.current.add(entry.id);
-        return true;
-      });
-      if (newEntries.length === 0) return;
+      const existing = entriesRef.current;
+      const merged = mergeJournalEntryReadProjections(existing, incoming);
+      const existingIds = new Set(existing.map(({ entry }) => entry.id));
+      const addedCount = incoming.filter(
+        ({ entry }) => entry.eventId === event.id && !existingIds.has(entry.id),
+      ).length;
+      entriesRef.current = merged;
+      setEntries(merged);
+      if (addedCount === 0) return;
       const nearEnd = isNearTimelineEnd();
       autoScrollRef.current = nearEnd;
-      setEntries((existing) =>
-        mergeJournalEntryReadProjections(existing, incoming),
-      );
-      if (!nearEnd) setUnseenCount((count) => count + newEntries.length);
-      if (announce) queueAnnouncement(newEntries.length);
+      if (!nearEnd) setUnseenCount((count) => count + addedCount);
+      if (announce) queueAnnouncement(addedCount);
     },
     [event.id, isNearTimelineEnd, queueAnnouncement],
   );
