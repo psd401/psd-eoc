@@ -21,6 +21,7 @@ import {
   MediaRecordSchema,
   MediaUploadIntentSchema,
   UuidSchema,
+  compareJournalEntryReadProjections as compareEntries,
   type ChannelConsequencePreview,
   type Event,
   type JournalEntry,
@@ -29,6 +30,8 @@ import {
   type LocationPayload,
   type MediaRecord,
   type MediaUploadIntent,
+  hasSameImmutableEventIdentity,
+  mergeJournalEntryReadProjections,
 } from '@psd-eoc/contracts';
 import {
   Component,
@@ -341,37 +344,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function compareEntries(
-  left: JournalEntryReadProjection,
-  right: JournalEntryReadProjection,
-): number {
-  const sequenceDifference = left.entry.sequence - right.entry.sequence;
-  return sequenceDifference !== 0
-    ? sequenceDifference
-    : left.entry.id.localeCompare(right.entry.id);
-}
-
 function visibleJournalEntry(entry: JournalEntry): JournalEntryReadProjection {
   return JournalEntryReadProjectionSchema.parse({
     visibility: 'visible',
     entry,
-  });
-}
-
-function immutableEventIdentity(event: Event): string {
-  return JSON.stringify({
-    id: event.id,
-    facilityId: event.facilityId,
-    kind: event.kind,
-    templateMode: event.templateMode,
-    eventTypeVersion: event.eventTypeVersion,
-    rosterSnapshotId: event.rosterSnapshotId,
-    rosterPopulation: event.rosterPopulation,
-    createdBy: event.createdBy,
-    createdAt: event.createdAt,
-    correctionOfEventId: event.correctionOfEventId,
-    correctionReason: event.correctionReason,
-    activationAuthorization: event.activationAuthorization,
   });
 }
 
@@ -380,7 +356,7 @@ function assertImmutableEventIdentity(
   baseline: Event,
   ambiguous = false,
 ): void {
-  if (immutableEventIdentity(candidate) !== immutableEventIdentity(baseline)) {
+  if (!hasSameImmutableEventIdentity(candidate, baseline)) {
     throw new EventRoomRequestError(
       'PSD EOC returned event identity or classification that does not match this room.',
       ambiguous,
@@ -3438,7 +3414,7 @@ export function EventRoom({
       const nearEnd = isNearTimelineEnd();
       autoScrollRef.current = nearEnd;
       setEntries((existing) =>
-        [...existing, ...newEntries].sort(compareEntries),
+        mergeJournalEntryReadProjections(existing, incoming),
       );
       if (!nearEnd) setUnseenCount((count) => count + newEntries.length);
       if (announce) queueAnnouncement(newEntries.length);

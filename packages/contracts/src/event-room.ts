@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { PaginationCursorSchema } from './api';
 import { ActorSchema, InvocationSourceSchema } from './capability';
-import { EventIdSchema, EventSchema } from './event';
+import { EventIdSchema, EventSchema, type Event } from './event';
 import { EventTypeVersionIdSchema, TemplateModeSchema } from './event-type';
 import { FacilityIdSchema } from './facility';
 import {
@@ -59,6 +59,143 @@ export const JournalEntryReadProjectionSchema = z
 export type JournalEntryReadProjection = z.infer<
   typeof JournalEntryReadProjectionSchema
 >;
+
+/**
+ * Serializes only the immutable identity and classification fields of an
+ * event. Lifecycle timestamps and status intentionally remain outside this
+ * projection because they advance while an event room is open.
+ */
+export function immutableEventIdentity(event: Event): string {
+  return JSON.stringify({
+    id: event.id,
+    facilityId: event.facilityId,
+    kind: event.kind,
+    templateMode: event.templateMode,
+    eventTypeVersion: event.eventTypeVersion,
+    rosterSnapshotId: event.rosterSnapshotId,
+    rosterPopulation: event.rosterPopulation,
+    createdBy: event.createdBy,
+    createdAt: event.createdAt,
+    correctionOfEventId: event.correctionOfEventId,
+    correctionReason: event.correctionReason,
+    activationAuthorization: event.activationAuthorization,
+  });
+}
+
+/** True when two projections identify the same immutable event room. */
+export function hasSameImmutableEventIdentity(
+  left: Event,
+  right: Event,
+): boolean {
+  return immutableEventIdentity(left) === immutableEventIdentity(right);
+}
+
+/** Canonical sequence-first ordering for every event-room client. */
+export function compareJournalEntryReadProjections(
+  left: JournalEntryReadProjection,
+  right: JournalEntryReadProjection,
+): number {
+  const sequenceDifference = left.entry.sequence - right.entry.sequence;
+  return sequenceDifference !== 0
+    ? sequenceDifference
+    : left.entry.id.localeCompare(right.entry.id);
+}
+
+function redactProjection(
+  projection: JournalEntryReadProjection,
+): JournalEntryReadProjection {
+  if (projection.visibility === 'redacted') return projection;
+  const {
+    id,
+    eventId,
+    sequence,
+    kind,
+    author,
+    source,
+    serverTime,
+    clientTime,
+    supersedes,
+  } = projection.entry;
+  return JournalEntryReadProjectionSchema.parse({
+    visibility: 'redacted',
+    entry: {
+      id,
+      eventId,
+      sequence,
+      kind,
+      author,
+      source,
+      serverTime,
+      clientTime,
+      supersedes,
+    },
+  });
+}
+
+/**
+ * Merges append-only journal projections without permitting an already-read
+ * fact to change. The sole allowed projection change is visible-to-redacted,
+ * which can arrive either directly or through an append-only redaction entry.
+ */
+export function mergeJournalEntryReadProjections(
+  existing: readonly JournalEntryReadProjection[],
+  incoming: readonly JournalEntryReadProjection[],
+): readonly JournalEntryReadProjection[] {
+  const byId = new Map(
+    existing.map((projection) => {
+      const parsed = JournalEntryReadProjectionSchema.parse(projection);
+      return [parsed.entry.id, parsed] as const;
+    }),
+  );
+  for (const projection of incoming) {
+    const parsed = JournalEntryReadProjectionSchema.parse(projection);
+    const prior = byId.get(parsed.entry.id);
+    if (
+      prior !== undefined &&
+      JSON.stringify(prior) !== JSON.stringify(parsed)
+    ) {
+      const visibleToRedacted =
+        prior.visibility === 'visible' &&
+        parsed.visibility === 'redacted' &&
+        JSON.stringify(redactProjection(prior)) === JSON.stringify(parsed);
+      if (!visibleToRedacted) {
+        throw new Error(
+          'An immutable timeline entry changed after it was read.',
+        );
+      }
+    }
+    byId.set(parsed.entry.id, parsed);
+  }
+
+  // A live delta carries the append-only redaction fact, not a rewritten
+  // target row. Hide the target as soon as that provenance arrives.
+  for (const projection of byId.values()) {
+    const supersession = projection.entry.supersedes;
+    if (supersession?.kind !== 'redaction') continue;
+    const target = byId.get(supersession.entryId);
+    if (
+      target === undefined ||
+      target.entry.sequence !== supersession.entrySequence
+    ) {
+      continue;
+    }
+    byId.set(target.entry.id, redactProjection(target));
+  }
+
+  const merged = [...byId.values()].sort(compareJournalEntryReadProjections);
+  for (let index = 1; index < merged.length; index += 1) {
+    const previous = merged[index - 1];
+    const current = merged[index];
+    if (
+      previous !== undefined &&
+      current !== undefined &&
+      previous.entry.sequence === current.entry.sequence
+    ) {
+      throw new Error('The event timeline contains a duplicate sequence.');
+    }
+  }
+  return Object.freeze(merged);
+}
 
 /** Builds the only canonical outward projection of a persisted entry. */
 export function projectJournalEntryForRead(
