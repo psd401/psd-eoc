@@ -35,9 +35,7 @@ const RECOVERY_RECORD_VERSION = 1;
 
 const PHOTO_COMPLETION_RECORD_VERSION = 1;
 
-export function mediaIdempotencyKey(
-  purpose: 'create' | 'complete',
-): string {
+export function mediaIdempotencyKey(purpose: 'create' | 'complete'): string {
   return IdempotencyKeySchema.parse(
     `event-photo-${purpose}-${crypto.randomUUID()}`,
   );
