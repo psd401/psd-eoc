@@ -11269,6 +11269,17 @@ describe('operator documentation and reproducibility', () => {
     ).text();
     expect(runbook).toContain('--confirm-plan');
     expect(runbook).toContain('planDigest');
+    for (const configurationName of [
+      'ASC_APP_NAME',
+      'ASC_APP_SKU',
+      'ASC_BUNDLE_ID',
+      'ASC_INTERNAL_GROUP_NAME',
+      'ASC_EXTERNAL_GROUP_NAME',
+    ]) {
+      expect(runbook).toContain(`export ${configurationName}=`);
+    }
+    expect(runbook).toContain('--confirm-apply "$ASC_BUNDLE_ID"');
+    expect(runbook).not.toMatch(/--confirm-apply net\.psd401\.eoc/u);
     expect(runbook).toContain(
       'cd packages/mobile\neas build:list --platform ios --build-profile production --status finished',
     );

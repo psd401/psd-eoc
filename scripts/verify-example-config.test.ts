@@ -11,6 +11,7 @@ const EXAMPLE = {
     'postgresql://psd_eoc_test:synthetic@localhost:5432/psd_eoc_test',
   GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
   GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
+  PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
   PSD_EOC_IOS_BUNDLE_ID: 'invalid.example.eoc',
   PSD_EOC_ORGANIZATION_NAME: 'Example School District',
   TEST_DATABASE_URL:
@@ -36,6 +37,19 @@ describe('synthetic example configuration', () => {
         TEST_DATABASE_URL: 'postgresql://admin@localhost/production',
       }),
     ).toThrow(/name ends in _test/u);
+  });
+
+  test('rejects a missing or invalid display time zone', () => {
+    const { PSD_EOC_DISPLAY_TIME_ZONE: _, ...missingTimeZone } = EXAMPLE;
+    expect(() => validateExampleConfiguration(missingTimeZone)).toThrow(
+      /PSD_EOC_DISPLAY_TIME_ZONE must be configured/u,
+    );
+    expect(() =>
+      validateExampleConfiguration({
+        ...EXAMPLE,
+        PSD_EOC_DISPLAY_TIME_ZONE: 'Not/A_Real_Zone',
+      }),
+    ).toThrow(/valid IANA time zone/u);
   });
 
   test('parses the committed values without inheriting ambient variables', () => {

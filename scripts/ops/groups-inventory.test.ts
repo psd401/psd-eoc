@@ -1,4 +1,4 @@
-import { describe, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import {
   CreateGroupSourceInputSchema,
   type Facility,
@@ -95,6 +95,7 @@ import {
 import { parseCli } from './groups-inventory-cli';
 
 const CLI_PATH = new URL('groups-inventory.ts', import.meta.url).pathname;
+const CLI_URL = new URL('groups-inventory.ts', import.meta.url).href;
 const SYNTHETIC_TEST_GROUP_DOMAIN = 'groups.synthetic.invalid';
 const TEST_CONFIGURATION: GroupsInventoryConfiguration = Object.freeze({
   hostedDomain: SYNTHETIC_TEST_GROUP_DOMAIN,
@@ -6909,6 +6910,17 @@ const runSelfTest = async (): Promise<void> => {
 };
 
 describe('Google Groups inventory', () => {
+  test('keeps the command entry point inert when imported', () => {
+    const imported = Bun.spawnSync(
+      [Bun.argv[0]!, '-e', `await import(${JSON.stringify(CLI_URL)});`],
+      { stderr: 'pipe', stdout: 'pipe' },
+    );
+
+    expect(imported.exitCode).toBe(0);
+    expect(new TextDecoder().decode(imported.stdout)).toBe('');
+    expect(new TextDecoder().decode(imported.stderr)).toBe('');
+  });
+
   // This preserves the complete former command-line self-test in ordinary
   // discovery. A two-core CI runner needs just over one minute for the bounded
   // subprocess, filesystem, and mapping cases together.
