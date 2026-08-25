@@ -14,21 +14,46 @@ import { join } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
 
+import { createAscJwt } from './asc-auth';
+import { parseCli as parseConfiguredCli } from './asc-cli';
+import { syncTestFlight as syncConfiguredTestFlight } from './asc-commands';
 import {
-  AppStoreConnectClient,
-  createAscJwt,
   isPathInside,
-  parseCli,
   parseReviewInfo,
   parseReviewInfoJson,
   parseTesterCsv,
   readPrivateFile,
-  syncTestFlight,
+} from './asc-inputs';
+import {
+  type AscAppConfiguration,
   type AscClient,
   type BetaReviewInfo,
   type JsonApiPageSummary,
   type JsonApiResource,
-} from './asc';
+  type SyncOptions,
+} from './asc-model';
+import { AppStoreConnectClient } from './asc-resources';
+
+const TEST_APP_CONFIGURATION = Object.freeze({
+  appName: 'Synthetic Emergency App',
+  appSku: 'SYNTHETIC-EOC-IOS',
+  bundleId: 'org.example.synthetic.eoc',
+  externalGroupName: 'Synthetic External Staff',
+  internalGroupName: 'Synthetic Internal Technology',
+}) satisfies AscAppConfiguration;
+
+type TestSyncOptions =
+  | Omit<Extract<SyncOptions, { readonly apply: false }>, 'app'>
+  | Omit<Extract<SyncOptions, { readonly apply: true }>, 'app'>;
+
+const syncTestFlight = (client: AscClient, options: TestSyncOptions) =>
+  syncConfiguredTestFlight(client, {
+    ...options,
+    app: TEST_APP_CONFIGURATION,
+  } as SyncOptions);
+
+const parseCli = (arguments_: readonly string[]) =>
+  parseConfiguredCli(arguments_, TEST_APP_CONFIGURATION);
 
 const resource = (
   type: string,
@@ -124,22 +149,22 @@ const sortedTesterEmails = (
 class StatefulClient implements AscClient {
   rateLimitBudget: number | null = 1_000_000;
   readonly app = resource('apps', 'app-1', {
-    bundleId: 'net.psd401.eoc',
-    name: 'PSD EOC',
-    sku: 'PSD-EOC-IOS',
+    bundleId: TEST_APP_CONFIGURATION.bundleId,
+    name: TEST_APP_CONFIGURATION.appName,
+    sku: TEST_APP_CONFIGURATION.appSku,
   });
   readonly groups = [
     resource('betaGroups', 'internal-group', {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: true,
-      name: 'District Technology',
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     }),
     resource('betaGroups', 'external-group', {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: false,
-      name: 'Staff',
+      name: TEST_APP_CONFIGURATION.externalGroupName,
       publicLinkEnabled: false,
     }),
   ];
@@ -831,7 +856,7 @@ class ScaleStatefulClient extends OrderedStatefulClient {
 }
 
 const review: BetaReviewInfo = {
-  betaDescription: 'Synthetic PSD EOC beta description.',
+  betaDescription: 'Synthetic emergency app beta description.',
   contactEmail: 'review@example.invalid',
   contactFirstName: 'Synthetic',
   contactLastName: 'Reviewer',
@@ -971,9 +996,15 @@ type FixedAppIdentityDrift = 'bundleId' | 'id' | 'name' | 'sku';
 
 const appWithIdentityDrift = (drift: FixedAppIdentityDrift): JsonApiResource =>
   resource('apps', drift === 'id' ? 'another-app-id' : 'app-1', {
-    bundleId: drift === 'bundleId' ? 'net.psd401.concurrent' : 'net.psd401.eoc',
-    name: drift === 'name' ? 'Concurrent PSD EOC' : 'PSD EOC',
-    sku: drift === 'sku' ? 'CONCURRENT-PSD-EOC-IOS' : 'PSD-EOC-IOS',
+    bundleId:
+      drift === 'bundleId'
+        ? 'org.example.concurrent.eoc'
+        : TEST_APP_CONFIGURATION.bundleId,
+    name:
+      drift === 'name'
+        ? 'Concurrent Emergency App'
+        : TEST_APP_CONFIGURATION.appName,
+    sku: drift === 'sku' ? 'CONCURRENT-EOC-IOS' : TEST_APP_CONFIGURATION.appSku,
   });
 
 interface RequestedSync {
@@ -3178,7 +3209,7 @@ describe('write gates and reconciliation', () => {
               feedbackEnabled: true,
               hasAccessToAllBuilds: false,
               isInternalGroup: false,
-              name: 'Staff',
+              name: TEST_APP_CONFIGURATION.externalGroupName,
               publicLinkEnabled: false,
             });
             this.groups.push(group);
@@ -3214,7 +3245,8 @@ describe('write gates and reconciliation', () => {
     expect(
       client.groups.filter(
         ({ attributes }) =>
-          attributes?.name === 'Staff' && attributes.isInternalGroup === false,
+          attributes?.name === TEST_APP_CONFIGURATION.externalGroupName &&
+          attributes.isInternalGroup === false,
       ),
     ).toHaveLength(1);
   });
@@ -3368,10 +3400,15 @@ describe('write gates and reconciliation', () => {
 
   test('CLI refuses an unconfirmed apply or incomplete beta review request', () => {
     expect(() => parseCli(['sync', '--apply'])).toThrow(
-      '--confirm-apply net.psd401.eoc',
+      `--confirm-apply ${TEST_APP_CONFIGURATION.bundleId}`,
     );
     expect(() =>
-      parseCli(['sync', '--apply', '--confirm-apply', 'net.psd401.eoc']),
+      parseCli([
+        'sync',
+        '--apply',
+        '--confirm-apply',
+        TEST_APP_CONFIGURATION.bundleId,
+      ]),
     ).toThrow('--confirm-plan');
     expect(() => parseCli(['sync', '--submit-beta-review'])).toThrow(
       'requires --review-info and --build',
@@ -3477,7 +3514,10 @@ describe('write gates and reconciliation', () => {
         feedbackEnabled: { enumerable: true, value: true },
         hasAccessToAllBuilds: { enumerable: true, value: false },
         isInternalGroup: { enumerable: true, value: true },
-        name: { enumerable: true, value: 'District Technology' },
+        name: {
+          enumerable: true,
+          value: TEST_APP_CONFIGURATION.internalGroupName,
+        },
       });
       Object.defineProperty(attributes, '__proto__', {
         enumerable: true,
@@ -3543,7 +3583,7 @@ describe('write gates and reconciliation', () => {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: true,
-      name: 'District Technology',
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     });
     let getterReads = 0;
     const inherited = Object.create(safeAttributes()) as Record<
@@ -5279,7 +5319,7 @@ describe('write gates and reconciliation', () => {
       1,
       resource('users', 'wrong-type-group', {
         isInternalGroup: true,
-        name: 'District Technology',
+        name: TEST_APP_CONFIGURATION.internalGroupName,
       }),
     );
     await expect(
@@ -5545,7 +5585,7 @@ describe('write gates and reconciliation', () => {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: true,
-      name: 'District Technology',
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     };
     const cases = [
       {
@@ -9963,7 +10003,7 @@ describe('write gates and reconciliation', () => {
     expect(dataAttributes(groupCreates[1]?.body)).toMatchObject({
       hasAccessToAllBuilds: false,
       isInternalGroup: false,
-      name: 'Staff',
+      name: TEST_APP_CONFIGURATION.externalGroupName,
       publicLinkEnabled: false,
     });
     expect(result.actions.at(-1)?.kind).toBe('verification');
