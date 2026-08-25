@@ -90,27 +90,9 @@ jobs:
   # It runs for documentation changes too because current documentation is part
   # of the format contract.
   gate:
-    name: Fresh-clone repository gate
+    name: README fresh-clone and repository gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: psd_eoc_test
-          POSTGRES_PASSWORD: synthetic_test_password
-          POSTGRES_USER: psd_eoc_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U psd_eoc_test -d psd_eoc_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_DRIVER: postgres
-      DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
-      TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -133,18 +115,64 @@ jobs:
       - name: Install PDF verification dependency
         run: sudo apt-get update && sudo apt-get install --yes poppler-utils
 
+      - name: Start repository-owned synthetic PostgreSQL
+        run: bun run test:db:start
+
       - name: Migrate and seed synthetic PostgreSQL
         run: |
-          bun run --cwd packages/server db:migrate
-          bun run --cwd packages/server db:seed
+          bun run test:db:migrate
+          bun run test:db:seed
 
-      # No district identity is set here. `next build` imports every route, and
-      # the deployable image must compile before it knows which district it serves.
+      - name: Start the documented web app
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/psd-eoc-readme-web.log"
+          bun run test:web > "$log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            if kill -0 "$server_pid" 2>/dev/null; then
+              kill "$server_pid"
+              set +e
+              wait "$server_pid"
+              set -e
+            fi
+          }
+          trap cleanup EXIT
+
+          page_ready=false
+          for _ in {1..60}; do
+            if code=$(curl --silent --show-error --output "$RUNNER_TEMP/login.html" --write-out '%{http_code}' --max-time 5 http://127.0.0.1:3000/login); then
+              if [[ "$code" == "200" ]]; then
+                grep --fixed-strings --quiet 'Example School District' "$RUNNER_TEMP/login.html"
+                page_ready=true
+                break
+              fi
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              sed -n '1,240p' "$log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          if [[ "$page_ready" != "true" ]]; then
+            sed -n '1,240p' "$log" >&2
+            exit 1
+          fi
+          cleanup
+          trap - EXIT
+
+      # The ignored local file contains only the reserved example identity;
+      # the deployable build still receives no production tenant identity.
       - name: Run the authoritative repository gate
         run: bun run check
 
       - name: Synthesize a second-district infrastructure configuration
         run: bun run --cwd infra synth:example
+
+      - name: Stop synthetic PostgreSQL
+        if: always()
+        run: bun run test:db:stop
 
   # An applied migration is a record of something that already happened, and
   # nothing else notices when one is edited: drizzle records each file's hash on

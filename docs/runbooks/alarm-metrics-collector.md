@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:**
 `psd-eoc-metrics-collector-failure`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -34,7 +33,7 @@ down, and stale operational metrics must not be interpreted as current health.
 
 ## Respond
 
-1. Confirm account `<aws-account-id>`, region `us-west-2`, the exact alarm name,
+1. Confirm the protected account/region, exact alarm name,
    UTC interval, last successful invocation, and whether data was zero or
    missing.
 2. Inspect the retained collector Lambda log by request ID and bounded stage or

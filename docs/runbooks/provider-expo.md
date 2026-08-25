@@ -3,8 +3,9 @@
 Use this runbook when the push queue backs up, Expo requests fail, receipts are
 delayed/unknown, or Expo reports an outage.
 
-**Current truth:** Expo Push is `mocked` in `docs/INTEGRATIONS.md`. There is no
-verified live push handoff. This runbook does not authorize connecting one.
+Current provider and alarm state lives only in the
+[operational readiness register](../INTEGRATIONS.md). This runbook never
+authorizes connecting or testing a provider.
 
 **Source-defined monitoring alarms:**
 
@@ -14,10 +15,8 @@ verified live push handoff. This runbook does not authorize connecting one.
   endpoint has not reached provider acceptance by the deterministic one-minute
   cutoff.
 
-Issue #29 source landed in pull request #96, but no approved deployment,
-CloudWatch read-back, alarm-action exercise, or console deep link is recorded.
-Treat both alarms as **live-unverified**. Their source definition does not
-change the `mocked` Expo integration truth or authorize provider I/O.
+The source definitions do not prove the alarms are deployed or authorize
+provider I/O.
 
 ## Safety posture
 
@@ -61,9 +60,9 @@ change the `mocked` Expo integration truth or authorize provider I/O.
   only when they provide the required proof.
 - Invalid-device evidence may deactivate that endpoint through the approved
   append-only path; never delete historical attempts or expose the token.
-- Do not send a production test to prove recovery. Use the isolated synthetic
-  non-production path after #91. Any future live test is a fresh authenticated-
-  human action under #30 and all AGENTS.md gates.
+- Do not send a production test to prove recovery. Use an isolated synthetic
+  non-production path. Any future live test is a fresh authenticated-human
+  action under the readiness register and all AGENTS.md gates.
 
 Escalate **SEV-1** when push is the only verified healthy launch channel,
 multiple providers are impaired, classification integrity is uncertain, or

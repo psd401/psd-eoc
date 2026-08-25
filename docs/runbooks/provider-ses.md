@@ -3,10 +3,9 @@
 Use this runbook when email queue age rises, SES rejects or throttles requests,
 delivery-event evidence stops, or AWS reports an SES incident.
 
-**Current truth:** Amazon SES is `mocked` in `docs/INTEGRATIONS.md`. The
-deployable infrastructure defines an identity and configuration set, but no
-live send/runtime is verified. The setup and read-only verification boundary
-is documented in [email-setup.md](email-setup.md).
+Current provider and alarm state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Setup and read-only
+verification procedures are documented in [email-setup.md](email-setup.md).
 
 **Source-defined monitoring alarms:**
 
@@ -16,10 +15,8 @@ is documented in [email-setup.md](email-setup.md).
   endpoint has not reached provider acceptance by the deterministic one-minute
   cutoff.
 
-Issue #29 source landed in pull request #96, but no approved deployment,
-CloudWatch read-back, alarm-action exercise, or console deep link is recorded.
-Treat both alarms as **live-unverified**. Their source definition does not
-change the `mocked` SES integration truth or authorize provider I/O.
+The source definitions do not prove the alarms are deployed or authorize
+provider I/O.
 
 ## Safety posture
 
@@ -34,14 +31,14 @@ change the `mocked` SES integration truth or authorize provider I/O.
 
 ## Respond
 
-1. Confirm account `<aws-account-id>`, region `us-west-2`, current delivery control
+1. Confirm the protected account/region, current delivery control
    epoch, SES integration truth, and `psd-eoc-email` queue/DLQ state.
 2. In CloudWatch, inspect `/psd-eoc/workers/email` and sanitized SES
    configuration-set metrics for the UTC interval. Count bounded reason codes;
    do not copy payloads or destinations.
 3. In the SES console, inspect read-only account sending status, identity
-   verification for `alerts.psd401.net`, DKIM, custom MAIL FROM
-   `mail.alerts.psd401.net`, and configuration set `psd-eoc-transactional`.
+   verification for the configured SES identity, DKIM, custom MAIL FROM, and
+   configuration set `psd-eoc-transactional`.
 4. Check AWS Health/status and the encrypted SES event topic state. A healthy
    identity or accepted API request does not prove event consumption, mailbox
    delivery, or human receipt.

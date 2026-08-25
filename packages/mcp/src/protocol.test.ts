@@ -915,7 +915,7 @@ describe('MCP tools', () => {
 });
 
 describe('MCP resources', () => {
-  test('lists and reads only the two binding documentation resources', async () => {
+  test('lists and reads only current documentation resources', async () => {
     const protocol = protocolWithFetch();
     const listed = await protocol.handle(request('resources/list'));
     expect(listed).toMatchObject({
@@ -924,28 +924,41 @@ describe('MCP resources', () => {
         ttlMs: 300_000,
         cacheScope: 'public',
         resources: [
-          { uri: 'psd-eoc://docs/plan', mimeType: 'text/markdown' },
           {
-            uri: 'psd-eoc://docs/decision-log',
+            uri: 'psd-eoc://docs/architecture',
+            mimeType: 'text/markdown',
+          },
+          {
+            uri: 'psd-eoc://docs/readiness',
             mimeType: 'text/markdown',
           },
         ],
       },
     });
-    const read = await protocol.handle(
+    for (const [uri, heading] of [
+      ['psd-eoc://docs/architecture', '# Architecture and contributing'],
+      ['psd-eoc://docs/readiness', '# Operational readiness register'],
+    ] as const) {
+      const read = await protocol.handle(request('resources/read', { uri }));
+      expect(read).toMatchObject({
+        result: {
+          resultType: 'complete',
+          contents: [
+            {
+              uri,
+              mimeType: 'text/markdown',
+              text: expect.stringContaining(heading),
+            },
+          ],
+        },
+      });
+    }
+
+    const stalePlan = await protocol.handle(
       request('resources/read', { uri: 'psd-eoc://docs/plan' }),
     );
-    expect(read).toMatchObject({
-      result: {
-        resultType: 'complete',
-        contents: [
-          {
-            uri: 'psd-eoc://docs/plan',
-            mimeType: 'text/markdown',
-            text: expect.stringContaining('# PSD EOC'),
-          },
-        ],
-      },
+    expect(stalePlan).toMatchObject({
+      error: { code: -32602, message: 'Resource not found' },
     });
   });
 

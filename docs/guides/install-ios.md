@@ -1,9 +1,9 @@
 # Install PSD EOC on iPhone or iPad
 
-> **Distribution status: BLOCKED.** No installable PSD EOC TestFlight build or
-> approved invitation has been verified yet. These illustrated screen
-> references are advance guidance, not provider screenshots or install proof.
-> Do not try to install until District Technology announces availability.
+> Current build and distribution state lives in the
+> [operational readiness register](../INTEGRATIONS.md). These illustrated screen
+> references are guidance, not provider screenshots or install proof. Install
+> only when your district technology team supplies an approved invitation.
 
 PSD EOC is distributed privately to approved Peninsula School District staff
 through Apple TestFlight. Installing the app does not start an incident, run a
@@ -33,7 +33,8 @@ drill, or notify anyone.
 4. Tap **View in TestFlight**, **Accept**, then **Install**. Apple's wording can
    vary slightly.
 5. Only after District Technology gives the separate registration confirmation
-   above, open **PSD EOC** and sign in with your approved `@psd401.net` staff
+   above, open **PSD EOC** and sign in with your approved staff account for the
+   configured hosted domain
    account. Otherwise stop after **Install**.
 6. After that confirmation, follow the app's prompt to enroll this device and
    enable Face ID, Touch ID, or the device's secure unlock. PSD EOC does not

@@ -5,10 +5,9 @@
 - `psd-eoc-roster-sync-failure-age`; and
 - `psd-eoc-roster-sync-success-age`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat both alarms as **live-unverified** and
-their deep links as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Source-defined alarm
+names are not deployment evidence.
 
 ## Meaning
 

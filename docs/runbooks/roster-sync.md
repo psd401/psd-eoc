@@ -3,9 +3,9 @@
 Use this runbook when Google Groups reads fail, a sync is rejected/partial, the
 staff roster is stale, or a facility audience is incomplete.
 
-**Current truth:** Google Groups is `mocked` in `docs/INTEGRATIONS.md`. No live
-delegated account or scheduled production sync is verified. Source responses
-are untrusted and snapshots are staff-only.
+Current provider and schedule state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Source responses are
+untrusted and membership data is staff-only.
 
 ## Safety posture
 
@@ -45,10 +45,10 @@ are untrusted and snapshots are staff-only.
 - Repair the proven source configuration or credential through a reviewed
   change with explicit product-owner approval where live Google configuration
   is affected.
-- Let the canonical scheduled sync create a new versioned snapshot. A verified
-  production manual trigger is not documented or deployed, so manual sync is
-  **BLOCKED** until a reviewed operator surface exists. Do not call internal
-  functions or write the database directly.
+- Let the canonical scheduled sync create a new versioned snapshot. Use a
+  manual trigger only if the current deployed operator surface and readiness
+  evidence explicitly support it. Do not call internal functions or write the
+  database directly.
 - Treat each Google response as untrusted. All sources must validate and the
   result must be complete before promotion.
 - If Google remains unavailable, document continued use of the last complete

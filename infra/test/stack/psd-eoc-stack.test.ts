@@ -66,6 +66,22 @@ function asStringArray(value: unknown): string[] {
   return values as string[];
 }
 
+function documentedContractList(contents: string, name: string): string[] {
+  const start = `<!-- docs-contract:${name}:start -->`;
+  const end = `<!-- docs-contract:${name}:end -->`;
+  const startOffset = contents.indexOf(start);
+  const endOffset = contents.indexOf(end);
+  if (startOffset === -1 || endOffset <= startOffset) return [];
+  return [
+    ...contents
+      .slice(startOffset + start.length, endOffset)
+      .matchAll(/^- `([^`]+)`\s*$/gmu),
+  ]
+    .map((match) => match[1])
+    .filter((value): value is string => value !== undefined)
+    .sort();
+}
+
 function resourceEntries(
   resourceType: string,
 ): Array<[string, SynthesizedResource]> {
@@ -186,6 +202,15 @@ const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
 describe('deployment boundary', () => {
+  it('keeps the documented CloudFormation parameter index exact', async () => {
+    const configuration = await Bun.file(
+      new URL('../../../docs/CONFIGURATION.md', import.meta.url),
+    ).text();
+    expect(Object.keys(asRecord(synthesized.Parameters)).sort()).toEqual(
+      documentedContractList(configuration, 'template-parameters'),
+    );
+  });
+
   it('binds automatic deployment to protected account, region, and identity', () => {
     const protectedEnvironment = {
       APP_PUBLIC_ORIGIN: currentDeploymentIdentity.applicationOrigin,

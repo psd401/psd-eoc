@@ -2,10 +2,9 @@
 
 **Source-defined CloudWatch alarm name:** `psd-eoc-apprunner-5xx`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -29,7 +28,7 @@ sent.
 
 1. Record the alarm transition time, environment, account, region, and App
    Runner service name in the operations record. Confirm account
-   `<aws-account-id>` and region `us-west-2`.
+   protected account/region from [CONFIGURATION.md](../CONFIGURATION.md).
 2. In the App Runner console, open `psd-eoc` and inspect read-only **Metrics**,
    **Activity**, **Deployments**, and service status for the alarm interval.
    Record the latest immutable image digest and deployment start time.
@@ -57,8 +56,8 @@ sent.
    latency evidence is current.
 3. Review append-only event/outbox evidence for requests reported ambiguous by
    users. Never create, close, all-clear, or send a real event as a test.
-4. Use only the approved isolated non-production synthetic test path after #91
-   exists. A production live test requires every AGENTS.md gate and a fresh
+4. Use only an approved isolated non-production synthetic test path. A
+   production live test requires every AGENTS.md gate and a fresh
    authenticated-human confirmation; this alarm does not authorize one.
 
 Escalate as **SEV-1** when activation is unavailable, the failing scope is

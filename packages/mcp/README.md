@@ -33,16 +33,16 @@ or rewrite prior evidence.
 
 ## Required configuration
 
-- `PSD_EOC_AGENT_API_KEY`: one revocable, facility- and capability-scoped P4.1
+- `PSD_EOC_AGENT_API_KEY`: one revocable, facility- and capability-scoped
   agent key. Keep it outside shell history, source control, and client prompts.
 - `PSD_EOC_AGENT_API_BASE_URL`: optional; defaults to
   `http://127.0.0.1:3000/api/agent/v1`. Remote URLs must use HTTPS. Redirects
   are rejected so the key cannot follow a response to another origin.
 
 Grant the key only the tools the agent needs. The server still shows its fixed,
-safe MCP catalog; P4.1 returns a scoped `403` if the key lacks a grant or the
-requested facility. Do not use a production-capable recipient/provider setup
-for development.
+safe MCP catalog; the agent API returns a scoped `403` if the key lacks a grant
+or the requested facility. Do not use a production-capable recipient/provider
+setup for development.
 
 For records access, grant only the needed IDs from `list-drill-records`,
 `export-drill-records`, `export-event-summary`, and
@@ -83,7 +83,7 @@ the client's secret mechanism rather than committing a literal credential.
         "start"
       ],
       "env": {
-        "PSD_EOC_AGENT_API_BASE_URL": "https://eoc.psd401.net/api/agent/v1",
+        "PSD_EOC_AGENT_API_BASE_URL": "https://eoc.example.invalid/api/agent/v1",
         "PSD_EOC_AGENT_API_KEY": "set-via-your-client-secret-store"
       }
     }
@@ -97,7 +97,7 @@ Equivalent Codex `config.toml` shape:
 [mcp_servers.psd-eoc]
 command = "bun"
 args = ["run", "--cwd", "/absolute/path/to/psd-eoc/packages/mcp", "start"]
-env = { PSD_EOC_AGENT_API_BASE_URL = "https://eoc.psd401.net/api/agent/v1", PSD_EOC_AGENT_API_KEY = "set-via-your-secret-store" }
+env = { PSD_EOC_AGENT_API_BASE_URL = "https://eoc.example.invalid/api/agent/v1", PSD_EOC_AGENT_API_KEY = "set-via-your-secret-store" }
 ```
 
 The process writes only JSON-RPC messages to stdout. Diagnostics go to stderr.
@@ -124,12 +124,14 @@ needed. `PSD_EOC_MCP_HTTP_HOST` accepts only `127.0.0.1`, `::1`, or `localhost`.
 
 ## Resources and error behavior
 
-`psd-eoc://docs/plan` and `psd-eoc://docs/decision-log` expose the binding plan
-and decision log as read-only Markdown resources. Unknown resource URIs fail;
-they are never converted into filesystem paths.
+`psd-eoc://docs/architecture` and `psd-eoc://docs/readiness` expose the current
+architecture/contributor guide and operational readiness register as read-only
+Markdown resources. Archived plans and decision ledgers are intentionally not
+resources. Unknown resource URIs fail; they are never converted into filesystem
+paths.
 
 Tool arguments and successful API results are parsed with the canonical
 `@psd-eoc/contracts` Zod schemas. Authentication, authorization, and
 not-found errors are intentionally scope-safe: they do not enumerate other
-facilities, recipient data, or credentials. A `503` means the underlying P4.1
+facilities, recipient data, or credentials. A `503` means the underlying
 capability is not deployed; the MCP adapter never substitutes synthetic data.

@@ -11310,9 +11310,12 @@ describe('operator documentation and reproducibility', () => {
     expect(ascEntry.AppStoreConnectClient).toBe(AppStoreConnectClient);
   });
 
-  test('binds writes to exact plans and exact EAS builds', async () => {
+  test('preserves the exact historical operator procedure', async () => {
     const runbook = await Bun.file(
-      join(import.meta.dir, '../../../docs/runbooks/appstore-setup.md'),
+      join(
+        import.meta.dir,
+        '../../../docs/archive/runbooks/appstore-setup-2026-08-25.md',
+      ),
     ).text();
     expect(runbook).toContain('--confirm-plan');
     expect(runbook).toContain('planDigest');
@@ -11432,7 +11435,10 @@ describe('operator documentation and reproducibility', () => {
     ).text();
     const lock = await Bun.file(join(import.meta.dir, 'Gemfile.lock')).text();
     const runbook = await Bun.file(
-      join(import.meta.dir, '../../../docs/runbooks/appstore-setup.md'),
+      join(
+        import.meta.dir,
+        '../../../docs/archive/runbooks/appstore-setup-2026-08-25.md',
+      ),
     ).text();
     expect(rubyVersion.trim()).toBe('3.3.12');
     expect(lock).toContain('fastlane (2.237.0)');

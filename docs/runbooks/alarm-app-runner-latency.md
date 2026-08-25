@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:**
 `psd-eoc-apprunner-request-latency-average`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -25,7 +24,7 @@ be queued for automatic execution.
 
 ## Respond
 
-1. Confirm account `<aws-account-id>`, region `us-west-2`, service `psd-eoc`, and
+1. Confirm the protected account/region, service `psd-eoc`, and
    record the UTC alarm interval.
 2. In App Runner **Metrics**, compare request latency, request count, active
    instances, and 4xx/5xx for the same period. In **Deployments**, note the
@@ -55,7 +54,8 @@ be queued for automatic execution.
 - Confirm no rise in duplicate events, stale previews, stuck outbox rows, or
   queue age. Record `unknown` where evidence cannot resolve an outcome.
 - Do not send a notification to measure recovery. Use approved non-production
-  synthetic evidence only; #30 owns any future human-confirmed live test.
+  synthetic evidence only. A live test requires separate product-owner
+  authorization and an authenticated human acting in the application.
 
 Escalate as **SEV-1** when activation p95 breaches the target with real user
 impact, latency causes ambiguous activation outcomes, or the cause is unknown.

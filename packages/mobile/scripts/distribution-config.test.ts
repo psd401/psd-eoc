@@ -124,46 +124,27 @@ describe('mobile distribution configuration', () => {
     });
   });
 
-  test('pins the verified App Store identity and separate write approvals', () => {
+  test('pins the App Store route while archiving one-off provider evidence', () => {
     expect(easConfig.submit.production.ios).toEqual({
       ascAppId: '6801607849',
     });
 
     const appStoreRunbook = repositoryText('docs/runbooks/appstore-setup.md');
-    const compactAppStoreRunbook = appStoreRunbook.replace(/\s+/gu, ' ');
+    const archivedRelease = repositoryText(
+      'docs/archive/runbooks/release-2026-08-25.md',
+    );
+    expect(appStoreRunbook).toContain('../INTEGRATIONS.md');
+    expect(appStoreRunbook).toContain(
+      'The presence of `ascAppId` is routing configuration only, never',
+    );
     for (const evidence of [
-      'App Store Connect provider: `372148`',
-      'Numeric Apple ID / EAS `ascAppId`: `6801607849`',
-      'Primary language: English (U.S.) / `en-US`',
-      'Initial iOS version scaffold: `1.0`',
-      'User access: Limited Access, with zero new app-specific user grants',
-      'TestFlight inventory: no processed build',
-      'App Store provisioning profile: `U8P2YKU4T8`',
-      'Ad Hoc profile `525SSPSUMQ`',
-      'c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde',
       'e68d07aa-98e5-4c87-8595-52175975291f',
       '7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9',
-      'separate provider-configuration gate',
-      'dcd24fd9-16ef-455d-92a8-c3852b4cfcd3',
       'Failed',
       '90683',
-      'Do not run the app-creation lane again',
-      'The presence of `ascAppId` is routing configuration only, never',
     ]) {
-      expect(appStoreRunbook).toContain(evidence);
+      expect(archivedRelease).toContain(evidence);
     }
-    expect(compactAppStoreRunbook).toContain(
-      'BUILD began only after that gate completed and a later exact one-build preview received its own product-owner approval',
-    );
-    expect(compactAppStoreRunbook).toContain(
-      'Before creating an App Store Connect API key, prepare an exact consequence preview that identifies the Apple team, proposed key name, least required role, access scope, key count, and approved custody destination. Obtain fresh explicit product-owner approval for that one key creation. If approval is absent, ambiguous, stale, or differs from the preview, stop before opening the creation flow.',
-    );
-    expect(compactAppStoreRunbook).toContain(
-      'After that approval, an authenticated human opens **Users and Access > Integrations > App Store Connect API**, verifies the previewed values, and generates exactly the approved team API key.',
-    );
-    expect(compactAppStoreRunbook).toContain(
-      'Approval to create the API key authorizes neither its use nor any later provider write.',
-    );
   });
 
   test('never auto-submits, auto-exposes, or publishes a remote update', () => {
@@ -205,8 +186,10 @@ describe('mobile distribution configuration', () => {
     }
   });
 
-  test('documents exact build preflight and keeps every external gate blocked', () => {
-    const release = repositoryText('docs/runbooks/release.md');
+  test('preserves the exact historical build and distribution evidence', () => {
+    const release = repositoryText(
+      'docs/archive/runbooks/release-2026-08-25.md',
+    );
     const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
     const compactRelease = normalizedRelease.replace(/\s+/gu, ' ');
     const releaseBuildCommands = normalizedRelease
@@ -321,8 +304,10 @@ describe('mobile distribution configuration', () => {
     );
   });
 
-  test('documents embedded-only device evidence and no runnable OTA operation', () => {
-    const release = repositoryText('docs/runbooks/release.md');
+  test('preserves embedded-only device evidence and no runnable OTA operation', () => {
+    const release = repositoryText(
+      'docs/archive/runbooks/release-2026-08-25.md',
+    );
     const readme = repositoryText('packages/mobile/README.md');
     const compactRelease = release.replace(/\s+/gu, ' ');
     const compactReadme = readme.replace(/\s+/gu, ' ');
@@ -377,8 +362,10 @@ describe('mobile distribution configuration', () => {
     );
   });
 
-  test('uses progressive approvals and preserves every human-only boundary', () => {
-    const release = repositoryText('docs/runbooks/release.md');
+  test('preserves the historical progressive-gate evidence', () => {
+    const release = repositoryText(
+      'docs/archive/runbooks/release-2026-08-25.md',
+    );
     const compactRelease = release.replace(/\s+/gu, ' ');
     const headings = [
       '### BUILD',
@@ -419,59 +406,35 @@ describe('mobile distribution configuration', () => {
     );
   });
 
-  test('truth-labels Build separately from blocked Update and stores', () => {
+  test('keeps one concise readiness row per mobile boundary', () => {
     const integrations = repositoryText('docs/INTEGRATIONS.md');
     const rows = integrations.split('\n');
-    const build = rows.find((line) =>
-      line.includes('| Expo Application Services (Build)'),
-    );
-    const update = rows.find((line) =>
-      line.includes('| Expo Application Services (Update)'),
-    );
+    const rowFor = (boundary: string): string | undefined =>
+      rows.find((line) => line.includes(`| ${boundary}`));
+    const build = rowFor('EAS Build');
+    const update = rowFor('EAS Update');
 
     expect(build).toContain('| `configured-unverified`');
-    expect(build).toContain(
-      'superseded evidence and are not eligible for Play',
-    );
-    expect(build).toContain('3742b81d-3942-4fea-b760-53c809d8733f');
-    expect(build).toContain(
-      '915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246',
-    );
-    expect(build).toContain('e68d07aa-98e5-4c87-8595-52175975291f');
-    expect(build).toContain(
-      '7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9',
-    );
+    expect(build).toContain('Signed iOS and Android artifacts were produced');
     expect(update).toContain('| `blocked`');
-    expect(update).toContain(
-      'Remote updates are disabled in current app/runtime 1.0.4',
-    );
+    expect(update).toContain('Remote updates are disabled');
+    expect(rowFor('EAS Submit')).toContain('| `blocked`');
 
-    for (const integration of [
-      'Expo Application Services (Submit)',
-      'Firebase App Distribution',
-    ]) {
-      const row = rows.find((line) => line.includes(`| ${integration}`));
-      expect(row).toContain('| `blocked`');
-    }
-
-    const submit = rows.find((line) =>
-      line.includes('| Expo Application Services (Submit)'),
-    );
-    const apple = rows.find((line) =>
-      line.includes('| Apple App Store Connect / TestFlight'),
-    );
-    const play = rows.find((line) =>
-      line.includes('| Google Play closed testing'),
-    );
-    expect(submit).toContain('6801607849');
-    expect(apple).toContain('6801607849');
+    const apple = rowFor('TestFlight device installation');
+    const play = rowFor('Google Play device installation');
     expect(apple).toContain('| `live-verified`');
     expect(play).toContain('| `live-verified`');
-    expect(submit).toContain('dcd24fd9-16ef-455d-92a8-c3852b4cfcd3');
-    expect(apple).toContain('90683');
-    expect(apple).toContain('which** build is on the device');
-    expect(play).toContain('4860219896995172827');
-    expect(play).toContain('Internal testing');
+    expect(apple).toContain('exact build identity remains unknown');
+    expect(play).toContain('exact rollout/build identity remains unknown');
+
+    expect(rows.filter((line) => line.includes('| EAS Build'))).toHaveLength(1);
+    expect(rows.filter((line) => line.includes('| EAS Update'))).toHaveLength(
+      1,
+    );
+    expect(rows.filter((line) => line.includes('| EAS Submit'))).toHaveLength(
+      1,
+    );
+    expect(integrations).not.toContain('e68d07aa-98e5-4c87-8595-52175975291f');
   });
 
   test('ships accessible screen references and safe staff guidance', () => {

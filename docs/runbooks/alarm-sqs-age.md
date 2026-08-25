@@ -7,10 +7,9 @@
 - `psd-eoc-email-queue-age`; and
 - `psd-eoc-sms-queue-age`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat all four alarms as **live-unverified** and
-their deep links as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Source-defined alarm
+names are not deployment evidence.
 
 ## Meaning
 
@@ -31,16 +30,16 @@ side effects unless the exact attempt is safely fenced.
 
 ## Identify the affected stage
 
-| Queue              | Stage                                             | Initial severity and next check                                                                                                         |
-| ------------------ | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `psd-eoc-delivery` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                                         |
-| `psd-eoc-push`     | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)                          |
-| `psd-eoc-email`    | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                                            |
-| `psd-eoc-sms`      | SMS worker before AWS End User Messaging boundary | SMS is allowed to remain dark under D-013. Keep it dark while its integration is `blocked`; unexpected routable staff work is **SEV-0** |
+| Queue              | Stage                                             | Initial severity and next check                                                                                                  |
+| ------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `psd-eoc-delivery` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                                  |
+| `psd-eoc-push`     | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)                   |
+| `psd-eoc-email`    | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                                     |
+| `psd-eoc-sms`      | SMS worker before AWS End User Messaging boundary | Consult the readiness register; keep SMS dark while blocked or unverified, and treat unexpected routable staff work as **SEV-0** |
 
 ## Respond
 
-1. Confirm account `<aws-account-id>`, region `us-west-2`, and exact queue name.
+1. Confirm the protected account/region and exact queue name.
    Record alarm start, current oldest age, visible count, in-flight count, and
    DLQ count from CloudWatch metrics.
 2. Check the paired worker/router log group for startup, authorization,
@@ -54,8 +53,8 @@ side effects unless the exact attempt is safely fenced.
    channel queue, inspect only that provider's status and adapter logs; a
    provider status page is not delivery evidence.
 5. Determine whether work is being processed slowly, repeatedly failing, or
-   not consumed. Because issue #91 has not deployed event-source/runtime
-   wiring, the current repository cannot supply production consumer evidence.
+   not consumed. Treat source definitions separately from the deployed
+   consumer evidence recorded in the readiness register.
 
 ## Recover and verify
 
@@ -69,8 +68,9 @@ side effects unless the exact attempt is safely fenced.
 - Sample only sanitized attempt IDs through approved application evidence.
   Confirm retries use new attempts only after a proven safe-to-retry failure;
   ambiguous provider outcomes stay `unknown` and are not retried.
-- Do not clear an alarm by purging or redriving. Do not send a live test. The
-  monthly test in #30 remains human-confirmed and currently blocked.
+- Do not clear an alarm by purging or redriving. Do not send a live test. Any
+  delivery test remains an authenticated-human action under the current
+  readiness and human-only boundaries.
 
 Close only after all four queue metrics have been reviewed for collateral
 backlog, each exact alarm has a complete healthy evaluation period, and a

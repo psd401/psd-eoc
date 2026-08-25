@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:**
 `psd-eoc-activation-accept-latency-p95`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -29,11 +28,12 @@ met its SLO.
 - Never weaken the consequence-preview, idempotency, real/drill, authorization,
   or offline-reconfirmation gates to improve latency.
 - Do not send a notification to create a sample. Production SLO testing remains
-  a separately authorized, human-confirmed operation under #30.
+  a separately authorized operation performed by an authenticated human in the
+  application.
 
 ## Respond
 
-1. Confirm account `<aws-account-id>`, region `us-west-2`, the exact alarm name,
+1. Confirm the protected account/region, exact alarm name,
    UTC evaluation interval, state transition, p95 value, and sample count.
 2. Verify the interval contains eligible staff incident/drill commits and that
    commit timestamps are available. If samples or timestamps are missing,

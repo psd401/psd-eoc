@@ -4,6 +4,9 @@ This is the ordered path a district follows once the infrastructure exists and
 before anyone trusts the system with a real incident. It assumes the deploy
 succeeded and `GET /api/health` returns `{"status":"ok"}`.
 
+Confirm current deployment and identity state in the
+[operational readiness register](../INTEGRATIONS.md) before starting.
+
 Nothing here sends a notification. The last step is a drill, and a drill is
 still an authenticated human confirming a consequence preview.
 
@@ -42,8 +45,9 @@ existed, or was intentionally omitted.
 
 Do not skip this, and do not treat a successful first sign-in as proof.
 
-Access is granted from a **membership snapshot**, and a snapshot is honoured
-for 24 hours after it was read (`MEMBERSHIP_FRESHNESS_MS` in
+Access is granted from each active access group's current membership rows and
+`members_captured_at`. A group remains fresh for 24 hours after it was read
+(`MEMBERSHIP_FRESHNESS_MS` in
 `packages/server/lib/auth/trusted-group-access.ts`). Past that,
 `decideAccess` refuses everyone with `MEMBERSHIP_STALE` — including you. A
 deployment where sign-in works today but nothing refreshes membership is a
@@ -74,7 +78,7 @@ An active group with `members_captured_at` null has never been read. One with
 `hours_old` above 24 is already refusing sign-ins.
 
 **When a sync fails, read why.** The task writes to CloudWatch log group
-`/psd-eoc/<deployment>/bootstrap`, stream
+`/psd-eoc/bootstrap`, stream
 `access-membership-sync/access-membership-sync/<task-id>`. A successful run
 emits one aggregate line:
 
@@ -116,9 +120,10 @@ an event at one of them reaches beyond its own building.
 
 ## 4. Give each facility a building group
 
-There is no audience to configure. Issue #292 retired
-`audience_configurations` and `audience_targets`: an event at a school reaches
-that school's staff, and that rule is now the code rather than a row.
+There is no audience to configure. The retired `audience_configurations` and
+`audience_targets` tables no longer control delivery: an event at a school
+reaches that school's staff, and that rule is enforced by current code rather
+than a configuration row.
 
 What decides whether an activation reaches anybody is the school's **building
 group source** — an active Google group, `purpose = building`, bound to the

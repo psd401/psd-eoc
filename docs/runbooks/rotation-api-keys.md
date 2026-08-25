@@ -1,5 +1,8 @@
 # Maintenance runbook: agent API-key rotation
 
+Current deployed agent-surface state lives only in the
+[operational readiness register](../INTEGRATIONS.md).
+
 PSD EOC agent API keys are scoped credentials for read/report/draft and other
 explicitly granted capabilities. They can never receive the four human-only
 actions. Rotation uses the authenticated human administrator interface and
