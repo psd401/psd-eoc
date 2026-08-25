@@ -1,0 +1,13 @@
+# Applied migrations and their snapshots are immutable history.
+packages/server/drizzle/migrations/
+
+# Verification evidence records an exact historical run.
+docs/evidence/
+
+# Vendored accessibility runtime and generated native projects are not source.
+packages/server/app/(app)/start/test/vendor/
+packages/mobile/android/
+packages/mobile/ios/
+
+# Next.js creates this production-build output during the root verification gate.
+**/.next/**

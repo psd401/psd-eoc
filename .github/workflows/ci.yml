@@ -86,11 +86,31 @@ jobs:
             echo "| workflows | $workflows |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Fast feedback. Runs on every change, no database, target under two minutes.
-  static:
-    name: Format, lint, and typecheck
+  # A clean checkout exercises the same authoritative gate contributors run.
+  # It runs for documentation changes too because current documentation is part
+  # of the format contract.
+  gate:
+    name: Fresh-clone repository gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: psd_eoc_test
+          POSTGRES_PASSWORD: synthetic_test_password
+          POSTGRES_USER: psd_eoc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U psd_eoc_test -d psd_eoc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_DRIVER: postgres
+      DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
+      TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -110,51 +130,21 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Check formatting
-        run: bun run format:check
+      - name: Install PDF verification dependency
+        run: sudo apt-get update && sudo apt-get install --yes poppler-utils
 
-      - name: Lint
-        run: bun run lint
+      - name: Migrate and seed synthetic PostgreSQL
+        run: |
+          bun run --cwd packages/server db:migrate
+          bun run --cwd packages/server db:seed
 
-      - name: Typecheck
-        run: bun run typecheck
+      # No district identity is set here. `next build` imports every route, and
+      # the deployable image must compile before it knows which district it serves.
+      - name: Run the authoritative repository gate
+        run: bun run check
 
-  build:
-    name: Build the server image contents
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.2.23
-
-      - name: Cache Bun install
-        uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # `next build` imports every route to collect page data, so a module that
-      # reads deployment configuration at import time fails here and nowhere
-      # else: format, lint, typecheck, and the test suite all pass without it.
-      # That gap sent a broken image to the deploy, which is a slow and
-      # expensive place to discover it.
-      #
-      # No district configuration is set on purpose. The image is built once and
-      # deployed by any district, so it has to compile without knowing whose
-      # domain it will serve.
-      - name: Build the server
-        run: bun run --cwd packages/server build
+      - name: Synthesize a second-district infrastructure configuration
+        run: bun run --cwd infra synth:example
 
   # An applied migration is a record of something that already happened, and
   # nothing else notices when one is edited: drizzle records each file's hash on
@@ -203,53 +193,6 @@ jobs:
             --workdir /repo \
             rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
             -color
-
-  test:
-    name: Test
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    # The suite runs in parallel shards and is expected to finish in about a
-    # minute. A generous ceiling here only hides a regression in that.
-    timeout-minutes: 10
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: psd_eoc_test
-          POSTGRES_PASSWORD: synthetic_test_password
-          POSTGRES_USER: psd_eoc_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U psd_eoc_test -d psd_eoc_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
-      TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.2.23
-
-      - name: Cache Bun install
-        uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run the test suite
-        run: bun run test
 
   browser:
     name: Operator browser flows
@@ -336,18 +279,6 @@ jobs:
       - name: Install dependencies from the lockfile
         run: bun install --frozen-lockfile
 
-      - name: Lint the mobile app
-        working-directory: packages/mobile
-        run: bun run lint
-
-      - name: Typecheck the mobile app
-        working-directory: packages/mobile
-        run: bun run typecheck
-
-      - name: Test the mobile app
-        working-directory: packages/mobile
-        run: bun run test
-
       - name: Check Expo dependency compatibility
         working-directory: packages/mobile
         run: bun run expo:check
@@ -366,8 +297,9 @@ jobs:
           set -euo pipefail
           test -d android
           test -d ios
-          grep -RFq 'net.psd401.eoc' android/app
-          grep -RFq 'net.psd401.eoc' ios
+          bundle_id=$(jq -er '.expo.ios.bundleIdentifier' app.json)
+          grep -RFq "$bundle_id" android/app
+          grep -RFq "$bundle_id" ios
           grep -Fq 'com.google.firebase.messaging.default_notification_channel_id' android/app/src/main/AndroidManifest.xml
           grep -Fq '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
           grep -Fq '<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml

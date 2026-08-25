@@ -15,16 +15,18 @@
  *
  * Usage: bun scripts/test.ts [--shards N] [extra bun test args]
  */
-import { readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import postgres from 'postgres';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+import { requireSyntheticTestDatabaseUrl } from '../packages/server/lib/testing/database';
+
+export const ROOT = new URL('..', import.meta.url).pathname;
 // `scripts` is here because leaving it out meant a colocated test could be
 // written, committed, and never run. `scripts/ops/appstore/asc.test.ts` had
 // been in that state: 171 assertions the gate had never once executed.
-const SEARCH_ROOTS = ['packages', 'workers', 'infra', 'scripts'];
+export const SEARCH_ROOTS = ['packages', 'workers', 'infra', 'scripts'];
 const TEST_PATTERN = /\.(test|spec)\.tsx?$/u;
 const SKIP_DIRECTORIES = new Set([
   'node_modules',
@@ -35,7 +37,10 @@ const SKIP_DIRECTORIES = new Set([
   'cdk.out',
 ]);
 
-function discoverTestFiles(directory: string, found: string[] = []): string[] {
+export function discoverTestFiles(
+  directory: string,
+  found: string[] = [],
+): string[] {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (SKIP_DIRECTORIES.has(entry.name)) continue;
@@ -53,7 +58,7 @@ function discoverTestFiles(directory: string, found: string[] = []): string[] {
  * with a large suite nobody else is waiting on. File size stands in for
  * duration, which is imperfect but needs no bookkeeping to stay accurate.
  */
-function balanceShards(files: string[], shardCount: number): string[][] {
+export function balanceShards(files: string[], shardCount: number): string[][] {
   const weighted = files
     .map((file) => ({ file, weight: statSync(file).size }))
     .sort((left, right) => right.weight - left.weight);
@@ -71,25 +76,76 @@ function balanceShards(files: string[], shardCount: number): string[][] {
   return shards.map((shard) => shard.files);
 }
 
-function parseShardCount(argv: string[]): {
+export type TestMode = 'full' | 'unit';
+
+export function parseTestArguments(argv: string[]): {
   shardCount: number;
+  mode: TestMode;
   passthrough: string[];
 } {
-  const index = argv.indexOf('--shards');
+  const unitOnly = argv.includes('--unit-only');
+  const withoutMode = argv.filter((argument) => argument !== '--unit-only');
+  const index = withoutMode.indexOf('--shards');
   if (index === -1) {
     return {
       shardCount: Math.max(1, Math.min(6, navigator.hardwareConcurrency - 2)),
-      passthrough: argv,
+      mode: unitOnly ? 'unit' : 'full',
+      passthrough: withoutMode,
     };
   }
-  const value = Number(argv[index + 1]);
+  const value = Number(withoutMode[index + 1]);
   if (!Number.isInteger(value) || value < 1 || value > 16) {
     throw new Error('--shards must be an integer between 1 and 16.');
   }
   return {
     shardCount: value,
-    passthrough: [...argv.slice(0, index), ...argv.slice(index + 2)],
+    mode: unitOnly ? 'unit' : 'full',
+    passthrough: [
+      ...withoutMode.slice(0, index),
+      ...withoutMode.slice(index + 2),
+    ],
   };
+}
+
+export function isDatabaseDependentTest(file: string): boolean {
+  return /process\.env(?:\.TEST_DATABASE_URL|\[['"]TEST_DATABASE_URL['"]\])/u.test(
+    readFileSync(join(ROOT, file), 'utf8'),
+  );
+}
+
+export function selectTestFiles(
+  files: string[],
+  mode: TestMode,
+): { excluded: string[]; selected: string[] } {
+  if (mode === 'full') return { excluded: [], selected: files };
+  const excluded = files.filter(isDatabaseDependentTest);
+  const excludedSet = new Set(excluded);
+  return {
+    excluded,
+    selected: files.filter((file) => !excludedSet.has(file)),
+  };
+}
+
+export function requireFullGateDatabase(
+  mode: TestMode,
+  testDatabaseUrl: string | undefined,
+): void {
+  if (mode === 'unit') return;
+  try {
+    requireSyntheticTestDatabaseUrl(testDatabaseUrl);
+  } catch (error) {
+    const cause = error instanceof Error ? ` ${error.message}` : '';
+    throw new Error(
+      `The full repository test gate requires a safe TEST_DATABASE_URL. Start the synthetic PostgreSQL service with \`bun run test:db:start\`, export the URL it prints, then rerun \`bun run check\`. Use \`bun run test:unit\` only when intentionally excluding the database suites.${cause}`,
+    );
+  }
+}
+
+export function countSkippedTests(output: string): number {
+  return [...output.matchAll(/^\s*(\d+) skip\s*$/gmu)].reduce(
+    (total, match) => total + Number(match[1] ?? 0),
+    0,
+  );
 }
 
 async function withMaintenance<T>(
@@ -155,106 +211,133 @@ async function createClusterRoles(baseUrl: string): Promise<void> {
   });
 }
 
-const { shardCount, passthrough } = parseShardCount(Bun.argv.slice(2));
-const files = SEARCH_ROOTS.flatMap((root) =>
-  discoverTestFiles(join(ROOT, root)),
-).map((file) => relative(ROOT, file));
-
-if (files.length === 0) {
-  console.info('No tests have been added yet.');
-  process.exit(0);
-}
-
-const baseDatabaseUrl = process.env.TEST_DATABASE_URL;
-const shards = balanceShards(files, shardCount).filter(
-  (shard) => shard.length > 0,
-);
-console.info(
-  `Running ${String(files.length)} test files across ${String(shards.length)} shard(s).`,
-);
-
-const shardDatabases: string[] = [];
-if (baseDatabaseUrl !== undefined) {
-  await withMaintenance(baseDatabaseUrl, async (sql) => {
-    for (let index = 0; index < shards.length; index += 1) {
-      const name = `psd_eoc_shard${String(index)}_test`;
-      await sql.unsafe(`drop database if exists "${name}" (force)`);
-      await sql.unsafe(`create database "${name}"`);
-      shardDatabases.push(name);
-    }
-  });
-  await createClusterRoles(baseDatabaseUrl);
-}
-
-const started = Date.now();
-const results = await Promise.all(
-  shards.map(async (shardFiles, index) => {
-    const environment: Record<string, string> = { ...process.env } as Record<
-      string,
-      string
-    >;
-    if (baseDatabaseUrl !== undefined) {
-      const url = new URL(baseDatabaseUrl);
-      url.pathname = `/${shardDatabases[index] ?? ''}`;
-      environment.TEST_DATABASE_URL = url.toString();
-      environment.DATABASE_URL = url.toString();
-    }
-    const child = Bun.spawn({
-      cmd: [process.execPath, 'test', ...passthrough, ...shardFiles],
-      cwd: ROOT,
-      env: environment,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { index, stdout, stderr, exitCode };
-  }),
-);
-
-for (const { index, stdout, stderr, exitCode } of results) {
-  const summary = stderr
-    .split('\n')
-    .filter(
-      (line) =>
-        /^\s*\d+ (pass|fail|skip|todo)/u.test(line) ||
-        line.startsWith('(fail)'),
-    )
-    .join('\n');
-  console.info(
-    `\n──── shard ${String(index)} (exit ${String(exitCode)}) ────\n${summary}`,
-  );
-  if (exitCode !== 0) {
-    console.error(stdout);
-    console.error(stderr);
+export async function runTestSuite(arguments_: string[]): Promise<number> {
+  const { mode, passthrough, shardCount } = parseTestArguments(arguments_);
+  const discovered = SEARCH_ROOTS.flatMap((root) =>
+    discoverTestFiles(join(ROOT, root)),
+  ).map((file) => relative(ROOT, file));
+  const baseDatabaseUrl =
+    mode === 'full' ? process.env.TEST_DATABASE_URL : undefined;
+  requireFullGateDatabase(mode, baseDatabaseUrl);
+  if (mode === 'full' && Bun.which('pdftotext') === null) {
+    throw new Error(
+      'The full repository test gate requires pdftotext so PDF assertions cannot skip. Install Poppler, then rerun `bun run check`.',
+    );
   }
+
+  const { excluded, selected: files } = selectTestFiles(discovered, mode);
+  if (mode === 'unit' && excluded.length > 0) {
+    console.info(
+      `Unit-only mode excludes ${String(excluded.length)} database-dependent test files:\n${excluded
+        .map((file) => `- ${file}`)
+        .join('\n')}`,
+    );
+  }
+  if (files.length === 0) {
+    console.info('No tests have been added yet.');
+    return 0;
+  }
+
+  const shards = balanceShards(files, shardCount).filter(
+    (shard) => shard.length > 0,
+  );
+  console.info(
+    `Running ${String(files.length)} ${mode} test files across ${String(shards.length)} shard(s).`,
+  );
+
+  const shardDatabases: string[] = [];
+  if (baseDatabaseUrl !== undefined) {
+    await withMaintenance(baseDatabaseUrl, async (sql) => {
+      for (let index = 0; index < shards.length; index += 1) {
+        const name = `psd_eoc_shard${String(index)}_test`;
+        await sql.unsafe(`drop database if exists "${name}" (force)`);
+        await sql.unsafe(`create database "${name}"`);
+        shardDatabases.push(name);
+      }
+    });
+    await createClusterRoles(baseDatabaseUrl);
+  }
+
+  const started = Date.now();
+  const results = await Promise.all(
+    shards.map(async (shardFiles, index) => {
+      const environment: Record<string, string> = {
+        ...process.env,
+      } as Record<string, string>;
+      if (baseDatabaseUrl !== undefined) {
+        const url = new URL(baseDatabaseUrl);
+        url.pathname = `/${shardDatabases[index] ?? ''}`;
+        environment.TEST_DATABASE_URL = url.toString();
+        environment.DATABASE_URL = url.toString();
+      }
+      const child = Bun.spawn({
+        cmd: [process.execPath, 'test', ...passthrough, ...shardFiles],
+        cwd: ROOT,
+        env: environment,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      return { index, stdout, stderr, exitCode };
+    }),
+  );
+
+  let unexpectedSkipCount = 0;
+  for (const { index, stdout, stderr, exitCode } of results) {
+    const summary = stderr
+      .split('\n')
+      .filter(
+        (line) =>
+          /^\s*\d+ (pass|fail|skip|todo)/u.test(line) ||
+          line.startsWith('(fail)'),
+      )
+      .join('\n');
+    console.info(
+      `\n──── shard ${String(index)} (exit ${String(exitCode)}) ────\n${summary}`,
+    );
+    unexpectedSkipCount += countSkippedTests(stderr);
+    if (exitCode !== 0) {
+      console.error(stdout);
+      console.error(stderr);
+    }
+  }
+
+  if (baseDatabaseUrl !== undefined) {
+    await withMaintenance(baseDatabaseUrl, async (sql) => {
+      for (const name of shardDatabases) {
+        await sql.unsafe(`drop database if exists "${name}" (force)`);
+      }
+      // Databases individual suites created and failed to remove. They are
+      // named by this repository's helpers and nothing else on a developer's
+      // server uses the prefix, so a sweep here keeps a crashed run from
+      // leaving a server full of them.
+      const leaked = await sql<{ datname: string }[]>`
+        select datname from pg_database
+        where datname like 'psd\\_eoc\\_%\\_test' and datname <> 'psd_eoc_test'
+      `;
+      for (const { datname } of leaked) {
+        await sql.unsafe(`drop database if exists "${datname}" (force)`);
+      }
+    });
+  }
+
+  if (unexpectedSkipCount > 0) {
+    console.error(
+      `The ${mode} test gate encountered ${String(unexpectedSkipCount)} unexpected skipped test(s). Exclude intentional database suites through unit-only discovery instead of runtime skips.`,
+    );
+  }
+  const seconds = ((Date.now() - started) / 1_000).toFixed(1);
+  const failed = results.filter((result) => result.exitCode !== 0);
+  console.info(
+    `\nSuite finished in ${seconds}s — ${String(shards.length - failed.length)}/${String(shards.length)} shards green.`,
+  );
+  return failed.length === 0 && unexpectedSkipCount === 0 ? 0 : 1;
 }
 
-if (baseDatabaseUrl !== undefined) {
-  await withMaintenance(baseDatabaseUrl, async (sql) => {
-    for (const name of shardDatabases) {
-      await sql.unsafe(`drop database if exists "${name}" (force)`);
-    }
-    // Databases individual suites created and failed to remove. They are named
-    // by this repository's helpers and nothing else on a developer's server
-    // uses the prefix, so a sweep here keeps a crashed run from leaving a
-    // server full of them.
-    const leaked = await sql<{ datname: string }[]>`
-      select datname from pg_database
-      where datname like 'psd\\_eoc\\_%\\_test' and datname <> 'psd_eoc_test'
-    `;
-    for (const { datname } of leaked) {
-      await sql.unsafe(`drop database if exists "${datname}" (force)`);
-    }
-  });
+if (import.meta.main) {
+  process.exitCode = await runTestSuite(Bun.argv.slice(2));
 }
-
-const seconds = ((Date.now() - started) / 1_000).toFixed(1);
-const failed = results.filter((result) => result.exitCode !== 0);
-console.info(
-  `\nSuite finished in ${seconds}s — ${String(shards.length - failed.length)}/${String(shards.length)} shards green.`,
-);
-process.exit(failed.length === 0 ? 0 : 1);

@@ -348,14 +348,17 @@ match the intended immutable object exactly.
 From the repository root:
 
 ```sh
-bun install
+bun install --frozen-lockfile
 bun run --cwd infra synth
+bun run --cwd infra synth:example
 bun run check
 ```
 
 Synthesis uses committed account-specific Availability Zone context and
 disables new lookups. After dependencies are installed, the synthesis step
 needs neither AWS credentials nor AWS API or context lookups.
+`synth:example` supplies only reserved synthetic district identity, facilities,
+and recipients so CI proves the stack accepts a non-PSD tenant configuration.
 
 ## Manual deployment (not authorization)
 
