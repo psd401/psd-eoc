@@ -101,7 +101,7 @@ const SYNTHETIC_TEST_GROUP_DOMAIN = 'groups.synthetic.invalid';
 const TEST_CONFIGURATION: GroupsInventoryConfiguration = Object.freeze({
   hostedDomain: SYNTHETIC_TEST_GROUP_DOMAIN,
   academicTimeZone: 'America/Los_Angeles',
-  organizationPrefixes: Object.freeze(['district', 'psd', 'psd401']),
+  organizationPrefixes: Object.freeze(['district', 'example', 'synthetic']),
 });
 
 const assertSelfTest: (
