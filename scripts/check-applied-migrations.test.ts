@@ -36,7 +36,9 @@ function git(...args: readonly string[]): void {
   }
 }
 
-function journal(entries: readonly { idx: number; tag: string; when: number }[]): string {
+function journal(
+  entries: readonly { idx: number; tag: string; when: number }[],
+): string {
   return `${JSON.stringify(
     {
       version: '7',
@@ -179,7 +181,11 @@ describe('a change that rewrites history', () => {
   });
 
   test('reports a rename as both a deletion and the file it names', () => {
-    git('mv', `${MIGRATIONS}/0001_second.sql`, `${MIGRATIONS}/0001_renamed.sql`);
+    git(
+      'mv',
+      `${MIGRATIONS}/0001_second.sql`,
+      `${MIGRATIONS}/0001_renamed.sql`,
+    );
     commit('rename an applied migration');
 
     const result = run('main~1', 'main');
@@ -190,7 +196,10 @@ describe('a change that rewrites history', () => {
 
 describe('the override trailer', () => {
   test('allows the edit when a commit states its reason', () => {
-    write(`${MIGRATIONS}/0001_second.sql`, '-- second, as applied\nselect 2;\n');
+    write(
+      `${MIGRATIONS}/0001_second.sql`,
+      '-- second, as applied\nselect 2;\n',
+    );
     commit(
       'restore 0001 to the applied text\n\nMigration-History-Override: restoring the bytes production recorded',
     );
@@ -214,11 +223,17 @@ describe('the override trailer', () => {
   test('ignores a trailer that predates the range', () => {
     // A reason given for an earlier, already-merged repair must not license a
     // later rewrite that nobody justified.
-    write(`${MIGRATIONS}/0001_second.sql`, '-- second, as applied\nselect 2;\n');
+    write(
+      `${MIGRATIONS}/0001_second.sql`,
+      '-- second, as applied\nselect 2;\n',
+    );
     commit(
       'restore 0001\n\nMigration-History-Override: restoring the bytes production recorded',
     );
-    write(`${MIGRATIONS}/0001_second.sql`, '-- second, reworded again\nselect 2;\n');
+    write(
+      `${MIGRATIONS}/0001_second.sql`,
+      '-- second, reworded again\nselect 2;\n',
+    );
     commit('reword it again with no reason');
 
     expect(run('main~1', 'main').status).toBe(1);

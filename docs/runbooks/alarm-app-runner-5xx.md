@@ -55,9 +55,9 @@ sent.
 2. Confirm the side-effect-free `/api/health` route is returning `200`, the
    exact 5xx alarm has a complete healthy evaluation period, and related
    latency evidence is current.
-4. Review append-only event/outbox evidence for requests reported ambiguous by
+3. Review append-only event/outbox evidence for requests reported ambiguous by
    users. Never create, close, all-clear, or send a real event as a test.
-5. Use only the approved isolated non-production synthetic test path after #91
+4. Use only the approved isolated non-production synthetic test path after #91
    exists. A production live test requires every AGENTS.md gate and a fresh
    authenticated-human confirmation; this alarm does not authorize one.
 
