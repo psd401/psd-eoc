@@ -5,19 +5,13 @@ against an isolated non-production PSD EOC stack containing synthetic data.
 It never restores over the source cluster and never connects a restored cluster
 to a provider, real recipient, or production application.
 
-## Current status
+Current database and restore-drill state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Do not infer backup or
+restore readiness from CDK synthesis.
 
-**Restore drill: BLOCKED — NOT EXECUTED.** Issue
-[#91](https://github.com/psd401/psd-eoc/issues/91) has not provided a deployed
-isolated non-production stack. Issue
-[#31](https://github.com/psd401/psd-eoc/issues/31) therefore has no deployed
-restore/failover evidence. The deployable CDK configures 35-day Aurora backup
-retention, encryption, one writer/one reader, deletion protection, and retained
-resources, but synthesis is not deployment or backup evidence.
-
-Targets from PLAN §2.5 are approximately zero RPO through multi-AZ synchronous
-database operation and an RTO under one hour. A backup restore cannot prove
-zero RPO; record the exact restored point and any gap.
+The operational targets are approximately zero RPO through multi-AZ
+synchronous database operation and an RTO under one hour. A backup restore
+cannot prove zero RPO; record the exact restored point and any gap.
 
 ## Roles and approvals
 
@@ -32,10 +26,11 @@ zero RPO; record the exact restored point and any gap.
 ## Read-only backup inspection
 
 1. Sign in through the approved short-lived AWS access path. Confirm account
-   `338414773271` and region `us-west-2`; stop on any mismatch.
-2. In **RDS > Databases**, locate the exact isolated non-production PSD EOC
-   cluster from #91. Verify its environment tag and synthetic-only data
-   attestation. Do not use a production cluster for this drill.
+   and protected region from configuration; stop on any mismatch.
+2. In **RDS > Databases**, locate the exact isolated non-production cluster
+   named in the reviewed drill plan. Verify its environment tag and
+   synthetic-only data attestation. Do not use a production cluster for this
+   drill.
 3. Open **Maintenance & backups** read-only. Record automated backup status,
    retention, earliest/latest restorable times, encryption key identifier,
    cluster engine/version, and most recent backup completion. Record IDs only,
@@ -66,8 +61,9 @@ create a temporary public endpoint.
 
 ## Execute the isolated restore
 
-These are AWS Console steps because the repository has no approved deployment
-or restore command.
+The repository has no automation for an isolated point-in-time restore, so use
+these AWS Console steps. Application deployments continue to use the supported
+GitHub Actions/OIDC workflow.
 
 1. Record the approved restore start time in UTC. This starts the measured RTO.
 2. In RDS, choose the exact source cluster and **Restore to point in time**.
@@ -85,9 +81,9 @@ or restore command.
 6. Re-prove target isolation before granting any application access. The
    restored cluster must not use a production App Runner role, queue, worker,
    provider secret, DNS name, or callback.
-7. Use only the approved read-only validation image/tool from #91. No such
-   deployed tool exists today, so validation execution remains **BLOCKED**.
-   Never substitute an ad hoc production SQL client or admin secret.
+7. Use only a separately reviewed, read-only validation image or tool whose
+   identity is recorded in the drill plan. Never substitute an ad hoc
+   production SQL client or admin secret.
 
 ## Required validation
 
@@ -120,32 +116,32 @@ attempt.
 
 ### Restore drill `[SEQUENTIAL ATTEMPT ID]`
 
-- Status: **BLOCKED — NOT EXECUTED**
-- Gap/dependency: `#91, #31`
-- Source environment/cluster ID: `[BLOCKED]`
-- Synthetic-only attestation link: `[BLOCKED]`
-- AWS account/region: `338414773271 / us-west-2`
-- Approved restore point (UTC): `[BLOCKED]`
-- Target isolated cluster ID: `[BLOCKED]`
-- Product-owner approval reference/time: `[BLOCKED — NOT APPROVED]`
-- Operator / second verifier roles: `[BLOCKED] / [BLOCKED]`
-- RTO start / available / validation-complete (UTC): `[BLOCKED]`
-- Measured RTO: `[BLOCKED]` (target `< 1 hour`)
-- Restored point and measured RPO gap: `[BLOCKED]`
-- KMS/network/public-access/deletion-protection proof: `[BLOCKED]`
-- Provider/recipient isolation proof: `[BLOCKED]`
-- Schema and aggregate digest evidence: `[BLOCKED]`
-- Append-only/hash-chain verification: `[BLOCKED]`
-- Real/drill fixture verification: `[BLOCKED]`
-- Zero queue/provider calls evidence: `[BLOCKED]`
-- S3 scope statement: `[BLOCKED]`
-- Observed behavior: `[BLOCKED — DO NOT FABRICATE]`
+- Status: `[NOT RECORDED]`
+- Gap/dependency: `[NOT RECORDED]`
+- Source environment/cluster ID: `[NOT RECORDED]`
+- Synthetic-only attestation link: `[NOT RECORDED]`
+- AWS account/region: `[NOT RECORDED]`
+- Approved restore point (UTC): `[NOT RECORDED]`
+- Target isolated cluster ID: `[NOT RECORDED]`
+- Product-owner approval reference/time: `[NOT RECORDED]`
+- Operator / second verifier roles: `[NOT RECORDED]`
+- RTO start / available / validation-complete (UTC): `[NOT RECORDED]`
+- Measured RTO: `[NOT RECORDED]` (target `< 1 hour`)
+- Restored point and measured RPO gap: `[NOT RECORDED]`
+- KMS/network/public-access/deletion-protection proof: `[NOT RECORDED]`
+- Provider/recipient isolation proof: `[NOT RECORDED]`
+- Schema and aggregate digest evidence: `[NOT RECORDED]`
+- Append-only/hash-chain verification: `[NOT RECORDED]`
+- Real/drill fixture verification: `[NOT RECORDED]`
+- Zero queue/provider calls evidence: `[NOT RECORDED]`
+- S3 scope statement: `[NOT RECORDED]`
+- Observed behavior: `[NOT RECORDED — DO NOT FABRICATE]`
 - Expected behavior: restore validation completes under one hour with no data
   mutation and no provider path
-- Gap issue or explicit `none`: `[BLOCKED]`
-- Product-owner gap acceptance, if any: `[BLOCKED — NOT ACCEPTED]`
-- Evidence package link (access controlled, redacted): `[BLOCKED]`
-- Second-responder review/time: `[BLOCKED]`
+- Gap issue or explicit `none`: `[NOT RECORDED]`
+- Product-owner gap acceptance, if any: `[NOT RECORDED]`
+- Evidence package link (access controlled, redacted): `[NOT RECORDED]`
+- Second-responder review/time: `[NOT RECORDED]`
 
 Completion checkboxes:
 

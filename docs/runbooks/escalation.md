@@ -1,5 +1,8 @@
 # On-call escalation and role matrix
 
+Current deployment, monitoring, and provider state lives only in the
+[operational readiness register](../INTEGRATIONS.md).
+
 Use this matrix for every PSD EOC operational alert. It identifies roles, not
 personal contact details. Keep phone numbers, email addresses, schedules, and
 credentials in the approved district operations system, never in this
@@ -40,7 +43,7 @@ in for the human.
 Escalate one level immediately when:
 
 - the condition crosses a safety stop in
-  [README.md](README.md#stop-conditions-that-override-every-runbook);
+  [README.md](README.md#stop-conditions);
 - diagnosis cannot prove the environment, resource, current control epoch, or
   real/drill classification;
 - a proposed recovery could release queued or suppressed notification work;
@@ -54,51 +57,19 @@ Escalate one level immediately when:
 
 If the primary role does not acknowledge within the locally approved paging
 window, page the backup and the operations incident lead. The exact window and
-contact route belong in the approved operations system and the appendix below;
-they are not yet recorded in this repository.
+contact route belong in the approved operations system, never this repository.
 
 ## Provider escalation packet
 
 Before opening an AWS, Expo, Apple, or Google case, collect only:
 
-- service, UTC interval, region, sanitized PSD EOC resource ID, and request or
+- service, UTC interval, region, sanitized application resource ID, and request or
   provider reference that contains no recipient information;
 - bounded error/reason code and diagnostic digest, not raw untrusted provider
   text or payload;
 - whether the result is known failed, provider-accepted, or unknown;
 - impact and safe actions already taken; and
-- the district case owner.
+- the authorized case owner.
 
 Do not attach credentials, tokens, real recipient destinations, roster
 exports, event message content, student data, or unredacted logs.
-
-## Product-owner-fillable names appendix
-
-**Status: BLOCKED / INCOMPLETE.** Kris Hagel must complete and approve this
-roster in the access-controlled district operations system before go-live.
-This issue does not infer or self-approve assignments.
-
-Copy the following fields into that system. Record the controlled document
-link and approval reference in the go-live evidence; do not commit personal
-contact details here.
-
-| Role                                    | Primary name   | Backup name    | Paging window  | Approved contact-system record | Status        |
-| --------------------------------------- | -------------- | -------------- | -------------- | ------------------------------ | ------------- |
-| Product owner / safety and IT authority | Kris Hagel     | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Operations incident lead                | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Application on-call                     | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Delivery on-call                        | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Database / AWS on-call                  | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Identity / roster on-call               | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Security/privacy lead                   | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-| Communications liaison                  | `[PO TO FILL]` | `[PO TO FILL]` | `[PO TO FILL]` | `[CONTROLLED LINK TO FILL]`    | **Unchecked** |
-
-Approval record:
-
-- [ ] All primary and backup roles are named in the controlled system.
-- [ ] Every named responder tested access without performing a provider write
-      or live send.
-- [ ] Paging windows and backup escalation were exercised.
-- [ ] Product owner reviewed the roster.
-- Product-owner approval reference: `[PO TO FILL — NOT APPROVED]`
-- Approved at (UTC): `[PO TO FILL — NOT APPROVED]`

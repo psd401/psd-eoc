@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:** `psd-eoc-delivery-dlq-depth`, targeting
 `psd-eoc-delivery-dlq` paired only with source queue `psd-eoc-delivery`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning and severity
 
@@ -20,7 +19,7 @@ mismatch, or a human-only boundary failure.
 1. Do not receive, purge, delete, copy, edit, or redrive the message. Follow
    the common safety/disposition procedure in
    [alarm-sqs-dlq.md](alarm-sqs-dlq.md).
-2. Confirm account `338414773271`, region `us-west-2`, exact DLQ/source names,
+2. Confirm the protected account/region, exact DLQ/source names,
    oldest age, visible count, and
    source queue age/count.
 3. Review `/psd-eoc/dispatcher` logs by UTC interval and sanitized batch ID.

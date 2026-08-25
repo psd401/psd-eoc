@@ -675,6 +675,7 @@ describe('bootstrap failure reporting', () => {
     const child = Bun.spawn(
       [process.execPath, new URL('./bootstrap.ts', import.meta.url).pathname],
       {
+        cwd: import.meta.dir,
         env: { ...environment, PATH: process.env.PATH ?? '' },
         stderr: 'pipe',
         stdout: 'pipe',

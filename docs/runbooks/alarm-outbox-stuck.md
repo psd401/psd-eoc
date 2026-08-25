@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:**
 `psd-eoc-stuck-production-outbox`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -26,7 +25,7 @@ or alarm is current.
 ## Respond
 
 1. Classify **SEV-1** when real activation delivery is delayed. Confirm account
-   `338414773271`, region `us-west-2`, alarm time, and current control epoch.
+   protected account/region, alarm time, and current control epoch.
 2. Use the approved read-only operational metric and application evidence.
    Record only row count, oldest age, status/reason counts, and sanitized
    outbox/batch IDs. Direct production SQL is not an approved procedure in this
@@ -49,8 +48,8 @@ or alarm is current.
 - Confirm central queue age does not rise and no corresponding DLQ item appears.
 - Reconcile each ambiguous activation using event, journal, intent, outbox, and
   queue evidence. Provider acceptance and human receipt remain separate.
-- Do not send a live test or replay a row to prove recovery. Use approved
-  isolated synthetic non-production evidence only after #91 is complete.
+- Do not send a live test or replay a row to prove recovery. Use only an
+  approved isolated synthetic non-production path.
 
 Append oldest-age/count trends, sanitized affected IDs, exact code/config
 change, product-owner approval for any production mutation, and the second

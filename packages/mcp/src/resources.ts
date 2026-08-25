@@ -2,19 +2,19 @@ const REPOSITORY_ROOT = new URL('../../../', import.meta.url);
 
 export const MCP_RESOURCES = Object.freeze([
   Object.freeze({
-    uri: 'psd-eoc://docs/plan',
-    name: 'PSD EOC implementation plan',
-    title: 'PSD EOC Implementation Plan',
+    uri: 'psd-eoc://docs/architecture',
+    name: 'PSD EOC current architecture',
+    title: 'PSD EOC Architecture and Contributing',
     description:
-      'Binding architecture, scope, delivery phases, and safety invariants for PSD EOC.',
+      'Current package ownership, capability execution, data, safety, and contributor boundaries.',
     mimeType: 'text/markdown',
   }),
   Object.freeze({
-    uri: 'psd-eoc://docs/decision-log',
-    name: 'PSD EOC discovery decision log',
-    title: 'PSD EOC Discovery Decision Log',
+    uri: 'psd-eoc://docs/readiness',
+    name: 'PSD EOC operational readiness',
+    title: 'PSD EOC Operational Readiness Register',
     description:
-      'Binding confirmed product decisions and explicitly recorded assumptions and open questions.',
+      'Current deployment, identity, monitoring, provider, and mobile readiness evidence.',
     mimeType: 'text/markdown',
   }),
 ] as const);
@@ -22,11 +22,11 @@ export const MCP_RESOURCES = Object.freeze([
 export type McpResourceUri = (typeof MCP_RESOURCES)[number]['uri'];
 
 const resourcePaths = Object.freeze({
-  'psd-eoc://docs/plan': new URL('docs/PLAN.md', REPOSITORY_ROOT),
-  'psd-eoc://docs/decision-log': new URL(
-    'docs/discovery/DECISION_LOG.md',
+  'psd-eoc://docs/architecture': new URL(
+    'docs/ARCHITECTURE.md',
     REPOSITORY_ROOT,
   ),
+  'psd-eoc://docs/readiness': new URL('docs/INTEGRATIONS.md', REPOSITORY_ROOT),
 } as const satisfies Record<McpResourceUri, URL>);
 
 export function isMcpResourceUri(value: unknown): value is McpResourceUri {

@@ -3,9 +3,9 @@
 Use this runbook for SMS queue backlog, provider rejection/throttling,
 delivery-event gaps, opt-out failures, or an AWS/carrier incident.
 
-**Current truth:** SMS is `blocked` in `docs/INTEGRATIONS.md`. D-013 explicitly
-allows go-live with push and email while SMS remains dark. Carrier registration
-and number allocation do not authorize sending. See
+Current provider and alarm state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Carrier registration and
+number allocation never authorize sending; see
 [sms-registration.md](sms-registration.md).
 
 **Source-defined monitoring alarms:**
@@ -16,10 +16,8 @@ and number allocation do not authorize sending. See
   endpoint has not reached provider acceptance by the deterministic one-minute
   cutoff.
 
-Issue #29 source landed in pull request #96, but no approved deployment,
-CloudWatch read-back, alarm-action exercise, or console deep link is recorded.
-Treat both alarms as **live-unverified**. Their source definition does not
-change the `blocked` SMS integration truth or authorize provider I/O.
+The source definitions do not prove the alarms are deployed or authorize
+provider I/O.
 
 ## Safety posture
 
@@ -36,7 +34,7 @@ change the `blocked` SMS integration truth or authorize provider I/O.
 
 ## Respond
 
-1. Confirm account `338414773271`, region `us-west-2`, current delivery control
+1. Confirm the protected account/region, current delivery control
    epoch, SMS truth label, and `psd-eoc-sms` queue/DLQ state.
 2. If routable staff work reached the provider boundary while SMS was blocked
    or unverified, classify **SEV-0**, preserve evidence, and follow
@@ -55,7 +53,8 @@ change the `blocked` SMS integration truth or authorize provider I/O.
 
 ## Recover and verify
 
-- It is acceptable to leave SMS dark and document the launch gap under D-013.
+- It is acceptable to leave SMS dark and document the gap in the readiness
+  register.
   Do not weaken a provider policy or misclassify emergency-alert traffic to
   obtain approval.
 - Any provider, registration, number, opt-out, credential, or worker change
@@ -67,6 +66,7 @@ change the `blocked` SMS integration truth or authorize provider I/O.
   consequence preview, product-owner authorization, and authenticated-human
   confirmation.
 
-Record D-013 disposition in the go-live checklist: either SMS has independently
-verified end-to-end evidence or it is explicitly dark with no queued/provider
-path. Never describe registration success as delivery readiness.
+Record the go-live disposition in the readiness register: either SMS has
+independently verified end-to-end evidence or it is explicitly dark with no
+queued/provider path. Never describe registration success as delivery
+readiness.

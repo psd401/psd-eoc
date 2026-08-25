@@ -4,10 +4,10 @@ This runbook rotates the server-side credential used by the push worker. A
 mobile EAS build token is a separate distribution concern and must not be
 placed in the notification worker.
 
-**Current truth:** Expo Push is `mocked`. The deployable stack creates
-`/psd-eoc/expo-access-token` as an unusable placeholder and deliberately does
-not expose it to App Runner. No production worker/event-source runtime is
-deployed, so execution is **BLOCKED BY #91**.
+Current push-provider and worker state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Do not rotate or connect a
+credential unless the intended worker, secret boundary, and rollback path are
+independently verified.
 
 ## Preconditions
 
@@ -19,7 +19,7 @@ deployed, so execution is **BLOCKED BY #91**.
 - [ ] The new token can be stored only in the approved encrypted secrets
       system; it will never be printed, committed, or exposed to App Runner/mobile.
 - [ ] An isolated non-production worker with provably unroutable synthetic
-      endpoints exists under #91.
+      endpoints is identified in the reviewed change plan.
 
 ## Planned rotation
 
@@ -30,8 +30,8 @@ deployed, so execution is **BLOCKED BY #91**.
    the old token active for rollback unless compromise requires immediate
    revocation.
 3. Store the new value as a new encrypted secret version and update only the
-   push worker's approved runtime reference. The current repository has no
-   deployed worker path; this step remains **BLOCKED BY #91**.
+   push worker's approved runtime reference. If the readiness register does not
+   prove that exact worker path, stop before the provider write.
 4. Verify in isolated non-production that the worker authenticates only at the
    push provider boundary, rejects staff/routable targets, preserves
    real/drill markers, and sends zero provider requests under mocked truth.

@@ -3,17 +3,16 @@
 **Source-defined CloudWatch alarm name:** `psd-eoc-sms-dlq-depth`, targeting
 `psd-eoc-sms-dlq` paired only with source queue `psd-eoc-sms`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning and severity
 
-SMS work could not complete safely after bounded attempts. SMS is currently
-`blocked` and may remain dark at go-live under D-013. A dark queue with no work
-is expected; routable staff work in the queue while blocked/unverified is
-**SEV-0**.
+SMS work could not complete safely after bounded attempts. Consult the
+readiness register before responding. A dark queue with no work is expected
+when SMS is unavailable; routable staff work in the queue while the boundary
+is blocked or unverified is **SEV-0**.
 
 ## Respond
 
@@ -35,8 +34,8 @@ is expected; routable staff work in the queue while blocked/unverified is
 
 ## Verify
 
-For the D-013 dark path, prove the channel remains off, no routable staff work
+For a dark SMS path, prove the channel remains off, no routable staff work
 enters the queue, no event source/provider permission exists, and retained
-unexpected work is terminally suppressed. For a separately live-verified path,
-confirm new eligible work drains normally while old/ambiguous work is not
-replayed. Provider acceptance is not delivery or human receipt.
+unexpected work is terminally suppressed. For a separately live-verified
+path, confirm new eligible work drains normally while old/ambiguous work is
+not replayed. Provider acceptance is not delivery or human receipt.

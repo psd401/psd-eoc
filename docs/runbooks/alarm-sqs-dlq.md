@@ -7,12 +7,10 @@
 - `psd-eoc-email-dlq-depth`; and
 - `psd-eoc-sms-dlq-depth`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat all four alarms as **live-unverified** and
-their deep links as unavailable until #91 supplies that evidence. Each source
-alarm fires when at least one message is visible in its retained DLQ; missing
-data is non-breaching.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Each source-defined alarm
+fires when at least one message is visible in its retained DLQ; missing data is
+non-breaching. A source-defined name is not deployment evidence.
 
 Any DLQ message is retained evidence of work that could not complete safely.
 It is not a redrive to-do list. Automatic or bulk replay is forbidden.
@@ -30,7 +28,7 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 
 ## Common response
 
-1. Confirm account `338414773271`, region `us-west-2`, exact DLQ name, and the
+1. Confirm the protected account/region, exact DLQ name, and the
    paired source queue.
 2. Classify the incident using the per-DLQ section below. Record oldest age,
    visible count, source-queue age/count, and first alarm time from CloudWatch.
@@ -45,8 +43,8 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 6. Open one follow-up record for disposition. It must preserve original
    message/evidence IDs and document why each item is permanently suppressed,
    reconciled without a provider call, or eligible for an individually
-   reviewed replay mechanism. No such production replay mechanism is verified
-   in the current repository, so replay is **BLOCKED**.
+   reviewed replay mechanism. Unless the current source and readiness register
+   prove that mechanism exists, retain the item without replay.
 
 ### Delivery DLQ
 
@@ -78,8 +76,8 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 
 - Queue: `psd-eoc-sms-dlq`
 - Source: `psd-eoc-sms`
-- SMS may ship dark under D-013 and is currently `blocked` in
-  `docs/INTEGRATIONS.md`. Do not enable it to clear work.
+- Consult the readiness register for SMS state. Do not enable a dark or
+  unverified channel to clear work.
 - Any routable staff work that reached this queue while SMS was blocked or
   unverified is **SEV-0**. Preserve the control/integration evidence and follow
   [provider-sms.md](provider-sms.md).
