@@ -3,12 +3,10 @@
 This runbook rotates the Google OIDC client used for staff sign-in. It does not
 rotate the separate Google Groups roster-reader credential.
 
-**Current truth:** Google OIDC is `blocked` in `docs/INTEGRATIONS.md`. The source
-contract imports the independently retained `/psd-eoc/google-oauth` credential
-by its complete ARN and separately creates
-`/psd-eoc/google-oidc-cookie-secret`; neither change has been deployed or read
-back, so exact runtime consumption is still unproven. There is no verified
-deployment workflow, so production rotation execution is **BLOCKED BY #91**.
+Current OIDC and deployment state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Perform this procedure
+only after confirming the exact deployed client, secret references, and
+rollback path there and in the protected environment.
 
 ## Preconditions
 
@@ -16,9 +14,9 @@ deployment workflow, so production rotation execution is **BLOCKED BY #91**.
       configuration change, consequence preview, operator, and rollback.
 - [ ] The target account/region/environment and Google project/client are
       independently verified.
-- [ ] Callback origins, hosted domain `psd401.net`, consent configuration, and
+- [ ] Configured callback origins, hosted domain, consent configuration, and
       least privilege were reviewed without adding scopes.
-- [ ] A non-production environment isolated under #91 is available.
+- [ ] A reviewed, isolated non-production environment is available.
 - [ ] The prior secret remains available for rollback, unless compromise
       requires immediate revocation.
 - [ ] No secret value, client credential, user identity, or callback token is
@@ -36,15 +34,15 @@ deployment workflow, so production rotation execution is **BLOCKED BY #91**.
    retained secret, preserving exactly `clientId`, `clientSecret`,
    `iosBundleId`, `iosClientId`, and `webClientId`. The two public client IDs
    must remain distinct, share the web client's numeric project prefix, and
-   retain bundle ID `net.psd401.eoc`; `clientId` and `webClientId` remain
+   retain the configured bundle ID; `clientId` and `webClientId` remain
    identical. Do not rotate or reuse the separate cookie-key secret as an OAuth
    client secret. Do not place any secret in environment text, a file, CI
    variable output, or a command line.
 4. Deploy the exact reviewed application configuration so new instances read
    the replacement through `GOOGLE_OAUTH_CONFIG`. Supply only the no-default
    complete ARN parameter for the retained secret; never delete or recreate it.
-   Because the repository has no approved deploy workflow, this step remains
-   **BLOCKED BY #91**; do not improvise a console deployment.
+   Use only the supported GitHub Actions/OIDC deployment path in
+   [CONFIGURATION.md](../CONFIGURATION.md).
 5. In isolated non-production, verify one new staff-context synthetic sign-in,
    hosted-domain/group denial, CSRF/session handling, and that an existing
    long-lived session remains usable without a fresh Google round trip. No

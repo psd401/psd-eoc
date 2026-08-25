@@ -19,6 +19,7 @@
     "lint": "eslint . --max-warnings 0",
     "verify:workspaces": "bun scripts/verify-workspaces.ts",
     "verify:config": "bun scripts/verify-example-config.ts",
+    "verify:docs": "bun scripts/verify-documentation.ts",
     "typecheck": "bun run verify:workspaces && bun run --filter '*' typecheck",
     "build": "bun run --cwd packages/server build",
     "test": "bun run test:full",
@@ -26,7 +27,10 @@
     "test:unit": "bun scripts/test.ts --unit-only && bun run test:mobile",
     "test:mobile": "bun run --cwd packages/mobile native-config:check && bun scripts/test-mobile-native.ts",
     "test:db:start": "bun scripts/test-database.ts start",
+    "test:db:migrate": "bun scripts/test-database.ts migrate",
+    "test:db:seed": "bun scripts/test-database.ts seed",
     "test:db:stop": "bun scripts/test-database.ts stop",
+    "test:web": "bun scripts/test-database.ts web",
     "test:e2e:issue-340": "bun packages/server/e2e/run.ts",
     "test:e2e:issue-340:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:issue-341": "bun test packages/mobile/src/features/event-room/native-photo.test.ts packages/mobile/src/features/event-room/photo-draft.test.ts packages/mobile/src/features/event-room/api.test.ts packages/mobile/src/features/event-room/model.test.ts packages/mobile/src/features/event-room/sync-controller.test.ts && bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen.native.tsx && bun packages/server/e2e/run.ts",
@@ -37,7 +41,7 @@
     "test:e2e:issue-32:update-evidence": "PSD_EOC_E2E_SERVER_MODE=production PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:mobile": "bun packages/mobile/e2e/run.ts",
     "test:e2e:mobile:verify": "bun run --cwd packages/mobile e2e:verify",
-    "check": "bun run format:check && bun run lint && bun run verify:config && bun run typecheck && bun run build && bun run test:full"
+    "check": "bun run format:check && bun run lint && bun run verify:config && bun run verify:docs && bun run typecheck && bun run build && bun run test:full"
   },
   "devDependencies": {
     "@eslint/js": "9.35.0",

@@ -6,17 +6,14 @@ Rollback is a production change and requires an exact consequence preview,
 rollback point, and explicit product-owner approval. A safety stop may require
 the service stopped first; it does not authorize an improvised deploy.
 
-## Current status
-
-The repository has no approved production deployment workflow, no verified
-deployed stack, and no production worker/event-source wiring. Execution is
-**BLOCKED BY #91**. These steps define the evidence and decisions an operator
-must follow after those prerequisites exist.
+Current deployment, worker, and provider state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Confirm the exact active
+boundary there before choosing a rollback point.
 
 ## Universal procedure
 
-1. Start an append-only change/incident record. Confirm environment, AWS
-   account `338414773271`, region `us-west-2`, current application/worker image
+1. Start an append-only change/incident record. Confirm the configured
+   environment, protected AWS account/region, current application/worker image
    digests, mobile build/runtime versions, infrastructure revision, database
    migration, secret version IDs, integration truth labels, and emergency-
    disable revision/epoch.
@@ -36,7 +33,8 @@ must follow after those prerequisites exist.
    go-live approval does not authorize a later rollback.
 7. Have a second responder compare the deployed and target digests/versions to
    the preview. Apply through the approved deployment/configuration surface.
-   No approved deployment command exists in this repository today.
+   Server/infrastructure rollback uses the GitHub Actions `Deploy` workflow and
+   immutable digest described in [CONFIGURATION.md](../CONFIGURATION.md).
 8. Verify read-only health, control truth, safety invariants, metrics, logs,
    queue/outbox state, and append-only evidence. Do not send a live notification
    as a smoke test.
@@ -99,7 +97,8 @@ must follow after those prerequisites exist.
   store build; do not force them through OTA.
 - A store rollback uses a new reviewed build/version when Apple/Google does not
   permit reverting installed binaries. TestFlight/Play tester changes and
-  submissions remain human provider writes under issue #33.
+  submissions remain human provider writes that require current product-owner
+  authorization.
 - Verify real/drill theming, notification permissions/handling, biometric
   session behavior, and activation offline refusal on both platforms with
   synthetic non-production evidence.

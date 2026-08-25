@@ -1,8 +1,8 @@
 # Applied migrations and their snapshots are immutable history.
 packages/server/drizzle/migrations/
 
-# Verification evidence records an exact historical run.
-docs/evidence/
+# Archived records preserve their historical bytes, including evidence.
+docs/archive/
 
 # Vendored accessibility runtime and generated native projects are not source.
 packages/server/app/(app)/start/test/vendor/

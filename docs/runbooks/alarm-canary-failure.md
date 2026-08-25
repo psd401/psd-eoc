@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:**
 `psd-eoc-one-minute-canary-failure`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -29,7 +28,7 @@ proof that the deployed canary preserves those boundaries.
 
 ## Respond
 
-1. Confirm account `338414773271`, region `us-west-2`, exact alarm name,
+1. Confirm the protected account/region, exact alarm name,
    source-defined function name `psd-eoc-one-minute-canary`, scheduled time,
    last success, and alarm transition against deployed read-back evidence.
 2. Check App Runner `/api/health` read-only and compare App Runner, Aurora, SQS,

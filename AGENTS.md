@@ -90,7 +90,8 @@ These are real failure patterns from this repo's history. Avoid them.
 - **Don't invent ceremony.** Do not add approval gates, acknowledgement
   strings, hand-computed SHA-256 inputs, cost-estimate fields, or
   "consequence preview" steps to workflows. Kris approves things by telling
-  you to do them. A deploy should be: pick a commit, click run.
+  you to do them. A manual deploy is: pick a commit, click run. Merges to main
+  use the same GitHub Actions/OIDC deployment path automatically.
 - **Don't split work into micro-issues.** If a task needs four files changed,
   change four files. Do not open a chain of dependent issues each owning two
   files.

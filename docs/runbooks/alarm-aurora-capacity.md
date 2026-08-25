@@ -2,10 +2,9 @@
 
 **Source-defined CloudWatch alarm name:** `psd-eoc-aurora-acu-utilization`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning
 
@@ -23,7 +22,7 @@ history and treat failed reads as unknown, not absent.
 
 ## Respond
 
-1. Confirm account `338414773271`, region `us-west-2`, and the exact cluster.
+1. Confirm the protected account/region and exact cluster.
    Record the UTC interval and current writer/reader status.
 2. In RDS/CloudWatch, inspect capacity, ACU utilization, connections, CPU,
    storage, read/write latency, Data API errors, and recent cluster events over

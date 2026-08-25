@@ -7,9 +7,9 @@ Expo Router owns navigation. Shared domain types come from
 Push registration is implemented behind an exact, fail-closed build opt-in.
 Without that opt-in the app does not request notification permission or contact
 Expo, removes any earlier server endpoint when authenticated, and explains that
-registration is disabled. Expo Push remains `mocked`, as recorded in
-`docs/INTEGRATIONS.md`; working code and mock tests do not prove physical-device
-delivery.
+registration is disabled. Working code and mock tests do not prove
+physical-device delivery; current provider state lives only in
+`docs/INTEGRATIONS.md`.
 The native appearance stays light until the app has complete dark navigation,
 screen, and system-bar colors; this prevents unreadable system controls when a
 device itself uses dark mode.
@@ -63,9 +63,10 @@ unlock, and routed only by the canonical event ID. Sign-out authenticates when
 locked and requires successful server revocation/push cleanup before local
 SecureStore state is removed; cleanup is never queued offline.
 
-Physical delivery remains a controlled external-integration run. Follow
-`docs/evidence/issue-23-mobile-push.md`; never place push tokens, credentials,
-real recipients, or provider payloads in evidence.
+Physical delivery remains a controlled external-integration run. The historical
+issue record is `docs/archive/evidence/issue-23-mobile-push.md`; current state is
+in `docs/INTEGRATIONS.md`. Never place push tokens, credentials, real
+recipients, or provider payloads in evidence.
 
 ## Authentication configuration
 

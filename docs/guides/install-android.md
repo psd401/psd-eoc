@@ -1,10 +1,9 @@
 # Install PSD EOC on Android
 
-> **Distribution status: BLOCKED.** The exact PSD EOC AAB is saved in a Play
-> Internal-testing draft, but no tester link or installable release is verified.
-> These illustrated screen references are advance guidance, not provider
-> screenshots or install proof. Do not try to install until District Technology
-> announces availability.
+> Current build and distribution state lives in the
+> [operational readiness register](../INTEGRATIONS.md). These illustrated screen
+> references are guidance, not provider screenshots or install proof. Install
+> only when your district technology team supplies an approved test link.
 
 PSD EOC is distributed privately to approved Peninsula School District staff
 through an approved Google Play test. The first bounded pilot uses Internal
@@ -37,7 +36,8 @@ Installing the app does not start an incident, run a drill, or notify anyone.
 4. Tap **Become a tester**, then open the Google Play link and tap **Install**.
    Enrollment can take a few minutes to appear.
 5. Only after District Technology gives the separate registration confirmation
-   above, open **PSD EOC** and sign in with your approved `@psd401.net` staff
+   above, open **PSD EOC** and sign in with your approved staff account for the
+   configured hosted domain
    account. Otherwise stop after **Install**.
 6. After that confirmation, follow the app's prompt to enroll this device and
    enable fingerprint, face, or the device's secure unlock. PSD EOC does not
@@ -141,7 +141,7 @@ confirm the action, and launch the synthetic test:
 
 Use Firebase App Distribution only when District Technology sends an approved
 invitation and explicitly says the approved Play test is unavailable. Confirm
-the app name and package are `PSD EOC` and `net.psd401.eoc`. Android may warn
+the app name and package match the configured protected build. Android may warn
 about installing a test build; never disable device security globally and
 never install an APK received directly as an attachment. Return to the approved
 Play test when District Technology announces that it is ready.

@@ -6,10 +6,9 @@
 - `psd-eoc-aurora-replica-lag`; and
 - `psd-eoc-aurora-failover-event`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat all three alarms as **live-unverified**
-and their deep links as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). Source-defined alarm
+names are not deployment evidence.
 
 ## Meaning
 
@@ -33,7 +32,7 @@ facts do not prove a cluster is deployed or failover has been tested.
 ## Respond
 
 1. Classify **SEV-1**, assign the database/AWS responder, and confirm account
-   `338414773271`, region `us-west-2`, and the exact PSD EOC cluster.
+   protected account/region and the exact application cluster.
 2. In the RDS console, inspect read-only cluster status, writer/reader roles,
    Availability Zones, recent events, and failover start/end times. Record
    sanitized instance IDs and UTC times.
@@ -59,9 +58,9 @@ facts do not prove a cluster is deployed or failover has been tested.
 4. Reconcile each user-reported activation outcome from immutable event,
    journal, intent, and outbox evidence. `Unknown` remains valid when the
    transaction outcome cannot be proved.
-5. Do not call a failover or live notification a verification test. The
-   deployed isolated restore/failover evidence required by #31 remains
-   **BLOCKED BY #31/#91**.
+5. Do not call a failover or live notification a verification test. Record the
+   exact isolated restore/failover evidence in the readiness register before
+   claiming that boundary is verified.
 
 Any manual failover, parameter change, restore, or production deployment needs
 an explicit product-owner-approved plan and rollback point. Record AWS event

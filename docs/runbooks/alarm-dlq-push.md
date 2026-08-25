@@ -3,10 +3,9 @@
 **Source-defined CloudWatch alarm name:** `psd-eoc-push-dlq-depth`, targeting
 `psd-eoc-push-dlq` paired only with source queue `psd-eoc-push`.
 
-**Deployment/read-back truth:** issue #29 source landed in pull request #96,
-but no approved deployment, CloudWatch read-back, alarm-action exercise, or
-console deep link is recorded. Treat the alarm as **live-unverified** and the
-deep link as unavailable until #91 supplies that evidence.
+Current deployment and alarm read-back state lives only in the
+[operational readiness register](../INTEGRATIONS.md). A source-defined alarm
+name is not deployment evidence.
 
 ## Meaning and severity
 
