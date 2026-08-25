@@ -40,7 +40,10 @@ describe('synthetic example configuration', () => {
   });
 
   test('rejects a missing or invalid display time zone', () => {
-    const { PSD_EOC_DISPLAY_TIME_ZONE: _, ...missingTimeZone } = EXAMPLE;
+    const missingTimeZone = {
+      ...EXAMPLE,
+      PSD_EOC_DISPLAY_TIME_ZONE: undefined,
+    };
     expect(() => validateExampleConfiguration(missingTimeZone)).toThrow(
       /PSD_EOC_DISPLAY_TIME_ZONE must be configured/u,
     );
