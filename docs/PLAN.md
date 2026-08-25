@@ -12,6 +12,7 @@
 Build a district-owned notification + documentation platform ("call 911 first" positioning, D-004) with a high-reliability activation/delivery core (D-017). One deployable system (modular monolith + isolated delivery workers), three clients (web, native iOS, native Android), agent-native capability layer with MCP/REST parity for district AI agents (D-019), with four human-only actions (D-020).
 
 **Release 1 (go-live before Easy Alert shutdown):**
+
 - Any staff member (Google Groups-gated) starts an incident or drill: site → type → confirm (≤3 taps after unlock).
 - Delivery: native push + email (+ SMS when carrier registration clears, D-013) to the staff of the school an event is started at, and of its neighborhood when an event reaches beyond its own building (D-008; the configurable audience layer was retired in #292).
 - Live event: timeline with text, photos, location pins; join-or-start-new for concurrent events (D-025); anyone can all-clear/close (D-009).
@@ -72,20 +73,20 @@ One deployment family in AWS account `338414773271` (us-west-2, D-026), fully se
 - Every feature is a typed capability; web UI, REST, and MCP all use the audited server engine — no side doors.
 - Agent credentials: scoped API keys (per-agent identity, auditable).
 - **Human-only (server-enforced, no agent credential can ever):** start real incident, send real notification, all-clear, close real event.
-- Agents CAN: read everything they're scoped to, run reports, draft messages/templates, manage config drafts, work with drill data, and *prepare* an activation for one-tap human confirmation.
+- Agents CAN: read everything they're scoped to, run reports, draft messages/templates, manage config drafts, work with drill data, and _prepare_ an activation for one-tap human confirmation.
 - Drill/test events in training mode: agents may exercise the full lifecycle against synthetic rosters only.
 
 ### 2.5 Reliability targets (adopted engineering targets, D-034 — these define "instant" and "high reliability" measurably)
 
-| Metric | Target |
-|---|---|
-| Activation accepted (p95) | < 500 ms |
-| Push handed to provider from activation (p95) | < 5 s |
-| Email/SMS handed to provider (p95) | < 15 s |
-| Activation-path availability | 99.9 % |
-| RPO (event journal + delivery evidence) | ~0 (multi-AZ synchronous) |
-| RTO | < 1 h |
-| Canary | Shallow health every 1 min; monthly live end-to-end delivery test to controlled recipients |
+| Metric                                        | Target                                                                                     |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Activation accepted (p95)                     | < 500 ms                                                                                   |
+| Push handed to provider from activation (p95) | < 5 s                                                                                      |
+| Email/SMS handed to provider (p95)            | < 15 s                                                                                     |
+| Activation-path availability                  | 99.9 %                                                                                     |
+| RPO (event journal + delivery evidence)       | ~0 (multi-AZ synchronous)                                                                  |
+| RTO                                           | < 1 h                                                                                      |
+| Canary                                        | Shallow health every 1 min; monthly live end-to-end delivery test to controlled recipients |
 
 ### 2.6 Security baseline
 
@@ -95,19 +96,19 @@ Carries forward the Maps safety-charter patterns: deny-by-default server-side au
 
 ## 3. Tech stack
 
-| Layer | Choice | Why |
-|---|---|---|
-| Monorepo | Bun workspaces + TypeScript strict | User runtime rules; one lockfile; shared contracts |
-| Contracts | Zod schemas in `packages/contracts` | Mirrors Maps; agents + all clients share one source of truth |
-| Server | Next.js App Router (`packages/server`) — web UI + REST + capability layer | Team convention from Maps; one deployable |
-| Mobile | Expo (React Native) + EAS Build (`packages/mobile`) | Only credible path to two native apps in the timeline; expo-notifications, expo-local-authentication, SecureStore |
-| Push | Expo Push API at launch → direct APNs/FCM fast-follow issue | Simplest working weekend path; migration issue tracks the extra-dependency tradeoff |
-| Email | AWS SES (`alerts.psd401.net` subdomain identity) | AWS-native, fast verification |
-| SMS | AWS End User Messaging SMS; 10DLC registration day 1; toll-free interim | D-013; same carrier queue regardless of vendor |
-| DB/ORM | Aurora PG + Drizzle migrations | Maps convention |
-| MCP | `packages/mcp` over capability layer | Agent-native requirement |
-| Infra | AWS CDK v2 (`infra/`), GitHub Actions OIDC deploy | Maps convention, no static keys |
-| Tests | `node --test` (server/contracts), Playwright + axe (web), Maestro smoke (mobile) | Maps convention; a11y = WCAG 2.2 AA |
+| Layer     | Choice                                                                           | Why                                                                                                               |
+| --------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Monorepo  | Bun workspaces + TypeScript strict                                               | User runtime rules; one lockfile; shared contracts                                                                |
+| Contracts | Zod schemas in `packages/contracts`                                              | Mirrors Maps; agents + all clients share one source of truth                                                      |
+| Server    | Next.js App Router (`packages/server`) — web UI + REST + capability layer        | Team convention from Maps; one deployable                                                                         |
+| Mobile    | Expo (React Native) + EAS Build (`packages/mobile`)                              | Only credible path to two native apps in the timeline; expo-notifications, expo-local-authentication, SecureStore |
+| Push      | Expo Push API at launch → direct APNs/FCM fast-follow issue                      | Simplest working weekend path; migration issue tracks the extra-dependency tradeoff                               |
+| Email     | AWS SES (`alerts.psd401.net` subdomain identity)                                 | AWS-native, fast verification                                                                                     |
+| SMS       | AWS End User Messaging SMS; 10DLC registration day 1; toll-free interim          | D-013; same carrier queue regardless of vendor                                                                    |
+| DB/ORM    | Aurora PG + Drizzle migrations                                                   | Maps convention                                                                                                   |
+| MCP       | `packages/mcp` over capability layer                                             | Agent-native requirement                                                                                          |
+| Infra     | AWS CDK v2 (`infra/`), GitHub Actions OIDC deploy                                | Maps convention, no static keys                                                                                   |
+| Tests     | `node --test` (server/contracts), Playwright + axe (web), Maestro smoke (mobile) | Maps convention; a11y = WCAG 2.2 AA                                                                               |
 
 ## 4. Monorepo layout (parallel-agent collision map)
 
@@ -134,6 +135,7 @@ Collision rules for parallel Codex agents (D-023): contracts merge before depend
 Phases gate on dependencies; issues within a phase are parallel-safe.
 
 ### Phase 0 — Foundations (serial, land first)
+
 1. **Scaffold monorepo** — Bun workspaces, TS strict, ESLint/Prettier, CI (check gate: format/lint/typecheck/test), PR template, CODEOWNERS.
 2. **Safety charter** — `AGENTS.md` + `SECURITY.md`: human-only actions, live-action gate, synthetic-data rule, truth labels, no-student-data, production-change authority.
 3. **Contracts v1** — Zod: identity/session, facility/neighborhood, group/roster snapshot, event type (versioned, real-vs-drill), event lifecycle + journal entries, notification intent/attempt/delivery-truth states, capability envelope + human-only action registry, API error model.
@@ -141,23 +143,26 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 5. **DB schema + migrations** — Drizzle from contracts; append-only journal tables; outbox table.
 
 ### Phase 1 — Identity & access (parallel after 3/5)
+
 6. Google OIDC web sign-in + hosted-domain + Groups gate + minimal roles (staff/admin) + facility scoping.
 7. Device sessions: long-lived refresh, rotation, revocation list, Google-outage grace; server-side session authz middleware.
 8. Groups→roster sync job: per-building groups, neighborhood config, "others" group; versioned snapshots; stale-roster report.
 
 ### Phase 2 — Event engine (parallel after Phase 0; UI parts after 6/7)
+
 9. Event lifecycle capabilities: create (idempotent), join-or-start-new, all-clear, close, reopen-correction; journal writes; real-vs-drill invariant.
 10. Event-type admin CRUD (versioned; seed: Lockdown, Modified Lockdown, Medical, Wildlife, + drill variants; SRP-migration-ready).
 11. Outbox dispatcher: transactional outbox → SQS enqueue, worker contract, delivery-state writeback, reconciliation, bounded retries.
 12. Push worker (Expo Push at launch) + device token registry + receipts.
 13. Email worker (SES) + templates (real vs drill theming).
-14. SMS worker (AWS EUM) + length-safe templates + opt-out handling. *(Ships dark until registration clears.)*
+14. SMS worker (AWS EUM) + length-safe templates + opt-out handling. _(Ships dark until registration clears.)_
 15. Web: active-events dashboard + start-event flow (site→type→confirm, 911 affordance that clearly does NOT auto-dial or imply dispatch).
 16. Web: event screen — timeline (poll), post text, all-clear/close with confirm.
 17. Media: presigned upload, content validation, re-encode, EXIF strip, authorized reads; photo posts.
 18. Location pins: explicit lat/lng + accuracy + label; web map display (MapLibre); "unknown/ambiguous" state.
 
 ### Phase 3 — Mobile (parallel after 3; API-dependent parts after 9)
+
 19. Expo scaffold: navigation, theming (unmistakable real-vs-drill visual states), EAS config for TestFlight + Android build.
 20. Mobile auth: OIDC flow, SecureStore, biometric unlock.
 21. Start-event flow (≤3 taps), join-or-start-new, 911 affordance.
@@ -165,6 +170,7 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 23. Push registration + foreground/background/locked-screen notification handling.
 
 ### Phase 4 — Agent-native & admin (parallel after 9)
+
 24. REST agent API: scoped API keys, per-agent identity, audit; human-only enforcement tests.
 25. MCP server: read/report/draft capabilities + prepare-activation (human confirms in app).
 26. Admin: facilities/neighborhoods, group mappings per site, test mode + synthetic roster.
@@ -172,6 +178,7 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 28. Audit trail + security-event log (distinct from operational journal).
 
 ### Phase 5 — Reliability & launch (after Phases 1–3)
+
 29. Monitoring: CloudWatch alarms → team notification, dashboards, shallow canary.
 30. Monthly live end-to-end delivery test harness (controlled recipients) + latency measurement vs SLO.
 31. Failure drills: kill worker mid-send, DB failover, Google-outage login, duplicate-delivery reconciliation — documented evidence.
@@ -180,6 +187,7 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 34. Runbooks (per §12 failure list), on-call escalation matrix, go-live/rollback checklist.
 
 ### External-dependency tasks (humans, start immediately — issues labeled `external`)
+
 E1. A2P 10DLC brand/campaign registration (+ toll-free interim number).
 E2. SES production access + `alerts.psd401.net` DNS.
 E3. Google Play developer account creation + org verification.
@@ -197,16 +205,16 @@ E8. WA Archives retention DAN lookup for incident/drill records (manual download
 
 ## 6. Success criteria (ISC)
 
-| Criterion | Source | Status |
-|---|---|---|
-| Staff member starts a drill from iPhone (TestFlight) and all building-group members receive push+email | Explicit | PENDING |
-| Same works on Android (private distribution) and web | Explicit | PENDING |
-| p95 activation→push-provider handoff < 5 s measured by test harness | Explicit (D-005/D-017) | PENDING |
-| Google forced-outage test: existing session still starts an incident | Explicit (D-016) | PENDING |
-| Agent via MCP can query events/drill records but is server-side blocked from the 4 human-only actions (test evidence) | Explicit (D-019/D-020) | PENDING |
-| Drill run in-app produces exportable record with date/time/type (RCW 28A.320.125 fields) | Implicit | PENDING |
-| Real incident and drill are visually + template-distinct in every channel (test evidence) | Implicit (brief invariant) | PENDING |
-| CI gate green: format, lint, typecheck, tests, Playwright+axe | Implicit | PENDING |
+| Criterion                                                                                                             | Source                     | Status  |
+| --------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------- |
+| Staff member starts a drill from iPhone (TestFlight) and all building-group members receive push+email                | Explicit                   | PENDING |
+| Same works on Android (private distribution) and web                                                                  | Explicit                   | PENDING |
+| p95 activation→push-provider handoff < 5 s measured by test harness                                                   | Explicit (D-005/D-017)     | PENDING |
+| Google forced-outage test: existing session still starts an incident                                                  | Explicit (D-016)           | PENDING |
+| Agent via MCP can query events/drill records but is server-side blocked from the 4 human-only actions (test evidence) | Explicit (D-019/D-020)     | PENDING |
+| Drill run in-app produces exportable record with date/time/type (RCW 28A.320.125 fields)                              | Implicit                   | PENDING |
+| Real incident and drill are visually + template-distinct in every channel (test evidence)                             | Implicit (brief invariant) | PENDING |
+| CI gate green: format, lint, typecheck, tests, Playwright+axe                                                         | Implicit                   | PENDING |
 
 ## 7. Top risks
 

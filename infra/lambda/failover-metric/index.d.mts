@@ -1,3 +1,5 @@
+export function assertDatabaseArn(value: unknown, region: unknown): string;
+
 export function runFailoverMetric(
   event: unknown,
   dependencies?: Readonly<{

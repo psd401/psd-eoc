@@ -116,7 +116,9 @@ function checkJournalEntries(base: string, head: string): string[] {
   for (const entry of before) {
     const current = afterByIdx.get(entry.idx);
     if (current === undefined) {
-      problems.push(`journal entry ${String(entry.idx)} (${entry.tag}) was removed`);
+      problems.push(
+        `journal entry ${String(entry.idx)} (${entry.tag}) was removed`,
+      );
       continue;
     }
     if (describeEntry(current) !== describeEntry(entry)) {

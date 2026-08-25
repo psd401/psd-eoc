@@ -1,0 +1,12 @@
+{
+  "name": "@psd-eoc/repository-scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit --project tsconfig.json"
+  },
+  "dependencies": {
+    "postgres": "3.4.8"
+  }
+}

@@ -1,8 +1,5 @@
 import { OrganizationNameSchema } from '@psd-eoc/contracts';
 
-export const AWS_ACCOUNT_ALIAS = 'psd401';
-export const AWS_ACCOUNT = '338414773271';
-export const AWS_REGION = 'us-west-2';
 /**
  * The deployed CloudFormation stack's name.
  *
@@ -54,14 +51,58 @@ export const PUSH_QUEUE_NAME = 'psd-eoc-push';
 export const PUSH_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-push-dlq';
 /** Redelivery attempts before a batch is retained for human inspection. */
 export const DELIVERY_QUEUE_MAX_RECEIVES = 5;
-export const SES_IDENTITY_DOMAIN = 'psd401.net';
-export const SES_FROM_ADDRESS = 'eoc-alerts@psd401.net';
 export const SES_VERIFICATION_REFERENCE = 'UNVERIFIED';
 export const BOOTSTRAP_LOG_GROUP_NAME = '/psd-eoc/bootstrap';
 export const DATABASE_SSL_ROOT_CERT =
   '/app/packages/server/certs/aws-rds-global-bundle.pem';
 
 export const IMAGE_DIGEST_SENTINEL = `sha256:${'0'.repeat(64)}`;
+
+export interface DeploymentTarget {
+  readonly account: string;
+  readonly accountAlias: string;
+  readonly monitoringRunbookBaseUrl: string;
+  readonly region: string;
+  readonly sesFromAddress: string;
+  readonly sesIdentityDomain: string;
+}
+
+/** Reads cloud and provider identity from the same CDK context as the tenant. */
+export function readDeploymentTarget(node: {
+  tryGetContext(key: string): unknown;
+}): DeploymentTarget {
+  const read = (key: string, pattern: RegExp): string => {
+    const value = node.tryGetContext(key);
+    if (typeof value !== 'string' || !pattern.test(value.trim())) {
+      throw new Error(`CDK context ${key} is required and invalid.`);
+    }
+    return value.trim();
+  };
+  const sesIdentityDomain = read(
+    'psdEoc:sesIdentityDomain',
+    /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
+  );
+  const sesFromAddress = read(
+    'psdEoc:sesFromAddress',
+    /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9][a-z0-9.-]+$/u,
+  );
+  if (!sesFromAddress.toLowerCase().endsWith(`@${sesIdentityDomain}`)) {
+    throw new Error(
+      'CDK context psdEoc:sesFromAddress must use psdEoc:sesIdentityDomain.',
+    );
+  }
+  return Object.freeze({
+    account: read('psdEoc:awsAccount', /^\d{12}$/u),
+    accountAlias: read('psdEoc:awsAccountAlias', /^[a-z0-9][a-z0-9-]{1,62}$/u),
+    monitoringRunbookBaseUrl: read(
+      'psdEoc:monitoringRunbookBaseUrl',
+      /^https:\/\/[^\s?#]+[^\s?#/]$/u,
+    ),
+    region: read('psdEoc:awsRegion', /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u),
+    sesFromAddress,
+    sesIdentityDomain,
+  });
+}
 
 /**
  * Who this deployment serves.
@@ -218,4 +259,46 @@ export function readDeploymentIdentity(node: {
     ),
     organizationName: organizationName.data,
   });
+}
+
+export interface ProtectedDeploymentEnvironment {
+  readonly APP_PUBLIC_ORIGIN: string | undefined;
+  readonly AWS_ACCOUNT_ID: string | undefined;
+  readonly AWS_REGION: string | undefined;
+  readonly PSD_EOC_ENFORCE_DEPLOYMENT_TARGET: string | undefined;
+}
+
+/** Binds automatic production deployment to its protected repository values. */
+export function assertProtectedDeploymentTarget(
+  target: DeploymentTarget,
+  identity: DeploymentIdentity,
+  environment: ProtectedDeploymentEnvironment,
+): void {
+  if (environment.PSD_EOC_ENFORCE_DEPLOYMENT_TARGET !== 'true') return;
+  const expectedAccount = environment.AWS_ACCOUNT_ID?.trim();
+  const expectedRegion = environment.AWS_REGION?.trim();
+  const expectedOrigin = environment.APP_PUBLIC_ORIGIN?.trim();
+  if (
+    expectedAccount === undefined ||
+    expectedRegion === undefined ||
+    expectedOrigin === undefined ||
+    target.account !== expectedAccount ||
+    target.region !== expectedRegion ||
+    identity.applicationOrigin !== expectedOrigin
+  ) {
+    throw new Error(
+      'CDK deployment target does not match the protected production environment.',
+    );
+  }
+  const originHostname = new URL(expectedOrigin).hostname;
+  const isSameOrSubdomain = (value: string, domain: string): boolean =>
+    value === domain || value.endsWith(`.${domain}`);
+  if (
+    !isSameOrSubdomain(originHostname, identity.hostedDomain) ||
+    !isSameOrSubdomain(target.sesIdentityDomain, identity.hostedDomain)
+  ) {
+    throw new Error(
+      'Configured application and SES identities must remain within the protected hosted domain.',
+    );
+  }
 }

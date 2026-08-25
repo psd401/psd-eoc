@@ -24,14 +24,14 @@ files. Reducing that is active work — don't add to it.
 
 ## Live environment
 
-| | |
-|---|---|
-| URL | https://eoc.psd401.net |
-| AWS account | `338414773271` (`psd401`), `us-west-2` |
-| Local profile | `psd401-prr-prod` (`aws sso login --profile psd401-prr-prod`) |
-| Stack | `PsdEoc` |
-| Compute | App Runner → VPC connector → private Aurora PostgreSQL 16 |
-| Sign-in | Google OIDC, hosted domain `psd401.net`, callback `/auth/callback` |
+|               |                                                                    |
+| ------------- | ------------------------------------------------------------------ |
+| URL           | https://eoc.psd401.net                                             |
+| AWS account   | `338414773271` (`psd401`), `us-west-2`                             |
+| Local profile | `psd401-prr-prod` (`aws sso login --profile psd401-prr-prod`)      |
+| Stack         | `PsdEoc`                                                           |
+| Compute       | App Runner → VPC connector → private Aurora PostgreSQL 16          |
+| Sign-in       | Google OIDC, hosted domain `psd401.net`, callback `/auth/callback` |
 
 The stack and its physical names were `PsdEocExplorationSmoke` /
 `psd-eoc-exploration-smoke` until 2026-08-21. CloudFormation identifies a stack
@@ -64,12 +64,14 @@ adding a mutation and not calling it, you're building a side door.
 ## Commands
 
 ```bash
-bun install                      # deps (never npm)
-bun run check                    # the full gate: format + lint + typecheck + tests
+bun install --frozen-lockfile    # one root lockfile (never npm)
+bun run test:db:start            # local synthetic PostgreSQL; prints exports
+bun run check                    # format + lint + all TS + build + all tests
+bun run test:unit                # DB-free subset; names every excluded suite
 bun run format                   # fix formatting
 bun run lint
 bun run typecheck
-bun test                         # all tests
+bun run test:full                # full tests; requires safe TEST_DATABASE_URL
 bun test path/to/file.test.ts    # one file
 
 bun run --cwd packages/server dev          # Next dev server
@@ -80,7 +82,9 @@ bun run --cwd packages/mobile start        # Expo
 bun run --cwd packages/mobile test
 ```
 
-Tests need PostgreSQL. Set `DATABASE_URL` and `TEST_DATABASE_URL`.
+The authoritative gate needs loopback PostgreSQL with a database name ending in
+`_test` or `-test`. `bun run test:db:start` provides the documented synthetic
+service. Poppler's `pdftotext` is also required so PDF coverage cannot skip.
 
 ## Auth and access — read this before touching sign-in
 

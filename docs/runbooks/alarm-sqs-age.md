@@ -31,12 +31,12 @@ side effects unless the exact attempt is safely fenced.
 
 ## Identify the affected stage
 
-| Queue            | Stage                                             | Initial severity and next check                                                                                                         |
-| ---------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Queue              | Stage                                             | Initial severity and next check                                                                                                         |
+| ------------------ | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `psd-eoc-delivery` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                                         |
-| `psd-eoc-push`   | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)                          |
-| `psd-eoc-email`  | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                                             |
-| `psd-eoc-sms`    | SMS worker before AWS End User Messaging boundary | SMS is allowed to remain dark under D-013. Keep it dark while its integration is `blocked`; unexpected routable staff work is **SEV-0** |
+| `psd-eoc-push`     | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)                          |
+| `psd-eoc-email`    | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                                            |
+| `psd-eoc-sms`      | SMS worker before AWS End User Messaging boundary | SMS is allowed to remain dark under D-013. Keep it dark while its integration is `blocked`; unexpected routable staff work is **SEV-0** |
 
 ## Respond
 
@@ -46,14 +46,14 @@ side effects unless the exact attempt is safely fenced.
 2. Check the paired worker/router log group for startup, authorization,
    parsing, persistence, throttling, and provider reason codes. Use the UTC
    interval and sanitized batch/attempt IDs; do not copy raw payloads.
-4. Check whether the paired DLQ depth is nonzero. If so, continue with the
+3. Check whether the paired DLQ depth is nonzero. If so, continue with the
    matching runbook: [delivery](alarm-dlq-delivery.md),
    [push](alarm-dlq-push.md), [email](alarm-dlq-email.md), or
    [SMS](alarm-dlq-sms.md).
-5. For the delivery queue, also inspect outbox age and App Runner health. For a
+4. For the delivery queue, also inspect outbox age and App Runner health. For a
    channel queue, inspect only that provider's status and adapter logs; a
    provider status page is not delivery evidence.
-6. Determine whether work is being processed slowly, repeatedly failing, or
+5. Determine whether work is being processed slowly, repeatedly failing, or
    not consumed. Because issue #91 has not deployed event-source/runtime
    wiring, the current repository cannot supply production consumer evidence.
 

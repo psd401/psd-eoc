@@ -348,14 +348,19 @@ match the intended immutable object exactly.
 From the repository root:
 
 ```sh
-bun install
+bun install --frozen-lockfile
 bun run --cwd infra synth
+bun run --cwd infra synth:example
 bun run check
 ```
 
 Synthesis uses committed account-specific Availability Zone context and
 disables new lookups. After dependencies are installed, the synthesis step
 needs neither AWS credentials nor AWS API or context lookups.
+`synth:example` supplies only reserved synthetic district identity, cloud
+account/region, SES identity, facilities, and recipients. It fails if the
+rendered template retains the production deployment target, proving that a
+district can supply these values through CDK context without editing source.
 
 ## Manual deployment (not authorization)
 
