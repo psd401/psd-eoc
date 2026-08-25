@@ -55,6 +55,16 @@ export function currentDocumentationViolations(
     );
   }
   if (
+    repositoryPath.startsWith('docs/runbooks/') &&
+    /(?:\b(?:current|old|older|disabled|enable|control)(?:[ \t-]|\r?\n[ \t]*)+epoch\b|\bemergency[ -]re-enable\b|\bemergency control\b|\bcurrent control (?:state|truth)\b|\bcontrol-entry\b|\bdata\/control-epoch\b|\bnew control entry\b)/iu.test(
+      contents,
+    )
+  ) {
+    violations.push(
+      'current runbook references the removed notification control gate',
+    );
+  }
+  if (
     /bun run --cwd packages\/server (?:db:migrate|db:seed|dev)\b/u.test(
       contents,
     )
@@ -64,6 +74,80 @@ export function currentDocumentationViolations(
     );
   }
   return violations;
+}
+
+function headingForAnchor(
+  contents: string,
+  anchor: string,
+): {
+  readonly line: number;
+  readonly section: string;
+} | null {
+  const lines = contents.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (!line.startsWith('### ')) continue;
+    const heading = `${line}\n`;
+    if (!githubAnchors(heading).has(anchor)) continue;
+    let end = index + 1;
+    while (end < lines.length && !(lines[end] ?? '').startsWith('### ')) {
+      end += 1;
+    }
+    return {
+      line: index + 1,
+      section: lines.slice(index, end).join('\n'),
+    };
+  }
+  return null;
+}
+
+export function validateMonitoringRunbooks(
+  repositoryRoot: string,
+): DocumentationError[] {
+  const monitoringPath = join(repositoryRoot, 'infra', 'src', 'monitoring.ts');
+  const runbookIndexPath = join(repositoryRoot, 'infra', 'README.md');
+  const monitoring = readFileSync(monitoringPath, 'utf8');
+  const runbookIndex = readFileSync(runbookIndexPath, 'utf8');
+  const anchors = [
+    ...new Set(
+      [...monitoring.matchAll(/runbookAnchor:\s*'([^']+)'/gu)]
+        .map((match) => match[1])
+        .filter((value): value is string => value !== undefined),
+    ),
+  ].sort();
+  const errors: DocumentationError[] = [];
+  if (anchors.length === 0) {
+    return [
+      {
+        file: 'infra/src/monitoring.ts',
+        line: 1,
+        message: 'monitoring source contains no runbook anchors',
+      },
+    ];
+  }
+  for (const anchor of anchors) {
+    const heading = headingForAnchor(runbookIndex, anchor);
+    if (heading === null) {
+      errors.push({
+        file: 'infra/README.md',
+        line: 1,
+        message: `monitoring runbook anchor is missing: ${anchor}`,
+      });
+      continue;
+    }
+    if (
+      !/\]\(\.\.\/docs\/runbooks\/[^)#]+\.md(?:#[^)]+)?\)/u.test(
+        heading.section,
+      )
+    ) {
+      errors.push({
+        file: 'infra/README.md',
+        line: heading.line,
+        message: `monitoring runbook anchor has no current procedure link: ${anchor}`,
+      });
+    }
+  }
+  return errors;
 }
 
 function lineNumber(contents: string, offset: number): number {
@@ -540,6 +624,7 @@ export function verifyDocumentation(
   return [
     ...validateMarkdownLinks(root, files),
     ...validateBunCommands(root, files),
+    ...validateMonitoringRunbooks(root),
     ...verifyContracts(root),
     ...verifyInformationArchitecture(root, files),
   ].sort(

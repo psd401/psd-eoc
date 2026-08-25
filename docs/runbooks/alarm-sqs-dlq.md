@@ -21,8 +21,11 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 - Do not edit a body, reset receive counts, or send it to another queue.
 - An ambiguous provider call remains `unknown`. Replaying it can duplicate a
   notification.
-- Disabling delivery terminally suppresses pending work. A later enable epoch
-  must not release any message created in an older epoch.
+- Pausing a consumer does not suppress or change pending work. Source-queue
+  retention is four days and DLQ retention is fourteen days; both clocks keep
+  running while paused. Record each deadline and reconcile every retained item
+  before expiry or resumption. A vanished item remains `unknown` without
+  independent immutable disposition evidence.
 - Raw payloads and provider responses are untrusted. Do not place them in
   tickets, screenshots, chat, or this repository.
 
@@ -52,8 +55,9 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 - Source: `psd-eoc-delivery`
 - Severity: **SEV-1**; batches for every channel can be affected.
 - Check transactional outbox evidence, central router authorization, real/drill
-  classification, roster snapshot ID, and current control epoch. Any mismatch
-  is terminally suppressed and escalated; never reconstruct a batch locally.
+  classification, roster snapshot ID, notification intent, and immutable batch
+  ID. Any mismatch is escalated and kept blocked; never reconstruct a batch
+  locally.
 
 ### Push DLQ
 
@@ -79,8 +83,8 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 - Consult the readiness register for SMS state. Do not enable a dark or
   unverified channel to clear work.
 - Any routable staff work that reached this queue while SMS was blocked or
-  unverified is **SEV-0**. Preserve the control/integration evidence and follow
-  [provider-sms.md](provider-sms.md).
+  unverified is **SEV-0**. Preserve the authorization/integration evidence and
+  follow [provider-sms.md](provider-sms.md).
 
 ## Recovery evidence
 

@@ -24,8 +24,8 @@ or alarm is current.
 
 ## Respond
 
-1. Classify **SEV-1** when real activation delivery is delayed. Confirm account
-   protected account/region, alarm time, and current control epoch.
+1. Classify **SEV-1** when real activation delivery is delayed. Confirm the
+   protected account/region, alarm time, and exact deployed revision.
 2. Use the approved read-only operational metric and application evidence.
    Record only row count, oldest age, status/reason counts, and sanitized
    outbox/batch IDs. Direct production SQL is not an approved procedure in this
@@ -42,9 +42,11 @@ or alarm is current.
 
 - Restore the canonical dispatcher path or roll back its proven regression.
   Follow [rollback.md](rollback.md). Do not introduce a side-door publisher.
-- Confirm current-epoch eligible rows leave through the normal dispatcher and
-  produce one immutable batch identity. Rows from a disabled/older epoch stay
-  suppressed after re-enable.
+- Confirm eligible rows leave through the normal dispatcher and produce one
+  immutable batch identity. A service pause does not suppress older work, and
+  downstream SQS retention clocks keep running. Reconcile every row and any
+  corresponding queue item before its configured deadline and before delivery
+  resumes.
 - Confirm central queue age does not rise and no corresponding DLQ item appears.
 - Reconcile each ambiguous activation using event, journal, intent, outbox, and
   queue evidence. Provider acceptance and human receipt remain separate.

@@ -31,8 +31,8 @@ provider I/O.
 
 ## Respond
 
-1. Confirm the protected account/region, current delivery control
-   epoch, SES integration truth, and `psd-eoc-email` queue/DLQ state.
+1. Confirm the protected account/region, exact deployed worker/configuration
+   revision, SES integration truth, and `psd-eoc-email` queue/DLQ state.
 2. In CloudWatch, inspect `/psd-eoc/workers/email` and sanitized SES
    configuration-set metrics for the UTC interval. Count bounded reason codes;
    do not copy payloads or destinations.

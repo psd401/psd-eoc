@@ -22,16 +22,16 @@ cannot lower severity by itself. `unknown` is an honest state.
 
 ## Decision roles
 
-| Role                                    | Accountable for                                                                                                                      | May not delegate away                                                 |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
-| Product owner / safety and IT authority | Go-live, production infrastructure/provider changes, approved synthetic live-test targets, emergency re-enable, accepted launch gaps | The required explicit authorization and final go-live signature       |
-| Operations incident lead                | Severity, task assignment, timeline, operator safety, handoff, and closure review                                                    | Evidence integrity or a safety stop condition                         |
-| Application on-call                     | App Runner, server behavior, web/mobile activation surfaces, rollback recommendation                                                 | Human-only boundaries or real/drill truth                             |
-| Delivery on-call                        | Outbox, SQS, workers, provider handoff, DLQ quarantine and reconciliation                                                            | Replaying ambiguous work or claiming receipt from provider acceptance |
-| Database / AWS on-call                  | Aurora, backups, restore, AWS service health, least-privilege access                                                                 | Destructive database changes or unapproved production mutation        |
-| Identity / roster on-call               | Google OAuth, Google Groups sync, session continuity, last-good snapshot evidence                                                    | Activating against an incomplete or ambiguous roster                  |
-| Security/privacy lead                   | Suspected unauthorized access, secret/contact-data exposure, audit-chain concerns                                                    | Evidence preservation and district reporting process                  |
-| Communications liaison                  | Internal status updates approved by the incident lead/product owner                                                                  | Sending PSD EOC notifications as an operations workaround             |
+| Role                                    | Accountable for                                                                                                                                            | May not delegate away                                                 |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Product owner / safety and IT authority | Go-live, production infrastructure/provider changes, approved synthetic live-test targets, resuming delivery after an emergency stop, accepted launch gaps | The required explicit authorization and final go-live signature       |
+| Operations incident lead                | Severity, task assignment, timeline, operator safety, handoff, and closure review                                                                          | Evidence integrity or a safety stop condition                         |
+| Application on-call                     | App Runner, server behavior, web/mobile activation surfaces, rollback recommendation                                                                       | Human-only boundaries or real/drill truth                             |
+| Delivery on-call                        | Outbox, SQS, workers, provider handoff, DLQ quarantine and reconciliation                                                                                  | Replaying ambiguous work or claiming receipt from provider acceptance |
+| Database / AWS on-call                  | Aurora, backups, restore, AWS service health, least-privilege access                                                                                       | Destructive database changes or unapproved production mutation        |
+| Identity / roster on-call               | Google OAuth, Google Groups sync, session continuity, last-good snapshot evidence                                                                          | Activating against an incomplete or ambiguous roster                  |
+| Security/privacy lead                   | Suspected unauthorized access, secret/contact-data exposure, audit-chain concerns                                                                          | Evidence preservation and district reporting process                  |
+| Communications liaison                  | Internal status updates approved by the incident lead/product owner                                                                                        | Sending PSD EOC notifications as an operations workaround             |
 
 One person may fill more than one role, but the operations record must name the
 role being exercised for each decision. The authenticated human who confirms a
@@ -44,14 +44,15 @@ Escalate one level immediately when:
 
 - the condition crosses a safety stop in
   [README.md](README.md#stop-conditions);
-- diagnosis cannot prove the environment, resource, current control epoch, or
+- diagnosis cannot prove the environment, resource, pending-delivery state, or
   real/drill classification;
 - a proposed recovery could release queued or suppressed notification work;
 - a provider outcome is ambiguous and someone proposes retrying it;
 - the primary channel and its expected fallback are both impaired;
 - no recent complete staff roster snapshot can be proved;
 - recovery needs a production deploy, secret rotation, DNS/provider change,
-  queue redrive, database failover/restore, or emergency re-enable; or
+  queue redrive, database failover/restore, or resumption after an emergency
+  service stop; or
 - the responder does not have the approved access or cannot locate the next
   named role.
 

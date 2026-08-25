@@ -26,6 +26,7 @@ EOC is not a 911 service.
 
 - [First deployment configuration](first-run.md)
 - [Escalation and roles](escalation.md)
+- [Emergency notification stop](rollback.md#emergency-notification-stop)
 - [Rollback](rollback.md)
 - [Go-live procedure](go-live.md)
 - [Mobile release and rollback](release.md)
@@ -40,7 +41,7 @@ EOC is not a 911 service.
 | Aurora                        | [Capacity](alarm-aurora-capacity.md), [failover](alarm-aurora-failover.md)                                                                                                        |
 | Queues and dead letters       | [Queue age](alarm-sqs-age.md), [common DLQ](alarm-sqs-dlq.md), [delivery](alarm-dlq-delivery.md), [push](alarm-dlq-push.md), [email](alarm-dlq-email.md), [SMS](alarm-dlq-sms.md) |
 | Application data paths        | [Stuck outbox](alarm-outbox-stuck.md), [stale roster](alarm-roster-stale.md)                                                                                                      |
-| Monitoring publishers         | [Metrics collector](alarm-metrics-collector.md), [shallow canary](alarm-canary-failure.md)                                                                                        |
+| Monitoring publishers         | [Metrics collector](alarm-metrics-collector.md), [monthly delivery test](alarm-monthly-delivery-test.md), [shallow canary](alarm-canary-failure.md)                               |
 
 ## Provider and roster response
 

@@ -34,8 +34,8 @@ provider I/O.
 
 ## Respond
 
-1. Confirm the protected account/region, current delivery control
-   epoch, SMS truth label, and `psd-eoc-sms` queue/DLQ state.
+1. Confirm the protected account/region, exact deployed worker/configuration
+   revision, SMS truth label, and `psd-eoc-sms` queue/DLQ state.
 2. If routable staff work reached the provider boundary while SMS was blocked
    or unverified, classify **SEV-0**, preserve evidence, and follow
    [rollback.md](rollback.md). Do not send or replay it.
@@ -60,11 +60,11 @@ provider I/O.
 - Any provider, registration, number, opt-out, credential, or worker change
   needs product-owner approval and an explicit rollback point.
 - Confirm the adapter remains fail closed at every non-`live-verified` state,
-  no old-epoch work can be released, and queue/DLQ state is stable.
+  no work retained across a service pause can be released without
+  reconciliation, and queue/DLQ state is stable.
 - Do not send a production SMS to test recovery. A future approved synthetic
-  test still needs verified credentials/registration, exact opt-in targets, a
-  consequence preview, product-owner authorization, and authenticated-human
-  confirmation.
+  test still needs verified credentials/registration, exact opt-in targets,
+  product-owner authorization, and authenticated-human confirmation.
 
 Record the go-live disposition in the readiness register: either SMS has
 independently verified end-to-end evidence or it is explicitly dark with no

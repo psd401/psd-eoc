@@ -91,7 +91,7 @@ The approved validator must record aggregate or digest evidence only:
 
 - database/schema migration version matches the source restore point;
 - expected synthetic facility, roster snapshot, event, journal, notification
-  intent, outbox, attempt, delivery-evidence, audit, and control-entry counts;
+  intent, outbox, attempt, delivery-evidence, and audit counts;
 - append-only sequence and hash-chain verification passes;
 - event real/drill classification and rendered-template markers agree for
   every synthetic fixture;
