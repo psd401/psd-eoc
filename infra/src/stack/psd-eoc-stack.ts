@@ -1494,6 +1494,7 @@ export class PsdEocStack extends Stack {
       },
       criticalAlarmTopic,
       database,
+      displayTimeZone: deploymentIdentity.displayTimeZone,
       delivery: queuePairs.Delivery,
       operationsAlarmTopic,
       operationsKey,

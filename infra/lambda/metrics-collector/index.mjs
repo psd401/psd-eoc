@@ -112,21 +112,21 @@ export const MONITORING_QUERIES = Object.freeze({
     ORDER BY state
   `,
   deliveryTestHealth: `
-    WITH pacific_month AS MATERIALIZED (
+    WITH configured_month AS MATERIALIZED (
       SELECT
         date_trunc('month', observation.local_time)
           AS current_month_start_local
       FROM (
         SELECT (CAST(:bucket_end AS timestamptz) + interval '1 minute')
-          AT TIME ZONE 'America/Los_Angeles' AS local_time
+          AT TIME ZONE CAST(:display_time_zone AS text) AS local_time
       ) AS observation
     ), month_bounds AS (
       SELECT
         (current_month_start_local - interval '1 month')
-          AT TIME ZONE 'America/Los_Angeles' AS previous_month_start,
+          AT TIME ZONE CAST(:display_time_zone AS text) AS previous_month_start,
         current_month_start_local
-          AT TIME ZONE 'America/Los_Angeles' AS current_month_start
-      FROM pacific_month
+          AT TIME ZONE CAST(:display_time_zone AS text) AS current_month_start
+      FROM configured_month
     ), report_heads_at_bucket_end AS MATERIALIZED (
       SELECT DISTINCT ON (report.run_id)
         report.run_id,
@@ -608,6 +608,19 @@ export async function collectOperationalMetrics(event, dependencies = {}) {
   const publishMetrics = dependencies.publishMetrics ?? publish;
   const bucket = metricBucket(event);
   const { parameters } = bucket;
+  const displayTimeZone = requiredEnvironment('DISPLAY_TIME_ZONE', 255);
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: displayTimeZone }).format(0);
+  } catch {
+    throw new Error('Monitoring configuration is unavailable.');
+  }
+  const deliveryTestParameters = [
+    ...parameters,
+    {
+      name: 'display_time_zone',
+      value: { stringValue: displayTimeZone },
+    },
+  ];
   const transaction = await client.send(
     new BeginTransactionCommand(commonDatabaseInput()),
   );
@@ -649,7 +662,7 @@ export async function collectOperationalMetrics(event, dependencies = {}) {
         client,
         transactionId,
         'deliveryTestHealth',
-        parameters,
+        deliveryTestParameters,
       ),
       outboxToProvider: await executeStaticSelect(
         client,

@@ -1461,10 +1461,15 @@ function monitoringQueryWithBucket(
   query: string,
   bucketStart: string,
   bucketEnd: string,
+  displayTimeZone = 'America/Los_Angeles',
 ): string {
+  if (!/^[A-Za-z0-9_+\-/]+$/u.test(displayTimeZone)) {
+    throw new Error('Synthetic monitoring time zone is invalid.');
+  }
   return query
     .replaceAll(':bucket_start', `'${bucketStart}'`)
-    .replaceAll(':bucket_end', `'${bucketEnd}'`);
+    .replaceAll(':bucket_end', `'${bucketEnd}'`)
+    .replaceAll(':display_time_zone', `'${displayTimeZone}'`);
 }
 
 describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
@@ -6329,7 +6334,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     );
   });
 
-  test('monthly health persists the preceding Pacific-month outcome at every observation', async () => {
+  test('monthly health persists the preceding configured-month outcome at every observation', async () => {
     const db = databaseConnection().db;
     const rollbackProbe = new Error(
       'rollback synthetic delivery-test report-head probe',
@@ -6370,6 +6375,23 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           ),
         );
         expect([...monthCloseRows]).toEqual([
+          { failed_run_count: 0, missed_count: 0 },
+        ]);
+
+        const easternMonthCloseRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-09-01T04:03:00.000Z',
+              '2026-09-01T04:04:00.000Z',
+              'America/New_York',
+            ),
+          ),
+        );
+        expect([...easternMonthCloseRows]).toEqual([
           { failed_run_count: 0, missed_count: 0 },
         ]);
 
