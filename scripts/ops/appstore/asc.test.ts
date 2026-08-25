@@ -14,21 +14,49 @@ import { join } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
 
+import { createAscJwt } from './asc-auth';
+import { parseCli as parseConfiguredCli } from './asc-cli';
+import { syncTestFlight as syncConfiguredTestFlight } from './asc-commands';
 import {
-  AppStoreConnectClient,
-  createAscJwt,
   isPathInside,
-  parseCli,
   parseReviewInfo,
   parseReviewInfoJson,
   parseTesterCsv,
   readPrivateFile,
-  syncTestFlight,
+} from './asc-inputs';
+import {
+  type AscAppConfiguration,
   type AscClient,
+  type AscCredentials,
   type BetaReviewInfo,
   type JsonApiPageSummary,
   type JsonApiResource,
-} from './asc';
+  type SyncOptions,
+} from './asc-model';
+import { AppStoreConnectClient } from './asc-resources';
+import { type AscTransport, AppStoreConnectTransport } from './asc-transport';
+import * as ascEntry from './asc';
+
+const TEST_APP_CONFIGURATION = Object.freeze({
+  appName: 'Synthetic Emergency App',
+  appSku: 'SYNTHETIC-EOC-IOS',
+  bundleId: 'org.example.synthetic.eoc',
+  externalGroupName: 'Synthetic External Staff',
+  internalGroupName: 'Synthetic Internal Technology',
+}) satisfies AscAppConfiguration;
+
+type TestSyncOptions =
+  | Omit<Extract<SyncOptions, { readonly apply: false }>, 'app'>
+  | Omit<Extract<SyncOptions, { readonly apply: true }>, 'app'>;
+
+const syncTestFlight = (client: AscClient, options: TestSyncOptions) =>
+  syncConfiguredTestFlight(client, {
+    ...options,
+    app: TEST_APP_CONFIGURATION,
+  } as SyncOptions);
+
+const parseCli = (arguments_: readonly string[]) =>
+  parseConfiguredCli(arguments_, TEST_APP_CONFIGURATION);
 
 const resource = (
   type: string,
@@ -124,22 +152,22 @@ const sortedTesterEmails = (
 class StatefulClient implements AscClient {
   rateLimitBudget: number | null = 1_000_000;
   readonly app = resource('apps', 'app-1', {
-    bundleId: 'net.psd401.eoc',
-    name: 'PSD EOC',
-    sku: 'PSD-EOC-IOS',
+    bundleId: TEST_APP_CONFIGURATION.bundleId,
+    name: TEST_APP_CONFIGURATION.appName,
+    sku: TEST_APP_CONFIGURATION.appSku,
   });
   readonly groups = [
     resource('betaGroups', 'internal-group', {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: true,
-      name: 'District Technology',
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     }),
     resource('betaGroups', 'external-group', {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: false,
-      name: 'Staff',
+      name: TEST_APP_CONFIGURATION.externalGroupName,
       publicLinkEnabled: false,
     }),
   ];
@@ -831,7 +859,7 @@ class ScaleStatefulClient extends OrderedStatefulClient {
 }
 
 const review: BetaReviewInfo = {
-  betaDescription: 'Synthetic PSD EOC beta description.',
+  betaDescription: 'Synthetic emergency app beta description.',
   contactEmail: 'review@example.invalid',
   contactFirstName: 'Synthetic',
   contactLastName: 'Reviewer',
@@ -971,9 +999,15 @@ type FixedAppIdentityDrift = 'bundleId' | 'id' | 'name' | 'sku';
 
 const appWithIdentityDrift = (drift: FixedAppIdentityDrift): JsonApiResource =>
   resource('apps', drift === 'id' ? 'another-app-id' : 'app-1', {
-    bundleId: drift === 'bundleId' ? 'net.psd401.concurrent' : 'net.psd401.eoc',
-    name: drift === 'name' ? 'Concurrent PSD EOC' : 'PSD EOC',
-    sku: drift === 'sku' ? 'CONCURRENT-PSD-EOC-IOS' : 'PSD-EOC-IOS',
+    bundleId:
+      drift === 'bundleId'
+        ? 'org.example.concurrent.eoc'
+        : TEST_APP_CONFIGURATION.bundleId,
+    name:
+      drift === 'name'
+        ? 'Concurrent Emergency App'
+        : TEST_APP_CONFIGURATION.appName,
+    sku: drift === 'sku' ? 'CONCURRENT-EOC-IOS' : TEST_APP_CONFIGURATION.appSku,
   });
 
 interface RequestedSync {
@@ -1010,16 +1044,19 @@ const writePrivate = async (path: string, contents: string): Promise<void> => {
   }
 };
 
-const createHttpClient = (): AppStoreConnectClient => {
+const createHttpCredentials = (): AscCredentials => {
   const { privateKey } = generateKeyPairSync('ec', {
     namedCurve: 'prime256v1',
   });
-  return new AppStoreConnectClient({
+  return {
     issuerId: 'synthetic-issuer',
     keyId: 'synthetic-key',
     privateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-  });
+  };
 };
+
+const createHttpClient = (): AppStoreConnectClient =>
+  new AppStoreConnectClient(createHttpCredentials());
 
 const TRUSTED_PAGINATION_PATH =
   '/v1/betaTesters?fields%5BbetaTesters%5D=email&filter%5Bapps%5D=app-1&filter%5Bapps%5D=app-2&limit=200';
@@ -1119,6 +1156,40 @@ describe('App Store Connect authentication', () => {
 });
 
 describe('App Store Connect HTTP safety', () => {
+  test('keeps fixed-origin HTTP transport independent from resource parsing', async () => {
+    const transport = new AppStoreConnectTransport(createHttpCredentials());
+    expect(transport.validatedUrl('/v1/apps?limit=1').href).toBe(
+      `${APP_STORE_CONNECT_ORIGIN}/v1/apps?limit=1`,
+    );
+    expect(() =>
+      transport.validatedUrl('https://example.invalid/v1/apps'),
+    ).toThrow(/unexpected URL/u);
+
+    const requestedUrls: string[] = [];
+    const injectedTransport: AscTransport = {
+      rateLimitRemaining: () => 99,
+      requestJson: (_method, url) => {
+        requestedUrls.push(url.href);
+        return Promise.resolve({ data: [resource('apps', 'app-1')] });
+      },
+      validatedContinuationUrl: () => {
+        throw new Error('Unexpected continuation.');
+      },
+      validatedUrl: (path) => new URL(path, APP_STORE_CONNECT_ORIGIN),
+    };
+    const client = new AppStoreConnectClient(
+      createHttpCredentials(),
+      injectedTransport,
+    );
+    expect(await client.first('/v1/apps?limit=1')).toEqual(
+      resource('apps', 'app-1'),
+    );
+    expect(client.rateLimitRemaining()).toBe(99);
+    expect(requestedUrls).toEqual([
+      `${APP_STORE_CONNECT_ORIGIN}/v1/apps?limit=1`,
+    ]);
+  });
+
   test('accepts only the exact documented status for each request shape', async () => {
     const originalFetch = globalThis.fetch;
     let responseFactory = (): Response =>
@@ -3178,7 +3249,7 @@ describe('write gates and reconciliation', () => {
               feedbackEnabled: true,
               hasAccessToAllBuilds: false,
               isInternalGroup: false,
-              name: 'Staff',
+              name: TEST_APP_CONFIGURATION.externalGroupName,
               publicLinkEnabled: false,
             });
             this.groups.push(group);
@@ -3214,7 +3285,8 @@ describe('write gates and reconciliation', () => {
     expect(
       client.groups.filter(
         ({ attributes }) =>
-          attributes?.name === 'Staff' && attributes.isInternalGroup === false,
+          attributes?.name === TEST_APP_CONFIGURATION.externalGroupName &&
+          attributes.isInternalGroup === false,
       ),
     ).toHaveLength(1);
   });
@@ -3368,10 +3440,15 @@ describe('write gates and reconciliation', () => {
 
   test('CLI refuses an unconfirmed apply or incomplete beta review request', () => {
     expect(() => parseCli(['sync', '--apply'])).toThrow(
-      '--confirm-apply net.psd401.eoc',
+      `--confirm-apply ${TEST_APP_CONFIGURATION.bundleId}`,
     );
     expect(() =>
-      parseCli(['sync', '--apply', '--confirm-apply', 'net.psd401.eoc']),
+      parseCli([
+        'sync',
+        '--apply',
+        '--confirm-apply',
+        TEST_APP_CONFIGURATION.bundleId,
+      ]),
     ).toThrow('--confirm-plan');
     expect(() => parseCli(['sync', '--submit-beta-review'])).toThrow(
       'requires --review-info and --build',
@@ -3477,7 +3554,10 @@ describe('write gates and reconciliation', () => {
         feedbackEnabled: { enumerable: true, value: true },
         hasAccessToAllBuilds: { enumerable: true, value: false },
         isInternalGroup: { enumerable: true, value: true },
-        name: { enumerable: true, value: 'District Technology' },
+        name: {
+          enumerable: true,
+          value: TEST_APP_CONFIGURATION.internalGroupName,
+        },
       });
       Object.defineProperty(attributes, '__proto__', {
         enumerable: true,
@@ -3543,7 +3623,7 @@ describe('write gates and reconciliation', () => {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: true,
-      name: 'District Technology',
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     });
     let getterReads = 0;
     const inherited = Object.create(safeAttributes()) as Record<
@@ -5279,7 +5359,7 @@ describe('write gates and reconciliation', () => {
       1,
       resource('users', 'wrong-type-group', {
         isInternalGroup: true,
-        name: 'District Technology',
+        name: TEST_APP_CONFIGURATION.internalGroupName,
       }),
     );
     await expect(
@@ -5545,7 +5625,7 @@ describe('write gates and reconciliation', () => {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: true,
-      name: 'District Technology',
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     };
     const cases = [
       {
@@ -9963,7 +10043,7 @@ describe('write gates and reconciliation', () => {
     expect(dataAttributes(groupCreates[1]?.body)).toMatchObject({
       hasAccessToAllBuilds: false,
       isInternalGroup: false,
-      name: 'Staff',
+      name: TEST_APP_CONFIGURATION.externalGroupName,
       publicLinkEnabled: false,
     });
     expect(result.actions.at(-1)?.kind).toBe('verification');
@@ -11223,12 +11303,30 @@ describe('write gates and reconciliation', () => {
 });
 
 describe('operator documentation and reproducibility', () => {
+  test('preserves the stable operator import surface', () => {
+    expect(ascEntry.createAscJwt).toBe(createAscJwt);
+    expect(ascEntry.parseCli).toBe(parseConfiguredCli);
+    expect(ascEntry.syncTestFlight).toBe(syncConfiguredTestFlight);
+    expect(ascEntry.AppStoreConnectClient).toBe(AppStoreConnectClient);
+  });
+
   test('binds writes to exact plans and exact EAS builds', async () => {
     const runbook = await Bun.file(
       join(import.meta.dir, '../../../docs/runbooks/appstore-setup.md'),
     ).text();
     expect(runbook).toContain('--confirm-plan');
     expect(runbook).toContain('planDigest');
+    for (const configurationName of [
+      'ASC_APP_NAME',
+      'ASC_APP_SKU',
+      'ASC_BUNDLE_ID',
+      'ASC_INTERNAL_GROUP_NAME',
+      'ASC_EXTERNAL_GROUP_NAME',
+    ]) {
+      expect(runbook).toContain(`export ${configurationName}=`);
+    }
+    expect(runbook).toContain('--confirm-apply "$ASC_BUNDLE_ID"');
+    expect(runbook).not.toMatch(/--confirm-apply net\.psd401\.eoc/u);
     expect(runbook).toContain(
       'cd packages/mobile\neas build:list --platform ios --build-profile production --status finished',
     );

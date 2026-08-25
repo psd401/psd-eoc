@@ -11,6 +11,7 @@ const axeVersion = (require('axe-core/package.json') as { version: string })
 
 export interface BrowserFixture {
   readonly eventId: string;
+  readonly issue344EventId: string;
   readonly issue32EventId: string;
   readonly issue32Media: Readonly<{
     mediaId: string;
@@ -43,6 +44,14 @@ export function issue341EvidencePath(name: string): string {
   const directory = process.env.PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR;
   if (directory === undefined) {
     throw new Error('Issue 341 browser evidence directory is unavailable.');
+  }
+  return join(directory, name);
+}
+
+export function issue344EvidencePath(name: string): string {
+  const directory = process.env.PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR;
+  if (directory === undefined) {
+    throw new Error('Issue 344 browser evidence directory is unavailable.');
   }
   return join(directory, name);
 }

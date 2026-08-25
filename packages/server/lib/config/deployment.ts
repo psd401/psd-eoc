@@ -73,6 +73,21 @@ export function organizationName(
   return result.data;
 }
 
+/** IANA time zone used for stable server- and client-rendered timestamps. */
+export function displayTimeZone(
+  environment: DeploymentEnvironment = process.env,
+): string {
+  const timeZone = required(environment, 'PSD_EOC_DISPLAY_TIME_ZONE');
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
+  } catch {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_DISPLAY_TIME_ZONE must be a valid IANA time zone.',
+    );
+  }
+  return timeZone;
+}
+
 /**
  * The browser-visible origin this deployment serves, used wherever a redirect
  * must not trust a proxy header.

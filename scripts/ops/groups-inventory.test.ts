@@ -1,4 +1,4 @@
-import { describe, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import {
   CreateGroupSourceInputSchema,
   type Facility,
@@ -11,15 +11,11 @@ import {
   CLOUD_IDENTITY_ORIGIN,
   CLOUD_IDENTITY_SCOPE,
   type CloudGroup,
-  type DraftDerivationMetrics,
   type DraftGroupRef,
-  type GcloudPathMetadata,
-  HIGH_CONFIDENCE_EMBEDDED_POPULATION_MARKERS,
-  INCIDENTAL_POPULATION_WORDS,
+  type GroupsInventoryConfiguration,
   type JsonObject,
   MAX_DRAFT_FILE_BYTES,
   MAX_FACILITIES,
-  MAX_FACILITY_CONTEXTS_PER_IDENTITY_FIELD,
   MAX_FACILITY_INPUT_BYTES,
   MAX_GROUPS,
   MAX_GROUPS_PER_PAGE,
@@ -32,53 +28,81 @@ import {
   SPELLED_GRADE_CARDINALS,
   SPELLED_GRADE_ORDINALS,
   SPELLED_GRADE_ORDINAL_MARKERS,
-  SYNTHETIC_TEST_GROUP_DOMAIN,
-  UNSAFE_AUTH_ENVIRONMENT_KEYS,
   type ValidationSummary,
-  academicStartYearAt,
-  assertSafeAuthenticationEnvironment,
-  buildDraft,
-  classifyPopulationGroup,
-  compactPopulationPrefixes,
   compareText,
-  createCloudIdentityFetcher,
-  createHumanAdcEnvironment,
-  createIsolatedGcloudConfigPath,
+  isHostedGroupEmail,
+  isRecord,
+  normalizeText,
+} from './groups-inventory-model';
+
+import {
+  type DraftDerivationMetrics,
+  HIGH_CONFIDENCE_EMBEDDED_POPULATION_MARKERS,
+  INCIDENTAL_POPULATION_WORDS,
+  MAX_FACILITY_CONTEXTS_PER_IDENTITY_FIELD,
+  academicStartYearAt as academicStartYearAtForTimeZone,
+  classifyPopulationGroup,
+  compactPopulationPrefixes as compactPopulationPrefixesForOrganization,
   facilityContextsForTokens,
-  gcloudTokenArguments,
   groupRef,
   groupTokenFields,
   hasIndexedExactWholeBuildingIdentity,
   hasStaffIdentityEvidence,
   hasUnsupportedIdentityContent,
+  scanWrittenGradeEndpoints,
+  siteSpecificFacilityNameTokens,
+  writtenGradeEvidenceForField,
+} from './groups-inventory-classification';
+
+import {
+  type GcloudPathMetadata,
+  UNSAFE_AUTH_ENVIRONMENT_KEYS,
+  assertSafeAuthenticationEnvironment,
+  createCloudIdentityFetcher,
+  createHumanAdcEnvironment,
+  gcloudTokenArguments,
   inventoryAllGroups,
-  isExactWholeBuildingIdentity,
-  isHostedGroupEmail,
-  isRecord,
   isTrustedGcloudAncestorMetadata,
   isTrustedGcloudExecutableMetadata,
-  normalizeText,
-  parseCli,
   parseCloudGroupForDomain,
-  parseDraftGroupRef,
-  parseFacilities,
   parseGroupPage,
-  parseGroupSourceFromDraft,
   parseInteractiveUserAdc,
-  parseNeighborhoodFromDraft,
   readBoundedResponseJson,
   readBoundedStream,
-  readPrivateJson,
+} from './groups-inventory-google';
+
+import {
+  buildDraft as buildDraftForConfiguration,
+  isExactWholeBuildingIdentity,
   retainBest,
-  scanWrittenGradeEndpoints,
+} from './groups-inventory-report';
+
+import {
+  createIsolatedGcloudConfigPath,
+  readPrivateJson,
   serializeDraft,
-  siteSpecificFacilityNameTokens,
-  validateDraftForDomain,
   writePrivateDraft,
-  writtenGradeEvidenceForField,
-} from './groups-inventory';
+} from './groups-inventory-files';
+
+import {
+  parseDraftGroupRef,
+  parseFacilities,
+  parseGroupSourceFromDraft,
+  parseNeighborhoodFromDraft,
+  validateDraftForDomain,
+} from './groups-inventory-input';
+
+import { parseCli } from './groups-inventory-cli';
+import * as groupsInventoryEntry from './groups-inventory';
 
 const CLI_PATH = new URL('groups-inventory.ts', import.meta.url).pathname;
+const CLI_URL = new URL('groups-inventory.ts', import.meta.url).href;
+const SYNTHETIC_TEST_GROUP_DOMAIN = 'groups.synthetic.invalid';
+const TEST_CONFIGURATION: GroupsInventoryConfiguration = Object.freeze({
+  hostedDomain: SYNTHETIC_TEST_GROUP_DOMAIN,
+  academicTimeZone: 'America/Los_Angeles',
+  organizationPrefixes: Object.freeze(['district', 'example', 'synthetic']),
+});
 
 const assertSelfTest: (
   condition: unknown,
@@ -114,6 +138,35 @@ const expectSelfTestReject = async (
 const runSelfTest = async (): Promise<void> => {
   const generatedAt = '2026-08-08T12:00:00.000Z';
   const parent = 'customers/C1234567';
+  const academicStartYearAt = (timestamp: Date): number =>
+    academicStartYearAtForTimeZone(
+      timestamp,
+      TEST_CONFIGURATION.academicTimeZone,
+    );
+  const compactPopulationPrefixes = (
+    facilities: readonly Facility[],
+    derivationMetrics?: DraftDerivationMetrics,
+  ) =>
+    compactPopulationPrefixesForOrganization(
+      facilities,
+      derivationMetrics,
+      TEST_CONFIGURATION.organizationPrefixes,
+    );
+  const buildDraft = (
+    facilities: readonly Facility[],
+    groups: readonly CloudGroup[],
+    pageCount: number,
+    generatedAt: string,
+    derivationMetrics?: DraftDerivationMetrics,
+  ): MappingDraft =>
+    buildDraftForConfiguration(
+      facilities,
+      groups,
+      pageCount,
+      generatedAt,
+      TEST_CONFIGURATION,
+      derivationMetrics,
+    );
   assertSelfTest(
     academicStartYearAt(new Date('2026-07-01T06:59:59.999Z')) === 2025 &&
       academicStartYearAt(new Date('2026-07-01T07:00:00.000Z')) === 2026,
@@ -129,7 +182,7 @@ const runSelfTest = async (): Promise<void> => {
       SYNTHETIC_TEST_GROUP_DOMAIN,
     );
   const validateDraft = (value: unknown): ValidationSummary =>
-    validateDraftForDomain(value, SYNTHETIC_TEST_GROUP_DOMAIN);
+    validateDraftForDomain(value, TEST_CONFIGURATION);
   const facilities: Facility[] = [
     {
       active: true,
@@ -177,6 +230,38 @@ const runSelfTest = async (): Promise<void> => {
     name: `groups/${id}`,
     parent,
   });
+  const customPrefixFacility = FacilitySchema.parse({
+    active: true,
+    code: 'NBE',
+    createdAt: generatedAt,
+    id: '00000000-0000-4000-8000-000000000006',
+    name: 'North Bay Elementary',
+  });
+  const customPrefixGroup = parseCloudGroup(
+    rawGroup(
+      'synthetic-acme-north-bay',
+      'acme.north.bay.staff@groups.synthetic.invalid',
+      'Acme North Bay Staff',
+    ),
+    parent,
+  );
+  const customPrefixDraft = buildDraftForConfiguration(
+    [customPrefixFacility],
+    [customPrefixGroup],
+    1,
+    generatedAt,
+    Object.freeze({
+      ...TEST_CONFIGURATION,
+      organizationPrefixes: Object.freeze(['acme']),
+    }),
+  );
+  assertSelfTest(
+    customPrefixDraft.buildingMappings[0]?.assessment.outcome ===
+      'strong-candidate' &&
+      customPrefixDraft.buildingMappings[0]?.createGroupSource
+        ?.googleGroupId === customPrefixGroup.googleGroupId,
+    'configured organization prefixes are retained through final facility scoring',
+  );
   const rawGroups = [
     rawGroup(
       'synthetic-nbe',
@@ -2867,6 +2952,7 @@ const runSelfTest = async (): Promise<void> => {
             facility,
             ordinalCollisionGroup,
             ordinalCollisionAcademicYear,
+            TEST_CONFIGURATION.organizationPrefixes,
           ),
       ) &&
       hasIndexedExactWholeBuildingIdentity(
@@ -6762,7 +6848,19 @@ const runSelfTest = async (): Promise<void> => {
     );
     await chmod(fifoInputPath, 0o600);
     const fifoValidation = Bun.spawn(
-      [Bun.argv[0]!, CLI_PATH, 'validate', '--draft', fifoInputPath],
+      [
+        Bun.argv[0]!,
+        CLI_PATH,
+        'validate',
+        '--draft',
+        fifoInputPath,
+        '--hosted-domain',
+        TEST_CONFIGURATION.hostedDomain,
+        '--academic-time-zone',
+        TEST_CONFIGURATION.academicTimeZone,
+        '--organization-prefixes',
+        TEST_CONFIGURATION.organizationPrefixes.join(','),
+      ],
       {
         stderr: 'pipe',
         stdin: 'ignore',
@@ -6846,6 +6944,25 @@ const runSelfTest = async (): Promise<void> => {
 };
 
 describe('Google Groups inventory', () => {
+  test('preserves the stable operator import surface', () => {
+    expect(groupsInventoryEntry.buildDraft).toBe(buildDraftForConfiguration);
+    expect(groupsInventoryEntry.parseCloudGroupForDomain).toBe(
+      parseCloudGroupForDomain,
+    );
+    expect(groupsInventoryEntry.parseCli).toBe(parseCli);
+  });
+
+  test('keeps the command entry point inert when imported', () => {
+    const imported = Bun.spawnSync(
+      [Bun.argv[0]!, '-e', `await import(${JSON.stringify(CLI_URL)});`],
+      { stderr: 'pipe', stdout: 'pipe' },
+    );
+
+    expect(imported.exitCode).toBe(0);
+    expect(new TextDecoder().decode(imported.stdout)).toBe('');
+    expect(new TextDecoder().decode(imported.stderr)).toBe('');
+  });
+
   // This preserves the complete former command-line self-test in ordinary
   // discovery. A two-core CI runner needs just over one minute for the bounded
   // subprocess, filesystem, and mapping cases together.

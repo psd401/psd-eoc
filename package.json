@@ -31,6 +31,8 @@
     "test:e2e:issue-340:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:issue-341": "bun test packages/mobile/src/features/event-room/native-photo.test.ts packages/mobile/src/features/event-room/photo-draft.test.ts packages/mobile/src/features/event-room/api.test.ts packages/mobile/src/features/event-room/model.test.ts packages/mobile/src/features/event-room/sync-controller.test.ts && bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen.native.tsx && bun packages/server/e2e/run.ts",
     "test:e2e:issue-341:update-evidence": "bun test packages/mobile/src/features/event-room/native-photo.test.ts packages/mobile/src/features/event-room/photo-draft.test.ts packages/mobile/src/features/event-room/api.test.ts packages/mobile/src/features/event-room/model.test.ts packages/mobile/src/features/event-room/sync-controller.test.ts && bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen.native.tsx && PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
+    "test:e2e:issue-344": "bun packages/server/e2e/run.ts",
+    "test:e2e:issue-344:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:issue-32": "bun packages/server/e2e/run.ts",
     "test:e2e:issue-32:update-evidence": "PSD_EOC_E2E_SERVER_MODE=production PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:mobile": "bun packages/mobile/e2e/run.ts",
