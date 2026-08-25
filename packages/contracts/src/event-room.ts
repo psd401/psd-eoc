@@ -101,10 +101,9 @@ export function compareJournalEntryReadProjections(
     : left.entry.id.localeCompare(right.entry.id);
 }
 
-function redactProjection(
-  projection: JournalEntryReadProjection,
-): JournalEntryReadProjection {
-  if (projection.visibility === 'redacted') return projection;
+function projectJournalReadMetadata(
+  entry: JournalEntryReadProjection['entry'],
+): z.infer<typeof journalReadMetadataSchema> {
   const {
     id,
     eventId,
@@ -115,20 +114,27 @@ function redactProjection(
     serverTime,
     clientTime,
     supersedes,
-  } = projection.entry;
+  } = entry;
+  return {
+    id,
+    eventId,
+    sequence,
+    kind,
+    author,
+    source,
+    serverTime,
+    clientTime,
+    supersedes,
+  };
+}
+
+function redactProjection(
+  projection: JournalEntryReadProjection,
+): JournalEntryReadProjection {
+  if (projection.visibility === 'redacted') return projection;
   return JournalEntryReadProjectionSchema.parse({
     visibility: 'redacted',
-    entry: {
-      id,
-      eventId,
-      sequence,
-      kind,
-      author,
-      source,
-      serverTime,
-      clientTime,
-      supersedes,
-    },
+    entry: projectJournalReadMetadata(projection.entry),
   });
 }
 
@@ -208,30 +214,9 @@ export function projectJournalEntryForRead(
       entry,
     });
   }
-  const {
-    id,
-    eventId,
-    sequence,
-    kind,
-    author,
-    source,
-    serverTime,
-    clientTime,
-    supersedes,
-  } = entry;
   return JournalEntryReadProjectionSchema.parse({
     visibility: 'redacted',
-    entry: {
-      id,
-      eventId,
-      sequence,
-      kind,
-      author,
-      source,
-      serverTime,
-      clientTime,
-      supersedes,
-    },
+    entry: projectJournalReadMetadata(entry),
   });
 }
 
