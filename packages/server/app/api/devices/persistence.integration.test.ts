@@ -19,7 +19,7 @@ import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../../(admin)/facilities/owned-database-lifecycle';
+} from '../../../lib/testing/owned-database-lifecycle';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import {
   createDatabaseClient,

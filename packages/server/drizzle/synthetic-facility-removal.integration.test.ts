@@ -25,7 +25,7 @@ import { requireSyntheticTestDatabaseUrl } from '../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../app/(admin)/facilities/owned-database-lifecycle';
+} from '../lib/testing/owned-database-lifecycle';
 import {
   createDatabaseClient,
   databaseExecuteRows,

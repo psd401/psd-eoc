@@ -3,16 +3,23 @@ import { createHash } from 'node:crypto';
 import {
   ActorInvocationSchema,
   ActorSchema,
+  AuthenticationCapabilityEnvelopeSchema,
   CapabilityScopeSchema,
   HumanConfirmationRecordSchema,
   IdempotencyKeySchema,
   MutationCapabilityEnvelopeSchema,
   MutationTransportSchema,
+  OidcCompletionTransportSchema,
+  PreSessionOidcPrincipalSchema,
   QueryCapabilityEnvelopeSchema,
+  SessionRefreshCapabilityEnvelopeSchema,
+  SessionRefreshTransportSchema,
   TimestampSchema,
   UuidSchema,
+  VerifiedCurrentRefreshCredentialSchema,
+  deriveHumanOnlyActionIds,
   defineCapability,
-  executeCapability as executeCanonicalCapability,
+  invokeAuthorizedCapabilityHandler,
   getCapabilityInvocationPolicy,
   parseCapabilityInput,
   parseCapabilityOutput,
@@ -20,6 +27,8 @@ import {
   type Actor,
   type ApiErrorCode,
   type CapabilityInput,
+  type CapabilityPrincipalKind,
+  type CapabilityExecutionDependencies,
   type CapabilityOutput,
   type CapabilitySafetyResolution,
   type CapabilitySafetyResolutionRequest,
@@ -30,10 +39,16 @@ import {
   type HumanOnlyActionId,
   type InvocationSource,
   type MutationTransport,
+  type OidcCompletionTransport,
+  type PreSessionOidcPrincipal,
   type RegisteredCapabilityId,
   type RegisteredMutationCapabilityId,
+  type RegisteredQueryCapabilityId,
+  type RegisteredCapabilityHandler,
   type SecurityAuditCategory,
   type SecurityAuditOutcome,
+  type SessionRefreshTransport,
+  type VerifiedCurrentRefreshCredential,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../auth/sessions';
@@ -71,6 +86,11 @@ export class CapabilityEngineError extends Error {
 /** Trusted invocation facts resolved by authentication adapters, never bodies. */
 export interface TrustedCapabilityInvocation {
   readonly actor: Actor;
+  /** Special authenticated evidence for the two pre-session capabilities. */
+  readonly principal?:
+    | PreSessionOidcPrincipal
+    | VerifiedCurrentRefreshCredential;
+  readonly principalKind?: CapabilityPrincipalKind;
   readonly source: InvocationSource;
   readonly scope: CapabilityScope;
   readonly requestId: string;
@@ -78,7 +98,10 @@ export interface TrustedCapabilityInvocation {
   readonly connectivityEpochId: string | null;
   readonly mutation: Readonly<{
     idempotencyKey: string;
-    transport: MutationTransport;
+    transport:
+      | MutationTransport
+      | OidcCompletionTransport
+      | SessionRefreshTransport;
     humanConfirmationId: string | null;
   }> | null;
 }
@@ -287,6 +310,41 @@ export interface ServerCapabilityRegistration<
     context: CapabilityHandlerContext<Transaction>,
   ) => string | null | Promise<string | null>;
   readonly replayFacilityId?: (output: CapabilityOutput<Id>) => string | null;
+  /**
+   * Specialized repositories may retain their existing durable idempotency
+   * protocol while the engine still owns authorization and atomic audit.
+   * The handler must execute inside the supplied engine-store transaction.
+   */
+  readonly mutationPersistence?: Id extends RepositoryOwnedMutationCapabilityId
+    ? 'engine-owned' | 'repository-owned'
+    : 'engine-owned';
+  /**
+   * Classifies repository errors without widening the committed mutation
+   * allowlist. A committed failure is reserved for a security response, such
+   * as refresh-token replay revocation, that must persist with its audit even
+   * though the caller receives a denial.
+   */
+  readonly classifyRepositoryError?: Id extends RepositoryOwnedMutationCapabilityId
+    ? (error: unknown) => RepositoryOwnedCapabilityErrorDisposition | null
+    : never;
+}
+
+export const REPOSITORY_OWNED_MUTATION_CAPABILITY_IDS = Object.freeze([
+  'refresh-session',
+  'revoke-session',
+  'create-event-type-draft',
+  'update-event-type-draft',
+  'publish-event-type-version',
+  'issue-agent-api-key',
+  'revoke-agent-api-key',
+] as const satisfies readonly RegisteredMutationCapabilityId[]);
+
+export type RepositoryOwnedMutationCapabilityId =
+  (typeof REPOSITORY_OWNED_MUTATION_CAPABILITY_IDS)[number];
+
+export interface RepositoryOwnedCapabilityErrorDisposition {
+  readonly auditError: CapabilityEngineError;
+  readonly commitTransaction: boolean;
 }
 
 function stableJson(value: unknown): string {
@@ -348,9 +406,11 @@ function assertInvocationAllowed(
   invocation: TrustedCapabilityInvocation,
 ): void {
   const policy = getCapabilityInvocationPolicy(capabilityId);
+  const principalKinds: ReadonlySet<string> = new Set(policy.principalKinds);
+  const sources: ReadonlySet<string> = new Set(policy.sources);
   if (
-    !policy.principalKinds.includes(invocation.actor.kind) ||
-    !policy.sources.includes(invocation.source)
+    !principalKinds.has(invocation.principalKind ?? invocation.actor.kind) ||
+    !sources.has(invocation.source)
   ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',
@@ -365,10 +425,25 @@ function validateTrustedInvocation(
   invocation: TrustedCapabilityInvocation,
 ): TrustedCapabilityInvocation {
   ActorSchema.parse(invocation.actor);
-  ActorInvocationSchema.parse({
-    actor: invocation.actor,
-    source: invocation.source,
-  });
+  const principalKind = invocation.principalKind ?? invocation.actor.kind;
+  if (principalKind === 'pre-session-oidc') {
+    PreSessionOidcPrincipalSchema.parse(invocation.principal);
+  } else if (principalKind === 'verified-refresh-credential') {
+    VerifiedCurrentRefreshCredentialSchema.parse(invocation.principal);
+  } else {
+    if (invocation.principal !== undefined) {
+      throw new CapabilityEngineError(
+        'VALIDATION_ERROR',
+        'MUTATION_METADATA_INVALID',
+        'Ordinary actors cannot carry special-principal evidence.',
+        400,
+      );
+    }
+    ActorInvocationSchema.parse({
+      actor: invocation.actor,
+      source: invocation.source,
+    });
+  }
   CapabilityScopeSchema.parse(invocation.scope);
   UuidSchema.parse(invocation.requestId);
   TimestampSchema.parse(invocation.serverTime.toISOString());
@@ -377,7 +452,13 @@ function validateTrustedInvocation(
   }
   if (invocation.mutation !== null) {
     IdempotencyKeySchema.parse(invocation.mutation.idempotencyKey);
-    MutationTransportSchema.parse(invocation.mutation.transport);
+    if (principalKind === 'pre-session-oidc') {
+      OidcCompletionTransportSchema.parse(invocation.mutation.transport);
+    } else if (principalKind === 'verified-refresh-credential') {
+      SessionRefreshTransportSchema.parse(invocation.mutation.transport);
+    } else {
+      MutationTransportSchema.parse(invocation.mutation.transport);
+    }
     if (invocation.mutation.humanConfirmationId !== null) {
       UuidSchema.parse(invocation.mutation.humanConfirmationId);
     }
@@ -397,6 +478,56 @@ function assertStaticMutationEnvelope(
       'Mutation metadata is required.',
       400,
     );
+  }
+  if (
+    capabilityId === 'complete-oidc-sign-in' &&
+    invocation.principalKind === 'pre-session-oidc'
+  ) {
+    const parsed = AuthenticationCapabilityEnvelopeSchema.safeParse({
+      capabilityId,
+      operation: 'mutation',
+      principal: invocation.principal,
+      source: invocation.source,
+      requestId: invocation.requestId,
+      serverTime: invocation.serverTime.toISOString(),
+      input,
+      idempotencyKey: invocation.mutation.idempotencyKey,
+      transport: invocation.mutation.transport,
+    });
+    if (!parsed.success) {
+      throw new CapabilityEngineError(
+        'VALIDATION_ERROR',
+        'MUTATION_METADATA_INVALID',
+        'The trusted OIDC mutation metadata is inconsistent.',
+        400,
+      );
+    }
+    return;
+  }
+  if (
+    capabilityId === 'refresh-session' &&
+    invocation.principalKind === 'verified-refresh-credential'
+  ) {
+    const parsed = SessionRefreshCapabilityEnvelopeSchema.safeParse({
+      capabilityId,
+      operation: 'mutation',
+      principal: invocation.principal,
+      source: invocation.source,
+      requestId: invocation.requestId,
+      serverTime: invocation.serverTime.toISOString(),
+      input,
+      idempotencyKey: invocation.mutation.idempotencyKey,
+      transport: invocation.mutation.transport,
+    });
+    if (!parsed.success) {
+      throw new CapabilityEngineError(
+        'VALIDATION_ERROR',
+        'MUTATION_METADATA_INVALID',
+        'The trusted refresh mutation metadata is inconsistent.',
+        400,
+      );
+    }
+    return;
   }
   const parsed = MutationCapabilityEnvelopeSchema.safeParse({
     capabilityId,
@@ -421,28 +552,6 @@ function assertStaticMutationEnvelope(
       'The trusted mutation metadata is inconsistent.',
       400,
     );
-  }
-}
-
-function protectedActionIdsForResolution(
-  capabilityId: RegisteredCapabilityId,
-  resolution: CapabilitySafetyResolution | null,
-): readonly HumanOnlyActionId[] {
-  if (resolution === null || resolution.rosterPopulation !== 'staff') {
-    return [];
-  }
-  switch (capabilityId) {
-    case 'start-event':
-    case 'reactivate-event':
-      return resolution.eventKind === 'incident'
-        ? ['start-real-incident', 'send-real-notification']
-        : ['send-real-notification'];
-    case 'all-clear-event':
-      return ['all-clear', 'send-real-notification'];
-    case 'close-event':
-      return resolution.eventKind === 'incident' ? ['close-real-event'] : [];
-    default:
-      return [];
   }
 }
 
@@ -596,7 +705,12 @@ function failureAuditEvent(
 ): CapabilityAuditEvent {
   const actionIds =
     context.authorization?.humanActionRequirement.actionIds ??
-    protectedActionIdsForResolution(capabilityId, context.safetyResolution);
+    (context.safetyResolution === null
+      ? []
+      : deriveHumanOnlyActionIds(
+          defineCapability(capabilityId).safetyEffect,
+          context.safetyResolution,
+        ));
   const isDenied = error.status === 401 || error.status === 403;
   const isHumanOnly =
     error.reasonCode === 'HUMAN_ONLY_REQUIRED' && actionIds.length > 0;
@@ -720,22 +834,27 @@ async function authorizeExecution<
         400,
       );
     }
-    MutationCapabilityEnvelopeSchema.parse({
-      capabilityId: registration.id,
-      operation: 'mutation',
-      actor: invocation.actor,
-      source: invocation.source,
-      scope: invocation.scope,
-      requestId: invocation.requestId,
-      serverTime,
-      input,
-      idempotencyKey: invocation.mutation.idempotencyKey,
-      transport: invocation.mutation.transport,
-      connectivityEpochId: invocation.connectivityEpochId,
-      requiredHumanActionIds: requirement.actionIds,
-      requiredConsequenceDigest: requirement.consequenceDigest,
-      humanConfirmation: confirmation,
-    });
+    if (
+      invocation.principalKind !== 'pre-session-oidc' &&
+      invocation.principalKind !== 'verified-refresh-credential'
+    ) {
+      MutationCapabilityEnvelopeSchema.parse({
+        capabilityId: registration.id,
+        operation: 'mutation',
+        actor: invocation.actor,
+        source: invocation.source,
+        scope: invocation.scope,
+        requestId: invocation.requestId,
+        serverTime,
+        input,
+        idempotencyKey: invocation.mutation.idempotencyKey,
+        transport: invocation.mutation.transport,
+        connectivityEpochId: invocation.connectivityEpochId,
+        requiredHumanActionIds: requirement.actionIds,
+        requiredConsequenceDigest: requirement.consequenceDigest,
+        humanConfirmation: confirmation,
+      });
+    }
   } else {
     if (invocation.mutation !== null) {
       throw new CapabilityEngineError(
@@ -792,10 +911,124 @@ function assertMutationRegistration<
 }
 
 /**
+ * Runs a read-only capability through the canonical parser and authorizer.
+ * The query-only generic prevents this lower tier from becoming a mutation
+ * side door around the audited transactional engine.
+ */
+export function executeAuthorizedCapabilityQuery<
+  Id extends RegisteredQueryCapabilityId,
+  Context,
+>(
+  registration: RegisteredCapabilityHandler<Id, Context>,
+  input: unknown,
+  dependencies: CapabilityExecutionDependencies<Context>,
+): Promise<CapabilityOutput<Id>> {
+  return invokeAuthorizedCapabilityHandler(registration, input, dependencies);
+}
+
+/**
+ * Executes the sole pre-session mutation whose session repository already
+ * commits replay protection, session issuance, and access-gate audit in one
+ * serializable transaction. The literal capability ID keeps this exception
+ * from becoming a general mutation bypass.
+ */
+export function executeRepositoryAuditedOidcCompletion<Context>(
+  registration: RegisteredCapabilityHandler<'complete-oidc-sign-in', Context>,
+  input: unknown,
+  dependencies: CapabilityExecutionDependencies<Context>,
+): Promise<CapabilityOutput<'complete-oidc-sign-in'>> {
+  return invokeAuthorizedCapabilityHandler(registration, input, dependencies);
+}
+
+type AuditedSessionReplayCapabilityId = 'refresh-session' | 'revoke-session';
+
+interface AuditedSessionReplayInput<
+  Id extends AuditedSessionReplayCapabilityId,
+> {
+  readonly capabilityId: Id;
+  readonly actor: Extract<Actor, { readonly kind: 'human' }>;
+  readonly source: Extract<InvocationSource, 'web' | 'mobile'>;
+  readonly requestId: string;
+  readonly serverTime: Date;
+}
+
+function sessionReplayAuditEvent<Id extends AuditedSessionReplayCapabilityId>(
+  input: AuditedSessionReplayInput<Id>,
+  outcome: Extract<SecurityAuditOutcome, 'success' | 'denied'>,
+): CapabilityAuditEvent {
+  const actor = ActorSchema.parse(input.actor);
+  if (actor.kind !== 'human') {
+    throw new CapabilityEngineError(
+      'FORBIDDEN',
+      'CAPABILITY_INVOCATION_DENIED',
+      'Only the authenticated human session may replay this capability.',
+      403,
+    );
+  }
+  const requestId = UuidSchema.parse(input.requestId);
+  const occurredAt = new Date(
+    TimestampSchema.parse(input.serverTime.toISOString()),
+  );
+  return Object.freeze({
+    category: outcome === 'success' ? 'capability-execution' : 'access-denial',
+    action: input.capabilityId,
+    actionIds: [],
+    confirmationId: null,
+    outcome,
+    actor,
+    source: input.source,
+    facilityId: null,
+    requestId,
+    reasonCode: outcome === 'success' ? null : 'CAPABILITY_INVOCATION_DENIED',
+    occurredAt,
+  });
+}
+
+/**
+ * Records a fresh canonical success fact for one exact completed session
+ * mutation replay. Keeping the two literal IDs here prevents this engine
+ * entry point from becoming a general repository-owned mutation bypass.
+ */
+export function executeAuditedSessionReplaySuccess<
+  Id extends AuditedSessionReplayCapabilityId,
+  Transaction extends CapabilityEngineTransaction,
+>(
+  input: AuditedSessionReplayInput<Id>,
+  store: CapabilityEngineStore<Transaction>,
+): Promise<void> {
+  const event = sessionReplayAuditEvent(input, 'success');
+  return store.transaction((transaction) =>
+    transaction.appendCapabilityAudit(event),
+  );
+}
+
+/**
+ * Commits the refresh-token replay security response and its canonical denial
+ * fact together. The literal refresh ID and transaction callback keep the
+ * lost-race security mutation inside the named capability engine boundary.
+ */
+export function executeAuditedRefreshReplayDenial<
+  Transaction extends CapabilityEngineTransaction,
+>(
+  input: Omit<AuditedSessionReplayInput<'refresh-session'>, 'capabilityId'>,
+  store: CapabilityEngineStore<Transaction>,
+  recordSecurityResponse: (transaction: Transaction) => Promise<void>,
+): Promise<void> {
+  const event = sessionReplayAuditEvent(
+    { ...input, capabilityId: 'refresh-session' },
+    'denied',
+  );
+  return store.transaction(async (transaction) => {
+    await recordSecurityResponse(transaction);
+    await transaction.appendCapabilityAudit(event);
+  });
+}
+
+/**
  * Executes one canonical capability through trusted actor resolution, central
  * safety resolution, scope authorization, idempotency, and append-only audit.
  */
-export async function executeCapability<
+export async function executeAuditedCapabilityTransaction<
   Id extends RegisteredCapabilityId,
   Transaction extends CapabilityEngineTransaction,
 >(
@@ -806,6 +1039,12 @@ export async function executeCapability<
 ): Promise<CapabilityOutput<Id>> {
   const invocation = validateTrustedInvocation(untrustedInvocation);
   const definition = defineCapability(registration.id);
+  const committedFailure: {
+    value: Readonly<{
+      original: unknown;
+      auditError: CapabilityEngineError;
+    }> | null;
+  } = { value: null };
   let auditContext: CapabilityFailureAuditContext = {
     invocation,
     authorization: null,
@@ -819,7 +1058,7 @@ export async function executeCapability<
       untrustedInput,
       invocation,
     );
-    return await store.transaction(async (transaction) => {
+    const output = await store.transaction(async (transaction) => {
       const transactionContext: CapabilityHandlerContext<Transaction> = {
         invocation,
         transaction,
@@ -829,217 +1068,262 @@ export async function executeCapability<
         safetyResolution: null,
       };
       auditContext = transactionContext;
-      assertInvocationAllowed(registration.id, invocation);
+      try {
+        assertInvocationAllowed(registration.id, invocation);
 
-      let idempotencyRecordId: string | null = null;
-      if (definition.operation === 'mutation') {
-        assertMutationRegistration(registration);
-        assertStaticMutationEnvelope(registration.id, input, invocation);
-        const mutation = invocation.mutation;
-        if (mutation === null) {
+        let idempotencyRecordId: string | null = null;
+        if (definition.operation === 'mutation') {
+          assertStaticMutationEnvelope(
+            registration.id as RegisteredMutationCapabilityId,
+            input,
+            invocation,
+          );
+          const mutation = invocation.mutation;
+          if (mutation === null) {
+            throw new CapabilityEngineError(
+              'VALIDATION_ERROR',
+              'MUTATION_METADATA_INVALID',
+              'Mutation metadata is required.',
+              400,
+            );
+          }
+          if (registration.mutationPersistence !== 'repository-owned') {
+            assertMutationRegistration(registration);
+            const parsedKey = IdempotencyKeySchema.parse(
+              mutation.idempotencyKey,
+            );
+            const principalDigest = digestCapabilityValue(invocation.actor);
+            const requestDigest = digestCapabilityValue({
+              capabilityId: registration.id,
+              input:
+                registration.canonicalizeIdempotencyInput?.(input) ?? input,
+            });
+            const claim = await transaction.claimIdempotency({
+              capabilityId: registration.id,
+              actor: invocation.actor,
+              principalDigest,
+              key: parsedKey,
+              requestDigest,
+              createdAt: invocation.serverTime,
+            });
+            if (claim.kind !== 'new') {
+              if (claim.requestDigest !== requestDigest) {
+                throw new CapabilityEngineError(
+                  'IDEMPOTENCY_CONFLICT',
+                  'IDEMPOTENCY_REQUEST_MISMATCH',
+                  'The idempotency key was already used for a different request.',
+                  409,
+                );
+              }
+              if (claim.kind === 'in-progress') {
+                throw new CapabilityEngineError(
+                  'CONFLICT',
+                  'IDEMPOTENCY_IN_PROGRESS',
+                  'The original request is still in progress.',
+                  409,
+                  true,
+                );
+              }
+              if (claim.kind === 'failed') {
+                throw new CapabilityEngineError(
+                  'CONFLICT',
+                  'IDEMPOTENCY_PREVIOUSLY_FAILED',
+                  'The original request failed and will not be executed again.',
+                  409,
+                );
+              }
+              const facilityId = await registration.resolveReplayFacilityId(
+                claim.resultReference,
+                transactionContext,
+              );
+              transactionContext.resolvedFacilityId = facilityId;
+              if (!scopeAllowsFacility(invocation.scope, facilityId)) {
+                throw new CapabilityEngineError(
+                  'FORBIDDEN',
+                  'CAPABILITY_SCOPE_DENIED',
+                  'The requested facility is outside the authenticated scope.',
+                  403,
+                );
+              }
+              const replay = parseCapabilityOutput(
+                registration.id,
+                await registration.loadReplay(
+                  claim.resultReference,
+                  transactionContext,
+                ),
+              );
+              if (registration.replayFacilityId(replay) !== facilityId) {
+                throw new CapabilityEngineError(
+                  'INTERNAL_ERROR',
+                  'IDEMPOTENCY_RESULT_UNAVAILABLE',
+                  'The original result facility evidence is inconsistent.',
+                  500,
+                );
+              }
+              if (definition.auditPolicy === 'all-outcomes') {
+                await transaction.appendCapabilityAudit({
+                  category:
+                    invocation.actor.kind === 'agent'
+                      ? 'agent-access'
+                      : 'capability-execution',
+                  action: registration.id,
+                  actionIds: [],
+                  confirmationId: null,
+                  outcome: 'success',
+                  actor: invocation.actor,
+                  source: invocation.source,
+                  facilityId,
+                  requestId: invocation.requestId,
+                  reasonCode: null,
+                  occurredAt: invocation.serverTime,
+                });
+              }
+              return replay;
+            }
+            idempotencyRecordId = claim.recordId;
+          }
+        } else if (invocation.mutation !== null) {
           throw new CapabilityEngineError(
             'VALIDATION_ERROR',
             'MUTATION_METADATA_INVALID',
-            'Mutation metadata is required.',
+            'Query capabilities cannot carry mutation metadata.',
             400,
           );
         }
-        const parsedKey = IdempotencyKeySchema.parse(mutation.idempotencyKey);
-        const principalDigest = digestCapabilityValue(invocation.actor);
-        const requestDigest = digestCapabilityValue({
-          capabilityId: registration.id,
-          input: registration.canonicalizeIdempotencyInput?.(input) ?? input,
-        });
-        const claim = await transaction.claimIdempotency({
-          capabilityId: registration.id,
-          actor: invocation.actor,
-          principalDigest,
-          key: parsedKey,
-          requestDigest,
-          createdAt: invocation.serverTime,
-        });
-        if (claim.kind !== 'new') {
-          if (claim.requestDigest !== requestDigest) {
-            throw new CapabilityEngineError(
-              'IDEMPOTENCY_CONFLICT',
-              'IDEMPOTENCY_REQUEST_MISMATCH',
-              'The idempotency key was already used for a different request.',
-              409,
-            );
-          }
-          if (claim.kind === 'in-progress') {
-            throw new CapabilityEngineError(
-              'CONFLICT',
-              'IDEMPOTENCY_IN_PROGRESS',
-              'The original request is still in progress.',
-              409,
-              true,
-            );
-          }
-          if (claim.kind === 'failed') {
-            throw new CapabilityEngineError(
-              'CONFLICT',
-              'IDEMPOTENCY_PREVIOUSLY_FAILED',
-              'The original request failed and will not be executed again.',
-              409,
-            );
-          }
-          const facilityId = await registration.resolveReplayFacilityId(
-            claim.resultReference,
-            transactionContext,
-          );
-          transactionContext.resolvedFacilityId = facilityId;
-          if (!scopeAllowsFacility(invocation.scope, facilityId)) {
-            throw new CapabilityEngineError(
-              'FORBIDDEN',
-              'CAPABILITY_SCOPE_DENIED',
-              'The requested facility is outside the authenticated scope.',
-              403,
-            );
-          }
-          const replay = parseCapabilityOutput(
-            registration.id,
-            await registration.loadReplay(
-              claim.resultReference,
-              transactionContext,
-            ),
-          );
-          if (registration.replayFacilityId(replay) !== facilityId) {
-            throw new CapabilityEngineError(
-              'INTERNAL_ERROR',
-              'IDEMPOTENCY_RESULT_UNAVAILABLE',
-              'The original result facility evidence is inconsistent.',
-              500,
-            );
-          }
-          if (definition.auditPolicy === 'all-outcomes') {
-            await transaction.appendCapabilityAudit({
-              category:
-                invocation.actor.kind === 'agent'
-                  ? 'agent-access'
-                  : 'capability-execution',
-              action: registration.id,
-              actionIds: [],
-              confirmationId: null,
-              outcome: 'success',
-              actor: invocation.actor,
-              source: invocation.source,
-              facilityId,
-              requestId: invocation.requestId,
-              reasonCode: null,
-              occurredAt: invocation.serverTime,
-            });
-          }
-          return replay;
-        }
-        idempotencyRecordId = claim.recordId;
-      } else if (invocation.mutation !== null) {
-        throw new CapabilityEngineError(
-          'VALIDATION_ERROR',
-          'MUTATION_METADATA_INVALID',
-          'Query capabilities cannot carry mutation metadata.',
-          400,
-        );
-      }
 
-      const registeredHandler = registerCapabilityHandler(
-        registration.id,
-        registration.handler,
-      );
-      const output = await executeCanonicalCapability(
-        registeredHandler,
-        input,
-        {
-          context: transactionContext,
-          humanActionResolutionContext:
-            definition.humanActionPolicy.kind === 'central'
-              ? {
-                  actor: invocation.actor,
-                  source: invocation.source,
-                  scope: invocation.scope,
-                  requestId: invocation.requestId,
-                  serverTime: invocation.serverTime.toISOString(),
-                  connectivityEpochId: invocation.connectivityEpochId,
-                }
-              : null,
-          safetyResolver:
-            definition.humanActionPolicy.kind === 'central'
-              ? {
-                  resolve: async (request) => {
-                    if (registration.resolveSafety === undefined) {
-                      throw new CapabilityEngineError(
-                        'INTERNAL_ERROR',
-                        'MUTATION_METADATA_INVALID',
-                        'The protected capability has no safety resolver.',
-                        500,
+        const registeredHandler = registerCapabilityHandler(
+          registration.id,
+          registration.handler,
+        );
+        const output = await invokeAuthorizedCapabilityHandler(
+          registeredHandler,
+          input,
+          {
+            context: transactionContext,
+            humanActionResolutionContext:
+              definition.humanActionPolicy.kind === 'central'
+                ? {
+                    actor: invocation.actor,
+                    source: invocation.source,
+                    scope: invocation.scope,
+                    requestId: invocation.requestId,
+                    serverTime: invocation.serverTime.toISOString(),
+                    connectivityEpochId: invocation.connectivityEpochId,
+                  }
+                : null,
+            safetyResolver:
+              definition.humanActionPolicy.kind === 'central'
+                ? {
+                    resolve: async (request) => {
+                      if (registration.resolveSafety === undefined) {
+                        throw new CapabilityEngineError(
+                          'INTERNAL_ERROR',
+                          'MUTATION_METADATA_INVALID',
+                          'The protected capability has no safety resolver.',
+                          500,
+                        );
+                      }
+                      const facilityId = await registration.resolveFacilityId(
+                        input,
+                        transactionContext,
                       );
-                    }
-                    const facilityId = await registration.resolveFacilityId(
-                      input,
-                      transactionContext,
-                    );
-                    transactionContext.resolvedFacilityId = facilityId;
-                    if (!scopeAllowsFacility(invocation.scope, facilityId)) {
-                      throw new CapabilityEngineError(
-                        'FORBIDDEN',
-                        'CAPABILITY_SCOPE_DENIED',
-                        'The requested facility is outside the authenticated scope.',
-                        403,
+                      transactionContext.resolvedFacilityId = facilityId;
+                      if (!scopeAllowsFacility(invocation.scope, facilityId)) {
+                        throw new CapabilityEngineError(
+                          'FORBIDDEN',
+                          'CAPABILITY_SCOPE_DENIED',
+                          'The requested facility is outside the authenticated scope.',
+                          403,
+                        );
+                      }
+                      const resolution = await registration.resolveSafety(
+                        request,
+                        transactionContext,
                       );
-                    }
-                    const resolution = await registration.resolveSafety(
-                      request,
-                      transactionContext,
-                    );
-                    transactionContext.safetyResolution = resolution;
-                    return resolution;
-                  },
-                }
-              : null,
-          authorizer: {
-            authorize: async ({ humanActionRequirement }) =>
-              authorizeExecution(
-                registration,
-                input,
-                humanActionRequirement,
+                      transactionContext.safetyResolution = resolution;
+                      return resolution;
+                    },
+                  }
+                : null,
+            authorizer: {
+              authorize: async ({ humanActionRequirement }) =>
+                authorizeExecution(
+                  registration,
+                  input,
+                  humanActionRequirement,
+                  transactionContext,
+                ),
+            },
+          },
+        );
+
+        if (definition.operation === 'mutation') {
+          if (registration.mutationPersistence !== 'repository-owned') {
+            assertMutationRegistration(registration);
+            if (idempotencyRecordId === null) {
+              throw new CapabilityEngineError(
+                'INTERNAL_ERROR',
+                'IDEMPOTENCY_RESULT_UNAVAILABLE',
+                'The mutation did not reserve idempotency.',
+                500,
+              );
+            }
+            await transaction.completeIdempotency({
+              recordId: idempotencyRecordId,
+              resultReference: registration.resultReference(
+                output,
                 transactionContext,
               ),
-          },
-        },
-      );
+              completedAt: invocation.serverTime,
+            });
+          }
+        }
 
-      if (definition.operation === 'mutation') {
-        assertMutationRegistration(registration);
-        if (idempotencyRecordId === null) {
-          throw new CapabilityEngineError(
-            'INTERNAL_ERROR',
-            'IDEMPOTENCY_RESULT_UNAVAILABLE',
-            'The mutation did not reserve idempotency.',
-            500,
+        if (definition.auditPolicy === 'all-outcomes') {
+          await transaction.appendCapabilityAudit(
+            successAuditEvent(
+              registration.id,
+              transactionContext as CapabilityHandlerContext<CapabilityEngineTransaction>,
+            ),
           );
         }
-        await transaction.completeIdempotency({
-          recordId: idempotencyRecordId,
-          resultReference: registration.resultReference(
-            output,
-            transactionContext,
-          ),
-          completedAt: invocation.serverTime,
-        });
+        return output;
+      } catch (error) {
+        const disposition = registration.classifyRepositoryError?.(error);
+        if (
+          registration.mutationPersistence === 'repository-owned' &&
+          disposition?.commitTransaction === true
+        ) {
+          await transaction.appendCapabilityAudit(
+            failureAuditEvent(
+              registration.id,
+              transactionContext,
+              disposition.auditError,
+            ),
+          );
+          committedFailure.value = Object.freeze({
+            original: error,
+            auditError: disposition.auditError,
+          });
+          return undefined as CapabilityOutput<Id>;
+        }
+        throw error;
       }
-
-      if (definition.auditPolicy === 'all-outcomes') {
-        await transaction.appendCapabilityAudit(
-          successAuditEvent(
-            registration.id,
-            transactionContext as CapabilityHandlerContext<CapabilityEngineTransaction>,
-          ),
-        );
-      }
-      return output;
     });
+    if (committedFailure.value !== null) {
+      throw committedFailure.value.original;
+    }
+    return output;
   } catch (error) {
-    const engineError = errorForUnknownFailure(error);
+    if (
+      committedFailure.value !== null &&
+      error === committedFailure.value.original
+    ) {
+      throw error;
+    }
+    const disposition = registration.classifyRepositoryError?.(error);
+    const engineError =
+      disposition?.auditError ?? errorForUnknownFailure(error);
     try {
       const event = failureAuditEvent(
         registration.id,
@@ -1056,6 +1340,8 @@ export async function executeCapability<
         true,
       );
     }
-    throw engineError;
+    throw disposition === null || disposition === undefined
+      ? engineError
+      : error;
   }
 }

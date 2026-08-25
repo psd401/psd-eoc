@@ -72,7 +72,7 @@ export type SmsLifecycleCapabilityRequest =
       input: RecordEndpointStatusInput;
     }>;
 
-/** Must execute the named mutation through server `executeCapability`. */
+/** Must execute the named mutation through server `executeAuditedCapabilityTransaction`. */
 export interface SmsCanonicalCapabilityExecutor {
   execute(request: SmsLifecycleCapabilityRequest): Promise<unknown>;
 }

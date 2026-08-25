@@ -559,8 +559,9 @@ async function establishInitialWebSession(
 
 /**
  * Registers initial session establishment under the canonical capability ID.
- * Callers must still pass this registration to executeCapability with the
- * central server authorizer; this factory does not create a side-door path.
+ * Callers must still pass this registration to the literal-ID
+ * repository-audited completion boundary with the central server
+ * authorizer; this factory does not create a side-door path.
  */
 export function createCompleteOidcSignInHandler(
   dependencies: WebSessionIssuerDependencies,

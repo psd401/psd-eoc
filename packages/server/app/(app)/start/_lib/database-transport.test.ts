@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { Database } from '../../../../db/client';
-import { createDrizzleStartFlowCapabilityStore } from './capabilities';
+import { createDrizzleStartFlowCapabilityStore } from '../../../../lib/capabilities/start';
 import { createDrizzleStartConfirmationStore } from './confirmation';
 
 const DATA_API_CLOCK = '2026-08-10T19:23:45.000Z';

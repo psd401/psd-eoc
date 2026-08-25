@@ -3,17 +3,24 @@ import {
   readDatabaseConfig,
   type DatabaseConnection,
 } from '../../db/client';
-import { createDeliveryTestReportRuntime } from '../../app/(app)/delivery-tests/capabilities';
-import { createStartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
+import { createDeliveryTestReportRuntime } from '../capabilities/delivery-tests';
+import { createStartFlowCapabilityRuntime } from '../capabilities/start';
 import {
   createDrizzleSecurityAuditRepository,
   SecurityAuditService,
 } from '../audit';
 import { createEventCapabilityRuntime } from '../capabilities/events';
+import {
+  createDrizzleEventTypeCapabilityStore,
+  DrizzleEventTypeStore,
+} from '../capabilities/event-types';
 import { createJournalCapabilityRuntime } from '../capabilities/journal';
 import { createRecordsCapabilityRuntime } from '../capabilities/records';
 import { createDrizzleStaleRosterReportStore } from '../roster/stale-report';
-import { AgentApiKeyAdministration } from './admin-capabilities';
+import {
+  AgentApiKeyAdministration,
+  createDrizzleAgentApiKeyCapabilityStore,
+} from './admin-capabilities';
 import {
   AgentAdministrationFacilityCapabilities,
   DrizzleAgentAdministrationFacilityStore,
@@ -23,7 +30,6 @@ import { createAgentGatewayAuditSink } from './audit';
 import { createDefaultAgentCapabilityDispatcher } from './dispatcher';
 import { createDrizzleAgentApiKeyRepository } from './drizzle-key-repository';
 import { createDrizzlePreparedActivationCapabilityStore } from './drizzle-prepared-activation-store';
-import { createAtomicAgentEventTypeStore } from './event-types';
 import { AgentRestGateway } from './gateway';
 import { AgentApiKeyService } from './keys';
 import { createAgentRosterReportRuntime } from './roster-report';
@@ -49,6 +55,7 @@ export function createAgentRestRuntime(
   const administration = new AgentApiKeyAdministration({
     keys,
     audit: auditRepository,
+    capabilityStore: createDrizzleAgentApiKeyCapabilityStore(connection.db),
   });
   const administrationFacilities = new AgentAdministrationFacilityCapabilities(
     new DrizzleAgentAdministrationFacilityStore(connection.db),
@@ -71,7 +78,8 @@ export function createAgentRestRuntime(
     records,
     administration,
     administrationFacilities,
-    eventTypes: createAtomicAgentEventTypeStore(connection.db),
+    eventTypes: new DrizzleEventTypeStore(connection.db),
+    eventTypeCapabilities: createDrizzleEventTypeCapabilityStore(connection.db),
     deliveryTestReports,
     preparedActivations: createDrizzlePreparedActivationCapabilityStore(
       connection.db,

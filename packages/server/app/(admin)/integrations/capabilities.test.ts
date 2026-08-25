@@ -8,7 +8,7 @@ import {
   type IntegrationStatus,
 } from '@psd-eoc/contracts';
 
-import { AdminCapabilityError } from '../facilities/admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import {
   SMS_INTEGRATION_ID,
   assertChannelChangeAllowed,

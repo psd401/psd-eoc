@@ -18,7 +18,7 @@ import {
   SmsLifecycleCapabilityContextSchema,
   SmsOptOutRecordSchema,
   UuidSchema,
-  executeCapability as executeCanonicalCapability,
+  invokeAuthorizedCapabilityHandler as executeCanonicalCapability,
   registerCapabilityHandler,
   type CapabilityAuthorizationRequest,
   type CapabilityExecutionAuthorizer,

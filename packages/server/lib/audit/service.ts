@@ -211,9 +211,11 @@ export class SecurityAuditService {
         ? undefined
         : SecurityAuditQuerySchema.parse(queryValue);
     const policy = getCapabilityInvocationPolicy(capabilityId);
+    const principalKinds: ReadonlySet<string> = new Set(policy.principalKinds);
+    const sources: ReadonlySet<string> = new Set(policy.sources);
     const authorized =
-      policy.principalKinds.includes(context.actor.kind) &&
-      policy.sources.includes(context.source) &&
+      principalKinds.has(context.actor.kind) &&
+      sources.has(context.source) &&
       isAuthorizedForCapability(capabilityId, context) &&
       (capabilityId !== 'verify-security-audit-chain' ||
         context.facilityScope.kind === 'district') &&

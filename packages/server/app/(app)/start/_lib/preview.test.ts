@@ -17,7 +17,7 @@ import {
   ActivationPreviewBuildError,
   buildActivationPreview,
   type ActivationPreviewEvidence,
-} from './preview';
+} from '../../../../lib/capabilities/start-preview';
 import { digestCapabilityValue } from '../../../../lib/capabilities/engine';
 import { formatNotificationStartTime } from '../../../../lib/notify/render';
 

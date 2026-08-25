@@ -37,7 +37,7 @@ import {
   type AdminMutationMetadata,
   type AdminQueryDatabase,
   type AdminQueryMetadata,
-} from '../facilities/admin-core';
+} from '../../../lib/capabilities/admin';
 
 export const SMS_INTEGRATION_ID = 'aws-eum-sms' as const;
 

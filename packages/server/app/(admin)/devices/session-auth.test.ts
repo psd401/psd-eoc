@@ -43,10 +43,12 @@ import {
   type RecordReplayInput,
   type RevokeStoredSessionInput,
   type RotateCredentialInput,
+  type SessionCapabilityStore,
   type SessionStore,
   type StoredCredential,
   type StoredSessionContext,
 } from '../../../lib/auth/sessions.js';
+import type { CapabilityAuditEvent } from '../../../lib/capabilities/engine.js';
 import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
@@ -63,6 +65,35 @@ import {
   users,
 } from '../../../db/schema.js';
 import { migrateDatabase } from '../../../drizzle/migrate.js';
+
+function sessionCapabilityStore(
+  service: SessionService,
+  auditHistory: CapabilityAuditEvent[] = [],
+): SessionCapabilityStore {
+  return {
+    transaction: (operation) =>
+      operation({
+        sessions: service,
+        readCurrentTime: (receivedAt) => Promise.resolve(receivedAt),
+        claimIdempotency: () =>
+          Promise.reject(new Error('Unexpected engine idempotency claim.')),
+        completeIdempotency: () =>
+          Promise.reject(
+            new Error('Unexpected engine idempotency completion.'),
+          ),
+        getHumanConfirmation: () => Promise.resolve(null),
+        consumeHumanConfirmation: () => Promise.resolve(false),
+        appendCapabilityAudit: (event) => {
+          auditHistory.push(event);
+          return Promise.resolve();
+        },
+      }),
+    appendCapabilityAudit: (event) => {
+      auditHistory.push(event);
+      return Promise.resolve();
+    },
+  };
+}
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -162,6 +193,7 @@ class MemorySessionStore implements SessionStore {
   private readonly retired = new Map<
     string,
     Readonly<{
+      userId: string;
       sessionId: string;
       deviceEnrollmentId: string;
       rotationId: string;
@@ -273,6 +305,7 @@ class MemorySessionStore implements SessionStore {
       );
     }
     this.retired.set(this.currentDigest, {
+      userId: input.principal.userId,
       sessionId: input.principal.sessionId,
       deviceEnrollmentId: input.principal.deviceEnrollmentId,
       rotationId: input.rotationId,
@@ -445,6 +478,7 @@ describe('Google-outage session continuity', () => {
     try {
       const issued = await executeRefreshSessionCapability({
         service,
+        capabilityStore: sessionCapabilityStore(service),
         token,
         source: 'web',
         idempotencyKey: 'offline-grace-refresh-0001',
@@ -630,8 +664,11 @@ describe('rotation and revocation', () => {
     const token = createOpaqueRefreshToken();
     const store = new MemorySessionStore(token);
     const service = new SessionService(store);
+    const auditHistory: CapabilityAuditEvent[] = [];
+    const capabilityStore = sessionCapabilityStore(service, auditHistory);
     const first = await executeRefreshSessionCapability({
       service,
+      capabilityStore,
       token,
       source: 'web',
       idempotencyKey: 'refresh-idempotency-key-0001',
@@ -640,6 +677,7 @@ describe('rotation and revocation', () => {
     });
     const retry = await executeRefreshSessionCapability({
       service,
+      capabilityStore,
       token,
       source: 'web',
       idempotencyKey: 'refresh-idempotency-key-0001',
@@ -651,10 +689,15 @@ describe('rotation and revocation', () => {
       first.result.connectivityEpoch.id,
     );
     expect(store.rotationCount).toBe(1);
+    expect(auditHistory.map(({ outcome }) => outcome)).toEqual([
+      'success',
+      'success',
+    ]);
 
     await expectSessionError(
       executeRefreshSessionCapability({
         service,
+        capabilityStore,
         token,
         source: 'web',
         idempotencyKey: 'refresh-idempotency-key-0001',
@@ -677,6 +720,7 @@ describe('rotation and revocation', () => {
     await expectSessionError(
       executeRefreshSessionCapability({
         service,
+        capabilityStore,
         token,
         source: 'web',
         idempotencyKey: 'refresh-replay-new-key-0002',
@@ -686,10 +730,81 @@ describe('rotation and revocation', () => {
       'TOKEN_REPLAY',
     );
     expect(store.replayCount).toBe(1);
+    expect(auditHistory.map(({ outcome }) => outcome)).toEqual([
+      'success',
+      'success',
+      'denied',
+    ]);
     await expectSessionError(
       service.authenticate(first.refreshToken, 'web', INSIDE_GRACE),
       'SESSION_REVOKED',
     );
+  });
+
+  test('commits a raced replay revocation and its denial audit before returning TOKEN_REPLAY', async () => {
+    const token = createOpaqueRefreshToken();
+    const store = new MemorySessionStore(token);
+    const preparationService = new SessionService(store);
+    let replayRevocationPersisted = false;
+    class RacedReplayService extends SessionService {
+      public override async rotatePreparedRefresh(): Promise<never> {
+        replayRevocationPersisted = true;
+        throw new SessionAccessError(
+          'TOKEN_REPLAY',
+          'The session credential is no longer current.',
+        );
+      }
+    }
+    const transactionService = new RacedReplayService(store);
+    const auditHistory: CapabilityAuditEvent[] = [];
+    const capabilityStore: SessionCapabilityStore = {
+      async transaction(operation) {
+        try {
+          return await operation({
+            sessions: transactionService,
+            readCurrentTime: (receivedAt) => Promise.resolve(receivedAt),
+            claimIdempotency: () =>
+              Promise.reject(new Error('Unexpected engine idempotency claim.')),
+            completeIdempotency: () =>
+              Promise.reject(
+                new Error('Unexpected engine idempotency completion.'),
+              ),
+            getHumanConfirmation: () => Promise.resolve(null),
+            consumeHumanConfirmation: () => Promise.resolve(false),
+            appendCapabilityAudit: (event) => {
+              auditHistory.push(event);
+              return Promise.resolve();
+            },
+          });
+        } catch (error) {
+          replayRevocationPersisted = false;
+          throw error;
+        }
+      },
+      appendCapabilityAudit: (event) => {
+        auditHistory.push(event);
+        return Promise.resolve();
+      },
+    };
+
+    await expect(
+      executeRefreshSessionCapability({
+        service: preparationService,
+        capabilityStore,
+        token,
+        source: 'web',
+        idempotencyKey: 'refresh-raced-replay-0001',
+        csrfVerified: true,
+        now: INSIDE_GRACE,
+      }),
+    ).rejects.toMatchObject({
+      code: 'TOKEN_REPLAY',
+      message: 'The session credential is no longer current.',
+    });
+    expect(replayRevocationPersisted).toBe(true);
+    expect(
+      auditHistory.map(({ action, outcome }) => ({ action, outcome })),
+    ).toEqual([{ action: 'refresh-session', outcome: 'denied' }]);
   });
 
   test('another server instance observes revocation immediately and within 60 seconds', async () => {
@@ -705,6 +820,7 @@ describe('rotation and revocation', () => {
     const revokedAt = new Date(INSIDE_GRACE.getTime() + 1_000);
     await executeRevokeSessionCapability({
       service: firstInstance,
+      capabilityStore: sessionCapabilityStore(firstInstance),
       authenticated,
       sessionId: IDS.session,
       reasonCode: 'USER_REQUESTED',
@@ -725,6 +841,7 @@ describe('rotation and revocation', () => {
     await expectSessionError(
       executeRefreshSessionCapability({
         service: secondInstance,
+        capabilityStore: sessionCapabilityStore(secondInstance),
         token,
         source: 'web',
         idempotencyKey: 'revoked-refresh-denied-0001',
@@ -741,6 +858,7 @@ describe('rotation and revocation', () => {
     const service = new SessionService(store);
     await executeRefreshSessionCapability({
       service,
+      capabilityStore: sessionCapabilityStore(service),
       token,
       source: 'web',
       idempotencyKey: 'bounded-refresh-recovery-0001',
@@ -750,6 +868,7 @@ describe('rotation and revocation', () => {
     await expectSessionError(
       executeRefreshSessionCapability({
         service,
+        capabilityStore: sessionCapabilityStore(service),
         token,
         source: 'web',
         idempotencyKey: 'bounded-refresh-recovery-0001',
@@ -824,6 +943,7 @@ describe('transport and policy boundaries', () => {
 
     const refreshed = await executeRefreshSessionCapability({
       service,
+      capabilityStore: sessionCapabilityStore(service),
       token: presented.token,
       source: presented.source,
       idempotencyKey: 'oidc-cookie-refresh-compatibility-0001',
@@ -1017,6 +1137,7 @@ describe('transport and policy boundaries', () => {
 
     const refreshed = await executeRefreshSessionCapability({
       service,
+      capabilityStore: sessionCapabilityStore(service),
       token: issued.refreshToken,
       source: 'web',
       idempotencyKey: 'deadline-preserving-refresh-0001',
@@ -1259,6 +1380,7 @@ describeWithDatabase(
         const refreshAt = new Date('2026-08-07T13:15:00.000Z');
         const refreshed = await executeRefreshSessionCapability({
           service: firstInstance,
+          capabilityStore: sessionCapabilityStore(firstInstance),
           token: issued.refreshToken,
           source: 'web',
           idempotencyKey: `db-offline-refresh-${suffix}`,
@@ -1267,6 +1389,7 @@ describeWithDatabase(
         });
         const retried = await executeRefreshSessionCapability({
           service: secondInstance,
+          capabilityStore: sessionCapabilityStore(secondInstance),
           token: issued.refreshToken,
           source: 'web',
           idempotencyKey: `db-offline-refresh-${suffix}`,
@@ -1369,6 +1492,7 @@ describeWithDatabase(
         const revokedAt = new Date('2026-08-07T13:22:00.000Z');
         await executeRevokeSessionCapability({
           service: firstInstance,
+          capabilityStore: sessionCapabilityStore(firstInstance),
           authenticated: adminAfterRemoval,
           sessionId: targetIssued.result.session.id,
           reasonCode: 'INTEGRATION_TEST_REMOVED_USER_REVOKE',

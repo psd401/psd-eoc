@@ -19,7 +19,7 @@ import {
   readDeliveryTestCredentialVerificationReferences,
   type StartFlowCapabilityStore,
   type StartFlowCapabilityTransaction,
-} from './capabilities';
+} from '../../../../lib/capabilities/start';
 
 describe('monthly delivery-test credential readiness', () => {
   const liveStatus = Object.freeze({

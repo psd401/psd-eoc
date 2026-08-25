@@ -479,7 +479,7 @@ export class AgentApiKeyService {
         apiKeyId: stored.id,
       }),
       scope: Object.freeze({ facilityScope: stored.facilityScope }),
-      capabilityIds: Object.freeze([...stored.capabilityIds]),
+      capabilityIds: stored.capabilityIds,
       key,
     });
   }

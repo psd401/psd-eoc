@@ -13,7 +13,7 @@ import {
   getDefaultEventTypeStore,
 } from '../../../../lib/capabilities/event-types';
 import { getDefaultRecordsCapabilityRuntime } from '../../../../lib/capabilities/records';
-import { getDefaultStartFlowCapabilityRuntime } from '../../start/_lib/capabilities';
+import { getDefaultStartFlowCapabilityRuntime } from '../../../../lib/capabilities/start';
 import { collectAllOperationalPages } from '../../start/_lib/data';
 
 export interface RecordsFilterOptions {

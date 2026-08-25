@@ -7,7 +7,6 @@ import {
   InvocationSourceSchema,
   RoleSchema,
   UuidSchema,
-  executeCapability,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type Actor,
@@ -15,7 +14,6 @@ import {
   type AgentApiKeyIssuance,
   type AgentApiKeyPage,
   type AgentApiKeyRevocation,
-  type AgentApiKeySummary,
   type CapabilityAuthorizationRequest,
   type CapabilityExecutionAuthorizer,
   type CapabilityScope,
@@ -30,14 +28,30 @@ import {
   type SecurityAuditTarget,
 } from '@psd-eoc/contracts';
 
+import type { Database } from '../../db/client';
+import {
+  createDrizzleCapabilityStore,
+  type AdminCapabilityTransaction,
+} from '../capabilities/admin';
+import {
+  CapabilityEngineError,
+  executeAuditedCapabilityTransaction,
+  executeAuthorizedCapabilityQuery,
+  type CapabilityAuditEvent,
+  type CapabilityEngineStore,
+  type CapabilityEngineTransaction,
+  type ServerCapabilityRegistration,
+  type TrustedCapabilityInvocation,
+} from '../capabilities/engine';
 import type { AuthenticatedSession } from '../auth/sessions';
 import { parseSecurityAuditFact } from '../audit/model';
 import type { SecurityAuditRepository } from '../audit/repository';
 import {
   AgentApiKeyError,
-  type AgentApiKeyService,
+  AgentApiKeyService,
   type AuthenticatedAgentApiKey,
 } from './keys';
+import { createDrizzleAgentApiKeyRepository } from './drizzle-key-repository';
 
 export type AgentApiKeyAdministrationCapabilityId =
   | 'issue-agent-api-key'
@@ -57,7 +71,17 @@ export interface AgentApiKeyAdministrationAccess {
 export interface AgentApiKeyAdministrationDependencies {
   readonly keys: Pick<AgentApiKeyService, 'issue' | 'list' | 'revoke'>;
   readonly audit: Pick<SecurityAuditRepository, 'append'>;
+  readonly capabilityStore: AgentApiKeyCapabilityStore;
 }
+
+export interface AgentApiKeyCapabilityTransaction
+  extends CapabilityEngineTransaction {
+  readonly keys: Pick<AgentApiKeyService, 'issue' | 'revoke'>;
+  setAuditTarget(target: SecurityAuditTarget): void;
+}
+
+export type AgentApiKeyCapabilityStore =
+  CapabilityEngineStore<AgentApiKeyCapabilityTransaction>;
 
 interface AgentApiKeyAdministrationContext {
   readonly keys: AgentApiKeyAdministrationDependencies['keys'];
@@ -65,72 +89,14 @@ interface AgentApiKeyAdministrationContext {
   readonly idempotencyKey: string | null;
 }
 
-export class AgentApiKeyAdministrationError extends Error {
-  public readonly code = 'FORBIDDEN' as const;
-  public readonly status = 403 as const;
-  public readonly retryable = false as const;
-
+export class AgentApiKeyAdministrationError extends CapabilityEngineError {
   public constructor(
     message = 'District administration capability access is required.',
   ) {
-    super(message);
+    super('FORBIDDEN', 'CAPABILITY_INVOCATION_DENIED', message, 403, false);
     this.name = 'AgentApiKeyAdministrationError';
   }
 }
-
-export type AgentApiKeyCommittedWithoutAudit =
-  | Readonly<{ kind: 'issued'; key: AgentApiKeySummary }>
-  | Readonly<{ kind: 'revoked'; revocation: AgentApiKeyRevocation }>;
-
-/** Truthful bounded failure when mutation persistence commits before audit. */
-export class AgentApiKeyAdministrationCommitError extends Error {
-  public constructor(
-    public readonly committed: AgentApiKeyCommittedWithoutAudit,
-  ) {
-    super(
-      committed.kind === 'issued'
-        ? 'The API key was issued, but its audit append could not be confirmed.'
-        : 'The API key was revoked, but its audit append could not be confirmed.',
-    );
-    this.name = 'AgentApiKeyAdministrationCommitError';
-  }
-}
-
-const issueAgentApiKeyHandler = registerCapabilityHandler(
-  'issue-agent-api-key',
-  (input, context: AgentApiKeyAdministrationContext) => {
-    if (context.access.actor.kind !== 'human') {
-      throw new AgentApiKeyAdministrationError();
-    }
-    if (context.idempotencyKey === null) {
-      throw new AgentApiKeyAdministrationError(
-        'Key issuance requires durable idempotency.',
-      );
-    }
-    return context.keys.issue(input, context.access.actor.userId, {
-      actor: context.access.actor,
-      idempotencyKey: context.idempotencyKey,
-    });
-  },
-);
-
-const revokeAgentApiKeyHandler = registerCapabilityHandler(
-  'revoke-agent-api-key',
-  (input, context: AgentApiKeyAdministrationContext) => {
-    if (context.access.actor.kind !== 'human') {
-      throw new AgentApiKeyAdministrationError();
-    }
-    if (context.idempotencyKey === null) {
-      throw new AgentApiKeyAdministrationError(
-        'Key revocation requires durable idempotency.',
-      );
-    }
-    return context.keys.revoke(input, context.access.actor.userId, {
-      actor: context.access.actor,
-      idempotencyKey: context.idempotencyKey,
-    });
-  },
-);
 
 const listAgentApiKeysHandler = registerCapabilityHandler(
   'list-agent-api-keys',
@@ -327,13 +293,77 @@ function targetFor(
   return { kind: 'capability', id: capabilityId };
 }
 
+/** Creates the production atomic key/idempotency/audit transaction boundary. */
+export function createDrizzleAgentApiKeyCapabilityStore(
+  database: Database,
+): AgentApiKeyCapabilityStore {
+  const engineStore = createDrizzleCapabilityStore(database);
+  return Object.freeze({
+    transaction<Result>(
+      operation: (
+        transaction: AgentApiKeyCapabilityTransaction,
+      ) => Promise<Result>,
+    ): Promise<Result> {
+      return engineStore.transaction((transaction) => {
+        const adminTransaction = transaction as AdminCapabilityTransaction;
+        return operation({
+          readCurrentTime: (receivedAt) =>
+            transaction.readCurrentTime(receivedAt),
+          claimIdempotency: (claim) => transaction.claimIdempotency(claim),
+          completeIdempotency: (completion) =>
+            transaction.completeIdempotency(completion),
+          getHumanConfirmation: (id) => transaction.getHumanConfirmation(id),
+          consumeHumanConfirmation: (confirmation) =>
+            transaction.consumeHumanConfirmation(confirmation),
+          appendCapabilityAudit: (event) =>
+            transaction.appendCapabilityAudit(event),
+          keys: new AgentApiKeyService({
+            repository: createDrizzleAgentApiKeyRepository(
+              adminTransaction.database as Database,
+            ),
+          }),
+          setAuditTarget: (target) => adminTransaction.setAuditTarget(target),
+        });
+      });
+    },
+    appendCapabilityAudit: (event: CapabilityAuditEvent) =>
+      engineStore.appendCapabilityAudit(event),
+  });
+}
+
+function mutationInvocation(
+  access: AgentApiKeyAdministrationAccess,
+  input: Readonly<{
+    idempotencyKey: string;
+    csrfVerified: boolean;
+    requestId: string;
+    now: Date;
+  }>,
+): TrustedCapabilityInvocation {
+  return Object.freeze({
+    actor: access.actor,
+    source: access.source,
+    scope: access.scope,
+    requestId: input.requestId,
+    serverTime: input.now,
+    connectivityEpochId: access.connectivityEpochId,
+    mutation: Object.freeze({
+      idempotencyKey: input.idempotencyKey,
+      transport: mutationTransport(access.source, input.csrfVerified),
+      humanConfirmationId: null,
+    }),
+  });
+}
+
 export class AgentApiKeyAdministration {
   private readonly keys: AgentApiKeyAdministrationDependencies['keys'];
   private readonly audit: AgentApiKeyAdministrationDependencies['audit'];
+  private readonly capabilityStore: AgentApiKeyCapabilityStore;
 
   public constructor(dependencies: AgentApiKeyAdministrationDependencies) {
     this.keys = dependencies.keys;
     this.audit = dependencies.audit;
+    this.capabilityStore = dependencies.capabilityStore;
   }
 
   private async appendAudit(
@@ -368,6 +398,36 @@ export class AgentApiKeyAdministration {
     );
   }
 
+  private async authorizeMutationInvocation(
+    capabilityId: 'issue-agent-api-key' | 'revoke-agent-api-key',
+    access: AgentApiKeyAdministrationAccess,
+    input: Readonly<{
+      idempotencyKey: string;
+      csrfVerified: boolean;
+      requestId: string;
+      now: Date;
+    }>,
+  ): Promise<TrustedCapabilityInvocation> {
+    try {
+      return mutationInvocation(access, input);
+    } catch (error) {
+      await this.capabilityStore.appendCapabilityAudit({
+        category: 'access-denial',
+        action: capabilityId,
+        actionIds: [],
+        confirmationId: null,
+        outcome: 'denied',
+        actor: access.actor,
+        source: access.source,
+        facilityId: null,
+        requestId: input.requestId,
+        reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+        occurredAt: input.now,
+      });
+      throw error;
+    }
+  }
+
   public async issue(
     input: Readonly<{
       access: AgentApiKeyAdministrationAccess;
@@ -381,76 +441,53 @@ export class AgentApiKeyAdministration {
     const access = parseAccess(input.access);
     const requestId = UuidSchema.parse(input.requestId ?? randomUUID());
     const now = input.now ?? new Date();
-    let result: AgentApiKeyIssuance;
-    try {
-      const envelope = parseCapabilityEnvelopeFor('issue-agent-api-key', {
-        capabilityId: 'issue-agent-api-key',
-        operation: 'mutation',
-        actor: access.actor,
-        source: access.source,
-        scope: access.scope,
-        requestId,
-        serverTime: now.toISOString(),
-        input: input.value,
-        idempotencyKey: input.idempotencyKey,
-        transport: mutationTransport(access.source, input.csrfVerified),
-        connectivityEpochId: access.connectivityEpochId,
-        requiredHumanActionIds: [],
-        requiredConsequenceDigest: null,
-        humanConfirmation: null,
-      });
-      const context = Object.freeze({
-        keys: this.keys,
-        access,
-        idempotencyKey: input.idempotencyKey,
-      });
-      result = await executeCapability(
-        issueAgentApiKeyHandler,
-        envelope.input,
-        {
-          context,
-          humanActionResolutionContext: null,
-          safetyResolver: null,
-          authorizer: administrationAuthorizer,
-        },
-      );
-    } catch (error) {
-      const reportedError = hasDistrictAdministratorAccess(access)
-        ? error
-        : new AgentApiKeyAdministrationError();
-      const failure = reasonFor(reportedError);
-      try {
-        await this.appendAudit({
-          capabilityId: 'issue-agent-api-key',
-          access,
-          requestId,
-          occurredAt: now,
-          ...failure,
-          targetId: null,
+    const registration: ServerCapabilityRegistration<
+      'issue-agent-api-key',
+      AgentApiKeyCapabilityTransaction
+    > = {
+      id: 'issue-agent-api-key',
+      mutationPersistence: 'repository-owned',
+      resolveFacilityId() {
+        if (!hasDistrictAdministratorAccess(access)) {
+          throw new AgentApiKeyAdministrationError();
+        }
+        return null;
+      },
+      async handler(value, context) {
+        if (context.invocation.actor.kind !== 'human') {
+          throw new AgentApiKeyAdministrationError();
+        }
+        const result = await context.transaction.keys.issue(
+          value,
+          context.invocation.actor.userId,
+          {
+            actor: context.invocation.actor,
+            idempotencyKey: input.idempotencyKey,
+          },
+        );
+        context.transaction.setAuditTarget({
+          kind: 'agent',
+          id: result.key.agentId,
         });
-      } catch {
-        // Preserve the known mutation outcome instead of replacing it with an
-        // audit transport error; the adapter must render that truth safely.
-      }
-      throw reportedError;
-    }
-    try {
-      await this.appendAudit({
-        capabilityId: 'issue-agent-api-key',
-        access,
+        return result;
+      },
+    };
+    const invocation = await this.authorizeMutationInvocation(
+      'issue-agent-api-key',
+      access,
+      {
+        idempotencyKey: input.idempotencyKey,
+        csrfVerified: input.csrfVerified,
         requestId,
-        occurredAt: now,
-        outcome: 'success',
-        reasonCode: null,
-        targetId: result.key.agentId,
-      });
-    } catch {
-      throw new AgentApiKeyAdministrationCommitError({
-        kind: 'issued',
-        key: result.key,
-      });
-    }
-    return result;
+        now,
+      },
+    );
+    return executeAuditedCapabilityTransaction(
+      registration,
+      input.value,
+      invocation,
+      this.capabilityStore,
+    );
   }
 
   public async revoke(
@@ -466,75 +503,52 @@ export class AgentApiKeyAdministration {
     const access = parseAccess(input.access);
     const requestId = UuidSchema.parse(input.requestId ?? randomUUID());
     const now = input.now ?? new Date();
-    let result: AgentApiKeyRevocation;
-    try {
-      const envelope = parseCapabilityEnvelopeFor('revoke-agent-api-key', {
-        capabilityId: 'revoke-agent-api-key',
-        operation: 'mutation',
-        actor: access.actor,
-        source: access.source,
-        scope: access.scope,
-        requestId,
-        serverTime: now.toISOString(),
-        input: input.value,
-        idempotencyKey: input.idempotencyKey,
-        transport: mutationTransport(access.source, input.csrfVerified),
-        connectivityEpochId: access.connectivityEpochId,
-        requiredHumanActionIds: [],
-        requiredConsequenceDigest: null,
-        humanConfirmation: null,
-      });
-      const context = Object.freeze({
-        keys: this.keys,
-        access,
-        idempotencyKey: input.idempotencyKey,
-      });
-      result = await executeCapability(
-        revokeAgentApiKeyHandler,
-        envelope.input,
-        {
-          context,
-          humanActionResolutionContext: null,
-          safetyResolver: null,
-          authorizer: administrationAuthorizer,
-        },
-      );
-    } catch (error) {
-      const reportedError = hasDistrictAdministratorAccess(access)
-        ? error
-        : new AgentApiKeyAdministrationError();
-      const failure = reasonFor(reportedError);
-      try {
-        await this.appendAudit({
-          capabilityId: 'revoke-agent-api-key',
-          access,
-          requestId,
-          occurredAt: now,
-          ...failure,
-          targetId: null,
+    const registration: ServerCapabilityRegistration<
+      'revoke-agent-api-key',
+      AgentApiKeyCapabilityTransaction
+    > = {
+      id: 'revoke-agent-api-key',
+      mutationPersistence: 'repository-owned',
+      resolveFacilityId(value, context) {
+        if (!hasDistrictAdministratorAccess(access)) {
+          throw new AgentApiKeyAdministrationError();
+        }
+        context.transaction.setAuditTarget({
+          kind: 'configuration',
+          id: value.apiKeyId,
         });
-      } catch {
-        // Preserve the known mutation outcome for truthful adapter handling.
-      }
-      throw reportedError;
-    }
-    try {
-      await this.appendAudit({
-        capabilityId: 'revoke-agent-api-key',
-        access,
+        return null;
+      },
+      handler(value, context) {
+        if (context.invocation.actor.kind !== 'human') {
+          throw new AgentApiKeyAdministrationError();
+        }
+        return context.transaction.keys.revoke(
+          value,
+          context.invocation.actor.userId,
+          {
+            actor: context.invocation.actor,
+            idempotencyKey: input.idempotencyKey,
+          },
+        );
+      },
+    };
+    const invocation = await this.authorizeMutationInvocation(
+      'revoke-agent-api-key',
+      access,
+      {
+        idempotencyKey: input.idempotencyKey,
+        csrfVerified: input.csrfVerified,
         requestId,
-        occurredAt: now,
-        outcome: 'success',
-        reasonCode: null,
-        targetId: result.apiKeyId,
-      });
-    } catch {
-      throw new AgentApiKeyAdministrationCommitError({
-        kind: 'revoked',
-        revocation: result,
-      });
-    }
-    return result;
+        now,
+      },
+    );
+    return executeAuditedCapabilityTransaction(
+      registration,
+      input.value,
+      invocation,
+      this.capabilityStore,
+    );
   }
 
   public async list(
@@ -565,7 +579,7 @@ export class AgentApiKeyAdministration {
         access,
         idempotencyKey: null,
       });
-      result = await executeCapability(
+      result = await executeAuthorizedCapabilityQuery(
         listAgentApiKeysHandler,
         envelope.input,
         {

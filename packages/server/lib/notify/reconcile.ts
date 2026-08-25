@@ -9,7 +9,7 @@ import {
   ReconcileDeliveryAttemptsResultSchema,
   TimestampSchema,
   UuidSchema,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   registerCapabilityHandler,
   type Actor,
   type CapabilityAuthorizationRequest,
@@ -443,7 +443,7 @@ export async function executeReconcileDeliveryAttempts(
     requestId: UuidSchema.parse(dependencies.requestId),
     idempotencyKey: IdempotencyKeySchema.parse(dependencies.idempotencyKey),
   });
-  return executeCapability(
+  return invokeAuthorizedCapabilityHandler(
     createReconcileDeliveryAttemptsHandler(dependencies.store),
     input,
     {

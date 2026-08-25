@@ -13,7 +13,9 @@ import { buildSecurityAuditEntry } from '../audit/entry';
 import { verifySecurityAuditEntries } from '../audit/verification';
 import {
   CapabilityEngineError,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
+  executeAuditedRefreshReplayDenial,
+  executeAuditedSessionReplaySuccess,
   preflightCapabilityInvocation,
   requireCapabilityAuthorization,
   resolveHumanCapabilityInvocation,
@@ -669,6 +671,53 @@ async function captureEngineError(
 }
 
 describe('capability engine', () => {
+  test('owns exact session replay success and committed-denial audit transactions', async () => {
+    const store = new MemoryCapabilityStore();
+    const successRequestId = uuid(131);
+    const denialRequestId = uuid(132);
+    let securityResponseCalls = 0;
+
+    await executeAuditedSessionReplaySuccess(
+      {
+        capabilityId: 'revoke-session',
+        actor: HUMAN_ACTOR,
+        source: 'web',
+        requestId: successRequestId,
+        serverTime: new Date(TIMES.execution),
+      },
+      store,
+    );
+    await executeAuditedRefreshReplayDenial(
+      {
+        actor: HUMAN_ACTOR,
+        source: 'mobile',
+        requestId: denialRequestId,
+        serverTime: new Date(TIMES.execution),
+      },
+      store,
+      async () => {
+        securityResponseCalls += 1;
+      },
+    );
+
+    expect(securityResponseCalls).toBe(1);
+    expect(store.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'revoke-session',
+        outcome: 'success',
+        requestId: successRequestId,
+        reasonCode: null,
+      }),
+      expect.objectContaining({
+        action: 'refresh-session',
+        category: 'access-denial',
+        outcome: 'denied',
+        requestId: denialRequestId,
+        reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+      }),
+    ]);
+  });
+
   test('rejects a mutation capability without its static mutation envelope during preflight', () => {
     let thrown: unknown;
     try {
@@ -737,7 +786,7 @@ describe('capability engine', () => {
     const idempotencyKey = 'join-replay-key-0001';
     const input = { eventId: IDS.event };
 
-    const first = await executeCapability(
+    const first = await executeAuditedCapabilityTransaction(
       join.registration,
       input,
       humanMutationInvocation({
@@ -746,7 +795,7 @@ describe('capability engine', () => {
       }),
       store,
     );
-    const replay = await executeCapability(
+    const replay = await executeAuditedCapabilityTransaction(
       join.registration,
       input,
       humanMutationInvocation({
@@ -783,7 +832,7 @@ describe('capability engine', () => {
     const idempotencyKey = 'join-static-replay-key-0001';
     const input = { eventId: IDS.event };
 
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       join.registration,
       input,
       humanMutationInvocation({
@@ -813,7 +862,12 @@ describe('capability engine', () => {
 
     for (const invocation of invalidInvocations) {
       const error = await captureEngineError(() =>
-        executeCapability(join.registration, input, invocation, store),
+        executeAuditedCapabilityTransaction(
+          join.registration,
+          input,
+          invocation,
+          store,
+        ),
       );
       expect(error).toMatchObject({
         code: 'VALIDATION_ERROR',
@@ -830,7 +884,7 @@ describe('capability engine', () => {
     const join = createJoinRegistration();
     const idempotencyKey = 'join-mismatch-key-0001';
 
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       join.registration,
       { eventId: IDS.event },
       humanMutationInvocation({
@@ -840,7 +894,7 @@ describe('capability engine', () => {
       store,
     );
     const error = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         join.registration,
         { eventId: IDS.otherEvent },
         humanMutationInvocation({
@@ -863,7 +917,7 @@ describe('capability engine', () => {
     const store = new MemoryCapabilityStore();
     const list = createListRegistration();
 
-    const result = await executeCapability(
+    const result = await executeAuditedCapabilityTransaction(
       list.registration,
       { facilityId: IDS.facility, cursor: null, limit: 20 },
       humanQueryInvocation(uuid(143), facilityScope(IDS.facility)),
@@ -889,7 +943,7 @@ describe('capability engine', () => {
     const sync = createEventRoomSyncRegistration();
 
     for (let index = 0; index < 1_200; index += 1) {
-      await executeCapability(
+      await executeAuditedCapabilityTransaction(
         sync.registration,
         { eventId: IDS.event, cursor: null, limit: 100 },
         humanQueryInvocation(uuid(10_000 + index), DISTRICT_SCOPE),
@@ -905,7 +959,7 @@ describe('capability engine', () => {
     const store = new MemoryCapabilityStore();
     const sync = createEventRoomSyncRegistration();
 
-    const mobileResult = await executeCapability(
+    const mobileResult = await executeAuditedCapabilityTransaction(
       sync.registration,
       { eventId: IDS.event, cursor: null, limit: 100 },
       humanQueryInvocation(uuid(11_290), DISTRICT_SCOPE, 'mobile'),
@@ -926,7 +980,7 @@ describe('capability engine', () => {
 
     for (const [index, source] of ['agent-rest', 'mcp'].entries()) {
       const error = await captureEngineError(() =>
-        executeCapability(
+        executeAuditedCapabilityTransaction(
           sync.registration,
           { eventId: IDS.event, cursor: null, limit: 100 },
           agentQueryInvocation(
@@ -965,7 +1019,7 @@ describe('capability engine', () => {
     const deniedSync = createEventRoomSyncRegistration();
     const deniedRequestId = uuid(11_300);
     const denied = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         deniedSync.registration,
         { eventId: IDS.event, cursor: null, limit: 100 },
         humanQueryInvocation(deniedRequestId, facilityScope(IDS.otherFacility)),
@@ -985,7 +1039,7 @@ describe('capability engine', () => {
     const failedSync = createEventRoomSyncRegistration(true);
     const failedRequestId = uuid(11_301);
     const failed = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         failedSync.registration,
         { eventId: IDS.event, cursor: null, limit: 100 },
         humanQueryInvocation(failedRequestId, DISTRICT_SCOPE),
@@ -1003,7 +1057,7 @@ describe('capability engine', () => {
 
     const agentStore = new MemoryCapabilityStore();
     const list = createListRegistration();
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       list.registration,
       { facilityId: IDS.facility, cursor: null, limit: 20 },
       agentQueryInvocation(uuid(11_302)),
@@ -1023,7 +1077,7 @@ describe('capability engine', () => {
     const sync = createEventRoomSyncRegistration();
     const syncRequestId = uuid(11_303);
     const syncError = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         sync.registration,
         { eventId: IDS.event, cursor: null, limit: 0 },
         humanQueryInvocation(syncRequestId, DISTRICT_SCOPE),
@@ -1050,7 +1104,7 @@ describe('capability engine', () => {
     const join = createJoinRegistration();
     const mutationRequestId = uuid(11_304);
     const mutationError = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         join.registration,
         { eventId: 'not-a-valid-event-id' },
         humanMutationInvocation({
@@ -1076,7 +1130,7 @@ describe('capability engine', () => {
     const list = createListRegistration();
     const agentRequestId = uuid(11_305);
     const agentError = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         list.registration,
         { facilityId: 'not-a-valid-facility-id', cursor: null, limit: 20 },
         agentQueryInvocation(agentRequestId),
@@ -1105,19 +1159,19 @@ describe('capability engine', () => {
     const replayRequestId = uuid(11_401);
     const agentRequestId = uuid(11_402);
 
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       join.registration,
       { eventId: IDS.event },
       humanMutationInvocation({ requestId: firstRequestId, idempotencyKey }),
       store,
     );
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       join.registration,
       { eventId: IDS.event },
       humanMutationInvocation({ requestId: replayRequestId, idempotencyKey }),
       store,
     );
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       list.registration,
       { facilityId: IDS.facility, cursor: null, limit: 20 },
       agentQueryInvocation(agentRequestId),
@@ -1144,7 +1198,7 @@ describe('capability engine', () => {
     const requestId = uuid(105);
 
     const error = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         list.registration,
         { facilityId: IDS.facility, cursor: null, limit: 20 },
         humanQueryInvocation(requestId, facilityScope(IDS.otherFacility)),
@@ -1171,7 +1225,7 @@ describe('capability engine', () => {
     const join = createJoinRegistration();
     const idempotencyKey = 'join-reauthorize-key-0001';
 
-    await executeCapability(
+    await executeAuditedCapabilityTransaction(
       join.registration,
       { eventId: IDS.event },
       humanMutationInvocation({
@@ -1182,7 +1236,7 @@ describe('capability engine', () => {
       store,
     );
     const error = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         join.registration,
         { eventId: IDS.event },
         humanMutationInvocation({
@@ -1240,7 +1294,7 @@ describe('capability engine', () => {
       };
 
       const error = await captureEngineError(() =>
-        executeCapability(
+        executeAuditedCapabilityTransaction(
           close.registration,
           { eventId: IDS.event },
           invocation,
@@ -1316,7 +1370,7 @@ describe('capability engine', () => {
       }
       const close = createCloseRegistration();
       const error = await captureEngineError(() =>
-        executeCapability(
+        executeAuditedCapabilityTransaction(
           close.registration,
           { eventId: IDS.event },
           humanMutationInvocation({
@@ -1340,7 +1394,7 @@ describe('capability engine', () => {
     const close = createCloseRegistration();
 
     const error = await captureEngineError(() =>
-      executeCapability(
+      executeAuditedCapabilityTransaction(
         close.registration,
         { eventId: IDS.event },
         humanMutationInvocation({
@@ -1368,7 +1422,7 @@ describe('capability engine', () => {
     const close = createCloseRegistration();
     const requestId = uuid(130);
 
-    const output = await executeCapability(
+    const output = await executeAuditedCapabilityTransaction(
       close.registration,
       { eventId: IDS.event },
       humanMutationInvocation({

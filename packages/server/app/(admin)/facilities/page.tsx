@@ -7,7 +7,7 @@ import {
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
 import { authenticateWebSession } from '../../../lib/auth/request-session';
-import { AdminCapabilityError } from './admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import { executeFacilitiesAdminProjection } from './capabilities';
 import {
   FacilitiesAdminView,

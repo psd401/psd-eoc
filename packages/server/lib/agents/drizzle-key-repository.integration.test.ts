@@ -8,7 +8,7 @@ import {
 } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -19,9 +19,16 @@ import {
   agentApiKeys,
   agents,
   idempotencyRecords,
+  securityAuditEntries,
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
+import {
+  AgentApiKeyAdministration,
+  createDrizzleAgentApiKeyCapabilityStore,
+} from './admin-capabilities';
+import { parseSecurityAuditFact } from '../audit/model';
+import { createDrizzleSecurityAuditRepository } from '../audit/drizzle-repository';
 import { createDrizzleAgentApiKeyRepository } from './drizzle-key-repository';
 import { AgentApiKeyIssuanceReplayError, AgentApiKeyService } from './keys';
 
@@ -174,5 +181,94 @@ describeWithDatabase('agent API-key PostgreSQL concurrency', () => {
         invocation,
       ),
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT', status: 409 });
+  });
+
+  test('production capability adapter rolls key and idempotency writes back when audit cannot append', async () => {
+    const database = databaseConnection().db;
+    const requestId = randomUUID();
+    const rollbackKey = `issue-agent-key:rollback-${randomUUID()}`;
+    const displayName = `Synthetic rollback agent ${randomUUID()}`;
+    const audit = createDrizzleSecurityAuditRepository(database);
+    await audit.append(
+      parseSecurityAuditFact({
+        category: 'agent-access',
+        action: 'list-agent-api-keys',
+        actionIds: [],
+        confirmationId: null,
+        outcome: 'success',
+        principal: {
+          kind: 'human',
+          userId: issuerId,
+          sessionId: issuerSessionId,
+        },
+        source: 'web',
+        facilityId: null,
+        target: { kind: 'capability', id: 'list-agent-api-keys' },
+        requestId,
+        reasonCode: null,
+        occurredAt: issuedAt.toISOString(),
+      }),
+    );
+    const keys = new AgentApiKeyService({
+      repository: createDrizzleAgentApiKeyRepository(database),
+      now: () => issuedAt,
+    });
+    const administration = new AgentApiKeyAdministration({
+      keys,
+      audit,
+      capabilityStore: createDrizzleAgentApiKeyCapabilityStore(database),
+    });
+
+    await expect(
+      administration.issue({
+        access: {
+          actor: {
+            kind: 'human',
+            userId: issuerId,
+            sessionId: issuerSessionId,
+          },
+          source: 'web',
+          roles: ['admin'],
+          capabilityGrants: [],
+          scope: { facilityScope: { kind: 'district' } },
+          connectivityEpochId: randomUUID(),
+        },
+        value: {
+          agentId: null,
+          displayName,
+          facilityScope: { kind: 'district' },
+          capabilityIds: ['list-active-events'],
+          expiresInSeconds: null,
+        },
+        idempotencyKey: rollbackKey,
+        csrfVerified: true,
+        requestId,
+        now: issuedAt,
+      }),
+    ).rejects.toMatchObject({ reasonCode: 'PERSISTENCE_CONFLICT' });
+
+    expect(
+      await database
+        .select({ id: agentApiKeys.id })
+        .from(agentApiKeys)
+        .where(eq(agentApiKeys.displayName, displayName)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ id: idempotencyRecords.id })
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.capabilityId, 'issue-agent-api-key'),
+            eq(idempotencyRecords.key, rollbackKey),
+          ),
+        ),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ action: securityAuditEntries.action })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, requestId)),
+    ).toEqual([{ action: 'list-agent-api-keys' }]);
   });
 });

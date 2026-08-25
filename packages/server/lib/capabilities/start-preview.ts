@@ -17,9 +17,9 @@ import {
   type RosterSnapshot,
 } from '@psd-eoc/contracts';
 
-import { digestCapabilityValue } from '../../../../lib/capabilities/engine';
-import { renderTemplateSet } from '../../../../lib/notify/render';
-import { resolveAudience } from '../../../../lib/roster/resolve';
+import { renderTemplateSet } from '../notify/render';
+import { resolveAudience } from '../roster/resolve';
+import { digestCapabilityValue } from './engine';
 
 const CHANNEL_INTEGRATION_IDS = Object.freeze({
   push: 'expo-push',

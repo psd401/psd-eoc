@@ -39,7 +39,7 @@ import {
   type Database,
   type DatabaseConnection,
   type DatabaseQuery,
-} from '../../../db/client';
+} from '../../db/client';
 import {
   channelAttempts,
   deliveryEvidence,
@@ -54,19 +54,19 @@ import {
   rosterEndpoints,
   securityAuditChainAnchors,
   securityAuditEntries,
-} from '../../../db/schema';
-import { canonicalSecurityAuditJson } from '../../../lib/audit/canonical';
-import { buildSecurityAuditEntry } from '../../../lib/audit/entry';
+} from '../../db/schema';
+import { canonicalSecurityAuditJson } from '../audit/canonical';
+import { buildSecurityAuditEntry } from '../audit/entry';
 import {
   parseSecurityAuditFact,
   securityAuditFactFromEntry,
-} from '../../../lib/audit/model';
-import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../../../lib/auth/sign-in-audit';
-import type { AuthenticatedSession } from '../../../lib/auth/sessions';
+} from '../audit/model';
+import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/sign-in-audit';
+import type { AuthenticatedSession } from '../auth/sessions';
 import {
   CapabilityEngineError,
   digestCapabilityValue,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   resolveHumanCapabilityInvocation,
   type CapabilityAuditEvent,
@@ -77,20 +77,17 @@ import {
   type IdempotencyClaim,
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
-} from '../../../lib/capabilities/engine';
-import type { AuthenticatedAgentApiKey } from '../../../lib/agents/keys';
-import { resolveAudience } from '../../../lib/roster/resolve';
+} from './engine';
+import type { AuthenticatedAgentApiKey } from '../agents/keys';
+import { resolveAudience } from '../roster/resolve';
 import {
   DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
   assembleDeliveryTestChannelReport,
   assembleMonthlyDeliveryTestReport,
   deliveryTestEndpointReferenceDigest,
   deliveryTestTargetLockIdentity,
-} from '../../../lib/testing/e2e-delivery';
-import type {
-  AdminMutationMetadata,
-  AdminQueryMetadata,
-} from '../../(admin)/facilities/admin-core';
+} from '../testing/e2e-delivery';
+import type { AdminMutationMetadata, AdminQueryMetadata } from './admin';
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
@@ -99,8 +96,8 @@ import {
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
-} from '../../(admin)/facilities/admin-core';
-import { loadRosterSnapshot } from '../start/_lib/capabilities';
+} from './admin';
+import { loadRosterSnapshot } from './start';
 
 export const DELIVERY_TEST_PRODUCT_OWNER_USER_ID_ENV =
   'PSD_EOC_PRODUCT_OWNER_USER_ID' as const;
@@ -2043,7 +2040,7 @@ export function executeFinalizeDeliveryTestReport(
 ): Promise<CapabilityOutput<'finalize-delivery-test-report'>> {
   const store =
     'store' in storeOrRuntime ? storeOrRuntime.store : storeOrRuntime;
-  return executeCapability(
+  return executeAuditedCapabilityTransaction(
     finalizeDeliveryTestReportRegistration,
     input,
     invocation,
@@ -2067,7 +2064,7 @@ export function createDeliveryTestReportRuntime(
         invocation,
         authenticated,
       );
-      return executeCapability(
+      return executeAuditedCapabilityTransaction(
         listDeliveryTestReportsRegistration,
         input,
         invocation,

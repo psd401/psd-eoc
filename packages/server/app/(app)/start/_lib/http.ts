@@ -26,7 +26,7 @@ import {
   type TrustedCapabilityInvocation,
 } from '../../../../lib/capabilities/engine';
 import { getDefaultEventCapabilityRuntime } from '../../../../lib/capabilities/events';
-import { getDefaultStartFlowCapabilityRuntime } from './capabilities';
+import { getDefaultStartFlowCapabilityRuntime } from '../../../../lib/capabilities/start';
 import {
   getDefaultStartConfirmationRuntime,
   type IssueStartConfirmationInput,

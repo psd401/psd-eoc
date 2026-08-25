@@ -95,6 +95,13 @@ export const NeighborhoodSchema = z
 /** Immutable neighborhood version inferred from its schema. */
 export type Neighborhood = z.infer<typeof NeighborhoodSchema>;
 
+/** Closed discriminator set persisted for facility-scoped authorization. */
+export const FACILITY_SCOPE_KINDS = ['district', 'facilities'] as const;
+export const FacilityScopeKindSchema = z.enum(FACILITY_SCOPE_KINDS);
+
+/** Facility-scope discriminator inferred from its canonical schema. */
+export type FacilityScopeKind = z.infer<typeof FacilityScopeKindSchema>;
+
 /**
  * Owns the complete server-resolved facility boundary for an actor. District
  * scope and a non-empty explicit facility set are distinct, eliminating
@@ -102,10 +109,10 @@ export type Neighborhood = z.infer<typeof NeighborhoodSchema>;
  */
 export const FacilityScopeSchema = z
   .discriminatedUnion('kind', [
-    z.object({ kind: z.literal('district') }).strict(),
+    z.object({ kind: z.literal(FACILITY_SCOPE_KINDS[0]) }).strict(),
     z
       .object({
-        kind: z.literal('facilities'),
+        kind: z.literal(FACILITY_SCOPE_KINDS[1]),
         facilityIds: z.array(FacilityIdSchema).min(1).readonly(),
       })
       .strict()

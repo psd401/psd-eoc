@@ -8,7 +8,6 @@ import type {
   AgentApiKeySummary,
 } from '@psd-eoc/contracts';
 
-import { AgentApiKeyAdministrationCommitError } from '../../../lib/agents/admin-capabilities';
 import {
   AgentApiKeyError,
   AgentApiKeyIssuanceReplayError,
@@ -309,29 +308,6 @@ describe('agent administration action handlers', () => {
     expect(harness.revalidationCalls.count).toBe(1);
   });
 
-  test('reports a committed issuance with failed audit confirmation truthfully', async () => {
-    const harness = actionHarness({
-      issueError: new AgentApiKeyAdministrationCommitError({
-        kind: 'issued',
-        key: KEY,
-      }),
-    });
-    const result = await handleIssueAgentApiKeyAction(
-      {
-        issuedKey: null,
-        idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
-        notice: null,
-      },
-      validIssueSubmission(),
-      harness.dependencies,
-    );
-
-    expect(result.issuedKey).toBeNull();
-    expect(result.notice?.message).toContain('was issued');
-    expect(result.notice?.message).toContain('credential was withheld');
-    expect(harness.revalidationCalls.count).toBe(1);
-  });
-
   test('bounds an unknown issuance failure without revalidation', async () => {
     const harness = actionHarness({
       issueError: new Error('Synthetic internal failure.'),
@@ -445,24 +421,6 @@ describe('agent administration action handlers', () => {
 
     expect(result.notice).toMatchObject({ kind: 'success' });
     expect(result.notice?.message).toContain('Refresh to update');
-  });
-
-  test('reports a committed revocation with failed audit confirmation truthfully', async () => {
-    const harness = actionHarness({
-      revokeError: new AgentApiKeyAdministrationCommitError({
-        kind: 'revoked',
-        revocation: REVOCATION,
-      }),
-    });
-    const result = await handleRevokeAgentApiKeyAction(
-      { notice: null },
-      validRevokeSubmission(),
-      harness.dependencies,
-    );
-
-    expect(result.notice).toMatchObject({ kind: 'info' });
-    expect(result.notice?.message).toContain('audit confirmation failed');
-    expect(harness.revalidationCalls.count).toBe(1);
   });
 
   test('reports an already-revoked key as retained append-only truth', async () => {

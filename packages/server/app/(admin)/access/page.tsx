@@ -7,7 +7,7 @@ import {
 } from '../../../lib/auth/sessions';
 import { authenticateWebSession } from '../../../lib/auth/request-session';
 import { executeListGroupSourcesCapability } from '../facilities/capabilities';
-import { AdminCapabilityError } from '../facilities/admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import { AccessAdminView, NON_ADMIN_ACCESS_VIEW } from './access-admin-view';
 import {
   accessAdminStatusMessage,

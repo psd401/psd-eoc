@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema, paginatedSchema } from './api';
+import type { AgentGrantableCapabilityId } from './capability-catalog';
+import { InstalledAgentGrantableCapabilityIdSchema } from './capability-derived-registry';
 import { FacilityScopeSchema } from './facility';
 import { TimestampSchema, UuidSchema } from './shared';
 
@@ -16,91 +18,9 @@ export const AgentApiKeyIdSchema = UuidSchema;
 /** Agent API-key identifier inferred from its schema. */
 export type AgentApiKeyId = z.infer<typeof AgentApiKeyIdSchema>;
 
-/**
- * Exact capability IDs that a human administrator may persist on an agent
- * API key. Authentication/session/device credentials, role/key trust
- * establishment, and internal provider/outbox truth writes are deliberately
- * absent. Product reads, reports, append-only journal operations, drafts,
- * configuration, media, and synthetic-safe lifecycle capabilities remain
- * available under explicit key, facility, and server authorization.
- */
-export const AGENT_GRANTABLE_CAPABILITY_IDS = [
-  'sync-roster',
-  'prepare-activation',
-  'start-event',
-  'join-event',
-  'all-clear-event',
-  'reactivate-event',
-  'close-event',
-  'reopen-as-correction',
-  'append-journal-entry',
-  'correct-journal-entry',
-  'redact-journal-entry',
-  'create-media-upload-intent',
-  'complete-media-upload',
-  'create-event-type-draft',
-  'update-event-type-draft',
-  'publish-event-type-version',
-  'create-facility',
-  'update-facility',
-  'create-neighborhood-version',
-  'create-group-source',
-  'update-group-source',
-  'set-channel-enabled',
-  'create-activation-preview',
-  'create-lifecycle-consequence-preview',
-  'get-prepared-activation',
-  'get-roster-snapshot',
-  'list-group-sources',
-  'get-roster-health',
-  'get-stale-roster-report',
-  'list-active-events',
-  'get-event',
-  'list-journal-entries',
-  'search-journal-entries',
-  'get-media-read-grant',
-  'list-event-types',
-  'get-event-type-version',
-  'get-event-type-draft',
-  'preview-event-type-rendering',
-  'get-notification-status',
-  'run-delivery-report',
-  'list-delivery-test-reports',
-  'get-integration-health',
-  'list-facilities',
-  'get-facility',
-  'list-neighborhoods',
-  'list-neighborhood-versions',
-  'get-neighborhood-version',
-  'list-users',
-  'list-agent-api-keys',
-  'list-drill-records',
-  'export-drill-records',
-  'export-event-summary',
-  'query-security-audit',
-  'verify-security-audit-chain',
-] as const;
-
 /** Owns the closed agent-key capability-grant vocabulary. */
-export const AgentGrantableCapabilityIdSchema = z.enum(
-  AGENT_GRANTABLE_CAPABILITY_IDS,
-);
-
-/** Agent-grantable capability identifier inferred from its schema. */
-export type AgentGrantableCapabilityId = z.infer<
-  typeof AgentGrantableCapabilityIdSchema
->;
-
-const agentGrantableCapabilityIdSet = new Set<string>(
-  AGENT_GRANTABLE_CAPABILITY_IDS,
-);
-
-/** Returns true only for IDs that may be persisted on an agent API key. */
-export function isAgentGrantableCapabilityId(
-  value: unknown,
-): value is AgentGrantableCapabilityId {
-  return typeof value === 'string' && agentGrantableCapabilityIdSet.has(value);
-}
+export const AgentGrantableCapabilityIdSchema =
+  InstalledAgentGrantableCapabilityIdSchema as z.ZodType<AgentGrantableCapabilityId>;
 
 /**
  * Owns the closed capability grant vocabulary available to agent API keys.
@@ -109,8 +29,7 @@ export function isAgentGrantableCapabilityId(
  */
 export const AgentCapabilityGrantSchema = AgentGrantableCapabilityIdSchema;
 
-/** Registered agent capability grant inferred from its schema. */
-export type AgentCapabilityGrant = z.infer<typeof AgentCapabilityGrantSchema>;
+type AgentCapabilityGrantValue = z.infer<typeof AgentCapabilityGrantSchema>;
 
 /**
  * Owns an agent API-key issuance request. Actor, issuance time, key material,
@@ -163,7 +82,7 @@ const agentApiKeySummaryShape = {
 
 function addAgentApiKeyLifecycleIssues(
   key: {
-    readonly capabilityIds: readonly AgentCapabilityGrant[];
+    readonly capabilityIds: readonly AgentCapabilityGrantValue[];
     readonly issuedAt: string;
     readonly expiresAt: string | null;
     readonly revokedAt: string | null;

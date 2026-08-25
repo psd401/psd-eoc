@@ -25,6 +25,7 @@ import {
   type CapabilityAuthorizationRequest,
   type CapabilityExecutionAuthorizer,
   type GroupSource,
+  type GroupCompletionKind,
   type Recipient,
   type RegisteredCapabilityHandler,
   type RegisteredCapabilityId,
@@ -2037,7 +2038,7 @@ function resultSourceRows(
   syncResultId: string,
   population: RosterPopulation,
   references: readonly RosterGroupSourceRef[],
-  setKind: 'expected' | 'completed',
+  setKind: GroupCompletionKind,
 ) {
   return references.map((reference) => ({
     syncResultId,
@@ -2054,7 +2055,7 @@ function snapshotSourceRows(
   rosterSnapshotId: string,
   population: RosterPopulation,
   references: readonly RosterGroupSourceRef[],
-  completionKind: 'expected' | 'completed',
+  completionKind: GroupCompletionKind,
 ) {
   return references.map((reference) => ({
     rosterSnapshotId,

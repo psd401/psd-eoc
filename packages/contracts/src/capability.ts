@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+import {
+  isInstalledMutationCapabilityId,
+  isInstalledQueryCapabilityId,
+} from './capability-derived-registry';
 import { FacilityScopeSchema } from './facility';
 import { HumanOnlyActionIdSchema, isHumanOnlyActionId } from './human-only';
 import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
@@ -547,7 +551,7 @@ export const IdempotencyRecordSchema = z
   })
   .strict()
   .superRefine((record, context) => {
-    if (!isRegisteredMutationCapabilityId(record.capabilityId)) {
+    if (!isInstalledMutationCapabilityId(record.capabilityId)) {
       context.addIssue({
         code: 'custom',
         message:
@@ -808,7 +812,7 @@ export const QueryCapabilityEnvelopeSchema = z
   .strict()
   .superRefine((envelope, context) => {
     addActorSourceIssues(envelope, context);
-    if (isRegisteredMutationCapabilityId(envelope.capabilityId)) {
+    if (isInstalledMutationCapabilityId(envelope.capabilityId)) {
       context.addIssue({
         code: 'custom',
         message:
@@ -816,7 +820,7 @@ export const QueryCapabilityEnvelopeSchema = z
         path: ['capabilityId'],
       });
     }
-    if (!isRegisteredQueryCapabilityId(envelope.capabilityId)) {
+    if (!isInstalledQueryCapabilityId(envelope.capabilityId)) {
       context.addIssue({
         code: 'custom',
         message: 'Query capability ID is not in the closed query manifest.',
@@ -868,7 +872,7 @@ export const MutationCapabilityEnvelopeSchema = z
   .strict()
   .superRefine((envelope, context) => {
     addActorSourceIssues(envelope, context);
-    if (!isRegisteredMutationCapabilityId(envelope.capabilityId)) {
+    if (!isInstalledMutationCapabilityId(envelope.capabilityId)) {
       context.addIssue({
         code: 'custom',
         message: 'Mutation capability ID is not in the closed safety manifest.',
@@ -1131,7 +1135,7 @@ export type SessionRefreshCapabilityEnvelope = z.infer<
 
 /**
  * Owns the shared query-or-mutation envelope consumed by
- * `executeCapability`. Actor, scope, and required protected actions must be
+ * `invokeAuthorizedCapabilityHandler`. Actor, scope, and required protected actions must be
  * constructed after authentication and state resolution, never trusted from
  * REST or MCP request bodies.
  */
@@ -1246,120 +1250,6 @@ export const CapabilitySafetyResolutionSchema = z
 export type CapabilitySafetyResolution = z.infer<
   typeof CapabilitySafetyResolutionSchema
 >;
-
-/**
- * Owns the closed mutation registry used by every executeCapability adapter.
- * IDs absent from this map cannot register or parse as mutations; the central
- * map, not a route or handler, determines each safety effect. Human-only
- * action IDs are deliberately absent because they are derived requirements,
- * never callable operations.
- */
-export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
-  'complete-oidc-sign-in': 'none',
-  'refresh-session': 'none',
-  'revoke-session': 'none',
-  'sync-roster': 'none',
-  'sync-access-membership': 'none',
-  'record-delivery-test-canary-eligibility': 'none',
-  'create-delivery-test-target-set-version': 'none',
-  'prepare-activation': 'none',
-  'start-event': 'start-event',
-  'join-event': 'none',
-  'append-journal-entry': 'none',
-  'correct-journal-entry': 'none',
-  'redact-journal-entry': 'none',
-  'all-clear-event': 'all-clear-event',
-  'reactivate-event': 'start-event',
-  'close-event': 'close-event',
-  'reopen-as-correction': 'none',
-  'create-media-upload-intent': 'none',
-  'complete-media-upload': 'none',
-  'create-event-type-draft': 'none',
-  'update-event-type-draft': 'none',
-  'publish-event-type-version': 'none',
-  'dispatch-outbox': 'none',
-  'record-delivery-evidence': 'none',
-  'reconcile-delivery-attempts': 'none',
-  'record-endpoint-status': 'none',
-  'record-sms-opt-out': 'none',
-  'finalize-delivery-test-report': 'none',
-  'register-push-token': 'none',
-  'unregister-push-token': 'none',
-  'create-facility': 'none',
-  'update-facility': 'none',
-  'create-neighborhood-version': 'none',
-  'create-group-source': 'none',
-  'update-group-source': 'none',
-  'set-channel-enabled': 'none',
-  'issue-agent-api-key': 'none',
-  'revoke-agent-api-key': 'none',
-  'create-lifecycle-consequence-preview': 'none',
-} as const satisfies Readonly<Record<string, CapabilitySafetyEffect>>);
-
-/**
- * Owns the closed read-only capability registry. Query adapters receive no
- * mutation handler or provider interface, and IDs absent from this list fail
- * registration and envelope parsing rather than becoming GET aliases.
- */
-export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
-  'create-activation-preview': 'none',
-  'create-delivery-test-preview': 'none',
-  'get-prepared-activation': 'none',
-  'get-current-session': 'none',
-  'list-device-sessions': 'none',
-  'list-facilities': 'none',
-  'get-facility': 'none',
-  'list-neighborhoods': 'none',
-  'list-group-sources': 'none',
-  'get-roster-snapshot': 'none',
-  'get-roster-health': 'none',
-  'get-stale-roster-report': 'none',
-  'list-active-events': 'none',
-  'get-event': 'none',
-  'sync-event-room': 'none',
-  'list-journal-entries': 'none',
-  'search-journal-entries': 'none',
-  'get-media-read-grant': 'none',
-  'list-event-types': 'none',
-  'get-event-type-version': 'none',
-  'get-event-type-draft': 'none',
-  'preview-event-type-rendering': 'none',
-  'get-notification-status': 'none',
-  'get-integration-health': 'none',
-  'get-admin-readiness': 'none',
-  'query-security-audit': 'none',
-  'verify-security-audit-chain': 'none',
-  'run-delivery-report': 'none',
-  'list-delivery-test-reports': 'none',
-  'list-my-devices': 'none',
-  'list-neighborhood-versions': 'none',
-  'get-neighborhood-version': 'none',
-  'list-users': 'none',
-  'list-agent-api-keys': 'none',
-  'list-drill-records': 'none',
-  'list-event-records': 'none',
-  'export-drill-records': 'none',
-  'export-event-summary': 'none',
-} as const satisfies Readonly<Record<string, 'none'>>);
-
-/** Closed query capability identifier inferred from the query manifest. */
-export type QueryCapabilityId = keyof typeof CAPABILITY_QUERY_MANIFEST;
-
-/** Closed mutation capability identifier inferred from the safety manifest. */
-export type MutationCapabilityId =
-  keyof typeof CAPABILITY_MUTATION_SAFETY_MANIFEST;
-
-function isRegisteredMutationCapabilityId(
-  value: string,
-): value is MutationCapabilityId {
-  return Object.hasOwn(CAPABILITY_MUTATION_SAFETY_MANIFEST, value);
-}
-
-function isRegisteredQueryCapabilityId(
-  value: string,
-): value is QueryCapabilityId {
-  return Object.hasOwn(CAPABILITY_QUERY_MANIFEST, value);
-}
 
 /**
  * Owns trusted execution metadata supplied to protected-action resolution.

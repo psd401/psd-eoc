@@ -33,7 +33,7 @@ One deployment family in AWS account `338414773271` (us-west-2, D-026), fully se
 ```
 [Expo iOS/Android]  [Next.js web UI]  [MCP server / REST agents]
         \                 |                  /
-         └────────── Capability layer (executeCapability) ──────────┐
+         └──── Capability layer (audited server engine) ────────────┐
                           |                                         |
                 Aurora PostgreSQL (Serverless v2, min-ACU>0,        |
                 multi-AZ, RDS Data API) + S3 media (private)        |
@@ -69,7 +69,7 @@ One deployment family in AWS account `338414773271` (us-west-2, D-026), fully se
 
 ### 2.4 Agent-native surfaces (D-019, D-020)
 
-- Every feature is a typed capability; web UI, REST, and MCP all call `executeCapability` — no side doors.
+- Every feature is a typed capability; web UI, REST, and MCP all use the audited server engine — no side doors.
 - Agent credentials: scoped API keys (per-agent identity, auditable).
 - **Human-only (server-enforced, no agent credential can ever):** start real incident, send real notification, all-clear, close real event.
 - Agents CAN: read everything they're scoped to, run reports, draft messages/templates, manage config drafts, work with drill data, and *prepare* an activation for one-tap human confirmation.

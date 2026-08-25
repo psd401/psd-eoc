@@ -13,7 +13,6 @@ import {
   SessionSchema,
   UserSchema,
   VerifiedCurrentRefreshCredentialSchema,
-  executeCapability,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type Actor,
@@ -58,6 +57,23 @@ import {
   userFacilityScopes,
   users,
 } from '../../db/schema';
+import {
+  createDrizzleCapabilityStore,
+  type AdminCapabilityTransaction,
+} from '../capabilities/admin';
+import {
+  CapabilityEngineError,
+  executeAuditedCapabilityTransaction,
+  executeAuditedRefreshReplayDenial,
+  executeAuditedSessionReplaySuccess,
+  executeAuthorizedCapabilityQuery,
+  type CapabilityAuditEvent,
+  type CapabilityEngineStore,
+  type CapabilityEngineTransaction,
+  type RepositoryOwnedCapabilityErrorDisposition,
+  type ServerCapabilityRegistration,
+  type TrustedCapabilityInvocation,
+} from '../capabilities/engine';
 import { type RoleStateDatabase } from './role-state';
 import { decideAccess } from './trusted-group-access';
 
@@ -204,6 +220,35 @@ export class SessionAccessError extends Error {
   }
 }
 
+function classifySessionRepositoryError(
+  error: unknown,
+): RepositoryOwnedCapabilityErrorDisposition | null {
+  if (!(error instanceof SessionAccessError)) return null;
+  const code =
+    error.status === 401
+      ? 'UNAUTHENTICATED'
+      : error.status === 403
+        ? 'FORBIDDEN'
+        : error.status === 409
+          ? 'CONFLICT'
+          : 'INTERNAL_ERROR';
+  const reasonCode =
+    error.code === 'IDEMPOTENCY_CONFLICT'
+      ? 'IDEMPOTENCY_REQUEST_MISMATCH'
+      : error.status === 401 || error.status === 403
+        ? 'CAPABILITY_INVOCATION_DENIED'
+        : 'PERSISTENCE_CONFLICT';
+  return Object.freeze({
+    auditError: new CapabilityEngineError(
+      code,
+      reasonCode,
+      error.message,
+      error.status,
+    ),
+    commitTransaction: error.code === 'TOKEN_REPLAY',
+  });
+}
+
 function timestamp(date: Date): string {
   return date.toISOString();
 }
@@ -315,6 +360,7 @@ interface CurrentCredential {
 
 interface RetiredCredential {
   readonly kind: 'retired';
+  readonly userId: string;
   readonly sessionId: string;
   readonly deviceEnrollmentId: string;
   readonly rotationId: string;
@@ -447,6 +493,16 @@ export interface SessionStore {
   ): Promise<StoredSessionContext | null>;
   listDeviceSessions(): Promise<readonly StoredSessionContext[]>;
 }
+
+/** Transaction-scoped session service used by authenticated mutations. */
+export interface SessionCapabilityTransaction
+  extends CapabilityEngineTransaction {
+  readonly sessions: SessionService;
+}
+
+/** Atomic session/idempotency/audit persistence boundary. */
+export type SessionCapabilityStore =
+  CapabilityEngineStore<SessionCapabilityTransaction>;
 
 function intersectScopes(
   current: FacilityScope,
@@ -801,7 +857,12 @@ export class SessionService {
         idempotencyKey: IdempotencyKey;
         requestDigest: string;
       }>
-    | Readonly<{ kind: 'completed-retry'; issued: IssuedDeviceSession }>
+    | Readonly<{
+        kind: 'completed-retry';
+        actor: Extract<Actor, { readonly kind: 'human' }>;
+        issued: IssuedDeviceSession;
+      }>
+    | Readonly<{ kind: 'detected-replay'; retired: RetiredCredential }>
   > {
     const parsedIdempotencyKey = IdempotencyKeySchema.parse(idempotencyKey);
     const tokenDigest = hashRefreshToken(token);
@@ -830,20 +891,21 @@ export class SessionService {
         );
         return Object.freeze({
           kind: 'completed-retry' as const,
+          actor: Object.freeze({
+            kind: 'human' as const,
+            userId: authenticated.result.user.id,
+            sessionId: authenticated.result.session.id,
+          }),
           issued: Object.freeze({
             result: authenticated.result,
             refreshToken: successor,
           }),
         });
       }
-      await this.store.recordReplayAndRevoke({
+      return Object.freeze({
+        kind: 'detected-replay' as const,
         retired: credential,
-        detectedAt: now,
       });
-      throw new SessionAccessError(
-        'TOKEN_REPLAY',
-        'The session credential is no longer current.',
-      );
     }
     if (credential.kind === 'unknown') {
       throw new SessionAccessError(
@@ -872,6 +934,13 @@ export class SessionService {
       idempotencyKey: parsedIdempotencyKey,
       requestDigest,
     });
+  }
+
+  public recordPreparedRefreshReplay(
+    retired: RetiredCredential,
+    detectedAt: Date,
+  ): Promise<void> {
+    return this.store.recordReplayAndRevoke({ retired, detectedAt });
   }
 
   public async rotatePreparedRefresh(
@@ -1652,6 +1721,7 @@ export class DrizzleSessionStore implements SessionStore {
           id: sessionTokenIssuances.id,
           tokenDigest: sessionTokenIssuances.tokenDigest,
         },
+        userId: sessions.userId,
         deviceEnrollmentId: sessions.deviceEnrollmentId,
         rotation: {
           id: sessionTokenRotations.id,
@@ -1674,7 +1744,7 @@ export class DrizzleSessionStore implements SessionStore {
         'Credential history is incomplete.',
       );
     }
-    const { issuance, deviceEnrollmentId } = issuanceAndSession;
+    const { issuance, userId, deviceEnrollmentId } = issuanceAndSession;
     const rotationRows = credentialHistoryRows.flatMap(({ rotation }) =>
       rotation === null ? [] : [rotation],
     );
@@ -1711,6 +1781,7 @@ export class DrizzleSessionStore implements SessionStore {
     if (retiringRotation !== undefined) {
       return Object.freeze({
         kind: 'retired' as const,
+        userId,
         sessionId,
         deviceEnrollmentId,
         rotationId: retiringRotation.id,
@@ -1743,6 +1814,7 @@ export class DrizzleSessionStore implements SessionStore {
     if (retiredAfterContextLoad !== undefined) {
       return Object.freeze({
         kind: 'retired' as const,
+        userId,
         sessionId,
         deviceEnrollmentId,
         rotationId: retiredAfterContextLoad.id,
@@ -2571,52 +2643,9 @@ export class DrizzleSessionStore implements SessionStore {
   }
 }
 
-interface RefreshCapabilityContext {
-  readonly service: SessionService;
-  readonly token: string;
-  readonly source: Extract<InvocationSource, 'web' | 'mobile'>;
-  readonly prepared: Extract<
-    Awaited<ReturnType<SessionService['prepareRefresh']>>,
-    { readonly kind: 'verified' }
-  >;
-  readonly now: Date;
-  readonly issuedHolder: { value?: IssuedDeviceSession };
-}
-
-const refreshSessionHandler = registerCapabilityHandler(
-  'refresh-session',
-  async (_input, context: RefreshCapabilityContext) => {
-    const issued = await context.service.rotatePreparedRefresh(
-      context.token,
-      context.prepared,
-      context.now,
-    );
-    context.issuedHolder.value = issued;
-    return issued.result;
-  },
-);
-
-const refreshAuthorizer: CapabilityExecutionAuthorizer<RefreshCapabilityContext> =
-  {
-    authorize: ({ definition, invocationPolicy, context }) => {
-      if (
-        definition.id !== 'refresh-session' ||
-        !invocationPolicy.principalKinds.includes(
-          'verified-refresh-credential',
-        ) ||
-        !invocationPolicy.sources.includes(context.source) ||
-        context.prepared.principal.credentialState !== 'current'
-      ) {
-        throw new SessionAccessError(
-          'FORBIDDEN',
-          'Session refresh authorization failed.',
-        );
-      }
-    },
-  };
-
 export interface ExecuteRefreshSessionInput {
   readonly service: SessionService;
+  readonly capabilityStore: SessionCapabilityStore;
   readonly token: string;
   readonly source: Extract<InvocationSource, 'web' | 'mobile'>;
   readonly idempotencyKey: string;
@@ -2629,13 +2658,14 @@ export interface ExecuteRefreshSessionInput {
 export async function executeRefreshSessionCapability(
   input: ExecuteRefreshSessionInput,
 ): Promise<IssuedDeviceSession> {
+  const now = input.now ?? new Date();
+  const requestId = input.requestId ?? randomUUID();
   if (input.source === 'web' && !input.csrfVerified) {
     throw new SessionAccessError(
       'FORBIDDEN',
       'Web session refresh requires verified same-origin CSRF protection.',
     );
   }
-  const now = input.now ?? new Date();
   const prepared = await input.service.prepareRefresh(
     input.token,
     input.source,
@@ -2643,44 +2673,103 @@ export async function executeRefreshSessionCapability(
     now,
   );
   if (prepared.kind === 'completed-retry') {
+    await executeAuditedSessionReplaySuccess(
+      {
+        capabilityId: 'refresh-session',
+        actor: prepared.actor,
+        source: input.source,
+        requestId,
+        serverTime: now,
+      },
+      input.capabilityStore,
+    );
     return prepared.issued;
   }
-  const envelope = parseCapabilityEnvelopeFor('refresh-session', {
-    capabilityId: 'refresh-session',
-    operation: 'mutation',
-    principal: prepared.principal,
-    source: input.source,
-    requestId: input.requestId ?? randomUUID(),
-    serverTime: timestamp(now),
-    input: {},
-    idempotencyKey: prepared.idempotencyKey,
-    transport:
-      input.source === 'web'
-        ? {
-            kind: 'web-refresh-cookie',
-            method: 'POST',
-            csrfVerified: input.csrfVerified,
-            secure: true,
-            httpOnly: true,
-            sameSite: 'strict',
-          }
-        : { kind: 'mobile-refresh-bearer', method: 'POST' },
-  });
+  if (prepared.kind === 'detected-replay') {
+    const actor = Object.freeze({
+      kind: 'human' as const,
+      userId: prepared.retired.userId,
+      sessionId: prepared.retired.sessionId,
+    });
+    await executeAuditedRefreshReplayDenial(
+      {
+        actor,
+        source: input.source,
+        requestId,
+        serverTime: now,
+      },
+      input.capabilityStore,
+      (transaction) =>
+        transaction.sessions.recordPreparedRefreshReplay(prepared.retired, now),
+    );
+    throw new SessionAccessError(
+      'TOKEN_REPLAY',
+      'The session credential is no longer current.',
+    );
+  }
+  const transport =
+    input.source === 'web'
+      ? ({
+          kind: 'web-refresh-cookie',
+          method: 'POST',
+          csrfVerified: true as const,
+          secure: true,
+          httpOnly: true,
+          sameSite: 'strict',
+        } as const)
+      : ({ kind: 'mobile-refresh-bearer', method: 'POST' } as const);
   const issuedHolder: { value?: IssuedDeviceSession } = {};
-  const context: RefreshCapabilityContext = {
-    service: input.service,
-    token: input.token,
-    source: input.source,
-    prepared,
-    now,
-    issuedHolder,
+  const registration: ServerCapabilityRegistration<
+    'refresh-session',
+    SessionCapabilityTransaction
+  > = {
+    id: 'refresh-session',
+    mutationPersistence: 'repository-owned',
+    classifyRepositoryError: classifySessionRepositoryError,
+    resolveFacilityId() {
+      if (prepared.principal.credentialState !== 'current') {
+        throw new SessionAccessError(
+          'FORBIDDEN',
+          'Session refresh authorization failed.',
+        );
+      }
+      return null;
+    },
+    async handler(_value, context) {
+      const issued = await context.transaction.sessions.rotatePreparedRefresh(
+        input.token,
+        prepared,
+        now,
+      );
+      issuedHolder.value = issued;
+      return issued.result;
+    },
   };
-  await executeCapability(refreshSessionHandler, envelope.input, {
-    context,
-    humanActionResolutionContext: null,
-    safetyResolver: null,
-    authorizer: refreshAuthorizer,
+  const invocation: TrustedCapabilityInvocation = Object.freeze({
+    actor: Object.freeze({
+      kind: 'human' as const,
+      userId: prepared.principal.userId,
+      sessionId: prepared.principal.sessionId,
+    }),
+    principal: prepared.principal,
+    principalKind: 'verified-refresh-credential',
+    source: input.source,
+    scope: { facilityScope: { kind: 'district' as const } },
+    requestId,
+    serverTime: now,
+    connectivityEpochId: null,
+    mutation: Object.freeze({
+      idempotencyKey: prepared.idempotencyKey,
+      transport,
+      humanConfirmationId: null,
+    }),
   });
+  await executeAuditedCapabilityTransaction(
+    registration,
+    {},
+    invocation,
+    input.capabilityStore,
+  );
   if (issuedHolder.value === undefined) {
     throw new SessionAccessError(
       'INVALID_CREDENTIAL',
@@ -2690,43 +2779,9 @@ export async function executeRefreshSessionCapability(
   return issuedHolder.value;
 }
 
-interface RevokeCapabilityContext {
-  readonly service: SessionService;
-  readonly authenticated: AuthenticatedSession;
-  readonly idempotencyKey: string;
-  readonly now: Date;
-}
-
-const revokeSessionHandler = registerCapabilityHandler(
-  'revoke-session',
-  (input, context: RevokeCapabilityContext) =>
-    context.service.revoke(
-      context.authenticated,
-      input,
-      context.idempotencyKey,
-      context.now,
-    ),
-);
-
-const revokeAuthorizer: CapabilityExecutionAuthorizer<RevokeCapabilityContext> =
-  {
-    authorize: ({ definition, invocationPolicy, context }) => {
-      if (
-        definition.id !== 'revoke-session' ||
-        context.authenticated.actor.kind !== 'human' ||
-        !invocationPolicy.principalKinds.includes('human') ||
-        !invocationPolicy.sources.includes(context.authenticated.source)
-      ) {
-        throw new SessionAccessError(
-          'FORBIDDEN',
-          'Session revocation authorization failed.',
-        );
-      }
-    },
-  };
-
 export interface ExecuteRevokeSessionInput {
   readonly service: SessionService;
+  readonly capabilityStore: SessionCapabilityStore;
   readonly authenticated: AuthenticatedSession;
   readonly sessionId: string;
   readonly reasonCode: string;
@@ -2741,49 +2796,112 @@ export async function executeRevokeSessionCapability(
   input: ExecuteRevokeSessionInput,
 ): Promise<SessionRevocation> {
   const now = input.now ?? new Date();
+  const requestId = input.requestId ?? randomUUID();
+  if (input.authenticated.source === 'web' && !input.csrfVerified) {
+    await input.capabilityStore.appendCapabilityAudit({
+      category: 'access-denial',
+      action: 'revoke-session',
+      actionIds: [],
+      confirmationId: null,
+      outcome: 'denied',
+      actor: input.authenticated.actor,
+      source: input.authenticated.source,
+      facilityId: null,
+      requestId,
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+      occurredAt: now,
+    });
+    throw new SessionAccessError(
+      'FORBIDDEN',
+      'Web session revocation requires verified same-origin CSRF protection.',
+    );
+  }
   const capabilityInput = {
     sessionId: input.sessionId,
     reasonCode: input.reasonCode,
   };
-  const envelope = parseCapabilityEnvelopeFor('revoke-session', {
-    capabilityId: 'revoke-session',
-    operation: 'mutation',
+  const registration: ServerCapabilityRegistration<
+    'revoke-session',
+    SessionCapabilityTransaction
+  > = {
+    id: 'revoke-session',
+    mutationPersistence: 'repository-owned',
+    classifyRepositoryError: classifySessionRepositoryError,
+    resolveFacilityId() {
+      if (input.authenticated.actor.kind !== 'human') {
+        throw new SessionAccessError(
+          'FORBIDDEN',
+          'Session revocation authorization failed.',
+        );
+      }
+      return null;
+    },
+    handler: (value, context) =>
+      context.transaction.sessions.revoke(
+        input.authenticated,
+        value,
+        input.idempotencyKey,
+        now,
+      ),
+  };
+  const invocation: TrustedCapabilityInvocation = Object.freeze({
     actor: input.authenticated.actor,
     source: input.authenticated.source,
     scope: input.authenticated.scope,
-    requestId: input.requestId ?? randomUUID(),
-    serverTime: timestamp(now),
-    input: capabilityInput,
-    idempotencyKey: input.idempotencyKey,
-    transport:
-      input.authenticated.source === 'web'
-        ? {
-            kind: 'web-interactive',
-            method: 'POST',
-            interaction: 'explicit-user-submit',
-            csrfVerified: input.csrfVerified,
-          }
-        : {
-            kind: 'mobile-interactive',
-            interaction: 'explicit-user-submit',
-          },
+    requestId,
+    serverTime: now,
     connectivityEpochId: input.authenticated.result.connectivityEpoch.id,
-    requiredHumanActionIds: [],
-    requiredConsequenceDigest: null,
-    humanConfirmation: null,
+    mutation: Object.freeze({
+      idempotencyKey: input.idempotencyKey,
+      transport:
+        input.authenticated.source === 'web'
+          ? {
+              kind: 'web-interactive' as const,
+              method: 'POST' as const,
+              interaction: 'explicit-user-submit' as const,
+              csrfVerified: true as const,
+            }
+          : {
+              kind: 'mobile-interactive' as const,
+              interaction: 'explicit-user-submit' as const,
+            },
+      humanConfirmationId: null,
+    }),
   });
-  const context: RevokeCapabilityContext = {
-    service: input.service,
-    authenticated: input.authenticated,
-    idempotencyKey: input.idempotencyKey,
-    now,
-  };
-  return executeCapability(revokeSessionHandler, envelope.input, {
-    context,
-    humanActionResolutionContext: null,
-    safetyResolver: null,
-    authorizer: revokeAuthorizer,
-  });
+  return executeAuditedCapabilityTransaction(
+    registration,
+    capabilityInput,
+    invocation,
+    input.capabilityStore,
+  );
+}
+
+/** Re-enters the engine for an exact completed revocation retry. */
+export async function executeAuditedCompletedRevokeSessionReplay(
+  input: Readonly<{
+    capabilityStore: SessionCapabilityStore;
+    revocation: SessionRevocation;
+    source: Extract<InvocationSource, 'web' | 'mobile'>;
+    requestId: string;
+    now?: Date;
+  }>,
+): Promise<void> {
+  if (input.revocation.revokedBy.kind !== 'human') {
+    throw new SessionAccessError(
+      'FORBIDDEN',
+      'Only the original human revocation may be replayed.',
+    );
+  }
+  await executeAuditedSessionReplaySuccess(
+    {
+      capabilityId: 'revoke-session',
+      actor: input.revocation.revokedBy,
+      source: input.source,
+      requestId: input.requestId,
+      serverTime: input.now ?? new Date(),
+    },
+    input.capabilityStore,
+  );
 }
 
 interface ListDeviceSessionsCapabilityContext {
@@ -2838,12 +2956,16 @@ export async function executeListDeviceSessionsCapability(
     service: input.service,
     authenticated: input.authenticated,
   };
-  return executeCapability(listDeviceSessionsHandler, envelope.input, {
-    context,
-    humanActionResolutionContext: null,
-    safetyResolver: null,
-    authorizer: listDeviceSessionsAuthorizer,
-  });
+  return executeAuthorizedCapabilityQuery(
+    listDeviceSessionsHandler,
+    envelope.input,
+    {
+      context,
+      humanActionResolutionContext: null,
+      safetyResolver: null,
+      authorizer: listDeviceSessionsAuthorizer,
+    },
+  );
 }
 
 export interface DefaultSessionServiceRuntimeDependencies {
@@ -2857,6 +2979,41 @@ export interface DefaultSessionServiceRuntimeDependencies {
   ) => () => void;
 }
 
+/** Creates the production outer transaction that atomically appends audit. */
+export function createDrizzleSessionCapabilityStore(
+  database: Database,
+  policy: SessionPolicy = DEFAULT_SESSION_POLICY,
+): SessionCapabilityStore {
+  const engineStore = createDrizzleCapabilityStore(database);
+  return Object.freeze({
+    transaction<Result>(
+      operation: (transaction: SessionCapabilityTransaction) => Promise<Result>,
+    ): Promise<Result> {
+      return engineStore.transaction((transaction) => {
+        const adminTransaction = transaction as AdminCapabilityTransaction;
+        return operation({
+          readCurrentTime: (receivedAt) =>
+            transaction.readCurrentTime(receivedAt),
+          claimIdempotency: (claim) => transaction.claimIdempotency(claim),
+          completeIdempotency: (completion) =>
+            transaction.completeIdempotency(completion),
+          getHumanConfirmation: (id) => transaction.getHumanConfirmation(id),
+          consumeHumanConfirmation: (confirmation) =>
+            transaction.consumeHumanConfirmation(confirmation),
+          appendCapabilityAudit: (event) =>
+            transaction.appendCapabilityAudit(event),
+          sessions: new SessionService(
+            new DrizzleSessionStore(adminTransaction.database as Database),
+            policy,
+          ),
+        });
+      });
+    },
+    appendCapabilityAudit: (event: CapabilityAuditEvent) =>
+      engineStore.appendCapabilityAudit(event),
+  });
+}
+
 /**
  * Owns one cached database-backed service generation and fences recovery so an
  * older failed generation can never clear or close its replacement.
@@ -2865,6 +3022,7 @@ export class DefaultSessionServiceRuntime {
   private readonly authenticationTimeoutMilliseconds: number;
   private connection: DatabaseConnection | undefined;
   private service: SessionService | undefined;
+  private capabilityStore: SessionCapabilityStore | undefined;
 
   public constructor(
     private readonly dependencies: DefaultSessionServiceRuntimeDependencies,
@@ -2924,7 +3082,22 @@ export class DefaultSessionServiceRuntime {
     );
     this.connection = connection;
     this.service = service;
+    this.capabilityStore = createDrizzleSessionCapabilityStore(
+      connection.db,
+      policy,
+    );
     return service;
+  }
+
+  /** Returns the atomic mutation store paired with the current service. */
+  public getCapabilityStore(): SessionCapabilityStore {
+    this.get();
+    if (this.capabilityStore === undefined) {
+      throw new SessionConfigurationError(
+        'The session capability store is unavailable.',
+      );
+    }
+    return this.capabilityStore;
   }
 
   /** Clears and closes only the current generation. */
@@ -2932,6 +3105,7 @@ export class DefaultSessionServiceRuntime {
     const connection = this.connection;
     this.connection = undefined;
     this.service = undefined;
+    this.capabilityStore = undefined;
     await connection?.close();
   }
 }
@@ -2943,6 +3117,11 @@ const defaultSessionServiceRuntime = new DefaultSessionServiceRuntime({
 /** Lazily creates the role-authenticated database-backed session service. */
 export function getDefaultSessionService(): SessionService {
   return defaultSessionServiceRuntime.get();
+}
+
+/** Returns the atomic mutation store paired with the default session service. */
+export function getDefaultSessionCapabilityStore(): SessionCapabilityStore {
+  return defaultSessionServiceRuntime.getCapabilityStore();
 }
 
 /** Lifecycle hook for tests/scripts; normal Next.js processes retain the pool. */

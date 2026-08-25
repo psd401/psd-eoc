@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 
 import { WEB_SESSION_COOKIE_NAME } from '../../../lib/auth/sessions';
 import { authenticateWebSession } from '../../../lib/auth/request-session';
-import { AdminCapabilityError } from '../facilities/admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import {
   AdminReadinessView,
   ForbiddenAdminReadiness,

@@ -14,7 +14,7 @@ import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../../app/(admin)/facilities/owned-database-lifecycle';
+} from '../testing/owned-database-lifecycle';
 import {
   createDatabaseClient,
   databaseExecuteRows,
@@ -30,6 +30,7 @@ import {
   groupSources,
   idempotencyRecords,
   sessionRevocations,
+  securityAuditEntries,
   sessions,
   sessionTokenIssuances,
   sessionTokenRotations,
@@ -46,10 +47,34 @@ import {
 import {
   DrizzleSessionStore,
   SessionService,
+  createDrizzleSessionCapabilityStore,
   executeRefreshSessionCapability,
   executeRevokeSessionCapability,
   hashRefreshToken,
+  type SessionCapabilityStore,
 } from './sessions';
+
+function sessionCapabilityStore(
+  service: SessionService,
+): SessionCapabilityStore {
+  return {
+    transaction: (operation) =>
+      operation({
+        sessions: service,
+        readCurrentTime: (receivedAt) => Promise.resolve(receivedAt),
+        claimIdempotency: () =>
+          Promise.reject(new Error('Unexpected engine idempotency claim.')),
+        completeIdempotency: () =>
+          Promise.reject(
+            new Error('Unexpected engine idempotency completion.'),
+          ),
+        getHumanConfirmation: () => Promise.resolve(null),
+        consumeHumanConfirmation: () => Promise.resolve(false),
+        appendCapabilityAudit: () => Promise.resolve(),
+      }),
+    appendCapabilityAudit: () => Promise.resolve(),
+  };
+}
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -570,6 +595,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await store.recordReplayAndRevoke({
       retired: {
         kind: 'retired',
+        userId,
         sessionId: targetSessionId,
         deviceEnrollmentId: targetDeviceId,
         rotationId,
@@ -974,9 +1000,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const verifiedAt = new Date(snapshotAt.getTime() + 1_000);
     const rotatedAt = new Date(snapshotAt.getTime() + 2_000);
     const expiresAt = new Date(snapshotAt.getTime() + 3 * 60 * 60 * 1_000);
-    const presentedTokenDigest = digest(
-      `issue-23-concurrent-refresh-presented-${suffix}`,
-    );
+    const presentedToken = suffix.replaceAll('-', '').repeat(2);
+    const presentedTokenDigest = digest(presentedToken);
     const googleSubject = `issue-23-concurrent-refresh-${suffix}`;
 
     await database.insert(users).values({
@@ -1033,13 +1058,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       sessionId,
       establishedAt: snapshotAt,
     });
-    await database.insert(sessionTokenRotations).values({
-      id: winningRotationId,
-      sessionId,
-      previousTokenDigest: presentedTokenDigest,
-      nextTokenDigest: digest(`issue-23-concurrent-refresh-winner-${suffix}`),
-      rotatedAt: verifiedAt,
-    });
     await database.insert(devicePushTokenRegistrations).values({
       id: registrationId,
       deviceEnrollmentId,
@@ -1048,34 +1066,40 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       registeredAt: snapshotAt,
     });
 
-    const store = new DrizzleSessionStore(database);
+    let raceInjected = false;
+    class RaceInjectingSessionStore extends DrizzleSessionStore {
+      public override async inspectCredential(tokenDigest: string, now?: Date) {
+        const credential = await super.inspectCredential(tokenDigest, now);
+        if (!raceInjected) {
+          raceInjected = true;
+          await database.insert(sessionTokenRotations).values({
+            id: winningRotationId,
+            sessionId,
+            previousTokenDigest: presentedTokenDigest,
+            nextTokenDigest: digest(
+              `issue-23-concurrent-refresh-winner-${suffix}`,
+            ),
+            rotatedAt: verifiedAt,
+          });
+        }
+        return credential;
+      }
+    }
+    const service = new SessionService(new RaceInjectingSessionStore(database));
+    const requestId = randomUUID();
     await expect(
-      store.rotateCredential({
-        principal: {
-          kind: 'verified-current-refresh-credential',
-          verificationId: randomUUID(),
-          userId,
-          sessionId,
-          deviceEnrollmentId,
-          recordRef: { kind: 'initial-issuance', issuanceId },
-          presentedTokenDigest,
-          credentialGeneration: 1,
-          credentialState: 'current',
-          sessionState: 'active',
-          deviceState: 'active',
-          sessionExpiresAt: expiresAt.toISOString(),
-          verifiedAt: verifiedAt.toISOString(),
-        },
-        nextTokenDigest: digest(`issue-23-concurrent-refresh-loser-${suffix}`),
+      executeRefreshSessionCapability({
+        service,
+        capabilityStore: createDrizzleSessionCapabilityStore(database),
+        token: presentedToken,
+        source: 'mobile',
         idempotencyKey: `issue-23-concurrent-refresh-${suffix}`,
-        requestDigest: digest(`issue-23-concurrent-refresh-request-${suffix}`),
-        rotatedAt,
-        rotationId: randomUUID(),
-        connectivityEpochId: randomUUID(),
-        membershipTtlSeconds: 60 * 60,
-        membershipGraceSeconds: 60 * 60,
+        csrfVerified: false,
+        requestId,
+        now: rotatedAt,
       }),
     ).rejects.toMatchObject({ code: 'TOKEN_REPLAY' });
+    expect(raceInjected).toBe(true);
 
     expect(
       await database
@@ -1107,6 +1131,16 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         .from(sessionRevocations)
         .where(eq(sessionRevocations.sessionId, sessionId)),
     ).toHaveLength(1);
+    expect(
+      await database
+        .select({
+          action: securityAuditEntries.action,
+          outcome: securityAuditEntries.outcome,
+          requestId: securityAuditEntries.requestId,
+        })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, requestId)),
+    ).toEqual([{ action: 'refresh-session', outcome: 'denied', requestId }]);
   });
 
   test('recovers only the exact completed self-revocation receipt after a service restart', async () => {
@@ -1181,6 +1215,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const idempotencyKey = `issue-23-revoke-recovery-${suffix}`;
       const canonical = await executeRevokeSessionCapability({
         service: firstService,
+        capabilityStore: sessionCapabilityStore(firstService),
         authenticated,
         ...revokeInput,
         idempotencyKey,
@@ -1261,6 +1296,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       );
       const refreshed = await executeRefreshSessionCapability({
         service: firstService,
+        capabilityStore: sessionCapabilityStore(firstService),
         token: rotatedIssued.refreshToken,
         source: 'mobile',
         idempotencyKey: `issue-23-revoke-rotate-${suffix}`,
@@ -1279,6 +1315,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const rotatedRevokeKey = `issue-23-revoke-retired-key-${suffix}`;
       await executeRevokeSessionCapability({
         service: firstService,
+        capabilityStore: sessionCapabilityStore(firstService),
         authenticated: refreshedAuthentication,
         ...rotatedRevokeInput,
         idempotencyKey: rotatedRevokeKey,

@@ -9,7 +9,6 @@ import {
   InvocationSourceSchema,
   RoleSchema,
   UuidSchema,
-  executeCapability,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type CapabilityAuthorizationRequest,
@@ -22,6 +21,7 @@ import { and, asc, eq, gt, or, type SQL } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import { facilities } from '../../db/schema';
+import { executeAuthorizedCapabilityQuery } from '../capabilities/engine';
 import { parseSecurityAuditFact } from '../audit/model';
 import type { SecurityAuditRepository } from '../audit/repository';
 import {
@@ -214,12 +214,16 @@ export class AgentAdministrationFacilityCapabilities {
         serverTime: now.toISOString(),
         input: input.value,
       });
-      result = await executeCapability(listFacilitiesHandler, envelope.input, {
-        context: Object.freeze({ store: this.store, access }),
-        humanActionResolutionContext: null,
-        safetyResolver: null,
-        authorizer: listFacilitiesAuthorizer,
-      });
+      result = await executeAuthorizedCapabilityQuery(
+        listFacilitiesHandler,
+        envelope.input,
+        {
+          context: Object.freeze({ store: this.store, access }),
+          humanActionResolutionContext: null,
+          safetyResolver: null,
+          authorizer: listFacilitiesAuthorizer,
+        },
+      );
     } catch (error) {
       await this.audit.append(
         parseSecurityAuditFact({

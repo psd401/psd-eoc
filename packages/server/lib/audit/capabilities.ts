@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import {
   SecurityAuditQuerySchema,
   VerifySecurityAuditChainInputSchema,
-  executeCapability,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type CapabilityAuthorizationRequest,
@@ -15,6 +14,7 @@ import {
   type VerifySecurityAuditChainInput,
 } from '@psd-eoc/contracts';
 
+import { executeAuthorizedCapabilityQuery } from '../capabilities/engine';
 import type {
   SecurityAuditService,
   SecurityAuditAccessContext,
@@ -99,12 +99,16 @@ export async function executeQuerySecurityAuditCapability(input: {
     input: input.query,
   });
   const context = envelopeContext(input.service, access);
-  return executeCapability(querySecurityAuditHandler, envelope.input, {
-    context,
-    humanActionResolutionContext: null,
-    safetyResolver: null,
-    authorizer: securityAuditAuthorizer,
-  });
+  return executeAuthorizedCapabilityQuery(
+    querySecurityAuditHandler,
+    envelope.input,
+    {
+      context,
+      humanActionResolutionContext: null,
+      safetyResolver: null,
+      authorizer: securityAuditAuthorizer,
+    },
+  );
 }
 
 /** Executes a district-wide verification job through the same capability. */
@@ -136,12 +140,16 @@ export async function executeVerifySecurityAuditChainCapability(input: {
     input: verification,
   });
   const context = envelopeContext(input.service, access);
-  return executeCapability(verifySecurityAuditChainHandler, envelope.input, {
-    context,
-    humanActionResolutionContext: null,
-    safetyResolver: null,
-    authorizer: securityAuditAuthorizer,
-  });
+  return executeAuthorizedCapabilityQuery(
+    verifySecurityAuditChainHandler,
+    envelope.input,
+    {
+      context,
+      humanActionResolutionContext: null,
+      safetyResolver: null,
+      authorizer: securityAuditAuthorizer,
+    },
+  );
 }
 
 /** Narrows arbitrary canonical IDs accepted by the shared authorizer. */

@@ -1,9 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import {
-  executeCapability,
-  parseCapabilityEnvelopeFor,
-} from '@psd-eoc/contracts';
+import { parseCapabilityEnvelopeFor } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
 
 import {
@@ -16,6 +13,7 @@ import {
   POST_GATE_SIGN_IN_FAILED_REASON,
   type AccessGateAuditSink,
 } from '../../../../lib/auth/sign-in-audit';
+import { executeRepositoryAuditedOidcCompletion } from '../../../../lib/capabilities/engine';
 import { authorizeSignIn } from '../../../../lib/auth/sign-in-authorization';
 import {
   completeGoogleOidcCallback,
@@ -311,7 +309,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       responseDigest: callback.responseDigest,
     });
     const policy = readSessionPolicy();
-    await executeCapability(
+    await executeRepositoryAuditedOidcCompletion(
       createCompleteOidcSignInHandler({
         store: runtime.sessionStore,
         policy,

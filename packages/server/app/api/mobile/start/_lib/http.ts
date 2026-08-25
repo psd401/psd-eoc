@@ -15,7 +15,7 @@ import {
   startFlowApiErrorResponse,
   type StartFlowRouteRuntime,
 } from '../../../../(app)/start/_lib/http';
-import { getDefaultStartFlowCapabilityRuntime } from '../../../../(app)/start/_lib/capabilities';
+import { getDefaultStartFlowCapabilityRuntime } from '../../../../../lib/capabilities/start';
 import {
   getDefaultStartConfirmationRuntime,
   type IssueStartConfirmationInput,
