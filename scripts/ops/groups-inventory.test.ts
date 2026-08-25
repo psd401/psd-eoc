@@ -6846,7 +6846,10 @@ const runSelfTest = async (): Promise<void> => {
 };
 
 describe('Google Groups inventory', () => {
+  // This preserves the complete former command-line self-test in ordinary
+  // discovery. A two-core CI runner needs just over one minute for the bounded
+  // subprocess, filesystem, and mapping cases together.
   test('passes the complete synthetic safety and mapping suite', async () => {
     await runSelfTest();
-  }, 60_000);
+  }, 120_000);
 });
