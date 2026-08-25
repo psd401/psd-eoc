@@ -27,12 +27,15 @@ import {
 import {
   type AscAppConfiguration,
   type AscClient,
+  type AscCredentials,
   type BetaReviewInfo,
   type JsonApiPageSummary,
   type JsonApiResource,
   type SyncOptions,
 } from './asc-model';
 import { AppStoreConnectClient } from './asc-resources';
+import { type AscTransport, AppStoreConnectTransport } from './asc-transport';
+import * as ascEntry from './asc';
 
 const TEST_APP_CONFIGURATION = Object.freeze({
   appName: 'Synthetic Emergency App',
@@ -1041,16 +1044,19 @@ const writePrivate = async (path: string, contents: string): Promise<void> => {
   }
 };
 
-const createHttpClient = (): AppStoreConnectClient => {
+const createHttpCredentials = (): AscCredentials => {
   const { privateKey } = generateKeyPairSync('ec', {
     namedCurve: 'prime256v1',
   });
-  return new AppStoreConnectClient({
+  return {
     issuerId: 'synthetic-issuer',
     keyId: 'synthetic-key',
     privateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-  });
+  };
 };
+
+const createHttpClient = (): AppStoreConnectClient =>
+  new AppStoreConnectClient(createHttpCredentials());
 
 const TRUSTED_PAGINATION_PATH =
   '/v1/betaTesters?fields%5BbetaTesters%5D=email&filter%5Bapps%5D=app-1&filter%5Bapps%5D=app-2&limit=200';
@@ -1150,6 +1156,40 @@ describe('App Store Connect authentication', () => {
 });
 
 describe('App Store Connect HTTP safety', () => {
+  test('keeps fixed-origin HTTP transport independent from resource parsing', async () => {
+    const transport = new AppStoreConnectTransport(createHttpCredentials());
+    expect(transport.validatedUrl('/v1/apps?limit=1').href).toBe(
+      `${APP_STORE_CONNECT_ORIGIN}/v1/apps?limit=1`,
+    );
+    expect(() =>
+      transport.validatedUrl('https://example.invalid/v1/apps'),
+    ).toThrow(/unexpected URL/u);
+
+    const requestedUrls: string[] = [];
+    const injectedTransport: AscTransport = {
+      rateLimitRemaining: () => 99,
+      requestJson: (_method, url) => {
+        requestedUrls.push(url.href);
+        return Promise.resolve({ data: [resource('apps', 'app-1')] });
+      },
+      validatedContinuationUrl: () => {
+        throw new Error('Unexpected continuation.');
+      },
+      validatedUrl: (path) => new URL(path, APP_STORE_CONNECT_ORIGIN),
+    };
+    const client = new AppStoreConnectClient(
+      createHttpCredentials(),
+      injectedTransport,
+    );
+    expect(await client.first('/v1/apps?limit=1')).toEqual(
+      resource('apps', 'app-1'),
+    );
+    expect(client.rateLimitRemaining()).toBe(99);
+    expect(requestedUrls).toEqual([
+      `${APP_STORE_CONNECT_ORIGIN}/v1/apps?limit=1`,
+    ]);
+  });
+
   test('accepts only the exact documented status for each request shape', async () => {
     const originalFetch = globalThis.fetch;
     let responseFactory = (): Response =>
@@ -11263,6 +11303,13 @@ describe('write gates and reconciliation', () => {
 });
 
 describe('operator documentation and reproducibility', () => {
+  test('preserves the stable operator import surface', () => {
+    expect(ascEntry.createAscJwt).toBe(createAscJwt);
+    expect(ascEntry.parseCli).toBe(parseConfiguredCli);
+    expect(ascEntry.syncTestFlight).toBe(syncConfiguredTestFlight);
+    expect(ascEntry.AppStoreConnectClient).toBe(AppStoreConnectClient);
+  });
+
   test('binds writes to exact plans and exact EAS builds', async () => {
     const runbook = await Bun.file(
       join(import.meta.dir, '../../../docs/runbooks/appstore-setup.md'),
