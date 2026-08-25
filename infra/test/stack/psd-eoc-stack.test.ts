@@ -2,9 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
+import productionConfiguration from '../../cdk.json';
 import {
-  AWS_ACCOUNT,
-  AWS_ACCOUNT_ALIAS,
   BOOTSTRAP_LOG_GROUP_NAME,
   DATABASE_IDENTIFIER,
   DATABASE_NAME,
@@ -18,13 +17,12 @@ import {
   HEALTH_PATH,
   IMAGE_DIGEST_SENTINEL,
   HEALTH_QUEUE_NAME,
-  AWS_REGION,
   SERVER_REPOSITORY_NAME,
-  SES_FROM_ADDRESS,
-  SES_IDENTITY_DOMAIN,
   SES_VERIFICATION_REFERENCE,
   STACK_NAME,
+  assertProtectedDeploymentTarget,
   readDeploymentIdentity,
+  readDeploymentTarget,
 } from '../../src/stack/config';
 import { PsdEocStack } from '../../src/stack/psd-eoc-stack';
 import {
@@ -149,6 +147,23 @@ function tagsByKey(resource: SynthesizedResource): Map<string, unknown> {
   );
 }
 
+const productionContext = productionConfiguration.context as Readonly<
+  Record<string, unknown>
+>;
+const currentDeploymentTarget = readDeploymentTarget({
+  tryGetContext: (key) => productionContext[key],
+});
+const currentDeploymentIdentity = readDeploymentIdentity({
+  tryGetContext: (key) => productionContext[key],
+});
+const {
+  account: AWS_ACCOUNT,
+  accountAlias: AWS_ACCOUNT_ALIAS,
+  region: AWS_REGION,
+  sesFromAddress: SES_FROM_ADDRESS,
+  sesIdentityDomain: SES_IDENTITY_DOMAIN,
+} = currentDeploymentTarget;
+
 const app = new App({
   context: {
     'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
@@ -158,6 +173,7 @@ const app = new App({
   },
 });
 const stack = new PsdEocStack(app, STACK_NAME, {
+  deploymentTarget: currentDeploymentTarget,
   env: {
     account: AWS_ACCOUNT,
     region: AWS_REGION,
@@ -169,6 +185,36 @@ const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
 describe('deployment boundary', () => {
+  it('binds automatic deployment to protected account, region, and identity', () => {
+    const protectedEnvironment = {
+      APP_PUBLIC_ORIGIN: currentDeploymentIdentity.applicationOrigin,
+      AWS_ACCOUNT_ID: currentDeploymentTarget.account,
+      AWS_REGION: currentDeploymentTarget.region,
+      PSD_EOC_ENFORCE_DEPLOYMENT_TARGET: 'true',
+    } as const;
+    expect(() =>
+      assertProtectedDeploymentTarget(
+        currentDeploymentTarget,
+        currentDeploymentIdentity,
+        protectedEnvironment,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertProtectedDeploymentTarget(
+        currentDeploymentTarget,
+        currentDeploymentIdentity,
+        { ...protectedEnvironment, AWS_REGION: 'us-east-1' },
+      ),
+    ).toThrow(/protected production environment/u);
+    expect(() =>
+      assertProtectedDeploymentTarget(
+        { ...currentDeploymentTarget, sesIdentityDomain: 'example.invalid' },
+        currentDeploymentIdentity,
+        protectedEnvironment,
+      ),
+    ).toThrow(/protected hosted domain/u);
+  });
+
   it('uses the canonical organization identity contract at synth time', () => {
     const identityFor = (organizationName: string) =>
       readDeploymentIdentity({
@@ -217,11 +263,7 @@ describe('deployment boundary', () => {
     expect(dockerfile).not.toContain('synthetic-only');
   });
 
-  it('rejects every account and region except the approved psd401 target', () => {
-    expect(AWS_ACCOUNT_ALIAS).toBe('psd401');
-    expect(AWS_ACCOUNT).toBe('<aws-account-id>');
-    expect(AWS_REGION).toBe('us-west-2');
-
+  it('rejects every account and region except the configured target', () => {
     expect(
       () =>
         new PsdEocStack(
@@ -235,6 +277,7 @@ describe('deployment boundary', () => {
           }),
           'WrongAccount',
           {
+            deploymentTarget: currentDeploymentTarget,
             env: { account: '000000000000', region: AWS_REGION },
           },
         ),
@@ -252,10 +295,65 @@ describe('deployment boundary', () => {
           }),
           'WrongRegion',
           {
+            deploymentTarget: currentDeploymentTarget,
             env: { account: AWS_ACCOUNT, region: 'us-east-1' },
           },
         ),
     ).toThrow(`in ${AWS_REGION}`);
+  });
+
+  it('uses the target AWS partition for secret and SES ARNs', () => {
+    for (const [region, partition] of [
+      ['cn-north-1', 'aws-cn'],
+      ['us-gov-west-1', 'aws-us-gov'],
+    ] as const) {
+      const account = '000000000000';
+      const partitionApp = new App({
+        context: {
+          'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+          'psdEoc:hostedDomain': 'example.invalid',
+          'psdEoc:iosBundleId': 'invalid.example.eoc',
+          'psdEoc:organizationName': 'Example School District',
+        },
+      });
+      const partitionStack = new PsdEocStack(
+        partitionApp,
+        'PartitionVerification',
+        {
+          deploymentTarget: {
+            account,
+            accountAlias: 'example-district',
+            monitoringRunbookBaseUrl:
+              'https://operations.example.invalid/runbooks',
+            region,
+            sesFromAddress: 'eoc-alerts@example.invalid',
+            sesIdentityDomain: 'example.invalid',
+          },
+          env: { account, region },
+        },
+      );
+      const partitionTemplate = asRecord(
+        Template.fromStack(partitionStack).toJSON(),
+      );
+      const parameters = asRecord(partitionTemplate.Parameters);
+      const outputs = asRecord(partitionTemplate.Outputs);
+      const serialized = JSON.stringify(partitionTemplate);
+
+      expect(asRecord(parameters.GoogleOauthSecretArn).AllowedPattern).toBe(
+        `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
+      );
+      expect(asRecord(parameters.GoogleGroupsSecretArn).AllowedPattern).toBe(
+        `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+      );
+      expect(asRecord(outputs.SesIdentityArn).Value).toBe(
+        `arn:${partition}:ses:${region}:${account}:identity/example.invalid`,
+      );
+      expect(serialized).toContain(
+        `arn:${partition}:ses:${region}:${account}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+      );
+      expect(serialized).not.toContain(`arn:aws:ses:${region}`);
+      expect(serialized).not.toContain(`arn:aws:secretsmanager:${region}`);
+    }
   });
 
   it('requires separate reviewed bootstrap and deploy digests plus protected identity', () => {

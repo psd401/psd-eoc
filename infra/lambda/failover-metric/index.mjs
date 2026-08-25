@@ -1,8 +1,3 @@
-import {
-  CloudWatchClient,
-  PutMetricDataCommand,
-} from '@aws-sdk/client-cloudwatch';
-
 function requiredNamespace() {
   const value = process.env.METRIC_NAMESPACE;
   if (
@@ -16,15 +11,29 @@ function requiredNamespace() {
   return value;
 }
 
-function requiredDatabaseArn() {
-  const value = process.env.DATABASE_ARN;
+export function assertDatabaseArn(value, region) {
+  const partition =
+    typeof region === 'string' && region.startsWith('cn-')
+      ? 'aws-cn'
+      : typeof region === 'string' && region.startsWith('us-gov-')
+        ? 'aws-us-gov'
+        : 'aws';
   if (
     typeof value !== 'string' ||
-    !/^arn:aws:rds:us-west-2:\d{12}:cluster:[A-Za-z0-9-]+$/u.test(value)
+    typeof region !== 'string' ||
+    !/^[a-z]{2}(?:-[a-z0-9]+)+-\d$/u.test(region) ||
+    !new RegExp(
+      `^arn:${partition}:rds:${region}:\\d{12}:cluster:[A-Za-z0-9-]+$`,
+      'u',
+    ).test(value)
   ) {
     throw new Error('Database identity is unavailable.');
   }
   return value;
+}
+
+function requiredDatabaseArn() {
+  return assertDatabaseArn(process.env.DATABASE_ARN, process.env.AWS_REGION);
 }
 
 function assertAuroraFailoverEvent(value, databaseArn) {
@@ -44,6 +53,9 @@ function assertAuroraFailoverEvent(value, databaseArn) {
 }
 
 async function publish(namespace) {
+  const { CloudWatchClient, PutMetricDataCommand } = await import(
+    '@aws-sdk/client-cloudwatch'
+  );
   await new CloudWatchClient({}).send(
     new PutMetricDataCommand({
       MetricData: [

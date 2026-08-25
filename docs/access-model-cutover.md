@@ -72,5 +72,5 @@ table locks out everyone, not one account.
 ## What this fixes
 
 `hagelk@psd401.net` is a current member of `tsd-engineering@psd401.net` and has
-been refused all along, because the old rule required membership in *every*
+been refused all along, because the old rule required membership in _every_
 configured access group and the synthetic fixture was one of them.

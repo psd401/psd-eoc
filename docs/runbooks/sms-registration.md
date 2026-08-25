@@ -41,16 +41,15 @@ too, including distinct `REAL INCIDENT` and `DRILL` message samples.
 From the repository root:
 
 ```sh
-bun install --cwd scripts/ops/sms-registration --frozen-lockfile
+bun install --frozen-lockfile
 bun run --cwd scripts/ops/sms-registration check
 bun run check
 ```
 
-The standalone package pins the AWS SDK clients because the root workspace does
-not own this external-operations issue. Runtime dependency justification: the
-typed End User Messaging and STS clients use the normal credential chain,
-validate the target account, and avoid static credentials or custom request
-signing.
+The operations package is part of the root Bun workspace and uses the one root
+lockfile. Runtime dependency justification: the typed End User Messaging and
+STS clients use the normal credential chain, validate the target account, and
+avoid static credentials or custom request signing.
 
 ## Prepare the private input once
 

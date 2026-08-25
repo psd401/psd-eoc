@@ -60,37 +60,46 @@ Run up to twelve agents at once, one block each:
 ```
 Goal: complete issue #2 (safety-charter enforcement). Master preamble applies.
 ```
+
 ```
 Goal: complete issue #4 (CDK infra baseline). cdk synth must pass in CI; do
 NOT deploy anything.
 ```
+
 ```
 Goal: complete issue #6 (Google OIDC + admin-configurable Groups gate).
 Mock the IdP in tests; no live Google calls in CI.
 ```
+
 ```
 Goal: complete issue #7 (device sessions, revocation, Google-outage grace).
 The IdP-offline test is the heart of this issue — prove it.
 ```
+
 ```
 Goal: complete issue #8 (Groups→roster sync, immutable snapshots, stale
 report). Fail-closed on partial sync is non-negotiable.
 ```
+
 ```
 Goal: complete issue #9 (event lifecycle capabilities + state machine). This
 is the most load-bearing issue in the repo: one-transaction durable
 acceptance, idempotency, human-only enforcement, real/drill invariant.
 ```
+
 ```
 Goal: complete issue #10 (event types + message templates + admin UI).
 Drill marking must be renderer-enforced, not convention.
 ```
+
 ```
 Goal: complete issue #19 (Expo scaffold + EAS profiles + real/drill theming).
 ```
+
 ```
 Goal: complete issue #28 (hash-chained security audit log module).
 ```
+
 ```
 Goal: complete issue #39 (GCP via Terraform: project, read-only Groups
 service account, OAuth clients) and then #40's Terraform portion (Firebase
@@ -98,6 +107,7 @@ project + Android app in infra/gcp/firebase.tf). Runs from this machine with
 gcloud auth; zero-manual-steps target, residual console steps documented
 honestly.
 ```
+
 ```
 Goal: complete the script portions of issues #35 and #36 (SMS registration
 scripts via the End User Messaging registration APIs; SES delegated-zone IaC
@@ -105,6 +115,7 @@ plus the production-access API request script). Build and verify against
 mocks/dry-runs — do NOT submit real registrations; the human runs the submit
 scripts.
 ```
+
 ```
 Goal: complete the script portions of issues #38 and #41 (fastlane/ASC API
 automation for the App Store record and TestFlight groups; Google Groups
@@ -118,26 +129,32 @@ the human, never bypassed.
 Goal: complete issue #11 (outbox + SQS dispatcher + reconciliation). Prove
 the crash-mid-batch no-loss/no-duplicate property with tests.
 ```
+
 ```
 Goal: complete issue #15 (web dashboard + start flow + 911 affordance).
 Three clicks or fewer; axe clean; consequence preview from roster snapshot.
 ```
+
 ```
 Goal: complete issue #16 (web event screen: timeline, posts, corrections,
 all-clear).
 ```
+
 ```
 Goal: complete issue #20 (mobile auth + SecureStore + biometric unlock).
 ```
+
 ```
 Goal: complete issue #24 (agent REST API + human-only enforcement +
 prepare-activation). The four-action 403 tests are the point of this issue.
 ```
+
 ```
 Goal: complete issue #26 (admin: facilities, neighborhoods, audiences,
 access groups, integration health, test mode). Test mode must be provably
 unable to reach real endpoints.
 ```
+
 ```
 Goal: complete issue #17 then #18 (media pipeline, then location pins) —
 both hang off the event screen; sequential is fine for one agent.
@@ -148,18 +165,23 @@ both hang off the event screen; sequential is fine for one agent.
 ```
 Goal: complete issue #12 (push worker via Expo Push + token registry).
 ```
+
 ```
 Goal: complete issue #13 (email worker via SES + bounce handling).
 ```
+
 ```
 Goal: complete issue #14 (SMS worker, feature-flagged dark until E1 clears).
 ```
+
 ```
 Goal: complete issue #21 (mobile start flow: ≤3 taps, join-or-start-new).
 ```
+
 ```
 Goal: complete issue #22 (mobile event screen: timeline + composers).
 ```
+
 ```
 Goal: complete issue #25 (MCP server over the agent API) and then #27
 (drill records + export).
@@ -171,17 +193,21 @@ Goal: complete issue #25 (MCP server over the agent API) and then #27
 Goal: complete issue #23 (mobile push registration, background handling,
 deep links) and record physical-device evidence on both platforms.
 ```
+
 ```
 Goal: complete issue #29 (monitoring, alarms, 1-minute canary) then #30
 (monthly live-test harness + SLO regression gate).
 ```
+
 ```
 Goal: complete issue #31 (failure drills with recorded evidence). Divergent
 behavior gets a ticket, not a shrug.
 ```
+
 ```
 Goal: complete issue #32 (Playwright+axe web suites, Maestro mobile suites).
 ```
+
 ```
 Goal: complete issue #33 (TestFlight + Play distribution + install guides)
 then #34 (runbooks, go-live checklist). Go-live

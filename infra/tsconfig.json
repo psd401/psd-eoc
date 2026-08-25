@@ -4,12 +4,7 @@
     "lib": ["ES2022"],
     "types": ["bun"]
   },
-  "include": [
-    "src/**/*.ts",
-    "test/**/*.ts",
-    "../scripts/ops/ses-production-access.ts",
-    "../scripts/ops/ses-verification.ts"
-  ],
+  "include": ["bin/**/*.ts", "src/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules"],
   "references": []
 }

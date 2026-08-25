@@ -5,14 +5,14 @@ human-only for critical actions.
 
 ## Data classification
 
-| Class | Examples | Handling |
-|---|---|---|
-| Staff identity | name, email, phone, device tokens | Encrypted at rest; minimized; never in logs/URLs; export controlled |
-| Event operational | events, journal entries, photos, locations | Facility-scoped authorization; append-only; retained indefinitely (D-032) |
-| Delivery evidence | provider receipts, attempt states | Separate from event narrative; truthful states only |
-| Credentials | sessions, refresh tokens, API keys | Hashed/encrypted; device-bound; revocable; short rotation |
-| Audit/security | authz failures, admin changes, agent access | Hash-chained; separate from operational journal |
-| Student data | — | **Prohibited. Not collected, not stored, not planned.** |
+| Class             | Examples                                    | Handling                                                                  |
+| ----------------- | ------------------------------------------- | ------------------------------------------------------------------------- |
+| Staff identity    | name, email, phone, device tokens           | Encrypted at rest; minimized; never in logs/URLs; export controlled       |
+| Event operational | events, journal entries, photos, locations  | Facility-scoped authorization; append-only; retained indefinitely (D-032) |
+| Delivery evidence | provider receipts, attempt states           | Separate from event narrative; truthful states only                       |
+| Credentials       | sessions, refresh tokens, API keys          | Hashed/encrypted; device-bound; revocable; short rotation                 |
+| Audit/security    | authz failures, admin changes, agent access | Hash-chained; separate from operational journal                           |
+| Student data      | —                                           | **Prohibited. Not collected, not stored, not planned.**                   |
 
 ## Hard rules
 

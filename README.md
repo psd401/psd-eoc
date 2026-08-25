@@ -35,3 +35,33 @@ docs/                Plans, decisions, runbooks
 - Real vs. drill can never be confused, in any channel.
 - No student data. Staff only, minimized.
 - Append-only records; delivery truth never overstated.
+
+## Local verification
+
+The repository uses Bun 1.2.23, Docker, and Poppler's `pdftotext`. Install the
+single root lockfile, start the repository-owned synthetic PostgreSQL service,
+and export the two values printed by the start command:
+
+```sh
+bun install --frozen-lockfile
+bun run test:db:start
+# Copy the two export commands printed above into this shell.
+bun run check
+```
+
+`bun run check` is the authoritative gate. It checks formatting for source and
+current documentation, lints with zero warnings, verifies every TypeScript
+workspace, builds the production server without district identity, and runs
+all Bun and mobile-native tests with zero runtime skips. It fails before tests
+when the synthetic database is missing or unsafe.
+
+For explicitly database-free work, `bun run test:unit` lists every excluded
+database suite by file name. It is not a substitute for `bun run check`.
+
+Additional repository checks:
+
+```sh
+bun run verify:config              # validate .env.example without connecting
+bun run --cwd infra synth:example  # synthesize a non-PSD identity fixture
+bun run test:db:stop               # remove the local synthetic service/data
+```

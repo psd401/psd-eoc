@@ -47,19 +47,11 @@ import type {
   aws_sqs as sqs,
 } from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
+import { RegionInfo } from 'aws-cdk-lib/region-info';
 
-import {
-  APP_RUNNER_HEALTH_CHECK_PATH,
-  DEPLOYMENT_ACCOUNT,
-  DEPLOYMENT_REGION,
-  NOTIFICATION_CHANNELS,
-} from './config';
-import { SES_IDENTITY_DOMAIN as SES_IDENTITY_DOMAIN } from './stack/config';
-
+import { APP_RUNNER_HEALTH_CHECK_PATH, NOTIFICATION_CHANNELS } from './config';
 export const MONITORING_METRIC_NAMESPACE = 'PSD/EOC';
 export const MONITORING_DASHBOARD_NAME = 'psd-eoc-operations';
-export const MONITORING_RUNBOOK_BASE_URL =
-  'https://github.com/psd401/psd-eoc/blob/main/infra/README.md';
 
 const ONE_MINUTE = Duration.minutes(1);
 /** Every log group this module creates lives under one prefix. */
@@ -80,6 +72,8 @@ export interface MonitoringProps {
   >;
   readonly operationsAlarmTopic: sns.ITopic;
   readonly operationsKey: kms.IKey;
+  readonly monitoringRunbookBaseUrl: string;
+  readonly sesIdentityDomain: string;
   /** The condition guarding App Runner, applied to anything that reads it. */
   readonly applicationCondition?: CfnCondition;
 }
@@ -134,19 +128,25 @@ interface ExactPercentileMetrics {
   readonly p99: cloudwatch.Metric;
 }
 
-function alarmDescription(summary: string, runbookAnchor: string): string {
-  return `${summary} Runbook: ${MONITORING_RUNBOOK_BASE_URL}#${runbookAnchor}`;
+function alarmDescription(
+  summary: string,
+  runbookAnchor: string,
+  runbookBaseUrl: string,
+): string {
+  return `${summary} Runbook: ${runbookBaseUrl}#${runbookAnchor}`;
 }
 
 function createAlarm(
   scope: Construct,
   definition: AlarmDefinition,
+  runbookBaseUrl: string,
   applicationCondition?: CfnCondition,
 ): void {
   const alarm = new cloudwatch.Alarm(scope, definition.id, {
     alarmDescription: alarmDescription(
       definition.summary,
       definition.runbookAnchor,
+      runbookBaseUrl,
     ),
     alarmName: definition.name,
     comparisonOperator:
@@ -258,6 +258,7 @@ function exactPercentileMetrics(
 function configureAlarmRecipients(
   scope: Construct,
   topics: readonly sns.ITopic[],
+  sesIdentityDomain: string,
 ): void {
   const email = new CfnParameter(scope, 'OperationsTeamAlarmEmail', {
     allowedPattern:
@@ -289,7 +290,7 @@ function configureAlarmRecipients(
     description:
       'Sends CloudWatch alarm notifications to the operations team with SES.',
     environment: {
-      ALARM_FROM_ADDRESS: `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
+      ALARM_FROM_ADDRESS: `eoc-alarms@${sesIdentityDomain}`,
       ALARM_TO_ADDRESSES: email.valueAsString,
     },
     functionName: 'psd-eoc-alarm-mailer',
@@ -311,7 +312,7 @@ function configureAlarmRecipients(
       actions: ['ses:SendEmail'],
       conditions: {
         StringEquals: {
-          'ses:FromAddress': `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
+          'ses:FromAddress': `eoc-alarms@${sesIdentityDomain}`,
         },
       },
       // Both the identity and a configuration set, because the district's
@@ -328,7 +329,7 @@ function configureAlarmRecipients(
       resources: [
         Stack.of(scope).formatArn({
           resource: 'identity',
-          resourceName: SES_IDENTITY_DOMAIN,
+          resourceName: sesIdentityDomain,
           service: 'ses',
         }),
         Stack.of(scope).formatArn({
@@ -464,11 +465,18 @@ function monitoringParameters(scope: Construct): Readonly<{
   facilityId: string;
   metricsDatabaseSecret: secretsmanager.Secret;
 }> {
+  const stack = Stack.of(scope);
+  const partition = RegionInfo.get(stack.region).partition;
+  if (partition === undefined) {
+    throw new Error(
+      `Monitoring requires an AWS region with a known ARN partition; received ${stack.region}.`,
+    );
+  }
   const credentialSecretArn = new CfnParameter(
     scope,
     'MonitoringCanaryCredentialSecretArn',
     {
-      allowedPattern: `^arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:[A-Za-z0-9/_+=.@-]+$`,
+      allowedPattern: `^arn:${partition}:secretsmanager:${stack.region}:${stack.account}:secret:[A-Za-z0-9/_+=.@-]+$`,
       constraintDescription:
         'Use the ARN of the separately issued, narrowly scoped rollback-canary agent credential encrypted with the AWS managed aws/secretsmanager key.',
       description:
@@ -755,7 +763,7 @@ function configureDashboard(
         '',
         'The one-minute canary executes canonical activation preview, start, lifecycle preview, all-clear, and close only as TEST / drill / synthetic / mocked inside a server-controlled outer transaction that is always rolled back. It has no database, queue, or provider-send permission.',
         '',
-        'Production activation acceptance is measured from human confirmation consumption to the immutable activation transaction commit time. Production latency and delivery metrics require staff population and exclude TEST. Provider acceptance remains distinct from delivery and human receipt. [Monitoring runbooks](https://github.com/psd401/psd-eoc/blob/main/infra/README.md#alarm-response-runbooks).',
+        `Production activation acceptance is measured from human confirmation consumption to the immutable activation transaction commit time. Production latency and delivery metrics require staff population and exclude TEST. Provider acceptance remains distinct from delivery and human receipt. [Monitoring runbooks](${props.monitoringRunbookBaseUrl}#alarm-response-runbooks).`,
       ].join('\n'),
       width: 24,
     }) as unknown as cloudwatch.IWidget,
@@ -937,7 +945,12 @@ function configureAlarms(
     if (definition.tier === 'application' && !includeApplicationTier) {
       return;
     }
-    createAlarm(scope, definition, props.applicationCondition);
+    createAlarm(
+      scope,
+      definition,
+      props.monitoringRunbookBaseUrl,
+      props.applicationCondition,
+    );
   };
   const canaryHeartbeat = new cloudwatch.MathExpression({
     expression: 'FILL(canarySuccess, 0)',
@@ -1406,10 +1419,11 @@ export function configureInfrastructureMonitoring(
   scope: Construct,
   props: MonitoringProps,
 ): void {
-  configureAlarmRecipients(scope, [
-    props.operationsAlarmTopic,
-    props.criticalAlarmTopic,
-  ]);
+  configureAlarmRecipients(
+    scope,
+    [props.operationsAlarmTopic, props.criticalAlarmTopic],
+    props.sesIdentityDomain,
+  );
   allowScopedCloudWatchAlarmPublish(scope, [
     props.operationsAlarmTopic,
     props.criticalAlarmTopic,
@@ -1437,10 +1451,11 @@ export function configureMonitoring(
   props: MonitoringProps,
 ): MonitoringRuntimeParameters {
   const parameters = monitoringParameters(scope);
-  configureAlarmRecipients(scope, [
-    props.operationsAlarmTopic,
-    props.criticalAlarmTopic,
-  ]);
+  configureAlarmRecipients(
+    scope,
+    [props.operationsAlarmTopic, props.criticalAlarmTopic],
+    props.sesIdentityDomain,
+  );
   allowScopedCloudWatchAlarmPublish(scope, [
     props.operationsAlarmTopic,
     props.criticalAlarmTopic,
