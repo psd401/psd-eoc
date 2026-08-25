@@ -62,20 +62,27 @@ const wholeBuildingFieldState = (
   tokens: readonly string[],
   facility: Facility,
   academicStartYear: number,
+  organizationPrefixes: readonly string[],
 ): WholeBuildingFieldState => {
-  const aliases = compactFacilityAliases(facility);
+  const aliases = compactFacilityAliases(facility, organizationPrefixes);
   if (
     !hasBoundaryPreservingAutomaticFacilityEvidence(tokens, facility, aliases)
   ) {
     return 'invalid';
   }
-  return wholeBuildingFieldStateForAliases(tokens, aliases, academicStartYear);
+  return wholeBuildingFieldStateForAliases(
+    tokens,
+    aliases,
+    academicStartYear,
+    organizationPrefixes,
+  );
 };
 
 export const isExactWholeBuildingIdentity = (
   facility: Facility,
   group: CloudGroup,
   academicStartYear: number,
+  organizationPrefixes: readonly string[],
 ): boolean => {
   if (
     group.displayName === null ||
@@ -90,11 +97,13 @@ export const isExactWholeBuildingIdentity = (
     fields.displayName,
     facility,
     academicStartYear,
+    organizationPrefixes,
   );
   const localPartState = wholeBuildingFieldState(
     fields.localPart,
     facility,
     academicStartYear,
+    organizationPrefixes,
   );
   return (
     displayNameState !== 'invalid' &&
@@ -108,9 +117,17 @@ const hasAmbiguousStaffScope = (
   group: CloudGroup,
   academicStartYear: number,
   automaticContexts: ReadonlySet<CompactFacilityPrefixContext>,
+  organizationPrefixes: readonly string[],
 ): boolean => {
   for (const { facility } of automaticContexts) {
-    if (!isExactWholeBuildingIdentity(facility, group, academicStartYear)) {
+    if (
+      !isExactWholeBuildingIdentity(
+        facility,
+        group,
+        academicStartYear,
+        organizationPrefixes,
+      )
+    ) {
       return true;
     }
   }
@@ -121,25 +138,33 @@ const scoreGroupForFacility = (
   facility: Facility,
   group: CloudGroup,
   academicStartYear: number,
+  organizationPrefixes: readonly string[],
 ): ScoredGroup => {
   const tokenFields = groupTokenFields(group);
   const tokens = tokenFields.combined;
   const codeTokens = tokensOf(facility.code);
   const stemTokens = siteSpecificFacilityNameTokens(facility);
-  const codeIsDistinctive = isFacilitySpecificCodeAlias(facility);
+  const codeIsDistinctive = isFacilitySpecificCodeAlias(
+    facility,
+    organizationPrefixes,
+  );
   const exactCode =
     codeIsDistinctive &&
     (containsSequence(tokenFields.displayName, codeTokens) ||
       containsSequence(tokenFields.localPart, codeTokens));
   const exactStem =
-    hasSiteSpecificAutomaticFacilityIdentity(facility) &&
-    isDistinctiveAutomaticFacilityAlias(stemTokens.join('')) &&
+    hasSiteSpecificAutomaticFacilityIdentity(facility, organizationPrefixes) &&
+    isDistinctiveAutomaticFacilityAlias(
+      stemTokens.join(''),
+      organizationPrefixes,
+    ) &&
     (containsSequence(tokenFields.displayName, stemTokens) ||
       containsSequence(tokenFields.localPart, stemTokens));
   const exactWholeBuildingIdentity = isExactWholeBuildingIdentity(
     facility,
     group,
     academicStartYear,
+    organizationPrefixes,
   );
   const broadStaff =
     hasAnyToken(tokens, STAFF_MARKERS) || exactWholeBuildingIdentity;
@@ -403,6 +428,7 @@ export const buildDraft = (
           group,
           academicStartYear,
           automaticMatches.contexts,
+          configuration.organizationPrefixes,
         ));
     if (hasAmbiguousScope) ambiguousStaffScopes.add(group.googleGroupId);
     const isMatchable = !isRestricted && !isStale && !hasAmbiguousScope;
@@ -417,7 +443,12 @@ export const buildDraft = (
           derivationMetrics.facilityGroupScoreEvaluations += 1;
         }
         if (
-          scoreGroupForFacility(facility, group, academicStartYear).score >= 90
+          scoreGroupForFacility(
+            facility,
+            group,
+            academicStartYear,
+            configuration.organizationPrefixes,
+          ).score >= 90
         ) {
           groupsMatchingInactiveFacility.add(group.googleGroupId);
           break;
@@ -431,7 +462,12 @@ export const buildDraft = (
       if (derivationMetrics !== undefined) {
         derivationMetrics.facilityGroupScoreEvaluations += 1;
       }
-      const scored = scoreGroupForFacility(facility, group, academicStartYear);
+      const scored = scoreGroupForFacility(
+        facility,
+        group,
+        academicStartYear,
+        configuration.organizationPrefixes,
+      );
       if (scored.score < 90) continue;
       if (!facility.active) {
         groupsMatchingInactiveFacility.add(group.googleGroupId);

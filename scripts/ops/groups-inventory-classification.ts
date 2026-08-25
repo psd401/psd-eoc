@@ -729,6 +729,7 @@ const exactWholeBuildingFieldBits = (
         tokens,
         [evidence.alias],
         academicStartYear,
+        [...context.global],
       );
       stateByAlias.set(evidence.alias, state);
     }
@@ -1263,6 +1264,7 @@ export const wholeBuildingFieldStateForAliases = (
   tokens: readonly string[],
   aliases: readonly string[],
   academicStartYear: number,
+  organizationPrefixes: readonly string[] = DEFAULT_ORGANIZATION_PREFIXES,
 ): WholeBuildingFieldState => {
   const compact = tokens.join('');
   if (compact === '') return 'invalid';
@@ -1298,7 +1300,10 @@ export const wholeBuildingFieldStateForAliases = (
           }
         }
       }
-      for (const marker of WHOLE_BUILDING_MARKERS) {
+      for (const marker of [
+        ...WHOLE_BUILDING_MARKERS,
+        ...organizationPrefixes,
+      ]) {
         if (compact.startsWith(marker, offset)) {
           addState(
             offset + marker.length,

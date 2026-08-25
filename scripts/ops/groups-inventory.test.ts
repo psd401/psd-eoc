@@ -229,6 +229,38 @@ const runSelfTest = async (): Promise<void> => {
     name: `groups/${id}`,
     parent,
   });
+  const customPrefixFacility = FacilitySchema.parse({
+    active: true,
+    code: 'NBE',
+    createdAt: generatedAt,
+    id: '00000000-0000-4000-8000-000000000006',
+    name: 'North Bay Elementary',
+  });
+  const customPrefixGroup = parseCloudGroup(
+    rawGroup(
+      'synthetic-acme-north-bay',
+      'acme.north.bay.staff@groups.synthetic.invalid',
+      'Acme North Bay Staff',
+    ),
+    parent,
+  );
+  const customPrefixDraft = buildDraftForConfiguration(
+    [customPrefixFacility],
+    [customPrefixGroup],
+    1,
+    generatedAt,
+    Object.freeze({
+      ...TEST_CONFIGURATION,
+      organizationPrefixes: Object.freeze(['acme']),
+    }),
+  );
+  assertSelfTest(
+    customPrefixDraft.buildingMappings[0]?.assessment.outcome ===
+      'strong-candidate' &&
+      customPrefixDraft.buildingMappings[0]?.createGroupSource
+        ?.googleGroupId === customPrefixGroup.googleGroupId,
+    'configured organization prefixes are retained through final facility scoring',
+  );
   const rawGroups = [
     rawGroup(
       'synthetic-nbe',
@@ -2919,6 +2951,7 @@ const runSelfTest = async (): Promise<void> => {
             facility,
             ordinalCollisionGroup,
             ordinalCollisionAcademicYear,
+            TEST_CONFIGURATION.organizationPrefixes,
           ),
       ) &&
       hasIndexedExactWholeBuildingIdentity(
