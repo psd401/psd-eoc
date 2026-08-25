@@ -26,11 +26,11 @@ import {
 } from './key-repository';
 import {
   AGENT_API_KEY_CREDENTIAL_MARKER,
+  AgentApiKeyError,
   AgentApiKeyIssuanceReplayError,
   AgentApiKeyService,
   digestAgentApiKeyAuditSubject,
   digestAgentApiKeyCredential,
-  type AgentApiKeyError,
 } from './keys';
 
 const IDS = {
@@ -327,6 +327,35 @@ describe('AgentApiKeyService', () => {
     expect(
       service.authorizeCapability(authenticated, 'prepare-activation'),
     ).toBe('prepare-activation');
+  });
+
+  test('fails closed when a persisted key contains a non-grantable capability', async () => {
+    const repository = new InMemoryAgentApiKeyRepository();
+    const service = new AgentApiKeyService({
+      repository,
+      now: () => new Date('2026-08-10T18:00:00.000Z'),
+    });
+    const issuance = await service.issue(
+      issueInput({ capabilityIds: ['prepare-activation'] }),
+      IDS.issuer,
+      mutation(IDS.issuer),
+    );
+    const persisted = repository.keys.get(issuance.key.id);
+    if (persisted === undefined) throw new TypeError('Missing persisted key.');
+    repository.keys.set(persisted.id, {
+      ...persisted,
+      capabilityIds: [...persisted.capabilityIds, 'issue-agent-api-key'],
+    } as unknown as AgentApiKey);
+
+    try {
+      await service.authenticate(issuance.oneTimeCredential);
+      throw new TypeError('Tampered persisted key unexpectedly authenticated.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AgentApiKeyError);
+      if (!(error instanceof AgentApiKeyError)) throw error;
+      expect(error.code).toBe('PERSISTENCE_FAILURE');
+      expect(error.status).toBe(500);
+    }
   });
 
   test('uses one indistinguishable 401 for malformed, unknown, and mismatched credentials', async () => {

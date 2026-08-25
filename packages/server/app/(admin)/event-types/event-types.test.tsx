@@ -1026,7 +1026,13 @@ describe('capability-level administrator authorization', () => {
         authenticatedAgent(['create-event-type-draft']),
         'event-type-agent-allow-0001',
       ),
-    ).rejects.toBeInstanceOf(Error);
+    ).rejects.toMatchObject({
+      name: 'CapabilityEngineError',
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      message: 'The capability could not be completed.',
+      status: 500,
+    });
     expect(allowedStore.createCalls).toBe(1);
 
     const wrongGrantStore = new CountingStore();

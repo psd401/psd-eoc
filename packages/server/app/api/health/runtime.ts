@@ -983,7 +983,9 @@ interface CanaryAuthorizedCalls {
   readonly serverTime: Date;
 }
 
-function hasExactCanaryCapabilities(capabilityIds: readonly string[]): boolean {
+function hasExactCanaryCapabilities(
+  capabilityIds: readonly AgentGrantableCapabilityId[],
+): boolean {
   return (
     capabilityIds.length === CANARY_CAPABILITY_IDS.length &&
     CANARY_CAPABILITY_IDS.every(

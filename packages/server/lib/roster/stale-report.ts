@@ -414,6 +414,14 @@ export async function executeStaleRosterReportQuery<Context>(
   context: Context,
 ): Promise<StaleRosterReport> {
   validateStaleRosterReportDependencies(dependencies);
+  return executeValidatedStaleRosterReportQuery(dependencies, input, context);
+}
+
+async function executeValidatedStaleRosterReportQuery<Context>(
+  dependencies: GetStaleRosterReportDependencies<Context>,
+  input: unknown,
+  context: Context,
+): Promise<StaleRosterReport> {
   const queryResult = RosterHealthQuerySchema.safeParse(input);
   if (!queryResult.success) {
     throw new StaleRosterReportError(
@@ -469,7 +477,7 @@ export function createGetStaleRosterReportHandler<Context>(
   return registerCapabilityHandler(
     'get-stale-roster-report',
     (input, context) =>
-      executeStaleRosterReportQuery(dependencies, input, context),
+      executeValidatedStaleRosterReportQuery(dependencies, input, context),
   );
 }
 

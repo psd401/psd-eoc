@@ -398,7 +398,7 @@ export class AgentApiKeyAdministration {
     );
   }
 
-  private async mutationInvocation(
+  private async authorizeMutationInvocation(
     capabilityId: 'issue-agent-api-key' | 'revoke-agent-api-key',
     access: AgentApiKeyAdministrationAccess,
     input: Readonly<{
@@ -472,7 +472,7 @@ export class AgentApiKeyAdministration {
         return result;
       },
     };
-    const invocation = await this.mutationInvocation(
+    const invocation = await this.authorizeMutationInvocation(
       'issue-agent-api-key',
       access,
       {
@@ -533,7 +533,7 @@ export class AgentApiKeyAdministration {
         );
       },
     };
-    const invocation = await this.mutationInvocation(
+    const invocation = await this.authorizeMutationInvocation(
       'revoke-agent-api-key',
       access,
       {

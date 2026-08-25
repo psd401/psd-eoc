@@ -1616,8 +1616,7 @@ function isAuthenticatedEventTypeAgent(
   return authenticated.actor.kind === 'agent';
 }
 
-interface EventTypeCapabilityContext {
-  readonly store: EventTypeStore;
+interface EventTypeAuthorizationContext {
   readonly authenticated: AuthenticatedEventTypePrincipal;
   readonly requestId: string;
   readonly now: Date;
@@ -1634,6 +1633,10 @@ interface EventTypeCapabilityContext {
       }
     >;
   }> | null;
+}
+
+interface EventTypeCapabilityContext extends EventTypeAuthorizationContext {
+  readonly store: EventTypeStore;
 }
 
 const listEventTypesHandler = registerCapabilityHandler(
@@ -1691,7 +1694,7 @@ const previewEventTypeRenderingHandler = registerCapabilityHandler(
 function assertEventTypeCapabilityAuthorized(
   capabilityId: RegisteredCapabilityId,
   input: unknown,
-  context: EventTypeCapabilityContext,
+  context: EventTypeAuthorizationContext,
 ): void {
   const definition = defineCapability(capabilityId);
   const invocationPolicy = getCapabilityInvocationPolicy(capabilityId);
@@ -1998,7 +2001,6 @@ function authorizeEngineEventTypeMutation(
   invocation: TrustedCapabilityInvocation,
 ): void {
   assertEventTypeCapabilityAuthorized(capabilityId, input, {
-    store: Object.freeze({}) as EventTypeStore,
     authenticated,
     requestId: invocation.requestId,
     now: invocation.serverTime,
