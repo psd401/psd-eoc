@@ -93,6 +93,7 @@ import {
 } from './groups-inventory-input';
 
 import { parseCli } from './groups-inventory-cli';
+import * as groupsInventoryEntry from './groups-inventory';
 
 const CLI_PATH = new URL('groups-inventory.ts', import.meta.url).pathname;
 const CLI_URL = new URL('groups-inventory.ts', import.meta.url).href;
@@ -6943,6 +6944,14 @@ const runSelfTest = async (): Promise<void> => {
 };
 
 describe('Google Groups inventory', () => {
+  test('preserves the stable operator import surface', () => {
+    expect(groupsInventoryEntry.buildDraft).toBe(buildDraftForConfiguration);
+    expect(groupsInventoryEntry.parseCloudGroupForDomain).toBe(
+      parseCloudGroupForDomain,
+    );
+    expect(groupsInventoryEntry.parseCli).toBe(parseCli);
+  });
+
   test('keeps the command entry point inert when imported', () => {
     const imported = Bun.spawnSync(
       [Bun.argv[0]!, '-e', `await import(${JSON.stringify(CLI_URL)});`],
