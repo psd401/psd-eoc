@@ -143,7 +143,7 @@ describe('database enum ownership', () => {
       enumExpectations.map(([value]) => value.enumName).sort(),
     );
     const schemaSource = readFileSync(
-      new URL('./schema.ts', import.meta.url),
+      new URL('./schema/enums.ts', import.meta.url),
       'utf8',
     );
     expect(schemaSource.match(/\bpgEnum\(/gu)).toHaveLength(1);
