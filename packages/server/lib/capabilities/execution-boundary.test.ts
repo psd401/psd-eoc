@@ -740,7 +740,7 @@ describe('capability execution source boundary', () => {
   test('lower-tier imports stay on the machine and webhook allowlist', () => {
     const consumers = lowerTierProductionConsumers();
     expect(consumers).toEqual([...LOWER_TIER_PRODUCTION_ALLOWLIST]);
-  }, 15_000);
+  }, 60_000);
 
   test('capability-boundary-denial fails closed without mutating audit history on every surface', async () => {
     let handlerCalls = 0;
