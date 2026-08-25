@@ -34,7 +34,7 @@ import { parseSecurityAuditFact } from '../../../../lib/audit/model';
 import { requireFacilityAccess } from '../../../../lib/auth/middleware';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
 import { CapabilityEngineError } from '../../../../lib/capabilities/engine';
-import { loadActivationPreview } from './capabilities';
+import { loadActivationPreview } from '../../../../lib/capabilities/start';
 
 type ActivationPreviewStartInput = Extract<
   StartEventInput,

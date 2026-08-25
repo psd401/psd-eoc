@@ -392,14 +392,9 @@ export function buildStaleRosterReport(
   return buildFromParsedEvidence(parseScopedEvidence(evidence), options);
 }
 
-/**
- * Registers the canonical stale-roster read capability. Authorization remains
- * mandatory in `executeCapability`; the injected store additionally owns all
- * facility filtering and context-bound database reads.
- */
-export function createGetStaleRosterReportHandler<Context>(
+function validateStaleRosterReportDependencies<Context>(
   dependencies: GetStaleRosterReportDependencies<Context>,
-): Readonly<RegisteredCapabilityHandler<'get-stale-roster-report', Context>> {
+): void {
   if (
     typeof dependencies.store?.loadScopedEvidence !== 'function' ||
     typeof dependencies.clock !== 'function'
@@ -410,52 +405,79 @@ export function createGetStaleRosterReportHandler<Context>(
     );
   }
   validateThreshold(dependencies.staleThresholdSeconds);
+}
 
+/** Executes the pure, already-authorized stale-roster report operation. */
+export async function executeStaleRosterReportQuery<Context>(
+  dependencies: GetStaleRosterReportDependencies<Context>,
+  input: unknown,
+  context: Context,
+): Promise<StaleRosterReport> {
+  validateStaleRosterReportDependencies(dependencies);
+  return executeValidatedStaleRosterReportQuery(dependencies, input, context);
+}
+
+async function executeValidatedStaleRosterReportQuery<Context>(
+  dependencies: GetStaleRosterReportDependencies<Context>,
+  input: unknown,
+  context: Context,
+): Promise<StaleRosterReport> {
+  const queryResult = RosterHealthQuerySchema.safeParse(input);
+  if (!queryResult.success) {
+    throw new StaleRosterReportError(
+      'INVALID_REPORT_EVIDENCE',
+      'The authorized roster-health query was invalid.',
+    );
+  }
+  const query = queryResult.data;
+  const evidence = parseScopedEvidence(
+    await dependencies.store.loadScopedEvidence(query, context),
+  );
+  if (
+    evidence.latestCompleteSnapshot !== null &&
+    new Set([
+      ...evidence.latestCompleteSnapshot.recipientHealth.map(
+        ({ recipientId }) => recipientId,
+      ),
+      ...evidence.latestCompleteSnapshot.staleEndpoints.map(
+        ({ recipientId }) => recipientId,
+      ),
+    ]).size > query.limit
+  ) {
+    throw new StaleRosterReportError(
+      'INVALID_REPORT_EVIDENCE',
+      'Scoped roster health evidence exceeded the authorized query limit.',
+    );
+  }
+
+  let generatedAt: Date;
+  try {
+    generatedAt = dependencies.clock();
+  } catch {
+    throw new StaleRosterReportError(
+      'INVALID_REPORT_TIME',
+      'The roster report clock failed.',
+    );
+  }
+  return buildFromParsedEvidence(evidence, {
+    generatedAt,
+    staleThresholdSeconds: dependencies.staleThresholdSeconds,
+  });
+}
+
+/**
+ * Registers the canonical stale-roster read capability. Authorization remains
+ * mandatory at the capability boundary; the injected store additionally owns
+ * all facility filtering and context-bound database reads.
+ */
+export function createGetStaleRosterReportHandler<Context>(
+  dependencies: GetStaleRosterReportDependencies<Context>,
+): Readonly<RegisteredCapabilityHandler<'get-stale-roster-report', Context>> {
+  validateStaleRosterReportDependencies(dependencies);
   return registerCapabilityHandler(
     'get-stale-roster-report',
-    async (input, context) => {
-      const queryResult = RosterHealthQuerySchema.safeParse(input);
-      if (!queryResult.success) {
-        throw new StaleRosterReportError(
-          'INVALID_REPORT_EVIDENCE',
-          'The authorized roster-health query was invalid.',
-        );
-      }
-      const query = queryResult.data;
-      const evidence = parseScopedEvidence(
-        await dependencies.store.loadScopedEvidence(query, context),
-      );
-      if (
-        evidence.latestCompleteSnapshot !== null &&
-        new Set([
-          ...evidence.latestCompleteSnapshot.recipientHealth.map(
-            ({ recipientId }) => recipientId,
-          ),
-          ...evidence.latestCompleteSnapshot.staleEndpoints.map(
-            ({ recipientId }) => recipientId,
-          ),
-        ]).size > query.limit
-      ) {
-        throw new StaleRosterReportError(
-          'INVALID_REPORT_EVIDENCE',
-          'Scoped roster health evidence exceeded the authorized query limit.',
-        );
-      }
-
-      let generatedAt: Date;
-      try {
-        generatedAt = dependencies.clock();
-      } catch {
-        throw new StaleRosterReportError(
-          'INVALID_REPORT_TIME',
-          'The roster report clock failed.',
-        );
-      }
-      return buildFromParsedEvidence(evidence, {
-        generatedAt,
-        staleThresholdSeconds: dependencies.staleThresholdSeconds,
-      });
-    },
+    (input, context) =>
+      executeValidatedStaleRosterReportQuery(dependencies, input, context),
   );
 }
 

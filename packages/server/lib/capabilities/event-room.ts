@@ -30,7 +30,7 @@ import {
 import { createDrizzleSecurityAuditRepository } from '../audit/drizzle-repository';
 import {
   CapabilityEngineError,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   type CapabilityAuditEvent,
   type CapabilityEngineStore,
   type CapabilityEngineTransaction,
@@ -499,7 +499,12 @@ export function executeEventRoomCapability(
   invocation: TrustedCapabilityInvocation,
   store: EventRoomCapabilityStore,
 ): Promise<CapabilityOutput<'sync-event-room'>> {
-  return executeCapability(syncEventRoomRegistration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    syncEventRoomRegistration,
+    input,
+    invocation,
+    store,
+  );
 }
 
 /** Managed runtime shared by the server-rendered page and polling route. */

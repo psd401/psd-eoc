@@ -31,7 +31,7 @@ import {
   createDisposableDatabase,
   type DisposableDatabase,
 } from '../../../../lib/testing/database';
-import { loadRosterSnapshot } from './capabilities';
+import { loadRosterSnapshot } from '../../../../lib/capabilities/start';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =

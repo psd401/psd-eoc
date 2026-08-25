@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   parseCapabilityEnvelopeFor,
   type CompleteOidcSignInInput,
   type RegisteredCapabilityEnvelope,
@@ -159,7 +159,7 @@ function execute(
   store: InitialWebSessionStore,
   signInContext: CompleteOidcSignInContext,
 ): Promise<SessionEstablishmentResult> {
-  return executeCapability(
+  return invokeAuthorizedCapabilityHandler(
     createCompleteOidcSignInHandler({ store, policy: POLICY, now: () => NOW }),
     INPUT,
     {

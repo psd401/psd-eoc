@@ -37,7 +37,7 @@ import {
   type Database,
   type DatabaseConnection,
   type DatabaseQuery,
-} from '../../../../db/client';
+} from '../../db/client';
 import {
   activationPreviews,
   agents,
@@ -57,44 +57,41 @@ import {
   rosterSnapshots,
   securityAuditEntries,
   users,
-} from '../../../../db/schema';
+} from '../../db/schema';
 import {
   SECURITY_AUDIT_APPEND_LOCK_SQL,
   toSecurityAuditInsertValues,
-} from '../../../../lib/audit/drizzle-repository';
-import { buildSecurityAuditEntry } from '../../../../lib/audit/entry';
-import { parseSecurityAuditFact } from '../../../../lib/audit/model';
+} from '../audit/drizzle-repository';
+import { buildSecurityAuditEntry } from '../audit/entry';
+import { parseSecurityAuditFact } from '../audit/model';
 import {
   CapabilityEngineError,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   type CapabilityAuditEvent,
   type CapabilityEngineStore,
   type CapabilityEngineTransaction,
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
-} from '../../../../lib/capabilities/engine';
-import {
-  DrizzleEventTypeStore,
-  EventTypeCapabilityError,
-} from '../../../../lib/capabilities/event-types';
-import {
-  AudienceResolutionError,
-  resolveAudience,
-} from '../../../../lib/roster/resolve';
+} from './engine';
+import { DrizzleEventTypeStore, EventTypeCapabilityError } from './event-types';
+import { AudienceResolutionError, resolveAudience } from '../roster/resolve';
 import {
   DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
   deliveryTestEndpointReferenceDigest,
   deliveryTestTargetLockIdentity,
   isDeliveryTestEndpointReferenceSubset,
-} from '../../../../lib/testing/e2e-delivery';
+} from '../testing/e2e-delivery';
 import {
   BoundedDatabaseQueryError,
   START_FLOW_DATABASE_PAGE_SIZE,
   collectBoundedDatabaseRows,
   START_FLOW_ENDPOINT_PAGE_SIZE,
-} from './bounded-query';
-import { ActivationPreviewBuildError, buildActivationPreview } from './preview';
+} from './start-bounded-query';
+import {
+  ActivationPreviewBuildError,
+  buildActivationPreview,
+} from './start-preview';
 
 type StartFlowCapabilityId = Extract<
   RegisteredCapabilityId,
@@ -1456,7 +1453,12 @@ export async function executeStartFlowCapability<
   const registration = registrations[
     capabilityId
   ] as ServerCapabilityRegistration<Id, StartFlowCapabilityTransaction>;
-  return executeCapability(registration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input,
+    invocation,
+    store,
+  );
 }
 
 export interface StartFlowCapabilityRuntime {

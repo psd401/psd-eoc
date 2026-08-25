@@ -12,6 +12,7 @@ import {
 import {
   SessionAccessError,
   executeRefreshSessionCapability,
+  getDefaultSessionCapabilityStore,
   getDefaultSessionService,
 } from '../../../../lib/auth/sessions';
 
@@ -65,6 +66,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const now = new Date();
     const issued = await executeRefreshSessionCapability({
       service: getDefaultSessionService(),
+      capabilityStore: getDefaultSessionCapabilityStore(),
       token: presented.token,
       source: presented.source,
       idempotencyKey,

@@ -6,6 +6,7 @@ import {
   FacilityScopeSchema,
   IdempotencyKeySchema,
   TimestampSchema,
+  isAgentGrantableCapabilityId,
   type AgentApiKey,
   type AgentApiKeyRevocation,
   type AgentApiKeySummary,
@@ -313,6 +314,10 @@ async function persistIssuedKey(
   inputValue: PersistIssuedAgentApiKeyInput,
 ): Promise<PersistIssuedAgentApiKeyResult> {
   const key = AgentApiKeySchema.parse(inputValue.key);
+  const capabilityIds = key.capabilityIds.filter(isAgentGrantableCapabilityId);
+  if (capabilityIds.length !== key.capabilityIds.length) {
+    throw new AgentApiKeyRepositoryIntegrityError();
+  }
   const idempotency = parseIdempotency(
     inputValue.idempotency,
     'issue-agent-api-key',
@@ -426,7 +431,7 @@ async function persistIssuedKey(
         );
       }
       await transaction.insert(agentApiKeyGrants).values(
-        key.capabilityIds.map((capabilityId) => ({
+        capabilityIds.map((capabilityId) => ({
           apiKeyId: key.id,
           capabilityId,
         })),

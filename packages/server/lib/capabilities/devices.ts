@@ -79,7 +79,7 @@ import {
 
 import {
   CapabilityEngineError,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   type CapabilityAuditEvent,
   type CapabilityEngineStore,
@@ -1119,7 +1119,12 @@ export function executeDeviceCapability<Id extends DeviceCapabilityId>(
   const registration = registrations[
     capabilityId
   ] as ServerCapabilityRegistration<Id, DeviceCapabilityTransaction>;
-  return executeCapability(registration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input,
+    invocation,
+    store,
+  );
 }
 
 type DeviceQueryDatabase = DatabaseQuery;

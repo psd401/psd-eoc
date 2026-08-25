@@ -9,7 +9,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   type CapabilityEngineError,
   type CapabilityAuditEvent,
   type CapabilityEngineStore,
@@ -191,7 +191,7 @@ describe('AGENTS.md human-only API-key enforcement', () => {
       const store = new DenialStore();
 
       await expect(
-        executeCapability(
+        executeAuditedCapabilityTransaction(
           deniedRegistration(capabilityCase),
           capabilityCase.input,
           agentInvocation(index + 10),

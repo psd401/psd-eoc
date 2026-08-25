@@ -15,8 +15,11 @@ import {
 } from '../../../../lib/auth/middleware';
 import {
   SessionAccessError,
+  executeAuditedCompletedRevokeSessionReplay,
   executeRevokeSessionCapability,
+  getDefaultSessionCapabilityStore,
   getDefaultSessionService,
+  type SessionCapabilityStore,
   type SessionService,
 } from '../../../../lib/auth/sessions';
 
@@ -67,11 +70,13 @@ function revocationResponse(
 
 export function createRevokeSessionRouteHandler(
   getSessionService: () => SessionService = getDefaultSessionService,
+  getSessionCapabilityStore: () => SessionCapabilityStore = getDefaultSessionCapabilityStore,
 ): (request: NextRequest) => Promise<NextResponse> {
   return async (request: NextRequest): Promise<NextResponse> => {
     const requestId = randomUUID();
     try {
       const service = getSessionService();
+      const capabilityStore = getSessionCapabilityStore();
       let authenticated;
       try {
         authenticated = await authenticateSessionRequest(request, service, {
@@ -95,11 +100,18 @@ export function createRevokeSessionRouteHandler(
           request.headers.get('idempotency-key') ?? '',
         );
         if (recovered === null) throw authenticationError;
+        await executeAuditedCompletedRevokeSessionReplay({
+          capabilityStore,
+          revocation: recovered,
+          source: presented.source,
+          requestId,
+        });
         return revocationResponse(recovered, presented.source === 'web');
       }
       const body = RevokeSessionInputSchema.parse(await request.json());
       const revocation = await executeRevokeSessionCapability({
         service,
+        capabilityStore,
         authenticated,
         sessionId: body.sessionId,
         reasonCode: body.reasonCode,

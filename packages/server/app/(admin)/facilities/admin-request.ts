@@ -12,7 +12,7 @@ import {
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
-import { AdminCapabilityError } from './admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 
 const MAX_ADMIN_FORM_BYTES = 64 * 1024;
 

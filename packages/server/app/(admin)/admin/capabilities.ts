@@ -32,7 +32,7 @@ import {
   type AdminCapabilityTransaction,
   type AdminQueryDatabase,
   type AdminQueryMetadata,
-} from '../facilities/admin-core';
+} from '../../../lib/capabilities/admin';
 import { readAlarmTopicReadiness } from './alarm-subscriptions';
 
 export const ACCESS_MEMBERSHIP_FRESHNESS_SECONDS =

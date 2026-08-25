@@ -8,7 +8,7 @@ import {
   IdempotencyKeySchema,
   RecordDeliveryEvidenceInputSchema,
   UuidSchema,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   registerCapabilityHandler,
   type Actor,
   type CapabilityAuthorizationRequest,
@@ -37,7 +37,7 @@ import {
 import {
   createDeliveryTestReportRuntime,
   type DeliveryTestReportRuntime,
-} from '../../../(app)/delivery-tests/capabilities';
+} from '../../../../lib/capabilities/delivery-tests';
 import type { TrustedCapabilityInvocation } from '../../../../lib/capabilities/engine';
 
 /** Worker-only bearer; it is deliberately unrelated to any database secret. */
@@ -1034,12 +1034,16 @@ export function createDeliveryStateRouteHandler(
     let runtime: DeliveryStateRouteRuntime | undefined;
     try {
       runtime = await dependencies.createRuntime();
-      const result = await executeCapability(runtime.handler, body.evidence, {
-        context: capabilityContextFor(body),
-        humanActionResolutionContext: null,
-        safetyResolver: null,
-        authorizer: runtime.authorizer,
-      });
+      const result = await invokeAuthorizedCapabilityHandler(
+        runtime.handler,
+        body.evidence,
+        {
+          context: capabilityContextFor(body),
+          humanActionResolutionContext: null,
+          safetyResolver: null,
+          authorizer: runtime.authorizer,
+        },
+      );
       // Evidence is committed before report projection begins. The canonical
       // report runtime resolves the pinned test run and returns null until its
       // exact target endpoint aggregate is terminal; this adapter never

@@ -1,7 +1,7 @@
 import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
 
-import type { DeliveryTestReportRuntime } from '../../app/(app)/delivery-tests/capabilities';
-import type { StartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
+import type { DeliveryTestReportRuntime } from '../capabilities/delivery-tests';
+import type { StartFlowCapabilityRuntime } from '../capabilities/start';
 import {
   executeQuerySecurityAuditCapability,
   executeVerifySecurityAuditChainCapability,
@@ -16,6 +16,7 @@ import {
   executePublishEventTypeVersionCapability,
   executeUpdateEventTypeDraftCapability,
   type AuthenticatedEventTypeAgent,
+  type EventTypeCapabilityStore,
   type EventTypeStore,
 } from '../capabilities/event-types';
 import type { TrustedCapabilityInvocation } from '../capabilities/engine';
@@ -49,6 +50,7 @@ export interface DefaultAgentCapabilityDispatcherDependencies {
   readonly administration: AgentApiKeyAdministration;
   readonly administrationFacilities: AgentAdministrationFacilityCapabilities;
   readonly eventTypes: EventTypeStore;
+  readonly eventTypeCapabilities: EventTypeCapabilityStore;
   readonly deliveryTestReports: AgentDeliveryTestReportRuntime;
   readonly preparedActivations: PreparedActivationCapabilityStore;
   readonly rosterReport: AgentRosterReportRuntime;
@@ -265,6 +267,7 @@ export function createDefaultAgentCapabilityDispatcher(
           const mutation = agentEventTypeMutation(invocation);
           return executeCreateEventTypeDraftCapability({
             store: dependencies.eventTypes,
+            capabilityStore: dependencies.eventTypeCapabilities,
             authenticated: eventTypeAgent(authenticated),
             command: input as never,
             idempotencyKey: mutation.idempotencyKey,
@@ -277,6 +280,7 @@ export function createDefaultAgentCapabilityDispatcher(
           const mutation = agentEventTypeMutation(invocation);
           return executeUpdateEventTypeDraftCapability({
             store: dependencies.eventTypes,
+            capabilityStore: dependencies.eventTypeCapabilities,
             authenticated: eventTypeAgent(authenticated),
             command: input as never,
             idempotencyKey: mutation.idempotencyKey,
@@ -289,6 +293,7 @@ export function createDefaultAgentCapabilityDispatcher(
           const mutation = agentEventTypeMutation(invocation);
           return executePublishEventTypeVersionCapability({
             store: dependencies.eventTypes,
+            capabilityStore: dependencies.eventTypeCapabilities,
             authenticated: eventTypeAgent(authenticated),
             command: input as never,
             idempotencyKey: mutation.idempotencyKey,

@@ -10,7 +10,7 @@ import {
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../facilities/owned-database-lifecycle';
+} from '../../../lib/testing/owned-database-lifecycle';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 
 const RUN_ID_PATTERN =

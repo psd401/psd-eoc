@@ -58,7 +58,7 @@ drizzle/             migrations
 docs/                runbooks, integration truth register, evidence
 ```
 
-Every surface (web, REST, MCP) funnels through `executeCapability`. If you're
+Every surface (web, REST, MCP) funnels through the server capability engine. If you're
 adding a mutation and not calling it, you're building a side door.
 
 ## Commands

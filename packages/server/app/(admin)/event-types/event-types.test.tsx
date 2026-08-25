@@ -29,6 +29,7 @@ import {
   executeListEventTypesCapability,
   isDatabaseConstraintError,
   type AuthenticatedEventTypeAgent,
+  type EventTypeCapabilityStore,
   type EventTypeStore,
 } from '../../../lib/capabilities/event-types';
 import {
@@ -241,6 +242,26 @@ class CountingStore implements EventTypeStore {
   public async publishVersion(): Promise<EventTypeVersion> {
     throw new Error('Unexpected version publication.');
   }
+}
+
+function capabilityStore(eventTypes: EventTypeStore): EventTypeCapabilityStore {
+  return {
+    transaction: (operation) =>
+      operation({
+        eventTypes,
+        readCurrentTime: (receivedAt) => Promise.resolve(receivedAt),
+        claimIdempotency: () =>
+          Promise.reject(new Error('Unexpected engine idempotency claim.')),
+        completeIdempotency: () =>
+          Promise.reject(
+            new Error('Unexpected engine idempotency completion.'),
+          ),
+        getHumanConfirmation: () => Promise.resolve(null),
+        consumeHumanConfirmation: () => Promise.resolve(false),
+        appendCapabilityAudit: () => Promise.resolve(),
+      }),
+    appendCapabilityAudit: () => Promise.resolve(),
+  };
 }
 
 function visibleFields(
@@ -907,6 +928,7 @@ describe('capability-level administrator authorization', () => {
     await expect(
       executeCreateEventTypeDraftCapability({
         store: nonAdminStore,
+        capabilityStore: capabilityStore(nonAdminStore),
         authenticated: authenticatedSession(['staff']),
         command,
         idempotencyKey: 'event-type-test-key-0001',
@@ -925,6 +947,7 @@ describe('capability-level administrator authorization', () => {
     await expect(
       executeCreateEventTypeDraftCapability({
         store: adminStore,
+        capabilityStore: capabilityStore(adminStore),
         authenticated: authenticatedSession(['staff', 'admin']),
         command,
         idempotencyKey: 'event-type-test-key-0002',
@@ -988,6 +1011,7 @@ describe('capability-level administrator authorization', () => {
     ) =>
       executeCreateEventTypeDraftCapability({
         store,
+        capabilityStore: capabilityStore(store),
         authenticated,
         command,
         idempotencyKey: key,
@@ -1002,7 +1026,13 @@ describe('capability-level administrator authorization', () => {
         authenticatedAgent(['create-event-type-draft']),
         'event-type-agent-allow-0001',
       ),
-    ).rejects.toThrow('authorization test reached the store');
+    ).rejects.toMatchObject({
+      name: 'CapabilityEngineError',
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      message: 'The capability could not be completed.',
+      status: 500,
+    });
     expect(allowedStore.createCalls).toBe(1);
 
     const wrongGrantStore = new CountingStore();

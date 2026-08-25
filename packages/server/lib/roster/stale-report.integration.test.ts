@@ -12,7 +12,7 @@ import {
   SMS_LIFECYCLE_PROVIDER,
   SMS_OPT_OUT_REASON_CODE,
   SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   type CapabilityExecutionAuthorizer,
   type RosterHealthQuery,
 } from '@psd-eoc/contracts';
@@ -46,7 +46,7 @@ import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../../app/(admin)/facilities/owned-database-lifecycle';
+} from '../testing/owned-database-lifecycle';
 import {
   createDrizzleStaleRosterReportStore,
   createGetStaleRosterReportHandler,
@@ -724,7 +724,7 @@ async function executeReport(
   input: RosterHealthQuery,
   context: StaleRosterAuthorizationContext,
 ) {
-  return executeCapability(
+  return invokeAuthorizedCapabilityHandler(
     createGetStaleRosterReportHandler({
       store: createDrizzleStaleRosterReportStore(database),
       clock: () => REPORT_TIME,

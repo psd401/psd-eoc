@@ -183,7 +183,7 @@ The monthly live-delivery-test reminder uses `cron(0 17 1 * ? *)`, the first
 day of every month at 17:00 UTC (09:00 Pacific Standard Time or 10:00 Pacific
 Daylight Time). The EventBridge rule deliberately has no target. Its native
 `AWS/Events` `TriggeredRules` metric drives an operations alarm, so the reminder
-cannot invoke the application, `executeCapability`, a queue, or a provider.
+cannot invoke the application, the capability engine, a queue, or a provider.
 
 The SELECT-only collector derives destination-free test health from immutable
 `delivery_test_runs` and append-only `delivery_test_reports`. It counts distinct

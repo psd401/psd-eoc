@@ -10,7 +10,7 @@ import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type { ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
 import {
   createDrizzleStaleRosterReportStoreFromTransaction,
-  createGetStaleRosterReportHandler,
+  executeStaleRosterReportQuery,
 } from '../../../lib/roster/stale-report';
 import {
   AdminCapabilityError,
@@ -22,7 +22,7 @@ import {
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
   type AdminQueryMetadata,
-} from '../facilities/admin-core';
+} from '../../../lib/capabilities/admin';
 
 export type LastRosterSync = Pick<
   RosterSyncResult,
@@ -58,22 +58,25 @@ function registration(
       return facility.id;
     },
     async handler(input, context) {
-      const reportHandler = createGetStaleRosterReportHandler({
-        // The split admin query store owns this repeatable-read/read-only
-        // transaction. Reuse that exact transaction so authorization, report
-        // evidence and last-sync truth share one snapshot without checking out
-        // a nested PostgreSQL connection or overlapping statements on one
-        // Aurora Data API transaction ID. Report generation keeps the trusted
-        // capability invocation time; this store does not change clock policy.
-        store: createDrizzleStaleRosterReportStoreFromTransaction(
-          context.transaction.database,
-        ),
-        clock: () => new Date(context.invocation.serverTime.getTime()),
-        staleThresholdSeconds: 24 * 60 * 60,
-      });
-      const report = await reportHandler.handler(input, {
-        facilityScope: context.invocation.scope.facilityScope,
-      });
+      const report = await executeStaleRosterReportQuery(
+        {
+          // The split admin query store owns this repeatable-read/read-only
+          // transaction. Reuse that exact transaction so authorization, report
+          // evidence and last-sync truth share one snapshot without checking out
+          // a nested PostgreSQL connection or overlapping statements on one
+          // Aurora Data API transaction ID. Report generation keeps the trusted
+          // capability invocation time; this store does not change clock policy.
+          store: createDrizzleStaleRosterReportStoreFromTransaction(
+            context.transaction.database,
+          ),
+          clock: () => new Date(context.invocation.serverTime.getTime()),
+          staleThresholdSeconds: 24 * 60 * 60,
+        },
+        input,
+        {
+          facilityScope: context.invocation.scope.facilityScope,
+        },
+      );
       const latestRows = await context.transaction.database
         .select({
           population: rosterSyncResults.population,

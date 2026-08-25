@@ -1,5 +1,5 @@
 import {
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   IdempotencyKeySchema,
   SyncAccessMembershipResultSchema,
   UuidSchema,
@@ -150,7 +150,7 @@ async function runFromCommandLine(): Promise<void> {
   });
   try {
     const result = await withReducedDriverErrors('access-membership sync', () =>
-      executeCapability(
+      invokeAuthorizedCapabilityHandler(
         createSyncAccessMembershipHandler({
           evaluator: createGoogleAccessMembershipEvaluator(
             readGoogleCloudIdentityRosterConfiguration(),

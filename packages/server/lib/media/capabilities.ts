@@ -13,7 +13,7 @@ import {
 
 import {
   digestCapabilityValue,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   readCapabilityTime,
   type CapabilityHandlerContext,
   type ServerCapabilityRegistration,
@@ -693,7 +693,12 @@ export async function executeMediaCapability<Id extends MediaCapabilityId>(
   const registration = registrations[
     capabilityId
   ] as ServerCapabilityRegistration<Id, MediaCapabilityTransaction>;
-  return executeCapability(registration, input, invocation, store);
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input,
+    invocation,
+    store,
+  );
 }
 
 export interface MediaCapabilityRuntime {
@@ -723,7 +728,7 @@ export function createMediaCapabilityRuntime(
       const registration = registrations[
         capabilityId
       ] as ServerCapabilityRegistration<Id, MediaCapabilityTransaction>;
-      return executeCapability(
+      return executeAuditedCapabilityTransaction(
         registration,
         input,
         invocation,

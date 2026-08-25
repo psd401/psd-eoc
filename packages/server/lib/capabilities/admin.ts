@@ -17,19 +17,19 @@ import {
   type Database,
   type DatabaseConnection,
   type PostgresDatabase,
-} from '../../../db/client';
+} from '../../db/client';
 import {
   idempotencyRecords,
   securityAuditChainAnchors,
   securityAuditEntries,
-} from '../../../db/schema';
+} from '../../db/schema';
 import {
   SECURITY_AUDIT_APPEND_LOCK_SQL,
   buildSecurityAuditEntry,
-} from '../../../lib/audit';
+} from '../audit';
 import {
   CapabilityEngineError,
-  executeCapability,
+  executeAuditedCapabilityTransaction,
   preflightCapabilityInvocation,
   resolveHumanCapabilityInvocation,
   type CapabilityAuditEvent,
@@ -40,8 +40,8 @@ import {
   type IdempotencyClaim,
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
-} from '../../../lib/capabilities/engine';
-import type { AuthenticatedSession } from '../../../lib/auth/sessions';
+} from './engine';
+import type { AuthenticatedSession } from '../auth/sessions';
 
 /**
  * Common schema-aware query surface used by both supported Drizzle drivers.
@@ -245,10 +245,17 @@ const ADMIN_MUTATION_IDS = new Set<RegisteredCapabilityId>([
   'set-channel-enabled',
   'update-facility',
   'update-group-source',
+  'create-event-type-draft',
+  'update-event-type-draft',
+  'publish-event-type-version',
+  'issue-agent-api-key',
+  'revoke-agent-api-key',
 ]);
 
 function auditCategory(event: CapabilityAuditEvent): SecurityAuditCategory {
-  return event.outcome === 'success' && ADMIN_MUTATION_IDS.has(event.action)
+  return event.outcome === 'success' &&
+    event.actor.kind === 'human' &&
+    ADMIN_MUTATION_IDS.has(event.action)
     ? 'admin-change'
     : event.category;
 }
@@ -391,7 +398,7 @@ function sameHumanActor(left: Actor, right: Actor): boolean {
 
 function createAdminTransaction(
   database: AdminQueryDatabase,
-  authenticated: AuthenticatedSession,
+  authenticated: AuthenticatedSession | null,
   auditBehavior: Readonly<{
     assertRequestAvailable(
       database: AdminQueryDatabase,
@@ -424,6 +431,7 @@ function createAdminTransaction(
     },
     requireAdministrator(actor) {
       if (
+        authenticated === null ||
         !sameHumanActor(actor, authenticated.actor) ||
         authenticated.source !== 'web' ||
         !authenticated.roles.includes('admin') ||
@@ -463,6 +471,19 @@ export function createDrizzleAdminCapabilityStore(
   database: Database,
   authenticated: AuthenticatedSession,
 ): AdminCapabilityStore {
+  return createDrizzleCapabilityStore(database, authenticated);
+}
+
+/**
+ * Creates the shared database-backed engine store for non-admin capability
+ * registrations. Repository-owned handlers still run inside this outer
+ * transaction, so their domain write and the engine's audit append commit or
+ * roll back together.
+ */
+export function createDrizzleCapabilityStore(
+  database: Database,
+  authenticated: AuthenticatedSession | null = null,
+): AdminCapabilityStore {
   const store: AdminCapabilityStore = {
     transaction<Result>(
       operation: (transaction: AdminCapabilityTransaction) => Promise<Result>,
@@ -479,7 +500,9 @@ export function createDrizzleAdminCapabilityStore(
       );
     },
   };
-  adminStoreBindings.set(store, Object.freeze({ database, authenticated }));
+  if (authenticated !== null) {
+    adminStoreBindings.set(store, Object.freeze({ database, authenticated }));
+  }
   return store;
 }
 
@@ -672,7 +695,7 @@ export function executeAdminQueryCapability<Id extends RegisteredCapabilityId>(
   store: AdminCapabilityStore,
   metadata: AdminQueryMetadata = {},
 ): Promise<CapabilityOutput<Id>> {
-  return executeCapability(
+  return executeAuditedCapabilityTransaction(
     withAuditRequestGuard(registration),
     input,
     queryInvocation(authenticated, metadata),
@@ -693,7 +716,7 @@ export function executeAdminMutationCapability<
   store: AdminCapabilityStore,
   metadata: AdminMutationMetadata,
 ): Promise<CapabilityOutput<Id>> {
-  return executeCapability(
+  return executeAuditedCapabilityTransaction(
     withAuditRequestGuard(registration),
     input,
     mutationInvocation(authenticated, metadata),

@@ -1,7 +1,7 @@
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
 import { redirect } from 'next/navigation';
 
-import { AdminCapabilityError } from './admin-core';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 
 const STATUS_MESSAGES = Object.freeze({
   'audience-version-created': 'The facility audience version was saved.',

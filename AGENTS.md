@@ -75,7 +75,7 @@ Follow these unless Kris says otherwise:
 - **Contracts first.** `packages/contracts` (Zod) is the source of truth for
   domain types and capability signatures. Cross-package changes land there
   first.
-- **One capability layer.** Web, REST, and MCP all call `executeCapability`.
+- **One capability layer.** Web, REST, and MCP use the server capability engine.
   Never add a side-door mutation path.
 - **Accessibility in the same PR.** Activation, event timeline, and all-clear
   must be keyboard- and screen-reader-operable when you build them, not later.

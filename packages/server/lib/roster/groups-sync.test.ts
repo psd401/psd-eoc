@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import {
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   GroupSourceSchema,
   RosterSnapshotSchema,
   RosterSourceConfigurationSchema,
@@ -1874,7 +1874,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
     });
 
     await expectSyncError(
-      executeCapability(handler, SYNC_INPUT, {
+      invokeAuthorizedCapabilityHandler(handler, SYNC_INPUT, {
         context: unauthorizedContext,
         humanActionResolutionContext: null,
         safetyResolver: null,

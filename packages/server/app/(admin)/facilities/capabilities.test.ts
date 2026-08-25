@@ -17,7 +17,7 @@ import {
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
   type AdminQueryDatabase,
-} from './admin-core';
+} from '../../../lib/capabilities/admin';
 import {
   executeCreateFacilityCapability,
   executeListFacilitiesCapability,

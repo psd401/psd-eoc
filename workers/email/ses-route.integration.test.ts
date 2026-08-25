@@ -12,7 +12,7 @@ import {
   ChannelAttemptSchema,
   DeliveryEvidenceSchema,
   RosterHealthQuerySchema,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   type CapabilityExecutionAuthorizer,
   type ChannelAttempt,
 } from '@psd-eoc/contracts';
@@ -251,7 +251,7 @@ function reportAuthorizer(): CapabilityExecutionAuthorizer<StaleRosterAuthorizat
 }
 
 async function staleReport(database: PostgresDatabase, generatedAt: Date) {
-  return executeCapability(
+  return invokeAuthorizedCapabilityHandler(
     createGetStaleRosterReportHandler({
       store: createDrizzleStaleRosterReportStoreFromTransaction(database),
       clock: () => generatedAt,

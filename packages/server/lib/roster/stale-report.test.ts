@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   RosterHealthQuerySchema,
   SMS_OPT_OUT_REASON_CODE,
-  executeCapability,
+  invokeAuthorizedCapabilityHandler,
   type CapabilityExecutionAuthorizer,
   type RosterHealthQuery,
 } from '@psd-eoc/contracts';
@@ -142,7 +142,7 @@ async function executeReport(
     },
   };
 
-  return executeCapability(
+  return invokeAuthorizedCapabilityHandler(
     createGetStaleRosterReportHandler({
       store,
       clock: () => options.now ?? NOW,

@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { AGENT_GRANTABLE_CAPABILITY_IDS } from './agent-api';
-import { CAPABILITY_INVOCATION_POLICY } from './capability-catalog';
+import {
+  AGENT_GRANTABLE_CAPABILITY_IDS,
+  CAPABILITY_INVOCATION_POLICY,
+} from './capability-catalog';
 import { HUMAN_ONLY_ACTION_IDS } from './human-only';
 
 /**
@@ -10,12 +12,15 @@ import { HUMAN_ONLY_ACTION_IDS } from './human-only';
  * remaining callable from agent REST or MCP.
  */
 const agentTransportCapabilities = Object.entries(CAPABILITY_INVOCATION_POLICY)
-  .filter(
-    ([, policy]) =>
-      policy.principalKinds.includes('agent') ||
-      policy.sources.includes('agent-rest') ||
-      policy.sources.includes('mcp'),
-  )
+  .filter(([, policy]) => {
+    const principalKinds: ReadonlySet<string> = new Set(policy.principalKinds);
+    const sources: ReadonlySet<string> = new Set(policy.sources);
+    return (
+      principalKinds.has('agent') ||
+      sources.has('agent-rest') ||
+      sources.has('mcp')
+    );
+  })
   .map(([capabilityId]) => capabilityId);
 
 const AGENT_SURFACE_MANIFESTS = {
