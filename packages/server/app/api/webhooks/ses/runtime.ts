@@ -43,6 +43,13 @@ import {
   type DeliveryEvidenceStore,
 } from '../../internal/delivery-state/runtime';
 import {
+  createDrizzleDeliveryTestCapabilityStore,
+  deliveryTestReportInvocationForEvidence,
+  executeFinalizeDeliveryTestReport,
+  mayFinalizeDeliveryTestReport,
+  resolveReadyDeliveryTestReportRunIdByIntent,
+} from '../../../../lib/capabilities/delivery-tests';
+import {
   SnsSignatureError,
   canonicalSnsEnvelopeDigest,
   confirmSnsSubscription,
@@ -118,6 +125,10 @@ export interface SesWebhookStore {
     attempt: ChannelAttempt,
     input: AttemptEvidenceInput,
   ): Promise<DeliveryEvidence>;
+  reprojectDeliveryTestReport(
+    attempt: ChannelAttempt,
+    evidence: DeliveryEvidence,
+  ): Promise<void>;
   recordEndpointStatus(
     attempt: ChannelAttempt,
     input: RecordEndpointStatusInput,
@@ -524,12 +535,22 @@ async function executeMappedEvent(
           attemptEvidenceInput(input, attempt.id),
         ),
     );
-    await invokeAuthorizedCapabilityHandler(evidenceHandler, evidenceInput, {
-      context,
-      humanActionResolutionContext: null,
-      safetyResolver: null,
-      authorizer,
-    });
+    const evidence = await invokeAuthorizedCapabilityHandler(
+      evidenceHandler,
+      evidenceInput,
+      {
+        context,
+        humanActionResolutionContext: null,
+        safetyResolver: null,
+        authorizer,
+      },
+    );
+    if (
+      attempt.deliveryTest != null &&
+      mayFinalizeDeliveryTestReport(evidence)
+    ) {
+      await store.reprojectDeliveryTestReport(attempt, evidence);
+    }
   }
 }
 
@@ -1135,6 +1156,7 @@ export function createDrizzleSesWebhookStore(
 ): SesWebhookStore {
   const evidenceStore: DeliveryEvidenceStore =
     createDrizzleDeliveryEvidenceStore(database);
+  const reportStore = createDrizzleDeliveryTestCapabilityStore(database);
   return Object.freeze({
     claimCallback: (messageId: string, requestDigest: string) =>
       claimCallback(database, messageId, requestDigest),
@@ -1238,6 +1260,22 @@ export function createDrizzleSesWebhookStore(
       input: AttemptEvidenceInput,
     ): Promise<DeliveryEvidence> {
       return evidenceStore.recordAttemptEvidence({ attempt, evidence: input });
+    },
+    async reprojectDeliveryTestReport(
+      attempt: ChannelAttempt,
+      evidence: DeliveryEvidence,
+    ): Promise<void> {
+      if (attempt.deliveryTest == null) return;
+      const runId = await resolveReadyDeliveryTestReportRunIdByIntent(
+        database,
+        attempt.intentId,
+      );
+      if (runId === null) return;
+      await executeFinalizeDeliveryTestReport(
+        { runId },
+        deliveryTestReportInvocationForEvidence(evidence),
+        reportStore,
+      );
     },
     recordEndpointStatus: (
       attempt: ChannelAttempt,

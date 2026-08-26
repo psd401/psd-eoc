@@ -2257,6 +2257,7 @@ export class PsdEocStack extends Stack {
           command: ['bun', 'workers/email/callback-service.ts'],
           environment: {
             AWS_REGION: region,
+            EMAIL_CALLBACK_QUEUE_ARN: emailCallbackQueue.queueArn,
             EMAIL_CALLBACK_QUEUE_URL: emailCallbackQueue.queueUrl,
             NODE_ENV: 'production',
             PSD_EOC_EMAIL_CALLBACK_RUNTIME_MODE: 'enabled',

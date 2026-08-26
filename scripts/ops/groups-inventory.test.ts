@@ -6964,9 +6964,10 @@ describe('Google Groups inventory', () => {
   });
 
   // This preserves the complete former command-line self-test in ordinary
-  // discovery. A two-core CI runner needs just over one minute for the bounded
-  // subprocess, filesystem, and mapping cases together.
+  // discovery. Six concurrent full-suite shards can make the bounded
+  // subprocess, filesystem, and mapping cases take more than two minutes on a
+  // two-core runner, so retain a finite budget with enough contention margin.
   test('passes the complete synthetic safety and mapping suite', async () => {
     await runSelfTest();
-  }, 120_000);
+  }, 180_000);
 });
