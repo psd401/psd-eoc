@@ -89,23 +89,40 @@ describe('push endpoint invalidation writeback', () => {
     );
   });
 
-  test('validates the exact DeviceNotRegistered contract before I/O', async () => {
+  test('accepts only canonical Expo, APNs, and FCM invalidation reasons', async () => {
     let calls = 0;
     const client = new PushEndpointInvalidationClient({
       serviceOrigin: 'https://eoc.example.invalid',
       bearerToken: WORKER_TOKEN,
-      fetch: () => {
+      fetch: (_url, init) => {
         calls += 1;
-        return Promise.resolve(Response.json(result));
+        const request = JSON.parse(String(init?.body)) as typeof input;
+        return Promise.resolve(
+          Response.json({ ...result, reasonCode: request.reasonCode }),
+        );
       },
     });
+
+    for (const reasonCode of [
+      'EXPO_DEVICE_NOT_REGISTERED',
+      'APNS_BAD_DEVICE_TOKEN',
+      'APNS_UNREGISTERED',
+      'FCM_INVALID_ARGUMENT',
+      'FCM_UNREGISTERED',
+    ] as const) {
+      const request =
+        reasonCode === 'APNS_UNREGISTERED'
+          ? { ...input, reasonCode, providerOccurredAt: TIMES.attempted }
+          : { ...input, reasonCode };
+      await expect(client.invalidate(request)).resolves.toBeUndefined();
+    }
 
     await expect(
       client.invalidate({ ...input, reasonCode: 'OTHER_REASON' }),
     ).rejects.toEqual(
       expect.objectContaining({ code: 'INVALID_INPUT', retryable: false }),
     );
-    expect(calls).toBe(0);
+    expect(calls).toBe(5);
   });
 
   test('cancels oversized untrusted success bodies', async () => {

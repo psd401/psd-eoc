@@ -22,7 +22,7 @@ import { resolveAudience } from '../roster/resolve';
 import { digestCapabilityValue } from './engine';
 
 const CHANNEL_INTEGRATION_IDS = Object.freeze({
-  push: 'expo-push',
+  push: 'mobile-push',
   email: 'ses-email',
   sms: 'aws-eum-sms',
 } as const satisfies Readonly<Record<NotificationChannel, string>>);

@@ -26,8 +26,8 @@ import {
   type TrustedCapabilityInvocation,
 } from '../../../../lib/capabilities/engine';
 import {
-  EXPO_DEVICE_NOT_REGISTERED_REASON,
   getDefaultDeviceCapabilityRuntime,
+  PUSH_ENDPOINT_INVALIDATION_REASONS,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
   type DeviceCapabilityRuntime,
 } from '../../../../lib/capabilities/devices';
@@ -598,7 +598,9 @@ export async function handlePushEndpointInvalidation(
       );
       if (
         input.status !== 'invalid' ||
-        input.reasonCode !== EXPO_DEVICE_NOT_REGISTERED_REASON
+        !PUSH_ENDPOINT_INVALIDATION_REASONS.includes(
+          input.reasonCode as (typeof PUSH_ENDPOINT_INVALIDATION_REASONS)[number],
+        )
       ) {
         throw new SyntaxError('The endpoint status is outside route scope.');
       }

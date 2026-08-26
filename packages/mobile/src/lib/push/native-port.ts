@@ -122,6 +122,21 @@ export const expoPushNativePort: PushNativePort = Object.freeze({
     );
   },
   getDevicePushToken: () => getDevicePushTokenAsync(),
+  async getServiceEnvironment(platform: NativePushPlatform) {
+    if (platform === 'android') return 'production';
+    if (
+      applicationModule?.getPushNotificationServiceEnvironmentAsync ===
+      undefined
+    ) {
+      throw new Error('The APNs service environment is unavailable.');
+    }
+    const environment =
+      await applicationModule.getPushNotificationServiceEnvironmentAsync();
+    if (environment !== 'development' && environment !== 'production') {
+      throw new Error('The APNs service environment is unavailable.');
+    }
+    return environment;
+  },
   async getExpoPushToken(
     input: Parameters<PushNativePort['getExpoPushToken']>[0],
   ) {
@@ -143,24 +158,9 @@ export const expoPushNativePort: PushNativePort = Object.freeze({
     ) {
       throw new Error('Native Expo push-token identity is unavailable.');
     }
-    let development = false;
-    if (Platform.OS === 'ios') {
-      if (
-        applicationModule.getPushNotificationServiceEnvironmentAsync ===
-        undefined
-      ) {
-        throw new Error('The APNs service environment is unavailable.');
-      }
-      const environment =
-        await applicationModule.getPushNotificationServiceEnvironmentAsync();
-      if (environment !== 'development' && environment !== 'production') {
-        throw new Error('The APNs service environment is unavailable.');
-      }
-      development = environment === 'development';
-    }
     return requestExplicitExpoPushToken({
       applicationId,
-      development,
+      development: input.serviceEnvironment === 'development',
       deviceId: await serverRegistrationModule.getInstallationIdAsync(),
       devicePushToken: verifiedDevicePushToken,
       projectId,

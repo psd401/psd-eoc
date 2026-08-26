@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { and, eq, inArray, isNull } from 'drizzle-orm';
+import type { PushProviderCutover } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
 import {
@@ -14,6 +15,11 @@ import {
   type EventPopulation,
   type EventReach,
 } from './event-recipients';
+import {
+  parsePushProviderCutover,
+  PUSH_PROVIDER_CUTOVER_ENV,
+  selectedPushProvider,
+} from '../push-provider-cutover';
 
 /**
  * A stable identifier derived from a value rather than stored beside it.
@@ -54,6 +60,8 @@ export interface EventAudienceEndpoint {
   readonly channel: 'email' | 'push';
   readonly email?: string;
   readonly platform?: 'ios' | 'android';
+  readonly provider?: 'expo' | 'apns' | 'fcm';
+  readonly serviceEnvironment?: 'development' | 'production';
   readonly token?: string;
 }
 
@@ -97,6 +105,9 @@ export async function resolveEventAudience(
     reach: EventReach;
     population: EventPopulation;
   }>,
+  pushProviderCutover: PushProviderCutover | null = parsePushProviderCutover(
+    process.env[PUSH_PROVIDER_CUTOVER_ENV],
+  ),
 ): Promise<EventAudience> {
   const reached = await resolveEventRecipients(database, input);
   if (reached.emails.length === 0) {
@@ -139,7 +150,10 @@ export async function resolveEventAudience(
           .select({
             userId: deviceEnrollments.userId,
             registrationId: devicePushTokenRegistrations.id,
+            deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
             platform: devicePushTokenRegistrations.platform,
+            provider: devicePushTokenRegistrations.provider,
+            serviceEnvironment: devicePushTokenRegistrations.serviceEnvironment,
             token: devicePushTokenRegistrations.token,
           })
           .from(devicePushTokenRegistrations)
@@ -179,25 +193,55 @@ export async function resolveEventAudience(
     const account = accountByEmail.get(email);
     const push =
       account === undefined ? [] : (pushByUserId.get(account.id) ?? []);
+    if (push.length > 0 && pushProviderCutover === null) {
+      throw new Error('Push provider selection is unavailable.');
+    }
+    const validPush = push.map((row) => {
+      if (
+        (row.platform !== 'ios' && row.platform !== 'android') ||
+        (row.provider !== 'expo' &&
+          row.provider !== 'apns' &&
+          row.provider !== 'fcm') ||
+        (row.serviceEnvironment !== 'development' &&
+          row.serviceEnvironment !== 'production')
+      ) {
+        throw new Error('Push endpoint provider metadata is invalid.');
+      }
+      return row as typeof row & {
+        platform: 'ios' | 'android';
+        provider: 'expo' | 'apns' | 'fcm';
+        serviceEnvironment: 'development' | 'production';
+      };
+    });
+    const selectedPush = validPush.filter(
+      (row) =>
+        pushProviderCutover !== null &&
+        row.provider ===
+          selectedPushProvider(pushProviderCutover, row.platform),
+    );
+    const activeDevices = new Set(
+      validPush.map((row) => `${row.deviceEnrollmentId}:${row.platform}`),
+    );
+    if (
+      new Set(
+        selectedPush.map((row) => `${row.deviceEnrollmentId}:${row.platform}`),
+      ).size !== selectedPush.length ||
+      selectedPush.length !== activeDevices.size
+    ) {
+      throw new Error('Push endpoint selection is incomplete or ambiguous.');
+    }
     const endpoints: EventAudienceEndpoint[] = [
       {
         id: derivedUuid('psd-eoc.endpoint.email', email),
         channel: 'email' as const,
         email,
       },
-      ...push
+      ...selectedPush
         // `device_push_token_registrations_native_only` already refuses any
         // other platform, so this drops nothing — but the column's type is
         // wider than its constraint, and narrowing by filter rather than by
         // assertion keeps a future third platform from silently becoming a
         // push endpoint nothing knows how to deliver to.
-        .filter(
-          (
-            row,
-          ): row is (typeof push)[number] & {
-            platform: 'ios' | 'android';
-          } => row.platform === 'ios' || row.platform === 'android',
-        )
         .map((row) => ({
           // The registration's own id: a token is replaced by registering a
           // new one, and a delivery record should name the registration it
@@ -205,6 +249,8 @@ export async function resolveEventAudience(
           id: row.registrationId,
           channel: 'push' as const,
           platform: row.platform,
+          provider: row.provider,
+          serviceEnvironment: row.serviceEnvironment,
           token: row.token,
         }))
         .sort((left, right) => left.id.localeCompare(right.id)),

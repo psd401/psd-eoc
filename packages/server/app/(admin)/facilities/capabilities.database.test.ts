@@ -2431,6 +2431,40 @@ describeWithDatabase('facilities administrator database flow', () => {
       enabled: false,
       status: { label: 'mocked' },
     });
+    const directVerificationReference = `issue-43-direct-push-${randomUUID()}`;
+    const directConfiguredAt = new Date();
+    await database.insert(integrationStatuses).values({
+      id: randomUUID(),
+      integrationId: 'mobile-push',
+      label: 'configured-unverified',
+      verifiedAt: null,
+      verifiedByUserId: null,
+      authorizationReference: null,
+      reasonCode: null,
+      observedAt: directConfiguredAt,
+    });
+    const directChannelResult = await executeSetChannelEnabledCapability({
+      authenticated,
+      store,
+      command: {
+        integrationId: 'mobile-push',
+        enabled: true,
+        authorization: null,
+        verificationReference: directVerificationReference,
+      },
+      directPushVerificationReference: directVerificationReference,
+      metadata: metadata('direct-channel-verification', requestIds),
+    });
+    expect(directChannelResult).toMatchObject({
+      integrationId: 'mobile-push',
+      enabled: true,
+      status: {
+        integrationId: 'mobile-push',
+        label: 'live-verified',
+        verifiedByUserId: authenticated.actor.userId,
+        authorizationReference: directVerificationReference,
+      },
+    });
     if (authenticated.actor.kind !== 'human') {
       throw new Error('The synthetic administrator must be human.');
     }

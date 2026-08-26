@@ -23,10 +23,15 @@ import {
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../db/client';
-import { seedDatabase, type SeedSummary } from '../db/seed';
+import {
+  seedDatabase,
+  type SeedDatabaseOptions,
+  type SeedSummary,
+} from '../db/seed';
 import { notificationIntentChannels } from '../db/schema';
 import { migrateDatabase } from './migrate';
 import {
+  closeAndDropDisposableDatabase,
   createDisposableDatabase,
   type DisposableDatabase,
 } from '../lib/testing/database';
@@ -80,6 +85,348 @@ const ISSUE_23_PRE_OUTBOX_V2_MIGRATIONS = [
 ] as const;
 const ISSUE_23_OUTBOX_V2_MIGRATION = '0008_yummy_living_tribunal.sql';
 
+describe('direct push migration safety', () => {
+  test('does not transfer Expo authorization or enable mobile push', async () => {
+    const migration = await Bun.file(
+      new URL(
+        './migrations/0035_direct_push_registration.sql',
+        import.meta.url,
+      ),
+    ).text();
+    const selectStart = migration.indexOf(
+      "SELECT\n\tgen_random_uuid(),\n\t'mobile-push'",
+    );
+    const selectEnd = migration.indexOf('FROM latest_expo_status', selectStart);
+    expect(selectStart).toBeGreaterThanOrEqual(0);
+    expect(selectEnd).toBeGreaterThan(selectStart);
+    const statusBackfill = migration.slice(selectStart, selectEnd);
+    expect(statusBackfill).toContain('\n\tnull,\n\tnull,\n\tnull,');
+    expect(statusBackfill).not.toContain('"verified_at"');
+    expect(statusBackfill).not.toContain('"verified_by_user_id"');
+    expect(statusBackfill).not.toContain('"authorization_reference"');
+    expect(migration).toContain(
+      '\n\t\'mobile-push\',\n\tfalse,\n\tmobile_status."id"',
+    );
+    expect(migration).not.toContain('expo_configuration."enabled"');
+    expect(migration).toContain(
+      'ADD COLUMN "provider_occurred_at" timestamp with time zone',
+    );
+    expect(migration).toContain(
+      'DISABLE TRIGGER "roster_endpoints_immutable_guard"',
+    );
+    expect(migration).toContain(
+      'ENABLE TRIGGER "roster_endpoints_immutable_guard"',
+    );
+    expect(migration).toContain('"roster_endpoints"."provider" is not null');
+    expect(migration).toContain(
+      '"roster_endpoints"."service_environment" is not null',
+    );
+    expect(migration).toContain('delivery_evidence_provider_time');
+    expect(migration).toContain('delivery_evidence_apns_unregistered_time');
+    expect(migration).toContain("provider\" = 'apns-direct'");
+    expect(migration).toContain("reason_code\" = 'APNS_UNREGISTERED'");
+    expect(
+      migration.match(
+        /@\.integrationStatus\.integrationId == "expo-push" \|\| @\.integrationStatus\.integrationId == "mobile-push"/gu,
+      ),
+    ).toHaveLength(2);
+  });
+});
+
+describeWithDatabase('direct push migration upgrade', () => {
+  test('preserves legacy Expo rows and backfills mobile push dark exactly once', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required.');
+    }
+    const owned = await createDisposableDatabase(
+      'psd_eoc_direct_push_upgrade',
+      testDatabaseUrl,
+    );
+    const opened = createDatabaseClient({
+      driver: 'postgres',
+      url: owned.url,
+      maxConnections: 1,
+    });
+    if (opened.driver !== 'postgres') {
+      throw new Error('Direct push migration proof requires PostgreSQL.');
+    }
+
+    const ids = Object.freeze({
+      registration: '00000000-0000-4000-8000-000000043001',
+      device: '00000000-0000-4000-8000-000000043002',
+      roster: '00000000-0000-4000-8000-000000043003',
+      recipient: '00000000-0000-4000-8000-000000043004',
+      endpoint: '00000000-0000-4000-8000-000000043005',
+      evidence: '00000000-0000-4000-8000-000000043006',
+      attempt: '00000000-0000-4000-8000-000000043007',
+      outbox: '00000000-0000-4000-8000-000000043008',
+      intent: '00000000-0000-4000-8000-000000043009',
+      event: '00000000-0000-4000-8000-000000043010',
+      eventTypeVersion: '00000000-0000-4000-8000-000000043011',
+      request: '00000000-0000-4000-8000-000000043012',
+      activationPreview: '00000000-0000-4000-8000-000000043013',
+      expoStatus: '00000000-0000-4000-8000-000000043014',
+      verifier: '00000000-0000-4000-8000-000000043015',
+    });
+    const createdAt = '2026-08-26T12:00:00.000Z';
+    const authorization = Object.freeze({
+      kind: 'synthetic-training' as const,
+      activationPreviewId: ids.activationPreview,
+      consequenceDigest: 'd'.repeat(64),
+      requestId: ids.request,
+    });
+    const channels = Object.freeze([
+      Object.freeze({
+        channel: 'push' as const,
+        endpointCount: 1,
+        renderedMessage: Object.freeze({
+          eventKind: 'test' as const,
+          templateMode: 'drill' as const,
+          purpose: 'activation' as const,
+          classificationMarker: 'DRILL' as const,
+          channel: 'push' as const,
+          title: '[DRILL] Legacy direct-push migration proof',
+          body: '[DRILL] Synthetic and unroutable test only.',
+        }),
+        integrationStatus: Object.freeze({
+          integrationId: 'expo-push',
+          label: 'mocked' as const,
+          verifiedAt: null,
+          verifiedByUserId: null,
+          authorizationReference: null,
+          reasonCode: null,
+          observedAt: createdAt,
+        }),
+      }),
+      Object.freeze({
+        channel: 'email' as const,
+        endpointCount: 1,
+        renderedMessage: Object.freeze({
+          eventKind: 'test' as const,
+          templateMode: 'drill' as const,
+          purpose: 'activation' as const,
+          classificationMarker: 'DRILL' as const,
+          channel: 'email' as const,
+          subject: '[DRILL] Legacy direct-push migration proof',
+          textBody: '[DRILL] Synthetic and unroutable test only.',
+        }),
+        integrationStatus: Object.freeze({
+          integrationId: 'ses-email',
+          label: 'mocked' as const,
+          verifiedAt: null,
+          verifiedByUserId: null,
+          authorizationReference: null,
+          reasonCode: null,
+          observedAt: createdAt,
+        }),
+      }),
+    ]);
+    const message = NotificationOutboxMessageSchema.parse({
+      version: 1,
+      outboxId: ids.outbox,
+      intentId: ids.intent,
+      eventId: ids.event,
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersion: {
+        id: ids.eventTypeVersion,
+        templateMode: 'drill',
+      },
+      rosterSnapshotId: ids.roster,
+      rosterPopulation: 'synthetic',
+      requestId: ids.request,
+      authorization,
+      channels,
+      createdAt,
+    });
+
+    try {
+      const journal = (await Bun.file(
+        new URL('./migrations/meta/_journal.json', import.meta.url),
+      ).json()) as { entries?: Array<{ tag?: unknown }> };
+      const migrationTags = (journal.entries ?? []).map(({ tag }) => {
+        if (typeof tag !== 'string') {
+          throw new Error('The migration journal contains an invalid tag.');
+        }
+        return tag;
+      });
+      const directMigrationIndex = migrationTags.indexOf(
+        '0035_direct_push_registration',
+      );
+      expect(directMigrationIndex).toBeGreaterThan(0);
+      expect(migrationTags[directMigrationIndex - 1]).toBe(
+        '0034_controlled_canary_target_modes',
+      );
+      for (const tag of migrationTags.slice(0, directMigrationIndex)) {
+        await applySqlMigrationFile(opened.db, `${tag}.sql`);
+      }
+
+      await opened.db.transaction(async (transaction) => {
+        await transaction.execute(
+          sql`set local session_replication_role = replica`,
+        );
+        await transaction.execute(sql`
+          insert into device_push_token_registrations (
+            id, device_enrollment_id, platform, token, registered_at, provider
+          ) values (
+            ${ids.registration}::uuid, ${ids.device}::uuid, 'ios',
+            'ExponentPushToken[synthetic-legacy-43]', ${createdAt}::timestamptz,
+            'expo'
+          )
+        `);
+        await transaction.execute(sql`
+          insert into roster_endpoints (
+            id, roster_snapshot_id, recipient_id, population, channel, status,
+            captured_at, platform, token, email, phone_number
+          ) values (
+            ${ids.endpoint}::uuid, ${ids.roster}::uuid, ${ids.recipient}::uuid,
+            'synthetic', 'push', 'active', ${createdAt}::timestamptz, 'ios',
+            'synthetic-unroutable:legacy-direct-push-43', null, null
+          )
+        `);
+        await transaction.execute(sql`
+          insert into delivery_evidence (
+            id, subject_kind, subject_id, intent_id, attempt_id, sequence,
+            previous_evidence_id, state, recorded_at, provider,
+            provider_reference, proof, reason_code, diagnostic_digest
+          ) values (
+            ${ids.evidence}::uuid, 'attempt', ${ids.attempt}::uuid, null,
+            ${ids.attempt}::uuid, 1, null, 'failed', ${createdAt}::timestamptz,
+            'expo-push', null, null, 'EXPO_DEVICE_NOT_REGISTERED', null
+          )
+        `);
+        await transaction.execute(sql`
+          insert into integration_statuses (
+            id, integration_id, label, verified_at, verified_by_user_id,
+            authorization_reference, reason_code, observed_at
+          ) values (
+            ${ids.expoStatus}::uuid, 'expo-push', 'live-verified',
+            ${createdAt}::timestamptz, ${ids.verifier}::uuid,
+            'retained-expo-authorization-proof', null, ${createdAt}::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into channel_configurations (
+            integration_id, enabled, status_id, status_label, changed_at
+          ) values (
+            'expo-push', true, ${ids.expoStatus}::uuid, 'live-verified',
+            ${createdAt}::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into outbox (
+            id, message_version, intent_id, event_id, event_kind,
+            template_mode, purpose, event_type_version_id, roster_snapshot_id,
+            roster_population, request_id, "authorization", channels, message,
+            status, attempts, available_at, locked_until, published_at,
+            failed_at, last_error_code, created_at
+          ) values (
+            ${ids.outbox}::uuid, 1, ${ids.intent}::uuid, ${ids.event}::uuid,
+            'test', 'drill', 'activation', ${ids.eventTypeVersion}::uuid,
+            ${ids.roster}::uuid, 'synthetic', ${ids.request}::uuid,
+            ${JSON.stringify(authorization)}::jsonb,
+            ${JSON.stringify(channels)}::jsonb,
+            ${JSON.stringify(message)}::jsonb,
+            'pending', 0, ${createdAt}::timestamptz, null, null, null, null,
+            ${createdAt}::timestamptz
+          )
+        `);
+      });
+
+      const [before] = await opened.db.execute<{
+        channels: unknown;
+        message: unknown;
+        token: string;
+      }>(sql`
+        select
+          (select token from device_push_token_registrations
+           where id = ${ids.registration}::uuid) as token,
+          (select channels from outbox where id = ${ids.outbox}::uuid) as channels,
+          (select message from outbox where id = ${ids.outbox}::uuid) as message
+      `);
+
+      await applySqlMigrationFile(
+        opened.db,
+        '0035_direct_push_registration.sql',
+      );
+
+      const [after] = await opened.db.execute<{
+        channels: unknown;
+        evidence_count: number;
+        expo_authorization_reference: string;
+        expo_enabled: boolean;
+        message: unknown;
+        mobile_authorization_reference: string | null;
+        mobile_enabled: boolean;
+        mobile_label: string;
+        outbox_count: number;
+        provider: string;
+        provider_occurred_at: Date | null;
+        push_dispatch_count: number;
+        roster_provider: string;
+        roster_service_environment: string;
+        service_environment: string;
+        token: string;
+      }>(sql`
+        select
+          registration.token,
+          registration.provider,
+          registration.service_environment,
+          endpoint.provider as roster_provider,
+          endpoint.service_environment as roster_service_environment,
+          evidence.provider_occurred_at,
+          legacy_status.authorization_reference as expo_authorization_reference,
+          legacy_config.enabled as expo_enabled,
+          mobile_status.label::text as mobile_label,
+          mobile_status.authorization_reference as mobile_authorization_reference,
+          mobile_config.enabled as mobile_enabled,
+          legacy_outbox.channels,
+          legacy_outbox.message,
+          (select count(*)::integer from outbox where id = ${ids.outbox}::uuid) as outbox_count,
+          (select count(*)::integer from delivery_evidence where id = ${ids.evidence}::uuid) as evidence_count,
+          (select count(*)::integer from dispatch_batches where outbox_id = ${ids.outbox}::uuid) as push_dispatch_count
+        from device_push_token_registrations registration
+        join roster_endpoints endpoint on endpoint.id = ${ids.endpoint}::uuid
+          and endpoint.roster_snapshot_id = ${ids.roster}::uuid
+        join delivery_evidence evidence on evidence.id = ${ids.evidence}::uuid
+        join integration_statuses legacy_status on legacy_status.id = ${ids.expoStatus}::uuid
+        join channel_configurations legacy_config on legacy_config.integration_id = 'expo-push'
+        join lateral (
+          select label, authorization_reference
+          from integration_statuses
+          where integration_id = 'mobile-push'
+          order by observed_at desc, id desc
+          limit 1
+        ) mobile_status on true
+        join channel_configurations mobile_config on mobile_config.integration_id = 'mobile-push'
+        join outbox legacy_outbox on legacy_outbox.id = ${ids.outbox}::uuid
+        where registration.id = ${ids.registration}::uuid
+      `);
+      expect(after).toMatchObject({
+        token: before?.token,
+        provider: 'expo',
+        service_environment: 'production',
+        roster_provider: 'expo',
+        roster_service_environment: 'production',
+        provider_occurred_at: null,
+        expo_authorization_reference: 'retained-expo-authorization-proof',
+        expo_enabled: true,
+        mobile_label: 'configured-unverified',
+        mobile_authorization_reference: null,
+        mobile_enabled: false,
+        outbox_count: 1,
+        evidence_count: 1,
+        push_dispatch_count: 0,
+      });
+      expect(after?.channels).toEqual(before?.channels);
+      expect(after?.message).toEqual(before?.message);
+    } finally {
+      await closeAndDropDisposableDatabase(() => opened.close(), owned);
+    }
+  });
+});
+
 /**
  * Inserts the audience configuration the pre-retirement schema requires.
  *
@@ -103,6 +450,80 @@ async function stageRetiredAudienceConfiguration(
       1,
       '2026-08-06T12:00:00.000Z'::timestamptz
     )
+    on conflict do nothing
+  `);
+}
+
+async function insertLegacyRosterEndpoints(
+  transaction: Parameters<
+    NonNullable<SeedDatabaseOptions['insertRosterEndpoints']>
+  >[0],
+): Promise<void> {
+  await transaction.execute(sql`
+    insert into roster_endpoints (
+      id, roster_snapshot_id, recipient_id, population, channel, status,
+      captured_at, platform, token, email, phone_number
+    ) values
+      ('00000000-0000-4000-8000-000000000060'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000050'::uuid,
+       'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+       'ios', 'synthetic-unroutable:north-one', null, null),
+      ('00000000-0000-4000-8000-000000000061'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000050'::uuid,
+       'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, 'north-one@example.invalid', null),
+      ('00000000-0000-4000-8000-000000000062'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000050'::uuid,
+       'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, null, '+12025550101'),
+      ('00000000-0000-4000-8000-000000000063'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000051'::uuid,
+       'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+       'android', 'synthetic-unroutable:north-two', null, null),
+      ('00000000-0000-4000-8000-000000000064'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000051'::uuid,
+       'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, 'north-two@example.invalid', null),
+      ('00000000-0000-4000-8000-000000000065'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000051'::uuid,
+       'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, null, '+12025550102'),
+      ('00000000-0000-4000-8000-000000000066'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000052'::uuid,
+       'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+       'ios', 'synthetic-unroutable:south-one', null, null),
+      ('00000000-0000-4000-8000-000000000067'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000052'::uuid,
+       'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, 'south-one@example.invalid', null),
+      ('00000000-0000-4000-8000-000000000068'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000052'::uuid,
+       'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, null, '+12025550103'),
+      ('00000000-0000-4000-8000-000000000069'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000053'::uuid,
+       'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+       'android', 'synthetic-unroutable:south-two', null, null),
+      ('00000000-0000-4000-8000-000000000070'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000053'::uuid,
+       'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, 'south-two@example.invalid', null),
+      ('00000000-0000-4000-8000-000000000071'::uuid,
+       '00000000-0000-4000-8000-000000000041'::uuid,
+       '00000000-0000-4000-8000-000000000053'::uuid,
+       'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+       null, null, null, '+12025550104')
     on conflict do nothing
   `);
 }
@@ -594,7 +1015,8 @@ async function insertDeliveryTestStructuralFixture(
     sql`
       insert into roster_endpoints (
         id, roster_snapshot_id, recipient_id, population, channel, status,
-        captured_at, platform, token, email, phone_number
+        captured_at, platform, provider, service_environment, token, email,
+        phone_number
       ) values
       (
         '00000000-0000-4000-8000-000000030006'::uuid,
@@ -605,6 +1027,8 @@ async function insertDeliveryTestStructuralFixture(
         'active'::endpoint_status,
         '2026-08-10T16:01:00.000Z'::timestamptz,
         'ios'::push_platform,
+        'expo',
+        'production',
         'synthetic-unroutable:delivery-test-listed-push',
         null,
         null
@@ -619,6 +1043,8 @@ async function insertDeliveryTestStructuralFixture(
         '2026-08-10T16:01:00.000Z'::timestamptz,
         null,
         null,
+        null,
+        null,
         'synthetic-delivery-test-listed@example.invalid',
         null
       ),
@@ -631,6 +1057,8 @@ async function insertDeliveryTestStructuralFixture(
         'active'::endpoint_status,
         '2026-08-10T16:01:00.000Z'::timestamptz,
         'android'::push_platform,
+        'expo',
+        'production',
         'synthetic-unroutable:delivery-test-unlisted-push',
         null,
         null
@@ -1679,6 +2107,50 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect(discriminatorCount[0]?.count).toBeGreaterThanOrEqual(12);
   });
 
+  test('rejects push roster snapshots without exact provider metadata', async () => {
+    const db = databaseConnection().db;
+    const invalidMetadata = [
+      {
+        id: '00000000-0000-4000-8000-000000043091',
+        provider: null,
+        serviceEnvironment: 'production',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000043092',
+        provider: 'expo',
+        serviceEnvironment: null,
+      },
+    ] as const;
+    for (const candidate of invalidMetadata) {
+      await expectPostgresRejection(async () => {
+        await db.transaction(async (transaction) => {
+          await transaction.execute(
+            sql`set local session_replication_role = replica`,
+          );
+          await transaction.execute(sql`
+              insert into roster_endpoints (
+                id, roster_snapshot_id, recipient_id, population, channel,
+                status, captured_at, platform, provider, service_environment,
+                token
+              ) values (
+                ${candidate.id}::uuid,
+                '00000000-0000-4000-8000-000000000041'::uuid,
+                '00000000-0000-4000-8000-000000000050'::uuid,
+                'synthetic'::roster_population,
+                'push'::notification_channel,
+                'active'::endpoint_status,
+                '2026-08-26T12:00:00.000Z'::timestamptz,
+                'ios'::push_platform,
+                ${candidate.provider},
+                ${candidate.serviceEnvironment},
+                'synthetic-unroutable:missing-provider-metadata'
+              )
+            `);
+        });
+      }, /roster_endpoints_valid_variant/u);
+    }
+  });
+
   test('defers retained channel-history scans while enforcing replacement checks', async () => {
     const db = databaseConnection().db;
     const constraints = await db.execute<{
@@ -2323,6 +2795,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         await applySqlMigrationFile(createdConnection.db, migration);
       }
       await seedDatabase(createdConnection.db, {
+        insertRosterEndpoints: insertLegacyRosterEndpoints,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -2806,6 +3279,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         await applySqlMigrationFile(createdConnection.db, migration);
       }
       await seedDatabase(createdConnection.db, {
+        insertRosterEndpoints: insertLegacyRosterEndpoints,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -7522,7 +7996,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       eventTypes: 8,
       eventTypeVersions: 8,
       eventTypeTemplates: 72,
-      integrationStatuses: 5,
+      integrationStatuses: 6,
       channelConfigurations: 3,
       events: 0,
       outboxMessages: 0,

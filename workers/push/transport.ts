@@ -135,12 +135,14 @@ function canonicalSingletonLiveWork(
     if (workItems.length !== 1) throw new TypeError();
     const item = parseWorkerAttemptWorkItem(workItems[0]);
     if (
-      item.batch.integrationStatus.integrationId !== 'expo-push' ||
+      (item.batch.integrationStatus.integrationId !== 'expo-push' &&
+        item.batch.integrationStatus.integrationId !== 'mobile-push') ||
       item.batch.integrationStatus.label !== 'live-verified' ||
       item.batch.rosterPopulation !== 'staff' ||
       item.batch.channel !== 'push' ||
       item.attempt.channel !== 'push' ||
-      item.endpoint.channel !== 'push'
+      item.endpoint.channel !== 'push' ||
+      item.endpoint.provider !== 'expo'
     ) {
       throw new TypeError();
     }

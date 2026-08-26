@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   DispatchBatchSchema,
+  EndpointStatusRecordSchema,
   RosterSnapshotSchema,
   type Actor,
   type CapabilityInput,
@@ -24,6 +25,7 @@ import {
   executeDeviceCapability,
   parsePushRegistrationBuildAllowlist,
   planPushTokenRegistration,
+  pushRegistrationBuildIsAuthorized,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
   PushEndpointResolutionError,
   resolvePushEndpointPage,
@@ -66,6 +68,7 @@ const registrationInput = Object.freeze({
   deviceEnrollmentId: ids.device,
   platform: 'ios' as const,
   provider: 'expo' as const,
+  serviceEnvironment: 'production' as const,
   build,
   token,
 });
@@ -112,6 +115,8 @@ const resolutionRoster = RosterSnapshotSchema.parse({
           status: 'active',
           capturedAt: now.toISOString(),
           platform: 'ios',
+          provider: 'expo',
+          serviceEnvironment: 'production',
           token: 'synthetic-unroutable:push-device-resolution',
         },
       ],
@@ -202,6 +207,8 @@ function deliveryTestPushResolutionInput() {
             status: 'active',
             capturedAt: now.toISOString(),
             platform: 'ios',
+            provider: 'expo',
+            serviceEnvironment: 'production',
             token: 'ExponentPushToken[approved-synthetic-canary-fixture]',
           },
         ],
@@ -219,6 +226,8 @@ function deliveryTestPushResolutionInput() {
             status: 'active',
             capturedAt: now.toISOString(),
             platform: 'android',
+            provider: 'expo',
+            serviceEnvironment: 'production',
             token: 'ExponentPushToken[ordinary-staff-must-not-send]',
           },
         ],
@@ -448,6 +457,8 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
     return {
       deviceEnrollmentId: input.deviceEnrollmentId,
       platform: input.platform,
+      provider: input.provider,
+      serviceEnvironment: input.serviceEnvironment,
       status: 'registered',
     };
   }
@@ -472,11 +483,22 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
     input: CapabilityInput<'record-endpoint-status'>,
   ): Promise<EndpointStatusRecord> {
     this.endpointStatusCalls.push(input);
-    return {
+    if (input.reasonCode === 'APNS_UNREGISTERED') {
+      return EndpointStatusRecordSchema.parse({
+        id: ids.status,
+        rosterSnapshotId: input.rosterSnapshotId,
+        recipientId: input.recipientId,
+        endpointId: input.endpointId,
+        status: input.status,
+        reasonCode: input.reasonCode,
+        recordedAt: now.toISOString(),
+      });
+    }
+    return EndpointStatusRecordSchema.parse({
       id: ids.status,
       ...input,
       recordedAt: now.toISOString(),
-    };
+    });
   }
 
   public async loadPushTokenRegistrationReplay(): Promise<null> {
@@ -515,16 +537,17 @@ function testStore(transaction = new TestDeviceTransaction()): {
 describe('device capability registration planning', () => {
   test('keeps one identical active token and retires every duplicate or replacement', () => {
     const active = [
-      { id: ids.registrationA, token },
-      { id: ids.registrationB, token: `${token}-old` },
+      { id: ids.registrationA, provider: 'expo', token },
+      { id: ids.registrationB, provider: 'expo', token: `${token}-old` },
+      { id: ids.endpoint, provider: 'apns', token: `${token}-native` },
     ];
 
-    expect(planPushTokenRegistration(active, token)).toEqual({
+    expect(planPushTokenRegistration(active, token, 'expo')).toEqual({
       keepRegistrationId: ids.registrationA,
       registrationRequired: false,
       unregisterRegistrationIds: [ids.registrationB],
     });
-    expect(planPushTokenRegistration(active, `${token}-new`)).toEqual({
+    expect(planPushTokenRegistration(active, `${token}-new`, 'expo')).toEqual({
       keepRegistrationId: null,
       registrationRequired: true,
       unregisterRegistrationIds: [ids.registrationA, ids.registrationB],
@@ -535,10 +558,11 @@ describe('device capability registration planning', () => {
     expect(
       planPushTokenRegistration(
         [
-          { id: ids.registrationA, token },
-          { id: ids.registrationB, token },
+          { id: ids.registrationA, provider: 'expo', token },
+          { id: ids.registrationB, provider: 'expo', token },
         ],
         token,
+        'expo',
       ),
     ).toEqual({
       keepRegistrationId: ids.registrationA,
@@ -720,11 +744,36 @@ describe('pinned push endpoint resolution', () => {
 });
 
 describe('canonical device capabilities', () => {
+  test('rejects a direct registration without its atomic Expo fallback', async () => {
+    const { store, transaction } = testStore();
+
+    await expect(
+      executeDeviceCapability(
+        'register-push-token',
+        {
+          ...registrationInput,
+          provider: 'apns',
+          token: 'synthetic-apns-token-material',
+        },
+        humanInvocation(true),
+        store,
+      ),
+    ).rejects.toThrow();
+    expect(transaction.claimedInput).toBeNull();
+    expect(transaction.registrationActor).toBeNull();
+  });
+
   test('registers for the actor session and keeps token material out of durable metadata', async () => {
     const { store, transaction } = testStore();
+    const nativeToken = 'synthetic-apns-token-material';
     const result = await executeDeviceCapability(
       'register-push-token',
-      registrationInput,
+      {
+        ...registrationInput,
+        provider: 'apns',
+        token: nativeToken,
+        expoFallbackToken: token,
+      },
       humanInvocation(true),
       store,
     );
@@ -732,14 +781,20 @@ describe('canonical device capabilities', () => {
     expect(result).toEqual({
       deviceEnrollmentId: ids.device,
       platform: 'ios',
+      provider: 'apns',
+      serviceEnvironment: 'production',
       status: 'registered',
     });
     expect(transaction.registrationActor).toEqual(humanActor());
     expect(transaction.completed).toHaveLength(1);
     expect(JSON.stringify(transaction.completed)).not.toContain(token);
+    expect(JSON.stringify(transaction.completed)).not.toContain(nativeToken);
     expect(JSON.stringify(transaction.transactionAudits)).not.toContain(token);
+    expect(JSON.stringify(transaction.transactionAudits)).not.toContain(
+      nativeToken,
+    );
     expect(transaction.completed[0]?.resultReference).toBe(
-      `push-registration:${ids.device}:ios`,
+      `push-registration:${ids.device}:ios:apns:production`,
     );
   });
 
@@ -749,11 +804,67 @@ describe('canonical device capabilities', () => {
     expect(
       parsePushRegistrationBuildAllowlist(
         JSON.stringify([
-          { platform: 'ios', provider: 'expo', build },
-          { platform: 'ios', provider: 'expo', build },
+          {
+            platform: 'ios',
+            provider: 'expo',
+            serviceEnvironment: 'production',
+            build,
+          },
+          {
+            platform: 'ios',
+            provider: 'expo',
+            serviceEnvironment: 'production',
+            build,
+          },
         ]),
       ),
     ).toEqual([]);
+
+    const productionAllowlist = parsePushRegistrationBuildAllowlist(
+      JSON.stringify([
+        {
+          platform: 'ios',
+          provider: 'expo',
+          serviceEnvironment: 'production',
+          build,
+        },
+      ]),
+    );
+    expect(
+      pushRegistrationBuildIsAuthorized(registrationInput, productionAllowlist),
+    ).toBe(true);
+    expect(
+      pushRegistrationBuildIsAuthorized(
+        { ...registrationInput, serviceEnvironment: 'development' },
+        productionAllowlist,
+      ),
+    ).toBe(false);
+    const atomicInput = {
+      ...registrationInput,
+      provider: 'apns' as const,
+      token: 'synthetic-apns-token-material',
+      expoFallbackToken: token,
+    };
+    expect(
+      pushRegistrationBuildIsAuthorized(
+        { ...atomicInput, expoFallbackToken: undefined },
+        productionAllowlist,
+      ),
+    ).toBe(false);
+    expect(
+      pushRegistrationBuildIsAuthorized(atomicInput, productionAllowlist),
+    ).toBe(false);
+    expect(
+      pushRegistrationBuildIsAuthorized(atomicInput, [
+        ...productionAllowlist,
+        {
+          platform: 'ios',
+          provider: 'apns',
+          serviceEnvironment: 'production',
+          build,
+        },
+      ]),
+    ).toBe(true);
 
     const denied = testStore();
     denied.transaction.registrationAuthorized = false;

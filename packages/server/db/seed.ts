@@ -88,6 +88,7 @@ const ids = {
   eventTypeVersionWildlifeDrill: '00000000-0000-4000-8000-000000000207',
   integrationGoogleGroups: '00000000-0000-4000-8000-000000000300',
   integrationExpoPush: '00000000-0000-4000-8000-000000000301',
+  integrationMobilePush: '00000000-0000-4000-8000-000000000305',
   integrationSesEmail: '00000000-0000-4000-8000-000000000302',
   integrationAwsEumSms: '00000000-0000-4000-8000-000000000303',
   integrationS3Media: '00000000-0000-4000-8000-000000000304',
@@ -203,6 +204,8 @@ function recipient(
         status: 'active',
         capturedAt: SEED_TIMESTAMP,
         platform,
+        provider: 'expo',
+        serviceEnvironment: 'production',
         token: `synthetic-unroutable:${endpointKey}`,
       },
       {
@@ -503,6 +506,15 @@ const integrationStatusRows = [
     observedAt: SEED_TIMESTAMP,
   }),
   IntegrationStatusSchema.parse({
+    integrationId: 'mobile-push',
+    label: 'mocked',
+    verifiedAt: null,
+    verifiedByUserId: null,
+    authorizationReference: null,
+    reasonCode: null,
+    observedAt: SEED_TIMESTAMP,
+  }),
+  IntegrationStatusSchema.parse({
     integrationId: 'ses-email',
     label: 'mocked',
     verifiedAt: null,
@@ -534,6 +546,7 @@ const integrationStatusRows = [
 const integrationStatusIds = [
   ids.integrationGoogleGroups,
   ids.integrationExpoPush,
+  ids.integrationMobilePush,
   ids.integrationSesEmail,
   ids.integrationAwsEumSms,
   ids.integrationS3Media,
@@ -541,21 +554,21 @@ const integrationStatusIds = [
 
 const channelConfigurationRows = [
   ChannelConfigurationSchema.parse({
-    integrationId: 'expo-push',
-    enabled: false,
-    status: integrationStatusRows[1],
-    changedAt: SEED_TIMESTAMP,
-  }),
-  ChannelConfigurationSchema.parse({
-    integrationId: 'ses-email',
+    integrationId: 'mobile-push',
     enabled: false,
     status: integrationStatusRows[2],
     changedAt: SEED_TIMESTAMP,
   }),
   ChannelConfigurationSchema.parse({
-    integrationId: 'aws-eum-sms',
+    integrationId: 'ses-email',
     enabled: false,
     status: integrationStatusRows[3],
+    changedAt: SEED_TIMESTAMP,
+  }),
+  ChannelConfigurationSchema.parse({
+    integrationId: 'aws-eum-sms',
+    enabled: false,
+    status: integrationStatusRows[4],
     changedAt: SEED_TIMESTAMP,
   }),
 ];
@@ -568,7 +581,7 @@ export interface ReferenceSeedSummary {
   readonly eventTypes: 8;
   readonly eventTypeVersions: 8;
   readonly eventTypeTemplates: 72;
-  readonly integrationStatuses: 5;
+  readonly integrationStatuses: 6;
   readonly channelConfigurations: 3;
   readonly events: 0;
   readonly outboxMessages: 0;
@@ -589,7 +602,7 @@ const referenceSeedSummary: ReferenceSeedSummary = {
   eventTypes: 8,
   eventTypeVersions: 8,
   eventTypeTemplates: 72,
-  integrationStatuses: 5,
+  integrationStatuses: 6,
   channelConfigurations: 3,
   events: 0,
   outboxMessages: 0,
@@ -670,8 +683,8 @@ export async function seedReferenceData(
           integrationId: configuration.integrationId,
           enabled: configuration.enabled,
           statusId:
-            configuration.integrationId === 'expo-push'
-              ? ids.integrationExpoPush
+            configuration.integrationId === 'mobile-push'
+              ? ids.integrationMobilePush
               : configuration.integrationId === 'ses-email'
                 ? ids.integrationSesEmail
                 : ids.integrationAwsEumSms,
@@ -712,6 +725,10 @@ export interface SeedDatabaseOptions {
    * source configuration that references them.
    */
   readonly insertGroupSources?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
+  /** Writes historical endpoint rows when the current provider columns do not exist. */
+  readonly insertRosterEndpoints?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
 }
@@ -884,27 +901,36 @@ export async function seedDatabase(
         ),
       )
       .onConflictDoNothing();
-    await transaction
-      .insert(rosterEndpoints)
-      .values(
-        rosterSnapshot.recipients.flatMap((rosterRecipient) =>
-          rosterRecipient.endpoints.map((endpoint) => ({
-            id: endpoint.id,
-            rosterSnapshotId: rosterSnapshot.id,
-            recipientId: rosterRecipient.id,
-            population: rosterRecipient.population,
-            channel: endpoint.channel,
-            status: endpoint.status,
-            capturedAt: SEED_TIME,
-            platform: endpoint.channel === 'push' ? endpoint.platform : null,
-            token: endpoint.channel === 'push' ? endpoint.token : null,
-            email: endpoint.channel === 'email' ? endpoint.email : null,
-            phoneNumber:
-              endpoint.channel === 'sms' ? endpoint.phoneNumber : null,
-          })),
-        ),
-      )
-      .onConflictDoNothing();
+    if (options.insertRosterEndpoints !== undefined) {
+      await options.insertRosterEndpoints(transaction);
+    } else {
+      await transaction
+        .insert(rosterEndpoints)
+        .values(
+          rosterSnapshot.recipients.flatMap((rosterRecipient) =>
+            rosterRecipient.endpoints.map((endpoint) => ({
+              id: endpoint.id,
+              rosterSnapshotId: rosterSnapshot.id,
+              recipientId: rosterRecipient.id,
+              population: rosterRecipient.population,
+              channel: endpoint.channel,
+              status: endpoint.status,
+              capturedAt: SEED_TIME,
+              platform: endpoint.channel === 'push' ? endpoint.platform : null,
+              provider: endpoint.channel === 'push' ? endpoint.provider : null,
+              serviceEnvironment:
+                endpoint.channel === 'push'
+                  ? endpoint.serviceEnvironment
+                  : null,
+              token: endpoint.channel === 'push' ? endpoint.token : null,
+              email: endpoint.channel === 'email' ? endpoint.email : null,
+              phoneNumber:
+                endpoint.channel === 'sms' ? endpoint.phoneNumber : null,
+            })),
+          ),
+        )
+        .onConflictDoNothing();
+    }
   });
 
   await seedReferenceData(database);

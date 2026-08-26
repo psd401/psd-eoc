@@ -248,6 +248,8 @@ export class PushEndpointEligibilityClient
       recipientId: workItem.attempt.recipientId,
       endpointId: workItem.attempt.endpointId,
       platform: workItem.endpoint.platform,
+      provider: workItem.endpoint.provider,
+      serviceEnvironment: workItem.endpoint.serviceEnvironment,
       tokenDigest: createHash('sha256')
         .update(workItem.endpoint.token, 'utf8')
         .digest('hex'),
