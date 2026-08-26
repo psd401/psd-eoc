@@ -353,7 +353,7 @@ jobs:
             --started-by "failure-drill-$GITHUB_RUN_ID" \
             --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=DISABLED}" \
             --query 'tasks[0].taskArn' --output text)
-          for attempt in {1..160}; do
+          for _ in {1..160}; do
             status=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task_arn" \
               --query 'tasks[0].lastStatus' --output text)
             [[ "$status" == "STOPPED" ]] && break
@@ -432,7 +432,7 @@ jobs:
             --no-notices
 
           stack_absent=false
-          for attempt in {1..60}; do
+          for _ in {1..60}; do
             set +e
             lookup=$(aws cloudformation describe-stacks \
               --stack-name "$FAILURE_DRILL_STACK_NAME" --output json 2>&1)
