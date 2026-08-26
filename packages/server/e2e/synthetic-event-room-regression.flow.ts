@@ -112,11 +112,16 @@ test.describe('synthetic-event-room-regression', () => {
         .from(events)
         .where(eq(events.id, fixture.issue344EventId));
       expect(storedEvent?.status).toBe('active');
-      const entries = await connection.db
-        .select({ kind: journalEntries.kind, payload: journalEntries.payload })
-        .from(journalEntries)
-        .where(eq(journalEntries.eventId, fixture.issue344EventId))
-        .orderBy(asc(journalEntries.sequence));
+      const readEntries = () =>
+        connection.db
+          .select({
+            kind: journalEntries.kind,
+            payload: journalEntries.payload,
+          })
+          .from(journalEntries)
+          .where(eq(journalEntries.eventId, fixture.issue344EventId))
+          .orderBy(asc(journalEntries.sequence));
+      const entries = await readEntries();
       expect(
         entries.some(
           ({ kind, payload }) =>
@@ -124,14 +129,17 @@ test.describe('synthetic-event-room-regression', () => {
             (payload as Readonly<{ text?: unknown }>).text === LATE_UPDATE,
         ),
       ).toBe(true);
-      expect(
-        entries.some(
-          ({ kind, payload }) =>
-            kind === 'location' &&
-            (payload as Readonly<{ reason?: unknown }>).reason ===
-              UNKNOWN_REASON,
-        ),
-      ).toBe(true);
+      await expect
+        .poll(async () => {
+          const durableEntries = await readEntries();
+          return durableEntries.some(
+            ({ kind, payload }) =>
+              kind === 'location' &&
+              (payload as Readonly<{ reason?: unknown }>).reason ===
+                UNKNOWN_REASON,
+          );
+        })
+        .toBe(true);
     } finally {
       await connection.close();
     }

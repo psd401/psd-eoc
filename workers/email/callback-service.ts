@@ -7,6 +7,7 @@ import {
 } from '@aws-sdk/client-sqs';
 
 import { parseSnsCallbackEnvelope } from './sns-signature';
+import { sqsQueueUrlForArn } from './aws-arn';
 
 const VISIBILITY_TIMEOUT_SECONDS = 120;
 const VISIBILITY_HEARTBEAT_MILLISECONDS = 30_000;
@@ -23,6 +24,7 @@ type CallbackLogEvent = Readonly<{
 
 export interface EmailCallbackServiceConfiguration {
   readonly queueUrl: string;
+  readonly queueArn: string;
   readonly expectedTopicArn: string;
   readonly serviceOrigin: string;
 }
@@ -62,20 +64,20 @@ function required(
   return value;
 }
 
-function exactHttps(value: string, kind: 'origin' | 'queue'): string {
+function exactHttpsOrigin(value: string): string {
   try {
     const url = new URL(value);
     if (
       url.protocol !== 'https:' ||
       url.username !== '' ||
       url.password !== '' ||
-      (kind === 'origin' &&
-        (url.pathname !== '/' || url.search !== '' || url.hash !== '')) ||
-      (kind === 'queue' && !url.hostname.startsWith('sqs.'))
+      url.pathname !== '/' ||
+      url.search !== '' ||
+      url.hash !== ''
     ) {
       throw new Error();
     }
-    return kind === 'origin' ? url.origin : url.toString();
+    return url.origin;
   } catch {
     throw new EmailCallbackServiceError('INVALID_CONFIGURATION');
   }
@@ -99,14 +101,21 @@ export function readEmailCallbackServiceConfiguration(
   ) {
     throw new EmailCallbackServiceError('INVALID_CONFIGURATION');
   }
-  return Object.freeze({
-    queueUrl: exactHttps(
+  const queueArn = required(environment, 'EMAIL_CALLBACK_QUEUE_ARN', 2_048);
+  let queueUrl: string;
+  try {
+    queueUrl = sqsQueueUrlForArn(
       required(environment, 'EMAIL_CALLBACK_QUEUE_URL', 2_048),
-      'queue',
-    ),
-    serviceOrigin: exactHttps(
+      queueArn,
+    );
+  } catch {
+    throw new EmailCallbackServiceError('INVALID_CONFIGURATION');
+  }
+  return Object.freeze({
+    queueUrl,
+    queueArn,
+    serviceOrigin: exactHttpsOrigin(
       required(environment, 'PSD_EOC_SERVICE_ORIGIN', 2_048),
-      'origin',
     ),
     expectedTopicArn,
   });

@@ -2619,6 +2619,18 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(JSON.stringify(callbackContainer.LogConfiguration)).toContain(
       'EmailCallbackWorkerLogGroup',
     );
+    const callbackEnvironment = new Map(
+      asArray(callbackContainer.Environment).map((entry) => {
+        const variable = asRecord(entry);
+        return [variable.Name, variable.Value];
+      }),
+    );
+    expect(
+      JSON.stringify(callbackEnvironment.get('EMAIL_CALLBACK_QUEUE_ARN')),
+    ).toContain('EmailCallbackQueue');
+    expect(
+      JSON.stringify(callbackEnvironment.get('EMAIL_CALLBACK_QUEUE_URL')),
+    ).toContain('EmailCallbackQueue');
     expect(
       resourceEntries('AWS::Logs::LogGroup').some(
         ([, resource]) =>
