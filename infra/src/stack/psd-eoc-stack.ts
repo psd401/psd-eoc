@@ -56,6 +56,7 @@ import {
   EMAIL_WORKER_LOG_GROUP_NAME,
   PUSH_DEAD_LETTER_QUEUE_NAME,
   PUSH_QUEUE_NAME,
+  PUSH_WORKER_LOG_GROUP_NAME,
   SMS_DEAD_LETTER_QUEUE_NAME,
   SMS_QUEUE_NAME,
   DEPLOYMENT_ENVIRONMENT,
@@ -163,6 +164,29 @@ export class PsdEocStack extends Stack {
         "Immutable digest already present in this stack's ECR repository; the all-zero sentinel is accepted only while ProvisionApplication=false.",
       type: 'String',
     });
+    const enableExpoPushWorker = new CfnParameter(
+      this,
+      'EnableExpoPushWorker',
+      {
+        allowedValues: ['false', 'true'],
+        default: 'false',
+        description:
+          'Scale the isolated Expo push worker from zero to one only after credentials, exact builds, and the integration truth record are verified.',
+        type: 'String',
+      },
+    );
+    const expoCredentialVerificationReference = new CfnParameter(
+      this,
+      'ExpoCredentialVerificationReference',
+      {
+        allowedPattern: '^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{0,254})$',
+        default: 'UNVERIFIED',
+        description:
+          'Token-free reference to retained APNs, FCM, EAS, and Expo credential verification evidence.',
+        maxLength: 255,
+        type: 'String',
+      },
+    );
     const bootstrapImageDigest = new CfnParameter(
       this,
       'BootstrapImageDigest',
@@ -299,6 +323,43 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldRunExpoPushWorker = new CfnCondition(
+      this,
+      'ShouldRunExpoPushWorker',
+      {
+        expression: Fn.conditionEquals(
+          enableExpoPushWorker.valueAsString,
+          'true',
+        ),
+      },
+    );
+    new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
+      assertions: [
+        {
+          assert: Fn.conditionAnd(
+            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                expoCredentialVerificationReference.valueAsString,
+                'UNVERIFIED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                appImageDigest.valueAsString,
+                IMAGE_DIGEST_SENTINEL,
+              ),
+            ),
+          ),
+          assertDescription:
+            'EnableExpoPushWorker=true requires the live application, a reviewed image digest, and retained credential-verification evidence.',
+        },
+      ],
+      ruleCondition: Fn.conditionEquals(
+        enableExpoPushWorker.valueAsString,
+        'true',
+      ),
+    });
     new CfnRule(this, 'ApplicationRequiresPublishedDigest', {
       assertions: [
         {
@@ -517,6 +578,64 @@ export class PsdEocStack extends Stack {
         },
         removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/workers/attempt-execution-token`,
+      },
+    );
+    const pushEndpointWorkerSecret = new secretsmanager.Secret(
+      this,
+      'PushEndpointWorkerSecret',
+      {
+        description:
+          'Generated bearer for push endpoint eligibility and token-free invalidation routes.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/workers/push-endpoint-token`,
+      },
+    );
+    const expoPushRuntimeWorkerSecret = new secretsmanager.Secret(
+      this,
+      'ExpoPushRuntimeWorkerSecret',
+      {
+        description:
+          'Generated bearer for Expo provider claims, receipt state, retry schedules, and work resolution.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/workers/expo-push-runtime-token`,
+      },
+    );
+    const expoAccessTokenSecret = new secretsmanager.Secret(
+      this,
+      'ExpoAccessTokenSecret',
+      {
+        description:
+          'Expo server access token and explicit verification status. Both fields must be replaced through Secrets Manager before the worker is enabled.',
+        generateSecretString: {
+          excludePunctuation: true,
+          generateStringKey: 'accessToken',
+          passwordLength: 64,
+          secretStringTemplate: JSON.stringify({ status: 'UNCONFIGURED' }),
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/providers/expo-access-token`,
+      },
+    );
+    const pushRegistrationBuildAllowlistSecret = new secretsmanager.Secret(
+      this,
+      'PushRegistrationBuildAllowlistSecret',
+      {
+        description:
+          'Protected JSON allowlist of exact native application, version, build, and EAS project identities permitted to register for push.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/mobile/push-build-allowlist`,
       },
     );
 
@@ -1088,6 +1207,163 @@ export class PsdEocStack extends Stack {
     databaseApplicationSecret.grantRead(bootstrapTaskExecutionRole);
     initialAccessGroupSecret.grantRead(bootstrapTaskExecutionRole);
 
+    // The push task is fully deployed but scaled to zero by default. This lets
+    // infrastructure, IAM, alarms, and image composition be reviewed without
+    // consuming a retained queue item or crossing the Expo provider boundary.
+    const pushWorkerLogGroup = new logs.LogGroup(this, 'PushWorkerLogGroup', {
+      logGroupName: PUSH_WORKER_LOG_GROUP_NAME,
+      removalPolicy: RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.TWO_WEEKS,
+    });
+    const pushWorkerSecurityGroup = new ec2.SecurityGroup(
+      this,
+      'PushWorkerSecurityGroup',
+      {
+        allowAllOutbound: false,
+        description:
+          'HTTPS-only egress for the isolated Expo push worker; no database route.',
+        securityGroupName: 'psd-eoc-push-worker',
+        vpc: network as unknown as ec2.IVpc,
+      },
+    );
+    pushWorkerSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS to the server, Expo, ECR, logs, Secrets Manager, and SQS through NAT.',
+    );
+    const pushWorkerTaskExecutionRole = new iam.Role(
+      this,
+      'PushWorkerTaskExecutionRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Pulls the reviewed image and injects only Expo push worker credentials.',
+      },
+    );
+    const pushWorkerTaskRole = new iam.Role(this, 'PushWorkerTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description:
+        'Consumes and retries only the Expo push queue; provider access uses the protected HTTPS token.',
+    });
+    const pushWorkerTaskDefinition = new ecs.FargateTaskDefinition(
+      this,
+      'PushWorkerTaskDefinition',
+      {
+        cpu: 256,
+        executionRole: pushWorkerTaskExecutionRole,
+        family: 'psd-eoc-expo-push-worker',
+        memoryLimitMiB: 512,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.X86_64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+        taskRole: pushWorkerTaskRole,
+      },
+    );
+    pushWorkerTaskDefinition.addVolume({ name: 'push-worker-tmp' });
+    const pushWorkerContainer = pushWorkerTaskDefinition.addContainer(
+      'expo-push-worker',
+      {
+        command: ['bun', 'workers/push/service.ts'],
+        environment: {
+          AWS_REGION: region,
+          NODE_ENV: 'production',
+          PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE:
+            expoCredentialVerificationReference.valueAsString,
+          PSD_EOC_EXPO_PUSH_PROVIDER_AUTHORIZED: Fn.conditionIf(
+            shouldRunExpoPushWorker.logicalId,
+            'true',
+            'false',
+          ).toString(),
+          PSD_EOC_EXPO_PUSH_RUNTIME_MODE: Fn.conditionIf(
+            shouldRunExpoPushWorker.logicalId,
+            'enabled',
+            'dark',
+          ).toString(),
+          PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
+          PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
+          SOURCE_SHA: sourceSha.valueAsString,
+          TMPDIR: '/tmp',
+        },
+        essential: true,
+        image: ecs.ContainerImage.fromRegistry(
+          Fn.join('', [
+            imageRepository.repositoryUri,
+            '@',
+            appImageDigest.valueAsString,
+          ]),
+        ),
+        logging: ecs.LogDrivers.awsLogs({
+          logGroup: pushWorkerLogGroup,
+          streamPrefix: 'expo-push-worker',
+        }),
+        readonlyRootFilesystem: true,
+        secrets: {
+          EXPO_ACCESS_TOKEN: ecs.Secret.fromSecretsManager(
+            expoAccessTokenSecret as unknown as secretsmanager.ISecret,
+            'accessToken',
+          ),
+          PSD_EOC_EXPO_CREDENTIAL_STATUS: ecs.Secret.fromSecretsManager(
+            expoAccessTokenSecret as unknown as secretsmanager.ISecret,
+            'status',
+          ),
+          PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            attemptExecutionWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_DELIVERY_STATE_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            deliveryStateWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            expoPushRuntimeWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            pushEndpointWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+        },
+      },
+    );
+    pushWorkerContainer.addMountPoints({
+      containerPath: '/tmp',
+      readOnly: false,
+      sourceVolume: 'push-worker-tmp',
+    });
+    imageRepository.grantPull(pushWorkerTaskExecutionRole);
+    for (const secret of [
+      expoAccessTokenSecret,
+      attemptExecutionWorkerSecret,
+      deliveryStateWorkerSecret,
+      expoPushRuntimeWorkerSecret,
+      pushEndpointWorkerSecret,
+    ]) {
+      secret.grantRead(pushWorkerTaskExecutionRole);
+    }
+    queuePairs.Push.queue.grantConsumeMessages(pushWorkerTaskRole);
+    queuePairs.Push.queue.grantSendMessages(pushWorkerTaskRole);
+    const pushWorkerService = new ecs.FargateService(
+      this,
+      'PushWorkerService',
+      {
+        assignPublicIp: false,
+        cluster: bootstrapCluster as unknown as ecs.ICluster,
+        circuitBreaker: { rollback: true },
+        desiredCount: 0,
+        enableExecuteCommand: false,
+        maxHealthyPercent: 200,
+        minHealthyPercent: 100,
+        securityGroups: [pushWorkerSecurityGroup],
+        serviceName: 'psd-eoc-expo-push-worker',
+        taskDefinition: pushWorkerTaskDefinition,
+        vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
+      },
+    );
+    const pushWorkerCfnService = pushWorkerService.node
+      .defaultChild as ecs.CfnService;
+    pushWorkerCfnService.desiredCount = Fn.conditionIf(
+      shouldRunExpoPushWorker.logicalId,
+      1,
+      0,
+    ) as unknown as number;
+
     const accessSyncTaskExecutionRole = new iam.Role(
       this,
       'AccessSyncTaskExecutionRole',
@@ -1250,6 +1526,9 @@ export class PsdEocStack extends Stack {
       apiSaltSecret.grantRead(runtimeRole),
       deliveryStateWorkerSecret.grantRead(runtimeRole),
       attemptExecutionWorkerSecret.grantRead(runtimeRole),
+      pushEndpointWorkerSecret.grantRead(runtimeRole),
+      expoPushRuntimeWorkerSecret.grantRead(runtimeRole),
+      pushRegistrationBuildAllowlistSecret.grantRead(runtimeRole),
       iam.Grant.addToPrincipal({
         actions: ['sqs:GetQueueAttributes'],
         grantee: runtimeRole,
@@ -1358,6 +1637,18 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
                   value: attemptExecutionWorkerSecret.secretArn,
+                },
+                {
+                  name: 'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
+                  value: pushEndpointWorkerSecret.secretArn,
+                },
+                {
+                  name: 'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
+                  value: expoPushRuntimeWorkerSecret.secretArn,
+                },
+                {
+                  name: 'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST',
+                  value: pushRegistrationBuildAllowlistSecret.secretArn,
                 },
                 {
                   name: 'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
@@ -1482,8 +1773,8 @@ export class PsdEocStack extends Stack {
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
 
     // Alarms. Until the canary and the metrics collector have the credentials
-    // they need, only the tier with a real publisher is deployed; see
-    // `configureInfrastructureMonitoring`.
+    // they need, only infrastructure publishers and metrics conditionally
+    // paired with the Expo worker are deployed; see infrastructure monitoring.
     configureInfrastructureMonitoring(this, {
       applicationCondition: shouldProvisionApplication,
       appRunnerService,
@@ -1499,6 +1790,8 @@ export class PsdEocStack extends Stack {
       operationsAlarmTopic,
       operationsKey,
       monitoringRunbookBaseUrl,
+      pushWorkerCondition: shouldRunExpoPushWorker,
+      pushWorkerLogGroup,
       sesIdentityDomain,
     });
 
@@ -1603,6 +1896,46 @@ export class PsdEocStack extends Stack {
     });
     new CfnOutput(this, 'EmailWorkerLogGroupName', {
       value: emailWorkerLogGroup.logGroupName,
+    });
+    new CfnOutput(this, 'PushQueueArn', {
+      value: queuePairs.Push.queue.queueArn,
+    });
+    new CfnOutput(this, 'PushQueueUrl', {
+      value: queuePairs.Push.queue.queueUrl,
+    });
+    new CfnOutput(this, 'PushDeadLetterQueueArn', {
+      value: queuePairs.Push.deadLetterQueue.queueArn,
+    });
+    new CfnOutput(this, 'PushWorkerTaskDefinitionArn', {
+      value: pushWorkerTaskDefinition.taskDefinitionArn,
+    });
+    new CfnOutput(this, 'PushWorkerServiceArn', {
+      value: pushWorkerService.serviceArn,
+    });
+    new CfnOutput(this, 'PushWorkerTaskRoleArn', {
+      value: pushWorkerTaskRole.roleArn,
+    });
+    new CfnOutput(this, 'PushWorkerTaskExecutionRoleArn', {
+      value: pushWorkerTaskExecutionRole.roleArn,
+    });
+    new CfnOutput(this, 'PushWorkerLogGroupName', {
+      value: pushWorkerLogGroup.logGroupName,
+    });
+    new CfnOutput(this, 'ExpoAccessTokenSecretArn', {
+      value: expoAccessTokenSecret.secretArn,
+    });
+    new CfnOutput(this, 'PushRegistrationBuildAllowlistSecretArn', {
+      value: pushRegistrationBuildAllowlistSecret.secretArn,
+    });
+    new CfnOutput(this, 'PushWorkerDeploymentState', {
+      value: Fn.conditionIf(
+        shouldRunExpoPushWorker.logicalId,
+        'enabled',
+        'dark-scaled-to-zero',
+      ).toString(),
+    });
+    new CfnOutput(this, 'PushIntegrationTruth', {
+      value: 'mocked',
     });
     new CfnOutput(this, 'SesIdentityArn', {
       value: Arn.format(

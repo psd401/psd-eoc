@@ -63,6 +63,8 @@ Repository/environment variables:
 - `AWS_DEPLOY_ROLE_ARN`
 - `AWS_REGION`
 - `ECR_REPOSITORY`
+- `EXPO_CREDENTIAL_VERIFICATION_REFERENCE`
+- `EXPO_PUSH_WORKER_ENABLED`
 - `GOOGLE_GROUPS_SECRET_ARN`
 - `GOOGLE_OAUTH_SECRET_ARN`
 - `INITIAL_ACCESS_GROUP_ID`
@@ -102,6 +104,8 @@ The current synthesized stack contains exactly these parameters:
 - `BootstrapImageDigest`
 - `BootstrapSourceSha`
 - `BootstrapVersion`
+- `EnableExpoPushWorker`
+- `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
 - `GoogleOauthSecretArn`
 - `InitialAccessGroupEmail`
@@ -116,7 +120,10 @@ The current synthesized stack contains exactly these parameters:
 <!-- docs-contract:template-parameters:end -->
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
-parameter and has a default. The workflow supplies the other 14 explicitly.
+parameter and has a default. `EnableExpoPushWorker` and
+`ExpoCredentialVerificationReference` default to the safe, dark state when
+their protected workflow variables are absent. The workflow supplies the
+other 16 explicitly.
 
 ### Parameters supplied by the workflow
 
@@ -125,6 +132,8 @@ parameter and has a default. The workflow supplies the other 14 explicitly.
 - `AppImageDigest`
 - `BootstrapImageDigest`
 - `BootstrapSourceSha`
+- `EnableExpoPushWorker`
+- `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
 - `GoogleOauthSecretArn`
 - `InitialAccessGroupEmail`
@@ -143,6 +152,68 @@ composition: `MonitoringCanaryCredentialSecretArn`,
 `MonitoringCanaryFacilityId`, and `MonitoringCanaryEventTypeVersionId`. The
 current stack calls `configureInfrastructureMonitoring`, not the full canary
 composition, so the deploy workflow does not supply them.
+
+## Expo push activation boundary
+
+The stack always creates the worker definition, protected secrets, queue/DLQ,
+log group, and conditional queue, DLQ, provider latency, incomplete handoff,
+stuck-outbox, receipt polling, and worker-health alarms. Its desired count
+is controlled by `EnableExpoPushWorker`, which defaults to false. The worker
+then performs independent fail-closed startup checks for the credential
+evidence reference and exact `verified` structured-secret status; those checks
+happen after a task starts and do not change desired count. The mobile client
+also denies registration unless the public build opt-in is exactly `true` and
+the server accepts the exact native build tuple from its protected allowlist.
+
+Before setting `EXPO_PUSH_WORKER_ENABLED` to `true`, an operator must establish
+all of these protected values without copying their contents into a terminal
+log, ticket, workflow, or source file:
+
+- `/psd-eoc/providers/expo-access-token` is one JSON secret containing the
+  exact keys `accessToken` and `status`; `status` must be exactly `verified`.
+  The stack-generated `UNCONFIGURED` value makes worker startup fail closed.
+- `/psd-eoc/mobile/push-build-allowlist` is a JSON array of exact build
+  authorizations. Each entry contains `platform`, the literal provider `expo`,
+  and `build.applicationId`, `build.applicationVersion`,
+  `build.nativeBuildVersion`, `build.expoProjectId`, and the literal
+  `build.updateMode` value `embedded-only`.
+- `EXPO_CREDENTIAL_VERIFICATION_REFERENCE` is a bounded, non-secret reference
+  to retained EAS/APNs/FCM credential and exact-build evidence. `UNVERIFIED` is
+  rejected.
+
+For example, this is the shape of one synthetic allowlist entry; it is not an
+approved build:
+
+```json
+[
+  {
+    "platform": "ios",
+    "provider": "expo",
+    "build": {
+      "applicationId": "org.example.eoc",
+      "applicationVersion": "1.2.3",
+      "nativeBuildVersion": "42",
+      "expoProjectId": "00000000-0000-4000-8000-000000000278",
+      "updateMode": "embedded-only"
+    }
+  }
+]
+```
+
+Development and preview EAS profiles set push registration to `false`.
+Production sets the public client opt-in to `true`, but that flag alone grants
+nothing: a missing, malformed, duplicate, or nonmatching protected server
+allowlist denies registration.
+
+Enabling the worker can consume retained queue items. While its desired count
+is still zero, review the queue and append-only attempt state by sanitized ID,
+establish a quiescence fence, and reconcile every retained or ambiguous item.
+Do not purge, redrive, replay, or inspect message bodies. Physical proof still
+requires an authenticated human to initiate one bounded drill in the running
+application on each approved device. The delivery-test target mode for this
+drill is `controlled-push-canary`, which permits exactly one current
+product-owner-approved push endpoint without requiring the unrelated email
+provider; ordinary delivery-test target sets still require push and email.
 
 ## Validate without a provider
 

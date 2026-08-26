@@ -17,6 +17,13 @@ import {
 
 const DEVICE_ID = '00000000-0000-4000-8000-000000002321';
 const PROJECT_ID = '00000000-0000-4000-8000-000000002322';
+const BUILD = Object.freeze({
+  applicationId: 'example.synthetic.eoc',
+  applicationVersion: '1.0.4',
+  nativeBuildVersion: '7',
+  expoProjectId: PROJECT_ID,
+  updateMode: 'embedded-only' as const,
+});
 const OTHER_DEVICE_ID = '00000000-0000-4000-8000-000000002323';
 const NATIVE_TOKEN = Object.freeze({
   type: 'ios',
@@ -105,34 +112,37 @@ function session() {
 
 function enabledController(native: NativePort) {
   return new PushRegistrationController({
-    configuration: { enabled: true, projectId: PROJECT_ID },
+    configuration: { enabled: true, projectId: PROJECT_ID, build: BUILD },
     native,
   });
 }
 
 describe('push registration controller', () => {
   test('requires an exact explicit opt-in and valid project identity', () => {
+    expect(
+      parsePushRegistrationConfiguration('true', PROJECT_ID, BUILD),
+    ).toEqual({ enabled: true, projectId: PROJECT_ID, build: BUILD });
+    expect(
+      parsePushRegistrationConfiguration(undefined, PROJECT_ID, BUILD),
+    ).toEqual({ enabled: false, projectId: PROJECT_ID, build: BUILD });
+    expect(
+      parsePushRegistrationConfiguration('TRUE', PROJECT_ID, BUILD).enabled,
+    ).toBe(false);
+    expect(
+      parsePushRegistrationConfiguration('true', 'not-a-project', BUILD),
+    ).toEqual({ enabled: false, projectId: null, build: null });
     expect(parsePushRegistrationConfiguration('true', PROJECT_ID)).toEqual({
-      enabled: true,
-      projectId: PROJECT_ID,
-    });
-    expect(parsePushRegistrationConfiguration(undefined, PROJECT_ID)).toEqual({
       enabled: false,
       projectId: PROJECT_ID,
+      build: null,
     });
-    expect(parsePushRegistrationConfiguration('TRUE', PROJECT_ID).enabled).toBe(
-      false,
-    );
-    expect(parsePushRegistrationConfiguration('true', 'not-a-project')).toEqual(
-      { enabled: false, projectId: null },
-    );
   });
 
   test('disabled development and CI builds never request permission or contact Expo', async () => {
     const native = new NativePort('granted');
     const currentSession = session();
     const controller = new PushRegistrationController({
-      configuration: { enabled: false, projectId: PROJECT_ID },
+      configuration: { enabled: false, projectId: PROJECT_ID, build: BUILD },
       native,
     });
 
@@ -209,6 +219,8 @@ describe('push registration controller', () => {
       {
         deviceEnrollmentId: DEVICE_ID,
         platform: 'ios',
+        provider: 'expo',
+        build: BUILD,
         token: EXPO_TOKEN,
       },
     ]);
@@ -412,7 +424,7 @@ describe('push registration controller', () => {
       },
     };
     const controller = new PushRegistrationController({
-      configuration: { enabled: false, projectId: PROJECT_ID },
+      configuration: { enabled: false, projectId: PROJECT_ID, build: BUILD },
       native,
     });
     controllerRef.current = controller;

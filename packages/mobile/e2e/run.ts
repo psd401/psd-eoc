@@ -418,6 +418,7 @@ try {
   await capture(`${platform}-synthetic-push`);
   await maestro(`open-push-${platform}.yaml`);
   await Bun.sleep(3_000);
+  await capture('push-opened-event-room');
   await maestro('event-room-lifecycle.yaml');
   await capture(`${platform}-synthetic-all-clear`);
 } finally {

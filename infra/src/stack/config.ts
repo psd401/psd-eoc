@@ -49,6 +49,7 @@ export const SMS_QUEUE_NAME = 'psd-eoc-sms';
 export const SMS_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-sms-dlq';
 export const PUSH_QUEUE_NAME = 'psd-eoc-push';
 export const PUSH_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-push-dlq';
+export const PUSH_WORKER_LOG_GROUP_NAME = '/psd-eoc/workers/push';
 /** Redelivery attempts before a batch is retained for human inspection. */
 export const DELIVERY_QUEUE_MAX_RECEIVES = 5;
 export const SES_VERIFICATION_REFERENCE = 'UNVERIFIED';

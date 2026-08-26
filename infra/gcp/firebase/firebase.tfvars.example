@@ -1,0 +1,6 @@
+project_id          = "replace-with-dedicated-firebase-project"
+project_name        = "EOC Firebase Push"
+organization_id     = "000000000000"
+billing_account     = "000000-000000-000000"
+android_package_name = "org.example.eoc"
+android_display_name = "EOC Android"

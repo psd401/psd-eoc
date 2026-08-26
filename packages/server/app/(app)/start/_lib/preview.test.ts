@@ -427,25 +427,34 @@ describe('activation consequence preview', () => {
     expect(preview.blockingReasonCodes).toEqual(['EMAIL_NOT_LIVE_VERIFIED']);
   });
 
-  test('rejects a singleton non-email delivery-test target before preview persistence', () => {
+  test('builds one exact controlled DRILL push without requiring email', () => {
     const base = evidence('drill', 'staff');
-    expect(() =>
-      buildActivationPreview({
-        ...base,
-        deliveryTest: {
-          purpose: 'monthly-live-delivery-test',
-          targetSet: { id: IDS.targetSet, version: 1 },
-          endpointReferenceDigest: 'd'.repeat(64),
+    const preview = buildActivationPreview({
+      ...base,
+      deliveryTest: {
+        purpose: 'monthly-live-delivery-test',
+        targetSet: { id: IDS.targetSet, version: 1 },
+        endpointReferenceDigest: 'd'.repeat(64),
+      },
+      deliveryTestEndpointReferences: [
+        {
+          recipientId: IDS.recipientPush,
+          endpointId: IDS.pushEndpoint,
+          channel: 'push',
         },
-        deliveryTestEndpointReferences: [
-          {
-            recipientId: IDS.recipientPush,
-            endpointId: IDS.pushEndpoint,
-            channel: 'push',
-          },
-        ],
-      }),
-    ).toThrow(ActivationPreviewBuildError);
+      ],
+    });
+
+    expect(preview.recipientCount).toBe(1);
+    expect(
+      preview.channels.map(({ channel, endpointCount }) => [
+        channel,
+        endpointCount,
+      ]),
+    ).toEqual([['push', 1]]);
+    expect(preview.sendReadiness).toBe('ready');
+    expect(preview.blockingReasonCodes).toEqual([]);
+    expect(JSON.stringify(preview)).not.toContain('ses-email');
   });
 
   test('keeps exact persisted activation copy independent of preview creation time', () => {

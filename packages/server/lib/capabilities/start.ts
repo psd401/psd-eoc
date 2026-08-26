@@ -805,23 +805,33 @@ export async function loadDeliveryTestTargetSet(
       asc(deliveryTestTargetEndpoints.recipientId),
       asc(deliveryTestTargetEndpoints.endpointId),
     );
+  const endpointReferences = endpoints.map((endpoint) => ({
+    eligibilityFactId: endpoint.eligibilityFactId,
+    recipientId: endpoint.recipientId,
+    endpointId: endpoint.endpointId,
+    channel: endpoint.channel,
+    attestation: endpoint.attestation,
+    optedInAt: dateIso(endpoint.optedInAt),
+    attestedAt: dateIso(endpoint.attestedAt),
+    attestedByUserId: endpoint.attestedByUserId,
+    authorizationReference: endpoint.authorizationReference,
+  }));
+  const controlledMode =
+    endpointReferences.length === 1 &&
+    endpointReferences[0]?.channel === 'email'
+      ? ('controlled-email-canary' as const)
+      : endpointReferences.length === 1 &&
+          endpointReferences[0]?.channel === 'push'
+        ? ('controlled-push-canary' as const)
+        : null;
   return DeliveryTestTargetSetVersionSchema.parse({
+    ...(controlledMode === null ? {} : { mode: controlledMode }),
     id: row.id,
     version: row.version,
     facilityId: row.facilityId,
     rosterSnapshotId: row.rosterSnapshotId,
     supersedesVersionId: row.supersedesVersionId,
-    endpoints: endpoints.map((endpoint) => ({
-      eligibilityFactId: endpoint.eligibilityFactId,
-      recipientId: endpoint.recipientId,
-      endpointId: endpoint.endpointId,
-      channel: endpoint.channel,
-      attestation: endpoint.attestation,
-      optedInAt: dateIso(endpoint.optedInAt),
-      attestedAt: dateIso(endpoint.attestedAt),
-      attestedByUserId: endpoint.attestedByUserId,
-      authorizationReference: endpoint.authorizationReference,
-    })),
+    endpoints: endpointReferences,
     endpointReferenceDigest: row.endpointReferenceDigest,
     approvedByUserId: row.approvedByUserId,
     approvedWithSessionId: row.approvedWithSessionId,

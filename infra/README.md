@@ -68,6 +68,12 @@ Use the [Expo](../docs/runbooks/provider-expo.md),
 [SES](../docs/runbooks/provider-ses.md), and
 [SMS](../docs/runbooks/provider-sms.md) provider procedures.
 
+### Runbook: Expo push worker health
+
+Use the
+[Expo push worker health](../docs/runbooks/alarm-push-worker-health.md)
+procedure.
+
 ### Runbook: Metrics collector
 
 Use the [metrics collector](../docs/runbooks/alarm-metrics-collector.md)

@@ -110,10 +110,9 @@ describe('issue-32 mobile E2E harness', () => {
     ).text();
     expect(iosNotification).toStartWith('appId: ${SYSTEM_APP_ID}\n');
     expect(iosNotification).toContain(
-      "- swipe:\n    from:\n      text: '\\[DRILL\\] Synthetic earthquake drill'\n    direction: RIGHT",
+      "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
     );
-    expect(iosNotification.match(/direction: RIGHT/gu)).toHaveLength(3);
-    expect(iosNotification).toContain('duration: 700');
+    expect(iosNotification.match(/direction: RIGHT/gu)).toHaveLength(2);
     expect(iosNotification).toContain('duration: 900');
     expect(iosNotification).toContain('duration: 1100');
     expect(iosNotification).toContain("visible: 'Open'");
