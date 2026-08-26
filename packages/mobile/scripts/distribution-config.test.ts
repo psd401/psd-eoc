@@ -505,7 +505,7 @@ describe('mobile distribution configuration', () => {
     expect(play).toContain('durable group-based Closed test is not yet active');
     const privacy = rowFor('Public mobile privacy policy');
     expect(privacy).toContain('| `live-verified`');
-    expect(privacy).toContain('https://eoc.psd401.net/privacy');
+    expect(privacy).toContain("configured production origin's `/privacy`");
     expect(privacy).toContain('returned HTTP 200');
     expect(rowFor('Play app content and store record')).toContain(
       '| `blocked`',
