@@ -771,6 +771,20 @@ const ControlledPushCanaryActivationPlanSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryActivationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary consequence must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const ActivationPreviewSchema = z
   .object({
     id: ActivationPreviewIdSchema,
@@ -785,6 +799,7 @@ export const ActivationPreviewSchema = z
       MultiChannelActivationPreviewPlanSchema,
       ControlledEmailCanaryActivationPlanSchema,
       ControlledPushCanaryActivationPlanSchema,
+      ControlledSmsCanaryActivationPlanSchema,
     ]),
     sendReadiness: z.enum(['ready', 'blocked']),
     blockingReasonCodes: z
@@ -860,7 +875,9 @@ export const ActivationPreviewSchema = z
     }
     const controlledSingleCanary =
       channelNames.length === 1 &&
-      (channelNames[0] === 'email' || channelNames[0] === 'push') &&
+      (channelNames[0] === 'email' ||
+        channelNames[0] === 'push' ||
+        channelNames[0] === 'sms') &&
       preview.channels[0]?.endpointCount === 1;
     if (
       controlledSingleCanary &&

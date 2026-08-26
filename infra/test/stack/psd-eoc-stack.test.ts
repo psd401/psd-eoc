@@ -19,6 +19,8 @@ import {
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
   SES_VERIFICATION_REFERENCE,
+  SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME,
+  SMS_RECEIPT_QUEUE_NAME,
   STACK_NAME,
   assertProtectedDeploymentTarget,
   readDeploymentIdentity,
@@ -210,6 +212,23 @@ describe('deployment boundary', () => {
     expect(Object.keys(asRecord(synthesized.Parameters)).sort()).toEqual(
       documentedContractList(configuration, 'template-parameters'),
     );
+  });
+
+  it('rejects blank or padded carrier evidence and response parameters', () => {
+    const parameters = asRecord(synthesized.Parameters);
+    expect(
+      asRecord(parameters.SmsRegistrationVerificationReference).AllowedPattern,
+    ).toBe('^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$');
+    expect(asRecord(parameters.SmsHelpMessage)).toMatchObject({
+      AllowedPattern: '^(UNCONFIGURED|\\S(?:[\\s\\S]{0,158}\\S)?)$',
+      MaxLength: 160,
+      NoEcho: true,
+    });
+    expect(asRecord(parameters.SmsStopMessage)).toMatchObject({
+      AllowedPattern: '^(UNCONFIGURED|\\S(?:[\\s\\S]{0,158}\\S)?)$',
+      MaxLength: 160,
+      NoEcho: true,
+    });
   });
 
   it('binds automatic deployment to protected account, region, and identity', () => {
@@ -557,18 +576,18 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::AppRunner::AutoScalingConfiguration', 1);
     template.resourceCountIs('AWS::AppRunner::VpcConnector', 1);
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 3);
-    template.resourceCountIs('AWS::ECS::Service', 1);
-    // Six log groups: bootstrap, access sync, the dark push worker, the Aurora
-    // failover bridge, the delivery router, and the alarm mailer.
-    template.resourceCountIs('AWS::Logs::LogGroup', 6);
-    // Nine queues: the health queue, plus a source/dead-letter pair each for
-    // delivery, email, SMS, and push.
-    template.resourceCountIs('AWS::SQS::Queue', 9);
-    // Twelve: the live application and bootstrap credentials, four exact
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 4);
+    template.resourceCountIs('AWS::ECS::Service', 2);
+    // Seven log groups: bootstrap, access sync, both dark channel workers, the
+    // Aurora failover bridge, the delivery router, and the alarm mailer.
+    template.resourceCountIs('AWS::Logs::LogGroup', 7);
+    // Eleven queues: the health queue, plus a source/dead-letter pair each for
+    // delivery, email, SMS work, SMS receipts, and push.
+    template.resourceCountIs('AWS::SQS::Queue', 11);
+    // Thirteen: the live application and bootstrap credentials, five exact
     // internal worker-route bearers, a deny-by-default build allowlist, and the
     // protected Expo credential placeholder.
-    template.resourceCountIs('AWS::SecretsManager::Secret', 12);
+    template.resourceCountIs('AWS::SecretsManager::Secret', 13);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
@@ -612,6 +631,23 @@ describe('minimal isolated resource shape', () => {
     );
     expect(emailDeadLetterQueue.SqsManagedSseEnabled).toBe(true);
     expect(emailDeadLetterQueue.MessageRetentionPeriod).toBe(1_209_600);
+
+    const smsReceiptQueue = properties(
+      queues.get(SMS_RECEIPT_QUEUE_NAME) ?? {},
+    );
+    expect(smsReceiptQueue.RedrivePolicy).toEqual({
+      deadLetterTargetArn: {
+        'Fn::GetAtt': [
+          expect.stringContaining('SmsReceiptDeadLetterQueue'),
+          'Arn',
+        ],
+      },
+      maxReceiveCount: 5,
+    });
+    expect(
+      properties(queues.get(SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME) ?? {})
+        .MessageRetentionPeriod,
+    ).toBe(1_209_600);
     const redriveAllowPolicy = asRecord(
       emailDeadLetterQueue.RedriveAllowPolicy,
     );
@@ -683,9 +719,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::Lambda::Function', 3);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
-    // Four: the database, shared bootstrap task, App Runner connector, and the
-    // HTTPS-only push worker. The push worker has no database ingress rule.
-    template.resourceCountIs('AWS::EC2::SecurityGroup', 4);
+    // Five: the database, shared bootstrap task, App Runner connector, and the
+    // two HTTPS-only channel workers. Neither worker has database ingress.
+    template.resourceCountIs('AWS::EC2::SecurityGroup', 5);
     const securityGroups = resourceEntries('AWS::EC2::SecurityGroup');
     const databaseSecurityGroup = securityGroups.find(([, resource]) =>
       String(properties(resource).GroupDescription).startsWith(
@@ -751,8 +787,8 @@ describe('minimal isolated resource shape', () => {
       ),
     );
     // One for the shared task group, one for the App Runner connector group,
-    // and one for the isolated push worker.
-    expect(httpsRules).toHaveLength(3);
+    // and one for each isolated channel worker.
+    expect(httpsRules).toHaveLength(4);
     for (const rule of httpsRules) {
       expect(rule.FromPort).toBe(443);
       expect(rule.ToPort).toBe(443);
@@ -798,6 +834,7 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/workers/delivery-state-token',
         '/psd-eoc/workers/expo-push-runtime-token',
         '/psd-eoc/workers/push-endpoint-token',
+        '/psd-eoc/workers/sms-runtime-token',
       ].sort(),
     );
     for (const name of [
@@ -811,6 +848,7 @@ describe('minimal isolated resource shape', () => {
       '/psd-eoc/workers/delivery-state-token',
       '/psd-eoc/workers/expo-push-runtime-token',
       '/psd-eoc/workers/push-endpoint-token',
+      '/psd-eoc/workers/sms-runtime-token',
     ]) {
       const resource = byName.get(name);
       expect(resource).toBeDefined();
@@ -1033,6 +1071,9 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_ORGANIZATION_NAME',
         'PSD_EOC_PRIVACY_CONTACT_URL',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
+        'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',
+        'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
+        'PSD_EOC_SMS_WORKER_READY',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',
       ].sort(),
@@ -1069,6 +1110,15 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE')).toBe(
       SES_VERIFICATION_REFERENCE,
     );
+    expect(variables.get('PSD_EOC_SMS_DESTINATION_COUNTRY_CODE')).toEqual({
+      Ref: 'SmsDestinationCountryCode',
+    });
+    expect(
+      variables.get('PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'SmsRegistrationVerificationReference' });
+    expect(variables.get('PSD_EOC_SMS_WORKER_READY')).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 'true', 'false'],
+    });
     expect(variables.get('RUNTIME_SECRET_ARN')).toEqual({
       Ref: expect.stringContaining('ApiSaltSecret'),
     });
@@ -1085,6 +1135,7 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
         'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
         'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST',
+        'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
       ].sort(),
     );
     expect(secrets.get('GOOGLE_OAUTH_CONFIG')).toEqual({
@@ -1114,7 +1165,8 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('SES_SECRET');
     expect(serialized).not.toContain('SES_SESSION');
     expect(serialized).not.toContain('SES_SEND');
-    expect(serialized).not.toContain('SMS');
+    expect(serialized).not.toContain('SMS_ORIGINATION');
+    expect(serialized).not.toContain('SMS_MAX_PRICE');
     expect(serialized).not.toContain('MEDIA_BUCKET');
 
     // The application holds every internal worker bearer, because verifying a
@@ -1127,6 +1179,7 @@ describe('App Runner runtime safety boundary', () => {
       'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
       'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
       'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
+      'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
     ]) {
       expect(secrets.has(name)).toBe(true);
       expect(variables.has(name)).toBe(false);
@@ -1216,6 +1269,144 @@ describe('App Runner runtime safety boundary', () => {
     );
     expect(JSON.stringify(secretStatement?.Resource)).not.toContain('Database');
     expect(JSON.stringify(secretStatement?.Resource)).not.toContain('Google');
+  });
+
+  it('keeps SMS dark until carrier resources, evidence, and live enablement agree', () => {
+    const task = properties(
+      taskDefinitionByFamily('psd-eoc-aws-eum-sms-worker'),
+    );
+    const container = asRecord(asArray(task.ContainerDefinitions)[0]);
+    expect(container.Command).toEqual(['bun', 'workers/sms/service.ts']);
+    expect(container.ReadonlyRootFilesystem).toBe(true);
+    expect(JSON.stringify(container)).not.toContain('DATABASE_');
+
+    const environment = new Map(
+      asArray(container.Environment).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.Value];
+      }),
+    );
+    expect(environment.get('PSD_EOC_SMS_RUNTIME_MODE')).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 'enabled', 'dark'],
+    });
+    expect(environment.get('PSD_EOC_SMS_PROVIDER_AUTHORIZED')).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 'true', 'false'],
+    });
+    expect(environment.get('SMS_QUEUE_ARN')).toEqual({
+      'Fn::GetAtt': [expect.stringContaining('SmsQueue'), 'Arn'],
+    });
+    expect(environment.get('SMS_RECEIPT_QUEUE_ARN')).toEqual({
+      'Fn::GetAtt': [expect.stringContaining('SmsReceiptQueue'), 'Arn'],
+    });
+
+    const injectedSecrets = asArray(container.Secrets).map((item) =>
+      String(asRecord(item).Name),
+    );
+    expect(injectedSecrets.sort()).toEqual(
+      [
+        'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
+        'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+        'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
+      ].sort(),
+    );
+
+    const taskRole = roleLogicalIdForDescription('Consumes the SMS queue');
+    const actions = allAllowedActions(inlineStatementsForRole(taskRole));
+    expect(actions).toContain('sms-voice:SendTextMessage');
+    expect(actions).toContain('sms-voice:DescribeOptedOutNumbers');
+    expect(actions).toContain('sqs:ReceiveMessage');
+    expect(actions).toContain('sqs:SendMessage');
+    const queueSendResources = JSON.stringify(
+      inlineStatementsForRole(taskRole)
+        .filter((statement) =>
+          asStringArray(statement.Action).includes('sqs:SendMessage'),
+        )
+        .map((statement) => statement.Resource),
+    );
+    expect(queueSendResources).toContain('SmsQueue');
+    expect(queueSendResources).not.toContain('SmsReceiptQueue');
+    const queueReceiveResources = JSON.stringify(
+      inlineStatementsForRole(taskRole)
+        .filter((statement) =>
+          asStringArray(statement.Action).includes('sqs:ReceiveMessage'),
+        )
+        .map((statement) => statement.Resource),
+    );
+    expect(queueReceiveResources).toContain('SmsQueue');
+    expect(queueReceiveResources).toContain('SmsReceiptQueue');
+    expect(JSON.stringify(inlineStatementsForRole(taskRole))).not.toContain(
+      'EmailQueue',
+    );
+    expect(JSON.stringify(inlineStatementsForRole(taskRole))).not.toContain(
+      'PushQueue',
+    );
+
+    for (const type of [
+      'AWS::SMSVOICE::OptOutList',
+      'AWS::SMSVOICE::Pool',
+      'AWS::SMSVOICE::ProtectConfiguration',
+      'AWS::SMSVOICE::ConfigurationSet',
+    ]) {
+      const resource = onlyResource(type);
+      expect(resource.Condition).toBe('ShouldProvisionAwsEumSmsResources');
+      expect(resource.DeletionPolicy).toBe('Retain');
+    }
+    const pool = properties(onlyResource('AWS::SMSVOICE::Pool'));
+    expect(pool.SelfManagedOptOutsEnabled).toBe(false);
+    expect(pool.SharedRoutesEnabled).toBe(false);
+    expect(pool.DeletionProtectionEnabled).toBe(true);
+
+    const smsService = resourceEntries('AWS::ECS::Service').find(
+      ([, resource]) =>
+        properties(resource).ServiceName === 'psd-eoc-aws-eum-sms-worker',
+    );
+    expect(smsService).toBeDefined();
+    const smsWorkerDesiredCount = properties(
+      smsService?.[1] ?? {},
+    ).DesiredCount;
+    expect(smsWorkerDesiredCount).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 1, 0],
+    });
+    const appRunnerService = properties(
+      onlyResource('AWS::AppRunner::Service'),
+    );
+    const appRunnerImage = asRecord(
+      asRecord(appRunnerService.SourceConfiguration).ImageRepository,
+    );
+    const appRunnerConfiguration = asRecord(appRunnerImage.ImageConfiguration);
+    const appRunnerEnvironment = new Map(
+      asArray(appRunnerConfiguration.RuntimeEnvironmentVariables).map(
+        (item) => {
+          const pair = asRecord(item);
+          return [String(pair.Name), pair.Value];
+        },
+      ),
+    );
+    const appRunnerSmsReadiness = appRunnerEnvironment.get(
+      'PSD_EOC_SMS_WORKER_READY',
+    );
+    expect(appRunnerSmsReadiness).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 'true', 'false'],
+    });
+    expect(asArray(asRecord(appRunnerSmsReadiness)['Fn::If'])[0]).toBe(
+      asArray(asRecord(smsWorkerDesiredCount)['Fn::If'])[0],
+    );
+
+    const deliveryRule = resourceEntries('AWS::Events::Rule').find(
+      ([, resource]) =>
+        properties(resource).Name === 'psd-eoc-sms-delivery-events',
+    );
+    expect(
+      JSON.stringify(properties(deliveryRule?.[1] ?? {}).Targets),
+    ).toContain('SmsReceiptQueue');
+    expect(
+      JSON.stringify(properties(deliveryRule?.[1] ?? {}).Targets),
+    ).not.toContain('SmsQueue');
+    const alarmNames = resourceEntries('AWS::CloudWatch::Alarm').map(
+      ([, resource]) => properties(resource).AlarmName,
+    );
+    expect(alarmNames).toContain('psd-eoc-sms-receipt-queue-age');
+    expect(alarmNames).toContain('psd-eoc-sms-receipt-dlq-depth');
   });
 
   it('gives the runtime only application, health, and alarm-read permissions', () => {
@@ -1767,19 +1958,22 @@ describe('protected access-membership publication boundary', () => {
 });
 
 describe('alarm topic delivery', () => {
-  it('deploys sanitized push worker metrics and alarms only with the worker', () => {
+  it('deploys sanitized channel-worker metrics and alarms only with each worker', () => {
     const filters = resourceEntries('AWS::Logs::MetricFilter');
-    expect(filters).toHaveLength(5);
+    expect(filters).toHaveLength(8);
     expect(
       filters
         .map(([, resource]) => {
-          expect(resource.Condition).toBe('ShouldRunExpoPushWorker');
           const filter = properties(resource);
           const transformation = asRecord(
             asArray(filter.MetricTransformations)[0],
           );
           expect(transformation.MetricNamespace).toBe('PSD/EOC');
-          return [transformation.MetricName, filter.FilterPattern];
+          return [
+            transformation.MetricName,
+            filter.FilterPattern,
+            resource.Condition,
+          ];
         })
         .sort(),
     ).toEqual(
@@ -1787,20 +1981,43 @@ describe('alarm topic delivery', () => {
         [
           'OutboxToProviderIncompleteCount',
           '{ ($.event = "push-worker-message-failed") || ($.event = "push-worker-message-incomplete") }',
+          'ShouldRunExpoPushWorker',
         ],
         [
           'OutboxToProviderLatency',
           '{ $.event = "push-worker-message-completed" }',
+          'ShouldRunExpoPushWorker',
         ],
         [
           'PushReceiptPollFailureCount',
           '{ $.event = "push-worker-receipts-failed" }',
+          'ShouldRunExpoPushWorker',
         ],
         [
           'PushStuckOutboxCount',
           '{ $.event = "push-worker-stuck-outbox-sample" }',
+          'ShouldRunExpoPushWorker',
         ],
-        ['PushWorkerHeartbeat', '{ $.event = "push-worker-heartbeat" }'],
+        [
+          'PushWorkerHeartbeat',
+          '{ $.event = "push-worker-heartbeat" }',
+          'ShouldRunExpoPushWorker',
+        ],
+        [
+          'SmsOutboxToProviderLatency',
+          '{ $.event = "sms-worker-message-completed" }',
+          'ShouldRunAwsEumSmsWorker',
+        ],
+        [
+          'SmsWorkerFailureCount',
+          '{ $.event = "sms-worker-message-failed" }',
+          'ShouldRunAwsEumSmsWorker',
+        ],
+        [
+          'SmsWorkerHeartbeat',
+          '{ $.event = "sms-worker-heartbeat" }',
+          'ShouldRunAwsEumSmsWorker',
+        ],
       ].sort(),
     );
     const serializedFilters = JSON.stringify(filters).toLowerCase();
@@ -1809,6 +2026,7 @@ describe('alarm topic delivery', () => {
       'device-token',
       'pushtoken',
       'providerresponse',
+      'phonenumber',
     ]) {
       expect(serializedFilters).not.toContain(forbidden);
     }
@@ -1834,6 +2052,28 @@ describe('alarm topic delivery', () => {
         'psd-eoc-push-receipt-poll-failures',
         'psd-eoc-push-stuck-production-outbox',
         'psd-eoc-push-worker-health',
+      ].sort(),
+    );
+
+    const conditionalSmsAlarms = resourceEntries('AWS::CloudWatch::Alarm')
+      .filter(([, resource]) =>
+        String(properties(resource).AlarmName).startsWith('psd-eoc-sms-'),
+      )
+      .filter(([, resource]) => resource.Condition !== undefined);
+    expect(
+      conditionalSmsAlarms
+        .map(([, resource]) => {
+          expect(resource.Condition).toBe('ShouldRunAwsEumSmsWorker');
+          const alarm = properties(resource);
+          expect(String(alarm.AlarmDescription)).toContain('Runbook: https://');
+          return alarm.AlarmName;
+        })
+        .sort(),
+    ).toEqual(
+      [
+        'psd-eoc-sms-outbox-to-provider-p95',
+        'psd-eoc-sms-worker-health',
+        'psd-eoc-sms-worker-message-failures',
       ].sort(),
     );
   });
@@ -1980,7 +2220,7 @@ describe('delivery router boundary', () => {
 });
 
 describe('configured-unverified provider readiness boundary', () => {
-  it('creates no provider identity, DNS, media, running channel worker, or custom resource', () => {
+  it('keeps provider resources conditional, schedules disabled, and channel workers at zero', () => {
     for (const forbiddenType of [
       'AWS::Route53::HostedZone',
       'AWS::Route53::RecordSet',
@@ -2011,16 +2251,32 @@ describe('configured-unverified provider readiness boundary', () => {
       'psd-eoc-access-membership-sync-every-two-hours',
       'psd-eoc-aurora-failover-events',
       'psd-eoc-monthly-live-delivery-test-due-reminder',
+      'psd-eoc-sms-delivery-events',
+      'psd-eoc-sms-opt-out-reconciliation',
     ]);
-    // Exactly one Lambda consumer exists, and it is the router. The push worker
-    // service is present for review but its desired count resolves to zero
-    // unless every protected enablement condition is true.
+    // Exactly one Lambda consumer exists, and it is the router. Both channel
+    // services are present for review but resolve to zero unless their exact
+    // protected conditions are true.
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 1);
-    template.resourceCountIs('AWS::ECS::Service', 1);
-    const pushService = properties(onlyResource('AWS::ECS::Service'));
+    template.resourceCountIs('AWS::ECS::Service', 2);
+    const pushService = properties(
+      resourceEntries('AWS::ECS::Service').find(
+        ([, resource]) =>
+          properties(resource).ServiceName === 'psd-eoc-expo-push-worker',
+      )?.[1] ?? {},
+    );
     expect(pushService.DesiredCount).toEqual({
       'Fn::If': ['ShouldRunExpoPushWorker', 1, 0],
     });
+    const smsRules = resourceEntries('AWS::Events::Rule')
+      .map(([, resource]) => properties(resource))
+      .filter((rule) => String(rule.Name).startsWith('psd-eoc-sms-'));
+    expect(smsRules).toHaveLength(2);
+    for (const rule of smsRules) {
+      expect(rule.State).toEqual({
+        'Fn::If': ['ShouldRunAwsEumSmsWorker', 'ENABLED', 'DISABLED'],
+      });
+    }
     const mapping = properties(onlyResource('AWS::Lambda::EventSourceMapping'));
     expect(JSON.stringify(mapping.EventSourceArn)).toContain('DeliveryQueue');
     expect(mapping.FunctionResponseTypes).toEqual(['ReportBatchItemFailures']);

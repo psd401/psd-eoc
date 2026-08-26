@@ -237,7 +237,8 @@ export function canActivateDeliveryTest(
     activation.recipientCount === 1 &&
     preview.channels[0].channel === activation.channels[0].channel &&
     (preview.channels[0].channel === 'email' ||
-      preview.channels[0].channel === 'push')
+      preview.channels[0].channel === 'push' ||
+      preview.channels[0].channel === 'sms')
       ? preview.channels[0].channel
       : null;
   return (

@@ -221,6 +221,20 @@ const ControlledPushCanaryTargetEndpointListSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryTargetEndpointListSchema = z
+  .tuple([DeliveryTestTargetEndpointRefSchema])
+  .superRefine(([endpoint], context) => {
+    if (endpoint.channel !== 'sms') {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary target must contain exactly one SMS endpoint.',
+        path: [0, 'channel'],
+      });
+    }
+  })
+  .readonly();
+
 function addTargetEndpointSetIssues(
   endpoints: readonly DeliveryTestTargetEndpointRef[],
   context: z.RefinementCtx,
@@ -408,6 +422,58 @@ const ControlledPushCanaryTargetSetVersionSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryTargetSetVersionSchema = z
+  .object({
+    mode: z.literal('controlled-sms-canary'),
+    id: UuidSchema,
+    version: VersionSchema,
+    facilityId: FacilityIdSchema,
+    rosterSnapshotId: RosterSnapshotIdSchema,
+    supersedesVersionId: UuidSchema.nullable(),
+    endpoints: ControlledSmsCanaryTargetEndpointListSchema,
+    endpointReferenceDigest: DigestSchema,
+    approvedByUserId: UuidSchema,
+    approvedWithSessionId: UuidSchema,
+    approvedAt: TimestampSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict()
+  .superRefine((targetSet, context) => {
+    if (
+      (targetSet.version === 1) !==
+      (targetSet.supersedesVersionId === null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Only the first canary target version may omit its superseded version.',
+        path: ['supersedesVersionId'],
+      });
+    }
+    if (targetSet.supersedesVersionId === targetSet.id) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A target-set version cannot supersede itself.',
+        path: ['supersedesVersionId'],
+      });
+    }
+    if (!isAtOrAfter(targetSet.approvedAt, targetSet.createdAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Target-set approval cannot precede version creation.',
+        path: ['approvedAt'],
+      });
+    }
+    if (!isAtOrAfter(targetSet.approvedAt, targetSet.endpoints[0].attestedAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Target-set approval cannot precede endpoint attestation.',
+        path: ['endpoints', 0, 'attestedAt'],
+      });
+    }
+  })
+  .readonly();
+
 /**
  * Adds single-channel controlled-canary branches without relaxing the ordinary
  * multi-channel target-set contract. Persisted endpoint shape safely derives
@@ -418,6 +484,7 @@ export const DeliveryTestTargetSetVersionSchema = z
     MultiChannelDeliveryTestTargetSetVersionSchema,
     ControlledEmailCanaryTargetSetVersionSchema,
     ControlledPushCanaryTargetSetVersionSchema,
+    ControlledSmsCanaryTargetSetVersionSchema,
   ])
   .readonly();
 
@@ -476,6 +543,19 @@ const ControlledPushCanaryTargetSetVersionInputSchema = z
   .strict()
   .readonly();
 
+const ControlledSmsCanaryTargetSetVersionInputSchema = z
+  .object({
+    mode: z.literal('controlled-sms-canary'),
+    previousVersion: DeliveryTestTargetSetRefSchema.nullable(),
+    facilityId: FacilityIdSchema,
+    rosterSnapshotId: RosterSnapshotIdSchema,
+    eligibilityFactIds: z
+      .tuple([DeliveryTestCanaryEligibilityFactIdSchema])
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
 /**
  * The controlled branch owns exactly one eligibility fact. The ordinary
  * branch retains its existing minimum of two facts and its later push/email
@@ -486,6 +566,7 @@ export const CreateDeliveryTestTargetSetVersionInputSchema = z
     MultiChannelDeliveryTestTargetSetVersionInputSchema,
     ControlledEmailCanaryTargetSetVersionInputSchema,
     ControlledPushCanaryTargetSetVersionInputSchema,
+    ControlledSmsCanaryTargetSetVersionInputSchema,
   ])
   .readonly();
 
@@ -579,6 +660,20 @@ const ControlledPushCanaryPreviewChannelListSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryPreviewChannelListSchema = z
+  .tuple([DeliveryTestPreviewChannelSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary preview must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const DeliveryTestPreviewSchema = z
   .object({
     purpose: z.literal('monthly-live-delivery-test'),
@@ -589,6 +684,7 @@ export const DeliveryTestPreviewSchema = z
       MultiChannelDeliveryTestPreviewChannelListSchema,
       ControlledEmailCanaryPreviewChannelListSchema,
       ControlledPushCanaryPreviewChannelListSchema,
+      ControlledSmsCanaryPreviewChannelListSchema,
     ]),
     consequenceDigest: DigestSchema,
     createdAt: TimestampSchema,
@@ -638,7 +734,9 @@ export const DeliveryTestPreviewSchema = z
     const channelNames = preview.channels.map((channel) => channel.channel);
     const controlledCanaryChannel =
       channelNames.length === 1 &&
-      (channelNames[0] === 'email' || channelNames[0] === 'push') &&
+      (channelNames[0] === 'email' ||
+        channelNames[0] === 'push' ||
+        channelNames[0] === 'sms') &&
       preview.channels[0]?.endpointCount === 1
         ? channelNames[0]
         : null;
@@ -659,7 +757,8 @@ export const DeliveryTestPreviewSchema = z
       controlledCanaryChannel !==
         (activation.channels.length === 1 &&
         (activation.channels[0]?.channel === 'email' ||
-          activation.channels[0]?.channel === 'push') &&
+          activation.channels[0]?.channel === 'push' ||
+          activation.channels[0]?.channel === 'sms') &&
         activation.channels[0].endpointCount === 1 &&
         activation.recipientCount === 1
           ? activation.channels[0].channel
@@ -860,6 +959,20 @@ const ControlledPushCanaryReportChannelListSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryReportChannelListSchema = z
+  .tuple([DeliveryTestChannelReportSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary report must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const MonthlyDeliveryTestReportSchema = z
   .object({
     id: MonthlyDeliveryTestReportIdSchema,
@@ -871,6 +984,7 @@ export const MonthlyDeliveryTestReportSchema = z
       MultiChannelDeliveryTestReportChannelListSchema,
       ControlledEmailCanaryReportChannelListSchema,
       ControlledPushCanaryReportChannelListSchema,
+      ControlledSmsCanaryReportChannelListSchema,
     ]),
     generatedAt: TimestampSchema,
     finalizedBy: DeliveryTestFinalizerSchema,
@@ -897,7 +1011,9 @@ export const MonthlyDeliveryTestReportSchema = z
     const channels = report.channels.map((channel) => channel.channel);
     const controlledSingleCanary =
       channels.length === 1 &&
-      (channels[0] === 'email' || channels[0] === 'push') &&
+      (channels[0] === 'email' ||
+        channels[0] === 'push' ||
+        channels[0] === 'sms') &&
       report.channels[0]?.endpointCount === 1;
     if (
       new Set(channels).size !== channels.length ||

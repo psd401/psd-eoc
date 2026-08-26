@@ -1022,7 +1022,7 @@ function verifyContracts(repositoryRoot: string): DocumentationError[] {
   compareNames(
     errors,
     extractContractList(configuration, 'workflow-secrets'),
-    captured(/\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}/gu),
+    captured(/\$\{\{\s*secrets\.([A-Z0-9_]+)(?:\s*\|\|[^}]*)?\s*\}\}/gu),
     'deploy workflow secret names',
   );
   const dispatch = workflow.slice(
