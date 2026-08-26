@@ -390,6 +390,19 @@ describe('documentation contract', () => {
         file: 'docs/INTEGRATIONS.md',
       },
       {
+        name: 'candidate-outside-contract',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                '<!-- docs-contract:records-retention-candidates:end -->',
+                '<!-- docs-contract:records-retention-candidates:end -->\n\nRoutine/minor responses use `GS50-18-29 Rev. 2` and retain for one year, then destroy.',
+              )
+            : contents,
+        message:
+          'records-retention candidate evidence appears outside its bounded contract',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
         name: 'override',
         transform: (path: string, contents: string): string =>
           path === 'docs/ARCHITECTURE.md'
@@ -507,6 +520,10 @@ describe('documentation contract', () => {
       'Administrators may purge all retained event records at any time.',
       'Deletion is permitted after export.',
       'Operators can dispose of audit records.',
+      'Deletion is permitted after export, not before export.',
+      'Deletion is not prohibited.',
+      'No approval is needed, administrators may purge all retained event records.',
+      'Administrators may purge event records if no legal hold exists.',
     ]) {
       expect(
         currentDocumentationViolations(

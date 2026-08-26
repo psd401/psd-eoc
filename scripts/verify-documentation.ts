@@ -14,22 +14,29 @@ interface PackageManifest {
 }
 
 const DISPOSITION_AUTHORIZATION_PATTERNS = Object.freeze([
-  /\b(?:may|can|will|must|should|(?:is|are)[ \t\r\n]+(?:allowed|authorized|permitted)[ \t\r\n]+to)[ \t\r\n]+(?:[a-z-]+[ \t\r\n]+){0,6}(?:delete|purge|dispose|destroy|enable[ \t\r\n]+(?:a[ \t\r\n]+)?(?:lifecycle[ \t\r\n]+rule|retention[ \t\r\n]+timer)|run[ \t\r\n]+(?:a[ \t\r\n]+)?down[ \t\r\n]+migration)\b/iu,
-  /\b(?:delete|deletion|purge|purging|dispose|disposition|destroy|destruction|lifecycle[ \t\r\n]+rules?|retention[ \t\r\n]+timers?|down[ \t\r\n]+migrations?)\b(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]+(?:is|are|becomes|remains)?(?:[ \t\r\n]+)?(?:enabled|allowed|authorized|permitted|required)\b/iu,
+  /\b(?:may|can|will|must|should|(?:is|are)[ \t\r\n]+(?:allowed|authorized|permitted)[ \t\r\n]+to)[ \t\r\n]+(?!(?:not|never)\b)(?:(?!(?:not|never)\b)[a-z-]+[ \t\r\n]+){0,6}(?:delete|purge|dispose|destroy|enable[ \t\r\n]+(?:a[ \t\r\n]+)?(?:lifecycle[ \t\r\n]+rule|retention[ \t\r\n]+timer)|run[ \t\r\n]+(?:a[ \t\r\n]+)?down[ \t\r\n]+migration)\b/giu,
+  /\b(?:delete|deletion|purge|purging|dispose|disposition|destroy|destruction|lifecycle[ \t\r\n]+rules?|retention[ \t\r\n]+timers?|down[ \t\r\n]+migrations?)\b(?:(?:[ \t\r\n]+)(?!(?:not|never)\b)[a-z-]+){0,6}[ \t\r\n]+(?:enabled|allowed|authorized|permitted|required)\b/giu,
 ]);
+
+const NEGATED_DISPOSITION_PROHIBITION =
+  /\b(?:delete|deletion|purge|purging|dispose|disposition|destroy|destruction|lifecycle[ \t\r\n]+rules?|retention[ \t\r\n]+timers?|down[ \t\r\n]+migrations?)\b(?:[ \t\r\n]+(?:is|are|becomes|remains))?[ \t\r\n]+(?:not|never)[ \t\r\n]+(?:prohibited|forbidden|disallowed)\b/iu;
 
 function containsConflictingDispositionAuthorization(
   contents: string,
 ): boolean {
   return contents
-    .split(/(?:[.!?;]|\bbut\b|\bhowever\b|\r?\n\s*\r?\n)/iu)
-    .some(
-      (clause) =>
-        !/\b(?:no|not|never)\b/iu.test(clause) &&
-        DISPOSITION_AUTHORIZATION_PATTERNS.some((pattern) =>
-          pattern.test(clause),
-        ),
-    );
+    .split(
+      /(?:[.!?;]|\bbut\b|\bhowever\b|\bwhile\b|\bwhereas\b|\balthough\b|\r?\n\s*\r?\n)/iu,
+    )
+    .some((clause) => {
+      if (NEGATED_DISPOSITION_PROHIBITION.test(clause)) return true;
+      return DISPOSITION_AUTHORIZATION_PATTERNS.some((pattern) =>
+        [...clause.matchAll(pattern)].some((match) => {
+          const prefix = clause.slice(0, match.index ?? 0);
+          return !/\bno(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]*$/iu.test(prefix);
+        }),
+      );
+    });
 }
 
 export function currentDocumentationViolations(
@@ -703,12 +710,13 @@ export function validateRecordsRetentionDocumentation(
     '<!-- docs-contract:records-retention-candidates:start -->';
   const candidatesEnd =
     '<!-- docs-contract:records-retention-candidates:end -->';
+  const candidatesSection = boundedDocumentationSection(
+    retentionReview,
+    candidatesStart,
+    candidatesEnd,
+  );
   if (
-    boundedDocumentationSection(
-      retentionReview,
-      candidatesStart,
-      candidatesEnd,
-    ) === null ||
+    candidatesSection === null ||
     currentMarkerCount(candidatesStart) !== 1 ||
     currentMarkerCount(candidatesEnd) !== 1
   ) {
@@ -717,6 +725,24 @@ export function validateRecordsRetentionDocumentation(
         integrationsFile,
         integrations,
         'expected one bounded records-retention-candidates contract',
+        reviewStart,
+      ),
+    );
+  }
+  const reviewWithoutCandidateContract =
+    candidatesSection === null
+      ? retentionReview
+      : retentionReview.replace(candidatesSection, '');
+  if (
+    /\b(?:GS2017-016|GS2012-025|GS50-18-29|GS2010-008|SD2011-153)[ \t]+Rev\.[ \t]+\d+\b|\bRetain for \d+ years\b|\bthen (?:destroy|transfer to Washington State Archives)\b/iu.test(
+      reviewWithoutCandidateContract,
+    )
+  ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'records-retention candidate evidence appears outside its bounded contract',
         reviewStart,
       ),
     );
