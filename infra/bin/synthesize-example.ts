@@ -56,6 +56,7 @@ const exampleConfiguration = Object.freeze({
     'Example School District',
     'Sample School District',
   ),
+  privacyContactUrl: `https://www.${exampleHostedDomain}/contact`,
   region: alternative(
     productionDeploymentTarget.region,
     'us-east-1',
@@ -86,6 +87,7 @@ const app = new App({
       exampleConfiguration.monitoringRunbookBaseUrl,
     'psdEoc:neighborhoods': exampleConfiguration.neighborhoods,
     'psdEoc:organizationName': exampleConfiguration.organizationName,
+    'psdEoc:privacyContactUrl': exampleConfiguration.privacyContactUrl,
     'psdEoc:sesFromAddress': exampleConfiguration.sesFromAddress,
     'psdEoc:sesIdentityDomain': exampleConfiguration.sesIdentityDomain,
     'psdEoc:syntheticGroups': exampleConfiguration.syntheticGroups,
@@ -134,6 +136,10 @@ template.hasResourceProperties('AWS::AppRunner::Service', {
           {
             Name: 'PSD_EOC_ORGANIZATION_NAME',
             Value: exampleConfiguration.organizationName,
+          },
+          {
+            Name: 'PSD_EOC_PRIVACY_CONTACT_URL',
+            Value: exampleConfiguration.privacyContactUrl,
           },
           {
             Name: 'PSD_EOC_DISPLAY_TIME_ZONE',

@@ -1182,6 +1182,7 @@ describeWithDatabase(
   'PostgreSQL-backed Google-outage and revocation proof',
   () => {
     let connection: PostgresDatabaseConnection | undefined;
+    let databaseName = '';
 
     function databaseConnection(): PostgresDatabaseConnection {
       if (connection === undefined) {
@@ -1196,9 +1197,23 @@ describeWithDatabase(
           'TEST_DATABASE_URL is required for database integration tests.',
         );
       }
-      const created = createDatabaseClient({
+      databaseName = `psd_eoc_session_${crypto.randomUUID().replaceAll('-', '')}_test`;
+      const admin = createDatabaseClient({
         driver: 'postgres',
         url: testDatabaseUrl,
+        maxConnections: 1,
+      });
+      if (admin.driver !== 'postgres') {
+        throw new Error('Session integration tests require PostgreSQL.');
+      }
+      await admin.db.execute(`create database "${databaseName}"` as never);
+      await admin.close();
+
+      const url = new URL(testDatabaseUrl);
+      url.pathname = `/${databaseName}`;
+      const created = createDatabaseClient({
+        driver: 'postgres',
+        url: url.toString(),
         maxConnections: 4,
       });
       if (created.driver !== 'postgres') {
@@ -1210,6 +1225,19 @@ describeWithDatabase(
 
     afterAll(async () => {
       await connection?.close();
+      connection = undefined;
+      if (testDatabaseUrl === undefined || databaseName === '') return;
+      const admin = createDatabaseClient({
+        driver: 'postgres',
+        url: testDatabaseUrl,
+        maxConnections: 1,
+      });
+      if (admin.driver === 'postgres') {
+        await admin.db.execute(
+          `drop database if exists "${databaseName}" (force)` as never,
+        );
+      }
+      await admin.close();
     });
 
     test('refreshes from recently read trusted-group membership with Google offline, then revokes across instances', async () => {
