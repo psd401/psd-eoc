@@ -90,7 +90,7 @@ describe('monthly delivery-test credential readiness', () => {
 
   test('accepts only bounded, non-secret deployment references', () => {
     const references = readDeliveryTestCredentialVerificationReferences({
-      PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE:
+      PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE:
         'credential-verification-reference-v1',
       PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE: ' too-short ',
       PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE:

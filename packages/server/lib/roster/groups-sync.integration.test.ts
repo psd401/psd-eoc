@@ -325,11 +325,20 @@ function syncContext(label: string): RosterSyncCapabilityContext {
   });
 }
 
+const TEST_PUSH_CUTOVER = Object.freeze({
+  version: 1 as const,
+  ios: 'expo' as const,
+  android: 'expo' as const,
+});
+
 function dependencies(
   database: PostgresDatabase,
   adapter: RosterGroupsAdapter,
   alerts: RosterSyncAlertSink,
-  store: RosterSyncStore = createDrizzleRosterSyncStore(database),
+  store: RosterSyncStore = createDrizzleRosterSyncStore(
+    database,
+    TEST_PUSH_CUTOVER,
+  ),
 ): RosterSyncDependencies {
   return Object.freeze({
     store,
@@ -990,7 +999,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       `);
     });
 
-    const baseStore = createDrizzleRosterSyncStore(database);
+    const baseStore = createDrizzleRosterSyncStore(database, TEST_PUSH_CUTOVER);
     let capturedPushEndpoints = 0;
     const racingStore: RosterSyncStore = Object.freeze({
       ...baseStore,
@@ -1354,7 +1363,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       },
     });
     const collector = alertCollector();
-    const baseStore = createDrizzleRosterSyncStore(database);
+    const baseStore = createDrizzleRosterSyncStore(database, TEST_PUSH_CUTOVER);
     let baselineArrivals = 0;
     let releaseBaselineGate: (() => void) | undefined;
     const baselineGate = new Promise<void>((resolve) => {

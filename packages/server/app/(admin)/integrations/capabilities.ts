@@ -1,8 +1,11 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   ChannelConfigurationSchema,
   IntegrationChannelChangeAuthorizationSchema,
   IntegrationIdSchema,
   IntegrationHealthSchema,
+  IntegrationVerificationReferenceSchema,
   SesVerificationReferenceSchema,
   type Actor,
   type CapabilityInput,
@@ -41,6 +44,35 @@ import {
 } from '../../../lib/capabilities/admin';
 
 export const SMS_INTEGRATION_ID = 'aws-eum-sms' as const;
+export const MOBILE_PUSH_INTEGRATION_ID = 'mobile-push' as const;
+export const DIRECT_PUSH_VERIFICATION_REFERENCE_ENV =
+  'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE' as const;
+
+/** Reads the exact non-secret deployment reference that authorizes activation. */
+export function readDirectPushVerificationReference(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string | null {
+  const value = environment[DIRECT_PUSH_VERIFICATION_REFERENCE_ENV];
+  return value !== undefined &&
+    value !== 'UNVERIFIED' &&
+    IntegrationVerificationReferenceSchema.safeParse(value).success
+    ? value
+    : null;
+}
+
+/** Refuses caller-supplied proof that is not bound to this deployment. */
+export function assertExactDirectPushVerificationReference(
+  supplied: string,
+  expected: string | null,
+): void {
+  if (expected === null || supplied !== expected) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'Direct push verification does not match the protected deployment reference.',
+      409,
+    );
+  }
+}
 export const SES_VERIFICATION_REFERENCE_ENV =
   'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE' as const;
 export const EMAIL_WORKER_ENABLED_ENV = 'PSD_EOC_EMAIL_WORKER_ENABLED' as const;
@@ -190,6 +222,12 @@ export function assertChannelChangeAllowed(
   status: IntegrationStatus,
   smsWorkerReadiness: SmsWorkerReadiness = readSmsWorkerReadiness(),
 ): void {
+  const initialMobileVerification =
+    input.integrationId === MOBILE_PUSH_INTEGRATION_ID &&
+    input.enabled &&
+    input.verificationReference !== undefined &&
+    input.authorization === null &&
+    status.label === 'configured-unverified';
   if (
     input.enabled &&
     input.integrationId === SMS_INTEGRATION_ID &&
@@ -222,14 +260,29 @@ export function assertChannelChangeAllowed(
       409,
     );
   }
-  if (input.enabled && status.label === 'configured-unverified') {
+  if (input.verificationReference !== undefined && !initialMobileVerification) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'Direct push verification is allowed only for the initial configured mobile-push activation.',
+      409,
+    );
+  }
+  if (
+    input.enabled &&
+    status.label === 'configured-unverified' &&
+    !initialMobileVerification
+  ) {
     throw new AdminCapabilityError(
       'CONFLICT',
       'An unverified integration cannot be enabled.',
       409,
     );
   }
-  if (status.label === 'live-verified' && input.authorization === null) {
+  if (
+    status.label === 'live-verified' &&
+    input.authorization === null &&
+    !initialMobileVerification
+  ) {
     throw new AdminCapabilityError(
       'FORBIDDEN',
       'Fresh product-owner authorization is required for this live channel change.',
@@ -530,8 +583,11 @@ async function loadChannelConfiguration(
       });
 }
 
-function createSetChannelEnabledRegistration(
-  smsWorkerReadiness: () => SmsWorkerReadiness,
+export function createSetChannelEnabledRegistration(
+  directPushVerificationReference:
+    | string
+    | null = readDirectPushVerificationReference(),
+  smsWorkerReadiness: () => SmsWorkerReadiness = readSmsWorkerReadiness,
 ): ServerCapabilityRegistration<
   'set-channel-enabled',
   AdminCapabilityTransaction
@@ -551,7 +607,7 @@ function createSetChannelEnabledRegistration(
         context.transaction,
         input.integrationId,
       );
-      const status = await latestStatusForChange(
+      let status = await latestStatusForChange(
         context.transaction,
         input.integrationId,
       );
@@ -569,7 +625,55 @@ function createSetChannelEnabledRegistration(
       );
 
       const changedAt = await readCapabilityTime(context);
-      if (status.label === 'live-verified') {
+      const initialMobileVerification =
+        input.integrationId === MOBILE_PUSH_INTEGRATION_ID &&
+        input.enabled &&
+        input.verificationReference !== undefined &&
+        input.authorization === null &&
+        status.label === 'configured-unverified';
+      if (initialMobileVerification) {
+        assertExactDirectPushVerificationReference(
+          input.verificationReference,
+          directPushVerificationReference,
+        );
+        if (context.invocation.actor.kind !== 'human') {
+          throw new AdminCapabilityError(
+            'FORBIDDEN',
+            'A human district administrator must record direct push verification.',
+            403,
+          );
+        }
+        const [verifiedStatus] = await context.transaction.database
+          .insert(integrationStatuses)
+          .values({
+            id: randomUUID(),
+            integrationId: MOBILE_PUSH_INTEGRATION_ID,
+            label: 'live-verified',
+            verifiedAt: changedAt,
+            verifiedByUserId: context.invocation.actor.userId,
+            authorizationReference: input.verificationReference,
+            reasonCode: null,
+            observedAt: changedAt,
+          })
+          .returning({
+            id: integrationStatuses.id,
+            integrationId: integrationStatuses.integrationId,
+            label: integrationStatuses.label,
+            verifiedAt: integrationStatuses.verifiedAt,
+            verifiedByUserId: integrationStatuses.verifiedByUserId,
+            authorizationReference: integrationStatuses.authorizationReference,
+            reasonCode: integrationStatuses.reasonCode,
+            observedAt: integrationStatuses.observedAt,
+          });
+        if (verifiedStatus === undefined) {
+          throw new AdminCapabilityError(
+            'INTERNAL_ERROR',
+            'The direct push verification could not be recorded.',
+            500,
+          );
+        }
+        status = verifiedStatus;
+      } else if (status.label === 'live-verified') {
         if (input.authorization === null) throw invalidLiveAuthorization();
         const commitment = assertExactLiveAuthorization({
           actor: context.invocation.actor,
@@ -673,7 +777,7 @@ function createSetChannelEnabledRegistration(
 }
 
 export const setChannelEnabledRegistration =
-  createSetChannelEnabledRegistration(readSmsWorkerReadiness);
+  createSetChannelEnabledRegistration();
 
 function readSesVerificationReference(
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -889,6 +993,7 @@ export function executeSetChannelEnabledCapability(input: {
   readonly metadata: AdminMutationMetadata;
   readonly smsWorkerReadiness?: SmsWorkerReadiness;
   readonly store?: AdminCapabilityStore;
+  readonly directPushVerificationReference?: string | null;
 }): Promise<ChannelConfiguration> {
   const store =
     input.store ??
@@ -897,10 +1002,14 @@ export function executeSetChannelEnabledCapability(input: {
       input.authenticated,
     );
   const readiness = input.smsWorkerReadiness;
+  const directPushReference = input.directPushVerificationReference;
   const registration =
-    readiness === undefined
+    readiness === undefined && directPushReference === undefined
       ? setChannelEnabledRegistration
-      : createSetChannelEnabledRegistration(() => readiness);
+      : createSetChannelEnabledRegistration(
+          directPushReference,
+          readiness === undefined ? readSmsWorkerReadiness : () => readiness,
+        );
   return executeAdminMutationCapability(
     registration,
     input.command,

@@ -42,11 +42,13 @@ EOC is not a 911 service.
 | Queues and dead letters       | [Queue age](alarm-sqs-age.md), [common DLQ](alarm-sqs-dlq.md), [delivery](alarm-dlq-delivery.md), [push](alarm-dlq-push.md), [email](alarm-dlq-email.md), [SMS](alarm-dlq-sms.md) |
 | Application data paths        | [Stuck outbox](alarm-outbox-stuck.md), [stale roster](alarm-roster-stale.md)                                                                                                      |
 | Expo push worker              | [Worker health and receipt polling](alarm-push-worker-health.md), [provider handoff](provider-expo.md)                                                                            |
+| Direct push providers         | [APNs/FCM activation, rotation, and rollback](provider-direct-push.md)                                                                                                            |
 | Monitoring publishers         | [Metrics collector](alarm-metrics-collector.md), [monthly delivery test](alarm-monthly-delivery-test.md), [shallow canary](alarm-canary-failure.md)                               |
 
 ## Provider and roster response
 
 - [Expo Push](provider-expo.md)
+- [Direct APNs and FCM push](provider-direct-push.md)
 - [Amazon SES](provider-ses.md)
 - [AWS End User Messaging SMS](provider-sms.md)
 - [Google Groups roster sync](roster-sync.md)

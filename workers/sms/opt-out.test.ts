@@ -270,6 +270,8 @@ describe('AWS-managed SMS opt-out capture', () => {
             capturedAt: pushBatch.createdAt,
             channel: 'push',
             platform: 'ios',
+            provider: 'expo',
+            serviceEnvironment: 'production',
             token: 'synthetic-unroutable:push-device-issue-14',
           }),
         },

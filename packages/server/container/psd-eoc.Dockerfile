@@ -48,9 +48,17 @@ COPY workers/email/service.ts workers/email/service.ts
 COPY workers/email/sns-signature.ts workers/email/sns-signature.ts
 COPY workers/email/state-client.ts workers/email/state-client.ts
 COPY workers/push/adapter.ts workers/push/adapter.ts
+COPY workers/push/apns-credentials.ts workers/push/apns-credentials.ts
+COPY workers/push/apns-transport.ts workers/push/apns-transport.ts
+COPY workers/push/direct-adapter.ts workers/push/direct-adapter.ts
+COPY workers/push/direct-protocol.ts workers/push/direct-protocol.ts
+COPY workers/push/direct-worker.ts workers/push/direct-worker.ts
 COPY workers/push/eligibility.ts workers/push/eligibility.ts
+COPY workers/push/fcm-credentials.ts workers/push/fcm-credentials.ts
+COPY workers/push/fcm-transport.ts workers/push/fcm-transport.ts
 COPY workers/push/invalidation.ts workers/push/invalidation.ts
 COPY workers/push/protocol.ts workers/push/protocol.ts
+COPY workers/push/provider-clients.ts workers/push/provider-clients.ts
 COPY workers/push/receipt-lifecycle.ts workers/push/receipt-lifecycle.ts
 COPY workers/push/runtime.ts workers/push/runtime.ts
 COPY workers/push/service.ts workers/push/service.ts

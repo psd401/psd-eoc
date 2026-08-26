@@ -19,7 +19,19 @@ const platform = Bun.argv[2] as MobileE2EPlatform | undefined;
 if (platform !== 'ios' && platform !== 'android') {
   throw new Error('Usage: bun packages/mobile/e2e/run.ts <ios|android>');
 }
-requireSyntheticMobileE2E(process.env);
+const childEnvironment: Record<string, string | undefined> = {
+  ...process.env,
+  CI: 'true',
+  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'issue-21',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: 'issue-32',
+  MAESTRO_CLI_NO_ANALYTICS: '1',
+  NODE_OPTIONS: '--dns-result-order=ipv4first',
+  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
+  SYSTEM_APP_ID: 'com.apple.springboard',
+};
+requireSyntheticMobileE2E(childEnvironment);
 
 const identity = mobileE2EIdentity(
   await Bun.file(resolve(mobileRoot, 'app.json')).json(),
@@ -43,19 +55,7 @@ await Bun.write(
   ].join('\n'),
 );
 
-const childEnvironment: Record<string, string | undefined> = {
-  ...process.env,
-  CI: 'true',
-  APP_ID: identity.appId,
-  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'issue-21',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: 'issue-32',
-  MAESTRO_CLI_NO_ANALYTICS: '1',
-  NODE_OPTIONS: '--dns-result-order=ipv4first',
-  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
-  SYSTEM_APP_ID: 'com.apple.springboard',
-};
+childEnvironment.APP_ID = identity.appId;
 
 class CommandExitError extends Error {
   constructor(
@@ -416,7 +416,19 @@ try {
     await Bun.sleep(2_000);
   }
   await capture(`${platform}-synthetic-push`);
-  await maestro(`open-push-${platform}.yaml`);
+  if (platform === 'ios') {
+    // Keep the JavaScript session connected before consuming the native
+    // notification response. Hosted simulators can evict the development
+    // session while Notification Center is open; reconnecting after the tap
+    // would consume the response in the launcher and reset navigation home.
+    await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);
+    await Bun.sleep(5_000);
+    await maestro('reveal-push-ios.yaml');
+    await maestro('open-push-ios.yaml');
+  } else {
+    await maestro('open-push-android.yaml');
+  }
+  await maestro('push-opened-event-room.yaml');
   await Bun.sleep(3_000);
   await capture('push-opened-event-room');
   await maestro('event-room-lifecycle.yaml');

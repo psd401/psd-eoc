@@ -1,0 +1,12 @@
+appId: ${APP_ID}
+name: Issue 32 - verify the notification opened its exact drill
+tags: [issue-32, synthetic-only, notification]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse event-room verification outside the synthetic harness
+- extendedWaitUntil:
+    visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
+    timeout: 30000
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertNotVisible: '^REAL INCIDENT$'

@@ -1,3 +1,4 @@
+import { INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE } from '@psd-eoc/contracts';
 import type {
   ChannelConfiguration,
   IntegrationHealth,
@@ -7,7 +8,7 @@ import type {
 } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
-import { SMS_INTEGRATION_ID } from './capabilities';
+import { MOBILE_PUSH_INTEGRATION_ID, SMS_INTEGRATION_ID } from './capabilities';
 
 export interface IntegrationsAdminViewProps {
   readonly integrationHealth: IntegrationHealth;
@@ -200,8 +201,10 @@ function ChannelStateSection({
                                 configuration.status.label !==
                                   'live-verified') ||
                               configuration.status.label === 'blocked' ||
-                              configuration.status.label ===
-                                'configured-unverified'
+                              (configuration.status.label ===
+                                'configured-unverified' &&
+                                configuration.integrationId !==
+                                  MOBILE_PUSH_INTEGRATION_ID)
                             }
                             value="true"
                           >
@@ -230,6 +233,31 @@ function ChannelStateSection({
                             artifact issued for this integration and requested
                             state. Never enter a token, credential, recipient,
                             or provider payload.
+                          </span>
+                        </>
+                      ) : null}
+                      {configuration.integrationId ===
+                        MOBILE_PUSH_INTEGRATION_ID &&
+                      configuration.status.label === 'configured-unverified' ? (
+                        <>
+                          <label>
+                            Retained direct-push verification reference
+                            <input
+                              autoComplete="off"
+                              maxLength={255}
+                              minLength={16}
+                              name="verificationReference"
+                              pattern={
+                                INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE
+                              }
+                              required
+                            />
+                          </label>
+                          <span className="field-help">
+                            Enter only the non-secret evidence reference for
+                            this mobile-push configuration. Saving Enabled
+                            appends live verification and enables the channel
+                            atomically.
                           </span>
                         </>
                       ) : null}
