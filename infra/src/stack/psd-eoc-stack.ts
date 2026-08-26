@@ -1958,8 +1958,11 @@ export class PsdEocStack extends Stack {
       'PushWorkerSecurityGroup',
       {
         allowAllOutbound: false,
+        // CloudFormation replaces an EC2 security group when its description
+        // changes. Preserve the deployed value because this group has a fixed
+        // physical name and cannot be created alongside its replacement.
         description:
-          'HTTPS-only egress for the isolated mobile push worker; no database route.',
+          'HTTPS-only egress for the isolated Expo push worker; no database route.',
         securityGroupName: 'psd-eoc-push-worker',
         vpc: network as unknown as ec2.IVpc,
       },
