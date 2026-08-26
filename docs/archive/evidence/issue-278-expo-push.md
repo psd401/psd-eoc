@@ -115,3 +115,34 @@ worker, queue/DLQ, protected secret boundaries, and alarms in dark mode with
 the worker disabled. This remains deployment-topology proof only. It does not
 prove a credentialed provider handoff, a physical-device presentation or tap,
 or human receipt, and it does not authorize an automated notification.
+
+## Superseding isolated-provider credential readback — 2026-08-26 UTC
+
+At `2026-08-26T20:54:03Z`, the dedicated Firebase project
+`eoc-push-prod-c5c14b` and its exact `net.psd401.eoc` Android app were present
+in the independent `terraform/gcp/firebase-isolated` state. The final OpenTofu
+readback reported no changes. That root enables only its fixed Firebase/FCM,
+project-management, billing, service-usage, and IAM API allowlist; it still
+declares no Google Groups access, IAM bindings, service accounts, datastore,
+hosting, or storage resources.
+
+The protected provider configuration was then retained outside the repository:
+
+- EAS production environment variable `GOOGLE_SERVICES_JSON` has immutable
+  variable ID `8226eb0b-04fb-4a10-9bee-ebeeaab4be36`, type `file`, and
+  visibility `SECRET`. Its contents were not read back or retained here.
+- EAS FCM V1 for `net.psd401.eoc` is assigned to the dedicated
+  `expo-push-delivery@eoc-push-prod-c5c14b.iam.gserviceaccount.com` identity.
+  Google IAM readback showed only
+  `roles/firebasecloudmessaging.admin` for that identity; the unrelated Play
+  submission credential was left unchanged.
+- Apple APNs key `P7TQSB2728` is production-only and topic-restricted to
+  `net.psd401.eoc`. EAS assigned that key to the same bundle identifier. No
+  other Apple service or application topic was enabled.
+
+Credential verification reference:
+`issue-278-provider-credentials-2026-08-26T205403Z`. This proves isolated
+project provisioning and token-free EAS credential assignment only. It does
+not prove an exact native build, Expo ticket, final receipt, device
+presentation, app tap, or human observation, and it authorizes no automated
+notification.
