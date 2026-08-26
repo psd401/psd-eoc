@@ -35,6 +35,21 @@ Last consolidated from retained evidence: **2026-08-25**.
 | GuardDuty Malware Protection for S3  | `configured-unverified` | CDK defines the scoped plan and fail-closed tag boundary; no active-plan readback or controlled scan is retained.                                                                                                                 |
 | OpenStreetMap raster tiles           | `configured-unverified` | The optional read-only configuration is source-defined; no live availability claim is retained.                                                                                                                                   |
 
+## Records-retention review
+
+<!-- psd-eoc:records-retention-review-status -->
+
+- Official sources last rechecked: `2026-08-25`.
+- Controlled mapping review status: `pending`.
+- Controlled mapping review date: `not completed`.
+
+The source versions and tenant-neutral inventory are recorded in
+[Architecture and contributing](ARCHITECTURE.md#records-retention-classification).
+The tenant's row-level DAN decisions and private evidence belong only in its
+controlled operations record. No completed records-officer review or ambiguity
+guidance has been supplied for this aggregate status. Until it is, retain every
+product record and do not enable disposition automation.
+
 The pre-consolidation register and its detailed dated observations are
 preserved in the [historical readiness snapshot](archive/evidence/readiness-register-2026-08-25.md).
 The append-only deployment ledger is

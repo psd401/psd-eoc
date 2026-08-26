@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +14,7 @@ import {
   extractContractList,
   validateMarkdownLinks,
   validateMonitoringRunbooks,
+  validateRecordsRetentionDocumentation,
   verifyDocumentation,
 } from './verify-documentation';
 
@@ -88,6 +95,67 @@ describe('documentation contract', () => {
         'names',
       ),
     ).toEqual(['FIRST', 'SECOND']);
+  });
+
+  test('keeps records-retention sources, classes, and review status explicit', () => {
+    expect(
+      validateRecordsRetentionDocumentation(join(import.meta.dir, '..')),
+    ).toEqual([]);
+  });
+
+  test('rejects an incomplete record-class inventory', () => {
+    const repositoryRoot = join(import.meta.dir, '..');
+    const root = mkdtempSync(join(tmpdir(), 'psd-eoc-retention-docs-'));
+    temporaryDirectories.push(root);
+    for (const path of [
+      'docs/ARCHITECTURE.md',
+      'docs/INTEGRATIONS.md',
+      'docs/runbooks/go-live.md',
+    ]) {
+      mkdirSync(join(root, path, '..'), { recursive: true });
+      const contents = readFileSync(join(repositoryRoot, path), 'utf8');
+      writeFileSync(
+        join(root, path),
+        path === 'docs/ARCHITECTURE.md'
+          ? contents.replace('- `transport-and-operational-copies`\n', '')
+          : contents,
+      );
+    }
+
+    expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+      expect.objectContaining({
+        file: 'docs/ARCHITECTURE.md',
+        message: expect.stringContaining('records-retention classes differ'),
+      }),
+    );
+  });
+
+  test('rejects a reviewed retention status without a review date', () => {
+    const repositoryRoot = join(import.meta.dir, '..');
+    const root = mkdtempSync(join(tmpdir(), 'psd-eoc-retention-status-'));
+    temporaryDirectories.push(root);
+    for (const path of [
+      'docs/ARCHITECTURE.md',
+      'docs/INTEGRATIONS.md',
+      'docs/runbooks/go-live.md',
+    ]) {
+      mkdirSync(join(root, path, '..'), { recursive: true });
+      let contents = readFileSync(join(repositoryRoot, path), 'utf8');
+      if (path === 'docs/INTEGRATIONS.md') {
+        contents = contents.replace(
+          'Controlled mapping review status: `pending`.',
+          'Controlled mapping review status: `reviewed`.',
+        );
+      }
+      writeFileSync(join(root, path), contents);
+    }
+
+    expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+      expect.objectContaining({
+        file: 'docs/INTEGRATIONS.md',
+        message: 'records-retention mapping status lacks an honest review date',
+      }),
+    );
   });
 
   test('rejects phase, tenant, and duplicate readiness claims from current docs', () => {

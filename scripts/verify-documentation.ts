@@ -375,6 +375,244 @@ export function extractContractList(contents: string, name: string): string[] {
     .sort();
 }
 
+const RECORDS_RETENTION_CLASSES = Object.freeze([
+  'audit-and-mutation-evidence',
+  'configuration-and-governance',
+  'dispatch-and-delivery-evidence',
+  'drills-and-delivery-tests',
+  'generated-reports-and-exports',
+  'identity-device-and-session-lifecycle',
+  'media-and-private-objects',
+  'notification-content-and-authorization',
+  'operational-events-and-lifecycle',
+  'operational-journal',
+  'roster-and-recipient-snapshots',
+  'transport-and-operational-copies',
+]);
+
+const RECORDS_RETENTION_SOURCE_URLS = Object.freeze([
+  'https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF',
+  'https://www.sos.wa.gov/sites/default/files/2026-06/Public-Schools-%28K-12%29-Records-Retention-Schedule.PDF',
+  'https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records',
+]);
+
+function recordsRetentionError(
+  file: string,
+  contents: string,
+  message: string,
+  token = '<!-- psd-eoc:records-retention -->',
+): DocumentationError {
+  const offset = contents.indexOf(token);
+  return {
+    file,
+    line: offset === -1 ? 1 : lineNumber(contents, offset),
+    message,
+  };
+}
+
+function normalizedDocumentationText(contents: string): string {
+  return contents
+    .replace(/([A-Za-z])-\s+([a-z])/gu, '$1-$2')
+    .replace(/\s+/gu, ' ');
+}
+
+/**
+ * Keeps the public repository's retention guidance complete and tenant-neutral.
+ * The tenant's reviewed DAN mapping remains a controlled operations record.
+ */
+export function validateRecordsRetentionDocumentation(
+  repositoryRoot: string,
+): DocumentationError[] {
+  const architectureFile = 'docs/ARCHITECTURE.md';
+  const integrationsFile = 'docs/INTEGRATIONS.md';
+  const goLiveFile = 'docs/runbooks/go-live.md';
+  const architecture = readFileSync(
+    join(repositoryRoot, architectureFile),
+    'utf8',
+  );
+  const integrations = readFileSync(
+    join(repositoryRoot, integrationsFile),
+    'utf8',
+  );
+  const goLive = readFileSync(join(repositoryRoot, goLiveFile), 'utf8');
+  const normalizedArchitecture = normalizedDocumentationText(architecture);
+  const normalizedIntegrations = normalizedDocumentationText(integrations);
+  const normalizedGoLive = normalizedDocumentationText(goLive);
+  const errors: DocumentationError[] = [];
+
+  const marker = '<!-- psd-eoc:records-retention -->';
+  const markerCount = currentMarkdownFiles(repositoryRoot).reduce(
+    (count, file) =>
+      count +
+      (readFileSync(file, 'utf8').match(new RegExp(marker, 'gu'))?.length ?? 0),
+    0,
+  );
+  if (markerCount !== 1 || !architecture.includes(marker)) {
+    errors.push(
+      recordsRetentionError(
+        architectureFile,
+        architecture,
+        `expected one current records-retention marker; found ${String(markerCount)}`,
+      ),
+    );
+  }
+
+  const documentedClasses = extractContractList(
+    architecture,
+    'records-retention-classes',
+  );
+  if (
+    JSON.stringify(documentedClasses) !==
+    JSON.stringify([...RECORDS_RETENTION_CLASSES].sort())
+  ) {
+    errors.push(
+      recordsRetentionError(
+        architectureFile,
+        architecture,
+        `records-retention classes differ: documented=${documentedClasses.join(',')} actual=${RECORDS_RETENTION_CLASSES.join(',')}`,
+      ),
+    );
+  }
+
+  for (const sourceUrl of RECORDS_RETENTION_SOURCE_URLS) {
+    if (!architecture.includes(sourceUrl)) {
+      errors.push(
+        recordsRetentionError(
+          architectureFile,
+          architecture,
+          `records-retention guidance is missing official source: ${sourceUrl}`,
+        ),
+      );
+    }
+  }
+  for (const [description, pattern] of [
+    [
+      'CORE v5.0 and its October 2, 2024 approval/effective date',
+      /CORE[\s\S]{0,240}version 5\.0[\s\S]{0,160}October 2, 2024/iu,
+    ],
+    [
+      'Public Schools (K-12) v9.1 and its June 3, 2026 approval date',
+      /Public Schools \(K-12\)[\s\S]{0,240}version 9\.1[\s\S]{0,160}June 3, 2026/iu,
+    ],
+  ] as const) {
+    if (!pattern.test(architecture)) {
+      errors.push(
+        recordsRetentionError(
+          architectureFile,
+          architecture,
+          `records-retention guidance is missing ${description}`,
+        ),
+      );
+    }
+  }
+
+  for (const required of [
+    'GS2017-016 Rev. 0',
+    'GS2012-025 Rev. 1',
+    'GS50-18-29 Rev. 2',
+    'GS2010-008 Rev. 2',
+    'SD2011-153 Rev. 1',
+    'routine/minor',
+    'uncommon/major',
+    'notification documentation',
+    'mixed-content',
+    'The product does not own a school-safety-plan record class',
+    'reasonably anticipated litigation',
+    'active public-records request',
+    'archival appraisal',
+    'district-controlled operations record',
+    'No deletion, purge, retention timer, lifecycle rule, down migration, or automated disposition',
+    'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
+  ]) {
+    if (!normalizedArchitecture.includes(required)) {
+      errors.push(
+        recordsRetentionError(
+          architectureFile,
+          architecture,
+          `records-retention guidance is missing required statement: ${required}`,
+        ),
+      );
+    }
+  }
+
+  const status = integrations.match(
+    /Controlled mapping review status: `([^`]+)`\./u,
+  )?.[1];
+  const reviewDate = integrations.match(
+    /Controlled mapping review date: `([^`]+)`\./u,
+  )?.[1];
+  const sourceCheckDate = integrations.match(
+    /Official sources last rechecked: `(\d{4}-\d{2}-\d{2})`\./u,
+  )?.[1];
+  if (status !== 'pending' && status !== 'reviewed') {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'records-retention mapping status must be pending or reviewed',
+        '<!-- psd-eoc:records-retention-review-status -->',
+      ),
+    );
+  }
+  if (
+    reviewDate === undefined ||
+    (status === 'pending' && reviewDate !== 'not completed') ||
+    (status === 'reviewed' && !/^\d{4}-\d{2}-\d{2}$/u.test(reviewDate))
+  ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'records-retention mapping status lacks an honest review date',
+        '<!-- psd-eoc:records-retention-review-status -->',
+      ),
+    );
+  }
+  if (sourceCheckDate === undefined) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'records-retention official-source check lacks an ISO date',
+        '<!-- psd-eoc:records-retention-review-status -->',
+      ),
+    );
+  }
+  if (
+    !integrations.includes(
+      '<!-- psd-eoc:records-retention-review-status -->',
+    ) ||
+    !normalizedIntegrations.includes('retain every product record')
+  ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'readiness register lacks aggregate retention review evidence and the retain-everything boundary',
+        '<!-- psd-eoc:records-retention-review-status -->',
+      ),
+    );
+  }
+
+  for (const required of [
+    '../ARCHITECTURE.md#records-retention-classification',
+    'does not block launch while every product record remains retained and automated disposition remains absent',
+    'blocks any later disposition design',
+  ]) {
+    if (!normalizedGoLive.includes(required)) {
+      errors.push(
+        recordsRetentionError(
+          goLiveFile,
+          goLive,
+          `go-live procedure is missing the retention boundary: ${required}`,
+          '# Go-live procedure',
+        ),
+      );
+    }
+  }
+  return errors;
+}
+
 function compareNames(
   errors: DocumentationError[],
   documented: readonly string[],
@@ -625,6 +863,7 @@ export function verifyDocumentation(
     ...validateMarkdownLinks(root, files),
     ...validateBunCommands(root, files),
     ...validateMonitoringRunbooks(root),
+    ...validateRecordsRetentionDocumentation(root),
     ...verifyContracts(root),
     ...verifyInformationArchitecture(root, files),
   ].sort(

@@ -95,6 +95,127 @@ drills and unroutable fixtures remain safe for automated tests.
 - External payloads and uploads are untrusted; validate by content and strip
   image metadata.
 
+## Records-retention classification
+
+<!-- psd-eoc:records-retention -->
+
+The product retains records; it does not decide when a district may dispose of
+them. The repository defines the content inventory and safety boundary below.
+Each deploying district owns the authoritative classification in its
+district-controlled operations record, reviewed by its records officer.
+
+The following official sources were rechecked on 2026-08-25:
+
+- [Local Government Common Records Retention Schedule (CORE)](https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF):
+  version 5.0, approved and effective October 2, 2024.
+- [Public Schools (K-12) Records Retention Schedule](https://www.sos.wa.gov/sites/default/files/2026-06/Public-Schools-%28K-12%29-Records-Retention-Schedule.PDF):
+  version 9.1, approved June 3, 2026.
+- [Washington State Archives school and ESD schedule index](https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records):
+  identifies those two versions as the current schedules used together.
+
+CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions. They are future
+change inputs only until the Local Records Committee approves them and the
+official index replaces the current versions. Do not commit schedule PDFs to
+the repository.
+
+### Product record-class inventory
+
+Classification follows actual record content and the event context, not table
+names, file formats, or one blanket DAN for the database. The inventory is:
+
+<!-- docs-contract:records-retention-classes:start -->
+
+- `operational-events-and-lifecycle`
+  Event identity, real-versus-drill kind, activation preparation and
+  consumption, lifecycle decisions, and event transitions.
+- `operational-journal`
+  Text, location, photo, and system entries, including superseding corrections
+  and redactions that preserve the original history.
+- `notification-content-and-authorization`
+  Notification intents, selected channels, versioned templates, rendered
+  activation/reactivation/all-clear content, and human authorization evidence.
+- `dispatch-and-delivery-evidence`
+  Outbox work, batches, channel attempts and executions, provider facts,
+  delivery evidence, endpoint-status facts, and SMS opt-out facts.
+- `drills-and-delivery-tests`
+  Drill events and controlled synthetic tests, canary eligibility, target-set
+  versions, endpoints, runs, and append-only reports.
+- `media-and-private-objects`
+  Upload intents, sanitized metadata and checksums, quarantine objects,
+  sanitized private objects, and journal references. A presentation redaction
+  does not dispose of the retained source or history.
+- `audit-and-mutation-evidence`
+  Hash-chained security audit entries and anchors, idempotency facts, human
+  confirmations, and integration-change authorizations. The security audit is
+  distinct from the operational journal.
+- `roster-and-recipient-snapshots`
+  Source configuration versions, immutable staff/synthetic snapshots,
+  facility/source provenance, minimized recipient endpoints, and sync
+  outcomes/failures. Public examples never include contact or token data.
+- `identity-device-and-session-lifecycle`
+  Staff accounts, roles and scopes, access snapshots, device enrollment,
+  session and credential lifecycle, push-token lifecycle, and agent/API-key
+  lifecycle.
+- `configuration-and-governance`
+  Facilities and neighborhoods, group sources, event-type versions/templates
+  and drafts, integration observations, channel configuration, and governance
+  decisions.
+- `generated-reports-and-exports`
+  Derived event/drill projections, delivery-test reports, and immutable,
+  content-addressed CSV/PDF objects. Expiration of a signed download URL does
+  not dispose of its object.
+- `transport-and-operational-copies`
+Queue messages, provider callbacks, logs, backups, CI artifacts, and
+monitoring telemetry. The controlled mapping must decide which are official,
+secondary, or transitory copies; unrelated infrastructure lifecycle policies
+are outside the product-record boundary.
+<!-- docs-contract:records-retention-classes:end -->
+
+A single event can span lifecycle, journal, media, notification, delivery,
+audit, roster-reference, and export records. `incident` alone does not say
+whether the event is routine/minor, uncommon/major, or a security incident.
+Notification documentation inherits its actual operational context; it is not
+assigned a stand-alone blanket classification. A mixed-content event can
+require more than one series or a documented controlling classification.
+
+These current schedule entries are candidates for records-officer review, not
+repository-owned classifications:
+
+| Content and context                                                                                 | Candidate series    | Current minimum/action                                                                                                                                               | Source designation |
+| --------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| Emergency-drill or occupational-safety-program administration                                       | `GS2017-016 Rev. 0` | Retain for 3 years after the end of the calendar year and until no longer needed for agency business, then destroy; non-archival.                                    | OPR                |
+| Routine/minor emergency response with minimal assistance or disruption                              | `GS2012-025 Rev. 1` | Retain for 6 years after the matter is resolved or recovery is complete, then destroy; non-archival.                                                                 | OPR                |
+| Uncommon/major response, including emergency-operations-center activities and communications        | `GS50-18-29 Rev. 2` | Retain for 6 years after the matter is resolved or recovery is complete, then transfer to Washington State Archives for appraisal and selective retention; archival. | OPR                |
+| Security incidents or data/privacy breaches, including investigation and notification documentation | `GS2010-008 Rev. 2` | Retain for 6 years after the matter is resolved, then destroy; non-archival.                                                                                         | OFM                |
+| School safety plans, only if the product actually owns that content                                 | `SD2011-153 Rev. 1` | Retain for 6 years after obsolete or superseded, then destroy; non-archival.                                                                                         | OPR                |
+
+The product does not own a school-safety-plan record class. Do not assign
+`SD2011-153` unless a future inventory proves that a deployment actually stores
+the plans themselves.
+
+### Controlled mapping and disposition boundary
+
+For every inventory class, the district-controlled operations record must name
+the schedule title/version and effective date; DAN/revision; retention trigger
+and minimum period; disposition; archival designation and appraisal
+requirement; source OPR/OFM designation; official-copy owner and secondary-copy
+treatment; content-based rationale; reviewer and review date; ambiguity status;
+and any retained records-officer or Washington State Archives guidance.
+Tenant-specific determinations, staff data, and private evidence do not belong
+in this public repository.
+
+An ongoing legal hold, reasonably anticipated litigation, active
+public-records request, unresolved audit requirement, or required archival
+appraisal overrides otherwise eligible disposition. Ambiguity is resolved with
+retained written guidance from the district records officer or Washington State
+Archives, not an engineering guess.
+
+Until a separately approved disposition design exists, retain every event,
+journal entry, audit fact, delivery fact, drill/test record, roster snapshot,
+media object, and export. No deletion, purge, retention timer, lifecycle rule,
+down migration, or automated disposition is authorized by this guidance.
+Applied migrations and append-only product history remain unchanged.
+
 ## Configuration boundaries
 
 Portable tenant configuration lives in the manifest and environment surfaces
