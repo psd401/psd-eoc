@@ -160,7 +160,10 @@ names, file formats, or one blanket DAN for the database. The inventory is:
   Queue messages, provider callbacks, logs, backups, CI artifacts, and
   monitoring telemetry. The controlled mapping must decide which are official,
   secondary, or transitory copies; unrelated infrastructure lifecycle policies
-  are outside the product-record boundary.
+  are outside the product-record boundary. Existing operational expiry does not
+  establish lawful record disposition. An expiring copy that the controlled
+  mapping identifies as official or secondary must not remain the sole copy of
+  content that the district is required to retain.
 
 <!-- docs-contract:records-retention-classes:end -->
 

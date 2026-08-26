@@ -13,6 +13,25 @@ interface PackageManifest {
   readonly scripts?: Readonly<Record<string, string>>;
 }
 
+const DISPOSITION_AUTHORIZATION_PATTERNS = Object.freeze([
+  /\b(?:may|can|will|must|should|(?:is|are)[ \t\r\n]+(?:allowed|authorized|permitted)[ \t\r\n]+to)[ \t\r\n]+(?:[a-z-]+[ \t\r\n]+){0,6}(?:delete|purge|dispose|destroy|enable[ \t\r\n]+(?:a[ \t\r\n]+)?(?:lifecycle[ \t\r\n]+rule|retention[ \t\r\n]+timer)|run[ \t\r\n]+(?:a[ \t\r\n]+)?down[ \t\r\n]+migration)\b/iu,
+  /\b(?:delete|deletion|purge|purging|dispose|disposition|destroy|destruction|lifecycle[ \t\r\n]+rules?|retention[ \t\r\n]+timers?|down[ \t\r\n]+migrations?)\b(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]+(?:is|are|becomes|remains)?(?:[ \t\r\n]+)?(?:enabled|allowed|authorized|permitted|required)\b/iu,
+]);
+
+function containsConflictingDispositionAuthorization(
+  contents: string,
+): boolean {
+  return contents
+    .split(/(?:[.!?;]|\bbut\b|\bhowever\b|\r?\n\s*\r?\n)/iu)
+    .some(
+      (clause) =>
+        !/\b(?:no|not|never)\b/iu.test(clause) &&
+        DISPOSITION_AUTHORIZATION_PATTERNS.some((pattern) =>
+          pattern.test(clause),
+        ),
+    );
+}
+
 export function currentDocumentationViolations(
   repositoryPath: string,
   contents: string,
@@ -83,12 +102,7 @@ export function currentDocumentationViolations(
       'current documentation bypasses the pinned synthetic database commands',
     );
   }
-  if (
-    [
-      /\b(?:may|can|will|must|should|(?:is|are)[ \t\r\n]+(?:allowed|authorized|permitted)[ \t\r\n]+to)[ \t\r\n]+(?!not\b)(?:[a-z-]+[ \t\r\n]+){0,6}(?:delete|purge|dispose|destroy|enable[ \t\r\n]+(?:a[ \t\r\n]+)?(?:lifecycle[ \t\r\n]+rule|retention[ \t\r\n]+timer)|run[ \t\r\n]+(?:a[ \t\r\n]+)?down[ \t\r\n]+migration)\b/iu,
-      /\b(?:deletion|purging|purge|disposition|destruction|lifecycle[ \t\r\n]+rules?|retention[ \t\r\n]+timers?|down[ \t\r\n]+migrations?)\b(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]+(?:is|are|becomes|remains)?(?:[ \t\r\n]+)?(?:enabled|allowed|authorized|permitted|required)\b/iu,
-    ].some((pattern) => pattern.test(contents))
-  ) {
+  if (containsConflictingDispositionAuthorization(contents)) {
     violations.push(
       'current documentation contains conflicting disposition authorization',
     );
@@ -395,6 +409,25 @@ export function extractContractList(contents: string, name: string): string[] {
     .sort();
 }
 
+function extractContractTableRows(contents: string, name: string): string[][] {
+  const section = boundedDocumentationSection(
+    contents,
+    `<!-- docs-contract:${name}:start -->`,
+    `<!-- docs-contract:${name}:end -->`,
+  );
+  if (section === null) return [];
+  return section
+    .split(/\r?\n/u)
+    .filter((line) => line.trimStart().startsWith('|'))
+    .slice(2)
+    .map((line) =>
+      line
+        .split('|')
+        .slice(1, -1)
+        .map((cell) => cell.trim().replace(/^`(.+)`$/u, '$1')),
+    );
+}
+
 const RECORDS_RETENTION_CLASSES = Object.freeze([
   'audit-and-mutation-evidence',
   'configuration-and-governance',
@@ -425,6 +458,42 @@ const RECORDS_RETENTION_POLICY = Object.freeze([
   'record-retention: all',
   'retention-timers: prohibited',
 ]);
+
+const RECORDS_RETENTION_CANDIDATES = Object.freeze([
+  [
+    'Emergency-drill or occupational-safety-program administration',
+    'GS2017-016 Rev. 0',
+    'Retain for 3 years after the end of the calendar year and until no longer needed for agency business, then destroy; non-archival.',
+    'OPR',
+  ],
+  [
+    'Routine/minor emergency response with minimal assistance or disruption',
+    'GS2012-025 Rev. 1',
+    'Retain for 6 years after the matter is resolved or recovery is complete, then destroy; non-archival.',
+    'OPR',
+  ],
+  [
+    'Uncommon/major response, including emergency-operations-center activities and communications',
+    'GS50-18-29 Rev. 2',
+    'Retain for 6 years after the matter is resolved or recovery is complete, then transfer to Washington State Archives for appraisal and selective retention; archival.',
+    'OPR',
+  ],
+  [
+    'Security incidents or data/privacy breaches, including investigation and notification documentation',
+    'GS2010-008 Rev. 2',
+    'Retain for 6 years after the matter is resolved, then destroy; non-archival.',
+    'OFM',
+  ],
+  [
+    'School safety plans, only if the product actually owns that content',
+    'SD2011-153 Rev. 1',
+    'Retain for 6 years after obsolete or superseded, then destroy; non-archival.',
+    'OPR',
+  ],
+]);
+
+const RECORDS_RETENTION_EVIDENCE_INTRODUCED_ON = '2026-08-25';
+const NEWEST_RECORDS_RETENTION_SCHEDULE_EFFECTIVE_ON = '2026-06-03';
 
 function recordsRetentionError(
   file: string,
@@ -630,6 +699,46 @@ export function validateRecordsRetentionDocumentation(
     );
   }
 
+  const candidatesStart =
+    '<!-- docs-contract:records-retention-candidates:start -->';
+  const candidatesEnd =
+    '<!-- docs-contract:records-retention-candidates:end -->';
+  if (
+    boundedDocumentationSection(
+      retentionReview,
+      candidatesStart,
+      candidatesEnd,
+    ) === null ||
+    currentMarkerCount(candidatesStart) !== 1 ||
+    currentMarkerCount(candidatesEnd) !== 1
+  ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'expected one bounded records-retention-candidates contract',
+        reviewStart,
+      ),
+    );
+  }
+  const documentedCandidates = extractContractTableRows(
+    retentionReview,
+    'records-retention-candidates',
+  );
+  if (
+    JSON.stringify(documentedCandidates) !==
+    JSON.stringify(RECORDS_RETENTION_CANDIDATES)
+  ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'records-retention candidate mapping differs from required current evidence',
+        reviewStart,
+      ),
+    );
+  }
+
   for (const sourceUrl of RECORDS_RETENTION_SOURCE_URLS) {
     if (!retentionReview.includes(sourceUrl)) {
       errors.push(
@@ -687,11 +796,6 @@ export function validateRecordsRetentionDocumentation(
   }
 
   for (const required of [
-    'GS2017-016 Rev. 0',
-    'GS2012-025 Rev. 1',
-    'GS50-18-29 Rev. 2',
-    'GS2010-008 Rev. 2',
-    'SD2011-153 Rev. 1',
     'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
   ]) {
     if (!normalizedIntegrations.includes(required)) {
@@ -716,6 +820,16 @@ export function validateRecordsRetentionDocumentation(
     retentionReview,
     /^- Controlled mapping review date: `([^`]+)`\.$/gmu,
   );
+  const inventoryCoverage = uniqueBoundedCapture(
+    integrations,
+    retentionReview,
+    /^- Controlled mapping inventory coverage: `([^`]+)`\.$/gmu,
+  );
+  const ambiguityStatus = uniqueBoundedCapture(
+    integrations,
+    retentionReview,
+    /^- Controlled mapping ambiguity status: `([^`]+)`\.$/gmu,
+  );
   const sourceCheckDate = uniqueBoundedCapture(
     integrations,
     retentionReview,
@@ -731,16 +845,22 @@ export function validateRecordsRetentionDocumentation(
       ),
     );
   }
-  const reviewDateIsHonest =
-    (status === 'pending' && reviewDate === 'not completed') ||
+  const reviewEvidenceIsHonest =
+    (status === 'pending' &&
+      reviewDate === 'not completed' &&
+      inventoryCoverage === 'not completed' &&
+      ambiguityStatus === 'not completed') ||
     (status === 'reviewed' &&
       isRealIsoDate(reviewDate) &&
-      reviewDate <= validationDateIso);
+      reviewDate >= NEWEST_RECORDS_RETENTION_SCHEDULE_EFFECTIVE_ON &&
+      reviewDate <= validationDateIso &&
+      inventoryCoverage === 'all classes' &&
+      ambiguityStatus === 'resolved');
   const pendingEvidence = normalizedIntegrations.includes(
     'No completed records-officer review or ambiguity guidance has been supplied',
   );
   if (
-    !reviewDateIsHonest ||
+    !reviewEvidenceIsHonest ||
     (status === 'pending' && !pendingEvidence) ||
     (status === 'reviewed' &&
       (pendingEvidence || normalizedIntegrations.includes('pending')))
@@ -756,6 +876,7 @@ export function validateRecordsRetentionDocumentation(
   }
   if (
     !isRealIsoDate(sourceCheckDate) ||
+    sourceCheckDate < RECORDS_RETENTION_EVIDENCE_INTRODUCED_ON ||
     sourceCheckDate > validationDateIso ||
     uniqueCapture(
       retentionReview,
@@ -766,7 +887,7 @@ export function validateRecordsRetentionDocumentation(
       recordsRetentionError(
         integrationsFile,
         integrations,
-        'records-retention official-source date is invalid, future-dated, duplicated, or inconsistent',
+        'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
         reviewStart,
       ),
     );

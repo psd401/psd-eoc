@@ -42,6 +42,33 @@ function retentionDocumentationFixture(
   return root;
 }
 
+function reviewedRetentionEvidence(
+  contents: string,
+  reviewDate: string,
+): string {
+  return contents
+    .replace(
+      'Controlled mapping review status: `pending`.',
+      'Controlled mapping review status: `reviewed`.',
+    )
+    .replace(
+      'Controlled mapping review date: `not completed`.',
+      `Controlled mapping review date: \`${reviewDate}\`.`,
+    )
+    .replace(
+      'Controlled mapping inventory coverage: `not completed`.',
+      'Controlled mapping inventory coverage: `all classes`.',
+    )
+    .replace(
+      'Controlled mapping ambiguity status: `not completed`.',
+      'Controlled mapping ambiguity status: `resolved`.',
+    )
+    .replace(
+      /No completed records-officer review or\s+ambiguity\s+guidance has been supplied for this aggregate status\./u,
+      'Records-officer review covers all inventory classes, and retained guidance resolves every ambiguity.',
+    );
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
@@ -147,10 +174,7 @@ describe('documentation contract', () => {
       'psd-eoc-retention-status-',
       (path, contents) =>
         path === 'docs/INTEGRATIONS.md'
-          ? contents.replace(
-              'Controlled mapping review status: `pending`.',
-              'Controlled mapping review status: `reviewed`.',
-            )
+          ? reviewedRetentionEvidence(contents, 'not completed')
           : contents,
     );
 
@@ -168,19 +192,7 @@ describe('documentation contract', () => {
       'psd-eoc-retention-reviewed-',
       (path, contents) =>
         path === 'docs/INTEGRATIONS.md'
-          ? contents
-              .replace(
-                'Controlled mapping review status: `pending`.',
-                'Controlled mapping review status: `reviewed`.',
-              )
-              .replace(
-                'Controlled mapping review date: `not completed`.',
-                'Controlled mapping review date: `2026-08-25`.',
-              )
-              .replace(
-                /No completed records-officer review or ambiguity\s+guidance has been supplied for this aggregate status\./u,
-                'Records-officer review and ambiguity guidance have been supplied for this aggregate status.',
-              )
+          ? reviewedRetentionEvidence(contents, '2026-08-25')
           : contents,
     );
 
@@ -233,19 +245,7 @@ describe('documentation contract', () => {
         name: 'invalid-date',
         transform: (path: string, contents: string): string =>
           path === 'docs/INTEGRATIONS.md'
-            ? contents
-                .replace(
-                  'Controlled mapping review status: `pending`.',
-                  'Controlled mapping review status: `reviewed`.',
-                )
-                .replace(
-                  'Controlled mapping review date: `not completed`.',
-                  'Controlled mapping review date: `2026-99-99`.',
-                )
-                .replace(
-                  /No completed records-officer review or ambiguity\s+guidance has been supplied for this aggregate status\./u,
-                  'Records-officer review and ambiguity guidance have been supplied for this aggregate status.',
-                )
+            ? reviewedRetentionEvidence(contents, '2026-99-99')
             : contents,
         message:
           'records-retention mapping status, date, and evidence are inconsistent',
@@ -255,19 +255,17 @@ describe('documentation contract', () => {
         name: 'future-review-date',
         transform: (path: string, contents: string): string =>
           path === 'docs/INTEGRATIONS.md'
-            ? contents
-                .replace(
-                  'Controlled mapping review status: `pending`.',
-                  'Controlled mapping review status: `reviewed`.',
-                )
-                .replace(
-                  'Controlled mapping review date: `not completed`.',
-                  'Controlled mapping review date: `9999-12-31`.',
-                )
-                .replace(
-                  /No completed records-officer review or ambiguity\s+guidance has been supplied for this aggregate status\./u,
-                  'Records-officer review and ambiguity guidance have been supplied for this aggregate status.',
-                )
+            ? reviewedRetentionEvidence(contents, '9999-12-31')
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'pre-schedule-review-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? reviewedRetentionEvidence(contents, '2026-06-02')
             : contents,
         message:
           'records-retention mapping status, date, and evidence are inconsistent',
@@ -283,7 +281,7 @@ describe('documentation contract', () => {
               )
             : contents,
         message:
-          'records-retention official-source date is invalid, future-dated, duplicated, or inconsistent',
+          'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
         file: 'docs/INTEGRATIONS.md',
       },
       {
@@ -299,7 +297,25 @@ describe('documentation contract', () => {
               'Official sources last rechecked: `9999-12-31`.',
             ),
         message:
-          'records-retention official-source date is invalid, future-dated, duplicated, or inconsistent',
+          'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'stale-source-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents
+                .replace(
+                  'official sources were rechecked on 2026-08-25',
+                  'official sources were rechecked on 1900-01-01',
+                )
+                .replace(
+                  'Official sources last rechecked: `2026-08-25`.',
+                  'Official sources last rechecked: `1900-01-01`.',
+                )
+            : contents,
+        message:
+          'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
         file: 'docs/INTEGRATIONS.md',
       },
     ];
@@ -327,9 +343,39 @@ describe('documentation contract', () => {
             ? contents.replace('GS2017-016 Rev. 0', 'missing candidate')
             : contents,
         message:
-          'records-retention review is missing required current evidence: GS2017-016 Rev. 0',
+          'records-retention candidate mapping differs from required current evidence',
         file: 'docs/INTEGRATIONS.md',
       },
+      ...(
+        [
+          ['period', 'Retain for 3 years', 'Retain for 4 years'],
+          [
+            'trigger',
+            'after the matter is resolved or recovery is complete',
+            'after creation',
+          ],
+          [
+            'disposition',
+            'then destroy; non-archival',
+            'then retain permanently',
+          ],
+          ['archival', 'non-archival.', 'archival.'],
+          [
+            'source-designation',
+            '| OPR                |',
+            '| OFM                |',
+          ],
+        ] as const
+      ).map(([name, current, replacement]) => ({
+        name: `candidate-${name}`,
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(current, replacement)
+            : contents,
+        message:
+          'records-retention candidate mapping differs from required current evidence',
+        file: 'docs/INTEGRATIONS.md',
+      })),
       {
         name: 'source',
         transform: (path: string, contents: string): string =>
@@ -470,6 +516,16 @@ describe('documentation contract', () => {
       ).toEqual([
         'current documentation contains conflicting disposition authorization',
       ]);
+    }
+    for (const prohibition of [
+      'Deletion is not permitted.',
+      'Purge is not allowed.',
+      'Automated disposition is never authorized.',
+      'Down migrations are not permitted.',
+    ]) {
+      expect(
+        currentDocumentationViolations('docs/runbooks/records.md', prohibition),
+      ).toEqual([]);
     }
   });
 });

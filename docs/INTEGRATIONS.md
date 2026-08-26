@@ -56,6 +56,8 @@ the repository.
 These current schedule entries are candidates for records-officer review, not
 repository-owned classifications:
 
+<!-- docs-contract:records-retention-candidates:start -->
+
 | Content and context                                                                                 | Candidate series    | Current minimum/action                                                                                                                                               | Source designation |
 | --------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
 | Emergency-drill or occupational-safety-program administration                                       | `GS2017-016 Rev. 0` | Retain for 3 years after the end of the calendar year and until no longer needed for agency business, then destroy; non-archival.                                    | OPR                |
@@ -64,16 +66,21 @@ repository-owned classifications:
 | Security incidents or data/privacy breaches, including investigation and notification documentation | `GS2010-008 Rev. 2` | Retain for 6 years after the matter is resolved, then destroy; non-archival.                                                                                         | OFM                |
 | School safety plans, only if the product actually owns that content                                 | `SD2011-153 Rev. 1` | Retain for 6 years after obsolete or superseded, then destroy; non-archival.                                                                                         | OPR                |
 
+<!-- docs-contract:records-retention-candidates:end -->
+
 - Official sources last rechecked: `2026-08-25`.
 - Controlled mapping review status: `pending`.
 - Controlled mapping review date: `not completed`.
+- Controlled mapping inventory coverage: `not completed`.
+- Controlled mapping ambiguity status: `not completed`.
 
-The source versions and tenant-neutral inventory are recorded in
-[Architecture and contributing](ARCHITECTURE.md#records-retention-classification).
-The tenant's row-level DAN decisions and private evidence belong only in its
-controlled operations record. No completed records-officer review or ambiguity
-guidance has been supplied for this aggregate status. Until it is, retain every
-product record and do not enable disposition automation.
+The tenant-neutral inventory and durable boundaries are recorded in
+[Architecture and contributing](ARCHITECTURE.md#records-retention-classification);
+the current source versions and aggregate evidence are retained in this
+section. The tenant's row-level DAN decisions and private evidence belong only
+in its controlled operations record. No completed records-officer review or
+ambiguity guidance has been supplied for this aggregate status. Until it is,
+retain every product record and do not enable disposition automation.
 
 <!-- psd-eoc:records-retention-review-status:end -->
 
