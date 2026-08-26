@@ -30,8 +30,10 @@ channel, or another channel outage. Safety-boundary failures are **SEV-0**.
 
 ## Verify
 
-Confirm new eligible work drains through the normal worker, old-epoch work
-stays suppressed, DLQ growth stops, and immutable attempt/receipt evidence
-advances only with proof. Provider acceptance is not delivery or receipt. Keep
-each retained item blocked unless an individually reviewed mechanism can prove
-zero duplicate provider side effect.
+Confirm newly authorized work drains through the normal worker, DLQ growth
+stops, and immutable attempt/receipt evidence advances only with proof. Pausing
+a consumer does not suppress queued work, and its SQS retention clock keeps
+running. Record the configured retention deadline. Keep each retained item
+blocked unless it has been reconciled before that deadline and an individually
+reviewed mechanism can prove zero duplicate provider side effect. Provider
+acceptance is not delivery or receipt.

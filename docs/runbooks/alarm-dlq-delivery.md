@@ -11,8 +11,8 @@ name is not deployment evidence.
 
 A delivery batch could not be safely routed to channel queues after
 bounded attempts. Every approved channel may be affected. Classify **SEV-1**;
-use **SEV-0** for real/drill mismatch, unapproved routable work, control-epoch
-mismatch, or a human-only boundary failure.
+use **SEV-0** for real/drill mismatch, unapproved routable work, contradictory
+authorization evidence, or a human-only boundary failure.
 
 ## Respond
 
@@ -25,17 +25,19 @@ mismatch, or a human-only boundary failure.
 3. Review `/psd-eoc/dispatcher` logs by UTC interval and sanitized batch ID.
    Record bounded reason counts only; do not open or copy a body.
 4. From authorized immutable application evidence, verify the event ID/kind,
-   template mode, roster snapshot/population, integration truth, batch ID, and
-   enable epoch agree. Any missing or contradictory value fails closed.
+   template mode, roster snapshot/population, integration truth, notification
+   intent, and batch ID agree. Any missing or contradictory value fails closed.
 5. Check stuck-outbox, App Runner, Aurora, and all channel queue metrics for the
    same interval. Fix or roll back the proven canonical router/runtime cause;
    never construct or publish a replacement batch manually.
 
 ## Verify
 
-Confirm new current-epoch batches route normally, queue age falls, DLQ depth
-stops increasing, old/disabled-epoch work stays terminally suppressed, and no
-provider receives an unreviewed replay. Disposition every retained item as
-suppressed, reconciled without provider I/O, or **BLOCKED** pending a separately
-implemented and individually approved safe mechanism. A zero count alone is
-not proof of recovery.
+Confirm newly authorized batches route normally, queue age falls, DLQ depth
+stops increasing, and no provider receives an unreviewed replay. A paused
+consumer does not suppress or change retained work, but SQS retention clocks
+keep running and may expire it. Record configured retention deadlines and
+reconcile every pre-recovery item before its deadline or before any consumer
+resumes. Disposition each item as reconciled without provider I/O or **BLOCKED**
+pending a separately implemented and individually approved safe mechanism. A
+zero count alone is not proof of recovery.
