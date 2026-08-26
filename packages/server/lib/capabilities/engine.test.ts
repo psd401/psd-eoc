@@ -1047,6 +1047,13 @@ describe('capability engine', () => {
       ),
     );
     expect(failed.reasonCode).toBe('PERSISTENCE_CONFLICT');
+    expect(failed.cause).toBeInstanceOf(Error);
+    expect((failed.cause as Error).message).toBe(
+      'synthetic sync persistence failure',
+    );
+    expect(JSON.stringify(failed)).not.toContain(
+      'synthetic sync persistence failure',
+    );
     expect(failedStore.auditEvents).toEqual([
       expect.objectContaining({
         action: 'sync-event-room',

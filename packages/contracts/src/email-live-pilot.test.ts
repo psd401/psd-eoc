@@ -185,6 +185,74 @@ describe('controlled email delivery-test canary contracts', () => {
     ).toBe(false);
   });
 
+  test('adds an exact singleton-push target for bounded physical drills', () => {
+    expect(
+      CreateDeliveryTestTargetSetVersionInputSchema.safeParse({
+        mode: 'controlled-push-canary',
+        previousVersion: null,
+        facilityId: IDS.facility,
+        rosterSnapshotId: IDS.roster,
+        eligibilityFactIds: [IDS.eligibility],
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse({
+        ...controlledTargetSet('push'),
+        mode: 'controlled-push-canary',
+      }).success,
+    ).toBe(true);
+
+    const pushConsequence = {
+      ...emailConsequence,
+      channel: 'push' as const,
+      renderedMessage: {
+        templateMode: 'drill' as const,
+        purpose: 'activation' as const,
+        classificationMarker: 'DRILL' as const,
+        eventKind: 'drill' as const,
+        channel: 'push' as const,
+        title: '[DRILL] Bounded push canary',
+        body: '[DRILL] Training only. Started once confirmed.',
+      },
+      integrationStatus: {
+        ...emailConsequence.integrationStatus,
+        integrationId: 'expo-push',
+      },
+    };
+    const pushActivation = {
+      ...controlledActivationPreview,
+      channels: [pushConsequence],
+    };
+    expect(ActivationPreviewSchema.safeParse(pushActivation).success).toBe(
+      true,
+    );
+    expect(
+      DeliveryTestPreviewSchema.safeParse({
+        purpose: 'monthly-live-delivery-test',
+        activationPreview: pushActivation,
+        targetSet: deliveryTest.targetSet,
+        endpointReferenceDigest: ENDPOINT_DIGEST,
+        channels: [
+          {
+            channel: 'push',
+            endpointCount: 1,
+            integrationStatus: pushConsequence.integrationStatus,
+            credentialVerified: true,
+          },
+        ],
+        consequenceDigest: DIGEST,
+        createdAt: CREATED_AT,
+        expiresAt: EXPIRES_AT,
+      }).success,
+    ).toBe(true);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...controlledIntent,
+        channels: [pushConsequence],
+      }).success,
+    ).toBe(true);
+  });
+
   test('allows exactly one email consequence only with staff DRILL delivery-test provenance', () => {
     expect(
       ActivationPreviewSchema.safeParse(controlledActivationPreview).success,

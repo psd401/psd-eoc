@@ -115,6 +115,11 @@ jobs:
       - name: Install PDF verification dependency
         run: sudo apt-get update && sudo apt-get install --yes poppler-utils
 
+      - name: Set up Terraform for isolated Firebase plan tests
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
       - name: Start repository-owned synthetic PostgreSQL
         run: bun run test:db:start
 
@@ -166,6 +171,9 @@ jobs:
       # the deployable build still receives no production tenant identity.
       - name: Run the authoritative repository gate
         run: bun run check
+
+      - name: Run issue 278 provider-free lifecycle verification
+        run: bun run test:e2e:issue-278
 
       - name: Synthesize a second-district infrastructure configuration
         run: bun run --cwd infra synth:example

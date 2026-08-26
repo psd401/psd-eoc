@@ -1,9 +1,19 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 import { eq } from 'drizzle-orm';
 
-import { createDisposableDatabase } from '../lib/testing/database';
+import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+} from '../lib/testing/database';
 import { migrateDatabase } from '../drizzle/migrate';
 import { decideAccess } from '../lib/auth/trusted-group-access';
 import {
@@ -20,6 +30,8 @@ import { groupMembers, groupSources } from './schema';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const CONFIGURATION = Object.freeze({
   googleGroupId: 'groups/synthetic-initial-administrators',
@@ -168,10 +180,14 @@ describeWithDatabase(
     });
 
     afterAll(async () => {
-      await connection?.close();
+      const opened = connection;
+      const ownedDatabase = disposable;
       connection = undefined;
-      await disposable?.drop();
       disposable = undefined;
+      await closeAndDropDisposableDatabase(
+        opened === undefined ? undefined : () => opened.close(),
+        ownedDatabase,
+      );
     });
 
     test('a freshly migrated deployment admits nobody', async () => {

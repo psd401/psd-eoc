@@ -30,12 +30,61 @@ Last consolidated from retained evidence: **2026-08-26**.
 | Google Play device installation      | `configured-unverified` | On 2026-08-26 Play showed 1.0.5/code 5 active and available to Internal testers. No exact-build physical installation, launch, or diagnostic readback is retained, and a durable group-based Closed test is not yet active.                                                                                                                                                                                                                                                                                                                                                                            |
 | Public mobile privacy policy         | `configured-unverified` | Source defines a public `/privacy` route, configured contact channel, truthful staff-data disclosure, and the mobile app's exact-origin link. Production deployment and store-record readback are not yet retained.                                                                                                                                                                                                                                                                                                                                                                                    |
 | Play app content and store record    | `blocked`               | On 2026-08-26 Play showed 4/11 setup tasks complete: no ads, no financial features, no health features, and the government-app declaration saved as `Yes` / city or local government with the official website. Business is selected. The approved listing copy, branded icon and feature graphic, and two synthetic screenshots are saved as a draft. Public contact publication and the feature-graphic AI declaration await final confirmation. Privacy URL/deploy, reusable reviewer credentials, content rating, target audience, Data Safety, a tester group, and Closed rollout remain blocked. |
-| Expo Push notification handoff       | `mocked`                | Client registration/receipt behavior and worker boundaries use synthetic mocks. No credentialed provider handoff or physical-device notification receipt is retained.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Expo Push notification handoff       | `mocked`                | Isolated Firebase source, exact-build registration fencing, durable worker state, and a dark conditional runtime are covered by provider-free tests. No credentialed Expo handoff, final provider receipt, device presentation, app tap, or human observation is retained.                                                                                                                                                                                                                                                                                                                             |
 | Amazon SES notification handoff      | `configured-unverified` | Production access and the domain identity were read on 2026-08-16. The configuration set remains sending-disabled and no executable sender, recipient, controlled provider send, delivery, or human receipt is proved.                                                                                                                                                                                                                                                                                                                                                                                 |
 | AWS End User Messaging SMS           | `blocked`               | No approved origination identity or connected live send exists. Registration alone cannot establish readiness.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Event media and record exports       | `mocked`                | Synthetic object metadata and authorization behavior are covered; no live storage operation is claimed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | GuardDuty Malware Protection for S3  | `configured-unverified` | CDK defines the scoped plan and fail-closed tag boundary; no active-plan readback or controlled scan is retained.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | OpenStreetMap raster tiles           | `configured-unverified` | The optional read-only configuration is source-defined; no live availability claim is retained.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+
+## Records-retention review
+
+<!-- psd-eoc:records-retention-review-status:start -->
+
+The following official sources were rechecked on 2026-08-26:
+
+- [Local Government Common Records Retention Schedule (CORE)](https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF):
+  version 5.0, approved and effective October 2, 2024.
+- [Public Schools (K-12) Records Retention Schedule](https://www.sos.wa.gov/sites/default/files/2026-06/Public-Schools-%28K-12%29-Records-Retention-Schedule.PDF):
+  version 9.1, approved and effective June 3, 2026.
+- [Washington State Archives school and ESD schedule index](https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records):
+  identifies those two versions as the current schedules used together.
+
+CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions. They are future
+change inputs only until the Local Records Committee approves them and the
+official index replaces the current versions. Do not commit schedule PDFs to
+the repository.
+
+These current schedule entries are candidates for records-officer review, not
+repository-owned classifications:
+
+<!-- docs-contract:records-retention-candidates:start -->
+
+| Content and context                                                                                 | Candidate series    | Current minimum/action                                                                                                                                               | Source designation |
+| --------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| Emergency-drill or occupational-safety-program administration                                       | `GS2017-016 Rev. 0` | Retain for 3 years after the end of the calendar year and until no longer needed for agency business, then destroy; non-archival.                                    | OPR                |
+| Routine/minor emergency response with minimal assistance or disruption                              | `GS2012-025 Rev. 1` | Retain for 6 years after the matter is resolved or recovery is complete, then destroy; non-archival.                                                                 | OPR                |
+| Uncommon/major response, including emergency-operations-center activities and communications        | `GS50-18-29 Rev. 2` | Retain for 6 years after the matter is resolved or recovery is complete, then transfer to Washington State Archives for appraisal and selective retention; archival. | OPR                |
+| Security incidents or data/privacy breaches, including investigation and notification documentation | `GS2010-008 Rev. 2` | Retain for 6 years after the matter is resolved, then destroy; non-archival.                                                                                         | OFM                |
+| School safety plans, only if the product actually owns that content                                 | `SD2011-153 Rev. 1` | Retain for 6 years after obsolete or superseded, then destroy; non-archival.                                                                                         | OPR                |
+
+<!-- docs-contract:records-retention-candidates:end -->
+
+- Official sources last rechecked: `2026-08-26`.
+- Controlled mapping review status: `pending`.
+- Controlled mapping review date: `not completed`.
+- Controlled mapping inventory coverage: `not completed`.
+- Controlled mapping ambiguity status: `not completed`.
+
+The tenant-neutral inventory and durable boundaries are recorded in
+[Architecture and contributing](ARCHITECTURE.md#records-retention-classification);
+the current source versions and aggregate evidence are retained in this
+section. The tenant's row-level DAN decisions and private evidence belong only
+in its controlled operations record. No completed records-officer review or
+ambiguity guidance has been supplied for this aggregate status. Until it is,
+retain every product record and do not enable disposition automation.
+
+<!-- psd-eoc:records-retention-review-status:end -->
 
 The pre-consolidation register and its detailed dated observations are
 preserved in the [historical readiness snapshot](archive/evidence/readiness-register-2026-08-25.md).
