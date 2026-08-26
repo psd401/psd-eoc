@@ -486,22 +486,22 @@ describe('mobile distribution configuration', () => {
     const build = rowFor('EAS Build');
     const update = rowFor('EAS Update');
 
-    expect(build).toContain('| `configured-unverified`');
-    expect(build).toContain('artifacts were produced for iOS build 10');
-    expect(build).toContain('1.0.5 store build is yet retained');
+    expect(build).toContain('| `live-verified`');
+    expect(build).toContain('iOS build 11');
+    expect(build).toContain('Android version code 5');
     expect(update).toContain('| `blocked`');
     expect(update).toContain('Remote updates are disabled');
     expect(rowFor('EAS Submit')).toContain('| `live-verified`');
 
     const apple = rowFor('TestFlight device installation');
     const play = rowFor('Google Play device installation');
-    expect(apple).toContain('| `live-verified`');
+    expect(apple).toContain('| `configured-unverified`');
     expect(play).toContain('| `configured-unverified`');
-    expect(apple).toContain('1.0.4/build 10');
+    expect(apple).toContain('1.0.5/build 11');
     expect(apple).toContain(
-      'exact physical-device launch/readback is not retained',
+      'no exact 1.0.5 physical-device installation, launch, or diagnostic readback exists',
     );
-    expect(play).toContain('1.0.4/code 4');
+    expect(play).toContain('1.0.5/code 5');
     expect(play).toContain('durable group-based Closed test is not yet active');
     expect(rowFor('Public mobile privacy policy')).toContain(
       '| `configured-unverified`',
@@ -510,7 +510,7 @@ describe('mobile distribution configuration', () => {
       '| `blocked`',
     );
     expect(rowFor('Play app content and store record')).toContain(
-      '0/11 setup tasks complete',
+      '3/11 setup tasks complete',
     );
 
     expect(rows.filter((line) => line.includes('| EAS Build'))).toHaveLength(1);

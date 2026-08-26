@@ -294,6 +294,7 @@ describe('deployment boundary', () => {
       'https://127.0.0.1/contact',
       'https://2130706433/contact',
       'https://[::1]/contact',
+      'https://%/contact',
     ]) {
       expect(() => identityFor(invalid)).toThrow(
         'CDK context psdEoc:privacyContactUrl',
