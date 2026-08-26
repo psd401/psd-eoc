@@ -110,6 +110,7 @@
     "psdEoc:iosBundleId": "net.psd401.eoc",
     "psdEoc:monitoringRunbookBaseUrl": "https://github.com/psd401/psd-eoc/blob/main/infra/README.md",
     "psdEoc:organizationName": "Peninsula School District",
+    "psdEoc:privacyContactUrl": "https://www.psd401.net/65722_3",
     "psdEoc:displayTimeZone": "America/Los_Angeles",
     "psdEoc:sesFromAddress": "eoc-alerts@psd401.net",
     "psdEoc:sesIdentityDomain": "psd401.net",

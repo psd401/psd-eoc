@@ -25,6 +25,7 @@ index fails `bun run verify:docs`.
 - `psdEoc:monitoringRunbookBaseUrl`
 - `psdEoc:neighborhoods`
 - `psdEoc:organizationName`
+- `psdEoc:privacyContactUrl`
 - `psdEoc:sesFromAddress`
 - `psdEoc:sesIdentityDomain`
 - `psdEoc:syntheticGroups`
@@ -49,6 +50,7 @@ names are:
 - `PSD_EOC_DISPLAY_TIME_ZONE`
 - `PSD_EOC_IOS_BUNDLE_ID`
 - `PSD_EOC_ORGANIZATION_NAME`
+- `PSD_EOC_PRIVACY_CONTACT_URL`
 - `TEST_DATABASE_URL`
 
 ## Protected GitHub deployment configuration

@@ -70,7 +70,8 @@ an event.
    A branch name, `latest` tag, mutable channel, or operator memory is not a
    rollback point.
 4. Define scope: server, one or more workers, infrastructure/configuration,
-   database, secret, web static assets, mobile OTA, or mobile store build.
+   database, secret, web static assets, or mobile store build. The current
+   mobile profiles are embedded-only and have no OTA rollback path.
 5. Record the expected user and delivery impact, pending work across the
    stop-start/quiescence interval, data/schema compatibility, provider changes,
    exact artifact, stop condition, and forward-recovery plan.
@@ -139,14 +140,14 @@ an event.
 
 - Stop a staged store rollout in the human store console when a build is
   unsafe. Never auto-submit or make an app public as a rollback.
-- An OTA rollback may republish only an exact reviewed JavaScript-only known-
-  good update to the matching runtime after preview-channel verification. Push,
-  authentication, native/runtime, or safety-boundary changes require a new
-  store build; do not force them through OTA.
-- A store rollback uses a new reviewed build/version when Apple/Google does not
-  permit reverting installed binaries. TestFlight/Play tester changes and
-  submissions remain human provider writes that require current product-owner
-  authorization.
+- Do not publish, republish, check for, download, or route an OTA update. The
+  exact current development, preview, and production profiles are
+  embedded-only. Changing that policy requires a separately reviewed new app
+  version, signed update design, and store build.
+- Fix forward with a new reviewed app version and store build when Apple or
+  Google does not permit reverting installed binaries. TestFlight/Play tester
+  changes and submissions remain human provider writes that require current
+  product-owner authorization.
 - Verify real/drill theming, notification permissions/handling, biometric
   session behavior, and activation offline refusal on both platforms with
   synthetic non-production evidence.
