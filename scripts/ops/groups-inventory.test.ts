@@ -6964,10 +6964,10 @@ describe('Google Groups inventory', () => {
   });
 
   // This preserves the complete former command-line self-test in ordinary
-  // discovery. It runs near two minutes alone and can take more than three
-  // minutes while the six-shard full gate is also exercising PostgreSQL and
-  // native subprocesses, so its timeout includes that measured contention.
+  // discovery. Six concurrent full-suite shards can make the bounded
+  // subprocess, filesystem, and mapping cases take more than two minutes on a
+  // two-core runner, so retain a finite budget with enough contention margin.
   test('passes the complete synthetic safety and mapping suite', async () => {
     await runSelfTest();
-  }, 240_000);
+  }, 180_000);
 });

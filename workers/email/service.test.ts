@@ -56,6 +56,41 @@ describe('email service configuration', () => {
       }),
     ).toThrow(EmailServiceError);
   });
+
+  test('binds the queue URL to the configured SQS ARN', () => {
+    for (const queueConfiguration of [
+      {
+        EMAIL_QUEUE_URL:
+          'https://sqs.attacker.example/000000000000/example-email',
+      },
+      {
+        EMAIL_QUEUE_URL:
+          'https://sqs.us-west-2.amazonaws.com/000000000000/example-email',
+      },
+      {
+        EMAIL_QUEUE_URL:
+          'https://sqs.us-east-1.amazonaws.com/111111111111/example-email',
+      },
+      {
+        EMAIL_QUEUE_URL:
+          'https://sqs.us-east-1.amazonaws.com/000000000000/other-email',
+      },
+      {
+        EMAIL_QUEUE_URL:
+          'https://sqs.us-east-1.amazonaws.com/000000000000/example-email?shadow=1',
+      },
+      {
+        EMAIL_QUEUE_ARN: 'arn:aws:sqs:us-west-2:000000000000:example-email',
+      },
+    ]) {
+      expect(() =>
+        readEmailServiceConfiguration({
+          ...ENABLED_ENV,
+          ...queueConfiguration,
+        }),
+      ).toThrow(EmailServiceError);
+    }
+  });
 });
 
 describe('email retry publisher', () => {

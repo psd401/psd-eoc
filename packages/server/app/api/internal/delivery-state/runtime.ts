@@ -35,7 +35,10 @@ import {
   notificationIntents,
 } from '../../../../db/schema';
 import {
+  DELIVERY_TEST_REPORT_WORKER_SERVICE_ID,
   createDeliveryTestReportRuntime,
+  deliveryTestReportInvocationForEvidence,
+  mayFinalizeDeliveryTestReport,
   type DeliveryTestReportRuntime,
 } from '../../../../lib/capabilities/delivery-tests';
 import type { TrustedCapabilityInvocation } from '../../../../lib/capabilities/engine';
@@ -45,7 +48,7 @@ export const DELIVERY_STATE_WORKER_TOKEN_ENV =
   'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN' as const;
 export const DELIVERY_STATE_MAX_BODY_BYTES = 32 * 1024;
 export const DELIVERY_STATE_WORKER_SERVICE_ID =
-  'notification-delivery-worker' as const;
+  DELIVERY_TEST_REPORT_WORKER_SERVICE_ID;
 
 const ATTEMPT_LOCK_NAMESPACE = 4_011;
 
@@ -779,37 +782,6 @@ function capabilityContextFor(
   });
 }
 
-/**
- * Correlates report idempotency to the immutable evidence fact. Each execution
- * receives a fresh audit request ID so a retained failure audit cannot block a
- * later successful retry; exact callback replays still share one canonical
- * idempotency key and therefore cannot duplicate a report.
- */
-function deliveryTestReportInvocationFor(
-  evidence: DeliveryEvidence,
-): TrustedCapabilityInvocation {
-  return Object.freeze({
-    actor: Object.freeze({
-      kind: 'system' as const,
-      serviceId: DELIVERY_STATE_WORKER_SERVICE_ID,
-    }),
-    source: 'worker' as const,
-    scope: Object.freeze({
-      facilityScope: Object.freeze({ kind: 'district' as const }),
-    }),
-    requestId: randomUUID(),
-    serverTime: new Date(dateIso(evidence.recordedAt)),
-    connectivityEpochId: null,
-    mutation: Object.freeze({
-      idempotencyKey: IdempotencyKeySchema.parse(
-        `delivery-test-report:${evidence.id}`,
-      ),
-      transport: Object.freeze({ kind: 'worker-execution' as const }),
-      humanConfirmationId: null,
-    }),
-  });
-}
-
 /** Deny-by-default authorization for the fixed, bearer-authenticated worker. */
 export function createDeliveryStateAuthorizer(): Readonly<
   CapabilityExecutionAuthorizer<DeliveryEvidenceCapabilityContext>
@@ -1113,15 +1085,11 @@ export function createDeliveryStateRouteHandler(
       // inserts or fabricates a report itself.
       if (
         body.attempt.deliveryTest != null &&
-        (result.state === 'provider-accepted' ||
-          result.state === 'delivered' ||
-          result.state === 'failed' ||
-          result.state === 'expired' ||
-          result.state === 'unknown')
+        mayFinalizeDeliveryTestReport(result)
       ) {
         await runtime.finalizeDeliveryTestReportByIntent(
           body.attempt.intentId,
-          deliveryTestReportInvocationFor(result),
+          deliveryTestReportInvocationForEvidence(result),
         );
       }
       return safeJson(200, { result });

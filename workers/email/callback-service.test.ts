@@ -14,12 +14,14 @@ import {
 const TOPIC_ARN = 'arn:aws:sns:us-east-1:000000000000:psd-eoc-email-events';
 const CONFIGURATION = Object.freeze({
   queueUrl: 'https://sqs.us-east-1.amazonaws.com/000000000000/email-callbacks',
+  queueArn: 'arn:aws:sqs:us-east-1:000000000000:email-callbacks',
   expectedTopicArn: TOPIC_ARN,
   serviceOrigin: 'https://eoc.example.invalid',
 });
 const ENVIRONMENT = Object.freeze({
   PSD_EOC_EMAIL_CALLBACK_RUNTIME_MODE: 'enabled',
   EMAIL_CALLBACK_QUEUE_URL: CONFIGURATION.queueUrl,
+  EMAIL_CALLBACK_QUEUE_ARN: CONFIGURATION.queueArn,
   PSD_EOC_SES_SNS_TOPIC_ARN: TOPIC_ARN,
   PSD_EOC_SERVICE_ORIGIN: CONFIGURATION.serviceOrigin,
 });
@@ -46,6 +48,21 @@ describe('email callback service', () => {
     for (const environment of [
       { ...ENVIRONMENT, PSD_EOC_EMAIL_CALLBACK_RUNTIME_MODE: 'dark' },
       { ...ENVIRONMENT, EMAIL_CALLBACK_QUEUE_URL: 'http://sqs.invalid/queue' },
+      {
+        ...ENVIRONMENT,
+        EMAIL_CALLBACK_QUEUE_URL:
+          'https://sqs.attacker.example/000000000000/email-callbacks',
+      },
+      {
+        ...ENVIRONMENT,
+        EMAIL_CALLBACK_QUEUE_URL:
+          'https://sqs.us-east-1.amazonaws.com/111111111111/email-callbacks',
+      },
+      {
+        ...ENVIRONMENT,
+        EMAIL_CALLBACK_QUEUE_ARN:
+          'arn:aws:sqs:us-east-1:000000000000:other-callbacks',
+      },
       { ...ENVIRONMENT, PSD_EOC_SES_SNS_TOPIC_ARN: 'not-an-arn' },
       { ...ENVIRONMENT, PSD_EOC_SERVICE_ORIGIN: 'http://eoc.invalid' },
     ]) {

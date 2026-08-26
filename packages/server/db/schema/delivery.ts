@@ -496,9 +496,17 @@ export const outbox = pgTable(
               and ${table.rosterPopulation} = 'staff'
               and jsonb_typeof(${table.message} -> 'deliveryTest') is not distinct from 'object'
               and jsonb_array_length(${table.channels}) = 1
-              and jsonb_array_length(jsonb_path_query_array(
-                ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-              )) = 1
+              and (
+                jsonb_array_length(jsonb_path_query_array(
+                  ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
+                ))
+                + jsonb_array_length(jsonb_path_query_array(
+                  ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
+                ))
+                + jsonb_array_length(jsonb_path_query_array(
+                  ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+                ))
+              ) = 1
             )
            ) and jsonb_array_length(jsonb_path_query_array(
             ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
@@ -1475,7 +1483,7 @@ export const deliveryTestReports = pgTable(
           or (
             jsonb_array_length(${table.channels}) = 1
             and jsonb_array_length(jsonb_path_query_array(
-              ${table.channels}, '$[*] ? (@.channel == "sms")'
+              ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
             )) = 1
           )
         )`,

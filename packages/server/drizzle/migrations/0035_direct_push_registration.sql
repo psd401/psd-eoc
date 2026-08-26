@@ -24,6 +24,40 @@ ALTER TABLE "device_push_token_registrations" ADD CONSTRAINT "device_push_token_
         or ("device_push_token_registrations"."provider" = 'fcm' and "device_push_token_registrations"."platform" = 'android'));--> statement-breakpoint
 ALTER TABLE "device_push_token_registrations" ADD CONSTRAINT "device_push_token_registrations_not_self_superseding" CHECK ("device_push_token_registrations"."supersedes_registration_id" is null
         or "device_push_token_registrations"."supersedes_registration_id" <> "device_push_token_registrations"."id");--> statement-breakpoint
+ALTER TABLE "roster_endpoints" ADD CONSTRAINT "roster_endpoints_valid_variant" CHECK ((
+        "roster_endpoints"."channel" = 'push'
+        and "roster_endpoints"."platform" is not null
+        and "roster_endpoints"."provider" is not null
+        and "roster_endpoints"."provider" in ('expo', 'apns', 'fcm')
+        and "roster_endpoints"."service_environment" is not null
+        and "roster_endpoints"."service_environment" in ('development', 'production')
+        and (
+          "roster_endpoints"."provider" = 'expo'
+          or ("roster_endpoints"."provider" = 'apns' and "roster_endpoints"."platform" = 'ios')
+          or ("roster_endpoints"."provider" = 'fcm' and "roster_endpoints"."platform" = 'android')
+        )
+        and "roster_endpoints"."token" is not null
+        and length(btrim("roster_endpoints"."token")) between 16 and 4096
+        and "roster_endpoints"."email" is null
+        and "roster_endpoints"."phone_number" is null
+      ) or (
+        "roster_endpoints"."channel" = 'email'
+        and "roster_endpoints"."platform" is null
+        and "roster_endpoints"."provider" is null
+        and "roster_endpoints"."service_environment" is null
+        and "roster_endpoints"."token" is null
+        and "roster_endpoints"."email" is not null
+        and "roster_endpoints"."phone_number" is null
+      ) or (
+        "roster_endpoints"."channel" = 'sms'
+        and "roster_endpoints"."platform" is null
+        and "roster_endpoints"."provider" is null
+        and "roster_endpoints"."service_environment" is null
+        and "roster_endpoints"."token" is null
+        and "roster_endpoints"."email" is null
+        and "roster_endpoints"."phone_number" is not null
+        and "roster_endpoints"."phone_number" ~ '^\+[1-9][0-9]{7,14}$'
+      ));--> statement-breakpoint
 ALTER TABLE "delivery_evidence" ADD CONSTRAINT "delivery_evidence_provider_time" CHECK ("delivery_evidence"."provider_occurred_at" is null
         or "delivery_evidence"."provider_occurred_at" <= "delivery_evidence"."recorded_at" + interval '5 minutes');--> statement-breakpoint
 ALTER TABLE "delivery_evidence" ADD CONSTRAINT "delivery_evidence_apns_unregistered_time" CHECK ((
@@ -90,40 +124,6 @@ CROSS JOIN LATERAL (
 ) AS mobile_status
 WHERE expo_configuration."integration_id" = 'expo-push'
 ON CONFLICT ("integration_id") DO NOTHING;--> statement-breakpoint
-ALTER TABLE "roster_endpoints" ADD CONSTRAINT "roster_endpoints_valid_variant" CHECK ((
-        "roster_endpoints"."channel" = 'push'
-        and "roster_endpoints"."platform" is not null
-        and "roster_endpoints"."provider" is not null
-        and "roster_endpoints"."provider" in ('expo', 'apns', 'fcm')
-        and "roster_endpoints"."service_environment" is not null
-        and "roster_endpoints"."service_environment" in ('development', 'production')
-        and (
-          "roster_endpoints"."provider" = 'expo'
-          or ("roster_endpoints"."provider" = 'apns' and "roster_endpoints"."platform" = 'ios')
-          or ("roster_endpoints"."provider" = 'fcm' and "roster_endpoints"."platform" = 'android')
-        )
-        and "roster_endpoints"."token" is not null
-        and length(btrim("roster_endpoints"."token")) between 16 and 4096
-        and "roster_endpoints"."email" is null
-        and "roster_endpoints"."phone_number" is null
-      ) or (
-        "roster_endpoints"."channel" = 'email'
-        and "roster_endpoints"."platform" is null
-        and "roster_endpoints"."provider" is null
-        and "roster_endpoints"."service_environment" is null
-        and "roster_endpoints"."token" is null
-        and "roster_endpoints"."email" is not null
-        and "roster_endpoints"."phone_number" is null
-      ) or (
-        "roster_endpoints"."channel" = 'sms'
-        and "roster_endpoints"."platform" is null
-        and "roster_endpoints"."provider" is null
-        and "roster_endpoints"."service_environment" is null
-        and "roster_endpoints"."token" is null
-        and "roster_endpoints"."email" is null
-        and "roster_endpoints"."phone_number" is not null
-        and "roster_endpoints"."phone_number" ~ '^\+[1-9][0-9]{7,14}$'
-      ));--> statement-breakpoint
 ALTER TABLE "dispatch_batches" ADD CONSTRAINT "dispatch_batches_integration_channel" CHECK ((
         "dispatch_batches"."channel" = 'push'
         and "dispatch_batches"."integration_id" in ('expo-push', 'mobile-push')
@@ -161,11 +161,19 @@ ALTER TABLE "outbox" ADD CONSTRAINT "outbox_channel_plan_shape" CHECK (case
               and "outbox"."roster_population" = 'staff'
               and jsonb_typeof("outbox"."message" -> 'deliveryTest') is not distinct from 'object'
               and jsonb_array_length("outbox"."channels") = 1
-              and jsonb_array_length(jsonb_path_query_array(
-                "outbox"."channels", '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-              )) = 1
+              and (
+                jsonb_array_length(jsonb_path_query_array(
+                  "outbox"."channels", '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
+                ))
+                + jsonb_array_length(jsonb_path_query_array(
+                  "outbox"."channels", '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
+                ))
+                + jsonb_array_length(jsonb_path_query_array(
+                  "outbox"."channels", '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+                ))
+              ) = 1
             )
-          ) and jsonb_array_length(jsonb_path_query_array(
+           ) and jsonb_array_length(jsonb_path_query_array(
             "outbox"."channels", '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
           )) = jsonb_array_length("outbox"."channels")
         else false
