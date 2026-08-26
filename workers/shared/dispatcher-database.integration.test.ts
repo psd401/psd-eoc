@@ -11,7 +11,7 @@ import {
   NotificationOutboxMessageSchema,
   type DispatchBatch,
 } from '@psd-eoc/contracts';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
@@ -45,6 +45,11 @@ import {
   createDrizzleReconciliationStore,
   executeReconcileDeliveryAttempts,
 } from '../../packages/server/lib/notify/reconcile';
+import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+  type DisposableDatabase,
+} from '../../packages/server/lib/testing/database';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -75,28 +80,9 @@ const ids = Object.freeze({
   sloSmsIntegrationStatus: randomUUID(),
 });
 
-const isolatedDatabaseName = `psd_eoc_issue11_${randomUUID().replaceAll('-', '')}_test`;
-
 let connection: PostgresDatabaseConnection | undefined;
-let controlConnection: PostgresDatabaseConnection | undefined;
+let ownedDatabase: DisposableDatabase | undefined;
 let fixtureCreatedAt: Date;
-
-function isolatedTestDatabaseUrl(baseUrl: string): string {
-  const parsed = new URL(baseUrl);
-  parsed.pathname = `/${isolatedDatabaseName}`;
-  return parsed.toString();
-}
-
-function databaseIdentifierStatement(operation: 'create' | 'drop') {
-  if (!/^[a-z0-9_]+$/u.test(isolatedDatabaseName)) {
-    throw new Error('The generated dispatcher test database name is unsafe.');
-  }
-  return sql.raw(
-    operation === 'create'
-      ? `create database "${isolatedDatabaseName}" template template0`
-      : `drop database if exists "${isolatedDatabaseName}" with (force)`,
-  );
-}
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -475,57 +461,58 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
         'TEST_DATABASE_URL is required for this integration test.',
       );
     }
-    const createdControlConnection = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 1,
-    });
-    if (createdControlConnection.driver !== 'postgres') {
-      throw new Error('The integration test requires direct PostgreSQL.');
-    }
-    controlConnection = createdControlConnection;
-
-    // Bun runs test files concurrently. Apply the shared migrations first so
-    // cluster-wide roles exist, then keep all issue-11 fixtures in a disposable
-    // database. This test must not race the seed test's zero-event invariant,
-    // and append-only production tables must never be weakened for cleanup.
-    await migrateDatabase(createdControlConnection);
-    await createdControlConnection.db.execute(
-      databaseIdentifierStatement('create'),
+    // Keep all issue-11 fixtures in a disposable database. This test must not
+    // race the seed test's zero-event invariant, and append-only production
+    // tables must never be weakened for cleanup.
+    const owned = await createDisposableDatabase(
+      'psd_eoc_issue11',
+      testDatabaseUrl,
     );
+    ownedDatabase = owned;
 
     const createdIsolatedConnection = createDatabaseClient({
       driver: 'postgres',
-      url: isolatedTestDatabaseUrl(testDatabaseUrl),
+      url: owned.url,
       maxConnections: 4,
     });
     if (createdIsolatedConnection.driver !== 'postgres') {
       throw new Error('The isolated integration test requires PostgreSQL.');
     }
     connection = createdIsolatedConnection;
-    await migrateDatabase(createdIsolatedConnection);
-    await seedDatabase(createdIsolatedConnection.db);
-    await createdIsolatedConnection.db.insert(integrationStatuses).values({
-      id: ids.sloSmsIntegrationStatus,
-      integrationId: 'aws-eum-sms',
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: new Date(),
-    });
-    await installAtomicEventOutboxFixture();
+    try {
+      await migrateDatabase(createdIsolatedConnection);
+      await seedDatabase(createdIsolatedConnection.db);
+      await createdIsolatedConnection.db.insert(integrationStatuses).values({
+        id: ids.sloSmsIntegrationStatus,
+        integrationId: 'aws-eum-sms',
+        label: 'mocked',
+        verifiedAt: null,
+        verifiedByUserId: null,
+        authorizationReference: null,
+        reasonCode: null,
+        observedAt: new Date(),
+      });
+      await installAtomicEventOutboxFixture();
+    } catch (error) {
+      await closeAndDropDisposableDatabase(
+        () => createdIsolatedConnection.close(),
+        ownedDatabase,
+      );
+      connection = undefined;
+      ownedDatabase = undefined;
+      throw error;
+    }
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const opened = connection;
+    const owned = ownedDatabase;
     connection = undefined;
-    if (controlConnection !== undefined) {
-      await controlConnection.db.execute(databaseIdentifierStatement('drop'));
-      await controlConnection.close();
-      controlConnection = undefined;
-    }
+    ownedDatabase = undefined;
+    await closeAndDropDisposableDatabase(
+      opened === undefined ? undefined : () => opened.close(),
+      owned,
+    );
   });
 
   test('commits the event and outbox atomically and skips a locked row', async () => {
