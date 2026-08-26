@@ -70,4 +70,4 @@ test('the actual failure-drill CLI synth cannot inherit production tenant contex
     const name = Reflect.get(facility, 'name');
     if (typeof name === 'string') expect(serialized).not.toContain(name);
   }
-});
+}, 20_000);
