@@ -97,6 +97,12 @@ describe('issue-32 mobile E2E harness', () => {
     expect(start).toContain(
       "- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'",
     );
+    expect(start).toContain(
+      "element:\n      text: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'\n    direction: DOWN",
+    );
+    expect(start).not.toContain(
+      "element:\n      id: 'issue-21-confirm-drill'",
+    );
     expect(start).toContain('- runFlow: activation-result.yaml');
     expect(start).not.toContain("visible: 'Allow'");
     const activationResult = await Bun.file(
@@ -180,7 +186,10 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain("'simctl', 'launch', deviceId, appId");
     expect(runner).toContain('await openIosDevelopmentClient');
     expect(runner).toContain(
-      "await maestro('open-push-ios.yaml');\n    // Hosted simulators can evict the JavaScript session",
+      "await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);\n    await Bun.sleep(5_000);\n    await maestro('reveal-push-ios.yaml');\n    await maestro('open-push-ios.yaml');",
+    );
+    expect(runner).not.toContain(
+      "await maestro('open-push-ios.yaml');\n    await openIosDevelopmentClient",
     );
     expect(runner).toContain("await maestro('push-opened-event-room.yaml')");
     expect(runner).toContain('iOS mobile E2E cannot skip the native build');
