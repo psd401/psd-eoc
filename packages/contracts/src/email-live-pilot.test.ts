@@ -66,6 +66,28 @@ const emailConsequence = Object.freeze({
   }),
 });
 
+const smsConsequence = Object.freeze({
+  channel: 'sms' as const,
+  endpointCount: 1,
+  renderedMessage: Object.freeze({
+    templateMode: 'drill' as const,
+    purpose: 'activation' as const,
+    classificationMarker: 'DRILL' as const,
+    eventKind: 'drill' as const,
+    channel: 'sms' as const,
+    body: '[DRILL] Training only. Started once confirmed.',
+  }),
+  integrationStatus: Object.freeze({
+    integrationId: 'aws-eum-sms',
+    label: 'live-verified' as const,
+    verifiedAt: CREATED_AT,
+    verifiedByUserId: IDS.user,
+    authorizationReference: 'controlled-canary-verification',
+    reasonCode: null,
+    observedAt: CREATED_AT,
+  }),
+});
+
 const controlledActivationPreview = Object.freeze({
   id: IDS.preview,
   facilityId: IDS.facility,
@@ -86,6 +108,11 @@ const controlledActivationPreview = Object.freeze({
   consequenceDigest: DIGEST,
   createdAt: CREATED_AT,
   expiresAt: EXPIRES_AT,
+});
+
+const controlledSmsActivationPreview = Object.freeze({
+  ...controlledActivationPreview,
+  channels: Object.freeze([smsConsequence]),
 });
 
 const humanAuthorization = Object.freeze({
@@ -120,6 +147,11 @@ const controlledIntent = Object.freeze({
   authorization: humanAuthorization,
   channels: Object.freeze([emailConsequence]),
   createdAt: CREATED_AT,
+});
+
+const controlledSmsIntent = Object.freeze({
+  ...controlledIntent,
+  channels: Object.freeze([smsConsequence]),
 });
 
 function controlledTargetSet(endpointChannel: 'email' | 'push' = 'email') {
@@ -251,6 +283,150 @@ describe('controlled email delivery-test canary contracts', () => {
         channels: [pushConsequence],
       }).success,
     ).toBe(true);
+  });
+
+  test('adds an exact singleton-SMS target without accepting another channel', () => {
+    const smsTarget = {
+      ...controlledTargetSet(),
+      mode: 'controlled-sms-canary' as const,
+      endpoints: [
+        {
+          ...controlledTargetSet().endpoints[0],
+          channel: 'sms' as const,
+        },
+      ],
+    };
+    expect(
+      CreateDeliveryTestTargetSetVersionInputSchema.safeParse({
+        mode: 'controlled-sms-canary',
+        previousVersion: null,
+        facilityId: IDS.facility,
+        rosterSnapshotId: IDS.roster,
+        eligibilityFactIds: [IDS.eligibility],
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse(smsTarget).success,
+    ).toBe(true);
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse({
+        ...smsTarget,
+        endpoints: controlledTargetSet().endpoints,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('binds a singleton SMS preview, intent, outbox, and dispatch batch to one endpoint', () => {
+    expect(
+      ActivationPreviewSchema.safeParse(controlledSmsActivationPreview).success,
+    ).toBe(true);
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...controlledSmsActivationPreview,
+        channels: [{ ...smsConsequence, endpointCount: 2 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestPreviewSchema.safeParse({
+        purpose: 'monthly-live-delivery-test',
+        activationPreview: controlledSmsActivationPreview,
+        targetSet: deliveryTest.targetSet,
+        endpointReferenceDigest: ENDPOINT_DIGEST,
+        channels: [
+          {
+            channel: 'sms',
+            endpointCount: 1,
+            integrationStatus: smsConsequence.integrationStatus,
+            credentialVerified: true,
+          },
+        ],
+        consequenceDigest: DIGEST,
+        createdAt: CREATED_AT,
+        expiresAt: EXPIRES_AT,
+      }).success,
+    ).toBe(true);
+    expect(
+      NotificationIntentSchema.safeParse(controlledSmsIntent).success,
+    ).toBe(true);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...controlledSmsIntent,
+        deliveryTest: null,
+      }).success,
+    ).toBe(false);
+
+    const message = {
+      version: 2 as const,
+      facilityId: IDS.facility,
+      outboxId: IDS.outbox,
+      intentId: IDS.intent,
+      eventId: IDS.event,
+      eventKind: 'drill' as const,
+      templateMode: 'drill' as const,
+      purpose: 'activation' as const,
+      eventTypeVersion: controlledSmsIntent.eventTypeVersion,
+      rosterSnapshotId: IDS.roster,
+      rosterPopulation: 'staff' as const,
+      deliveryTest,
+      requestId: IDS.request,
+      authorization: humanAuthorization,
+      channels: [smsConsequence],
+      createdAt: CREATED_AT,
+    };
+    expect(NotificationOutboxMessageSchema.safeParse(message).success).toBe(
+      true,
+    );
+
+    const batch = {
+      id: IDS.batch,
+      intentId: IDS.intent,
+      eventId: IDS.event,
+      facilityId: IDS.facility,
+      eventKind: 'drill' as const,
+      templateMode: 'drill' as const,
+      purpose: 'activation' as const,
+      eventTypeVersion: controlledSmsIntent.eventTypeVersion,
+      rosterSnapshotId: IDS.roster,
+      rosterPopulation: 'staff' as const,
+      deliveryTest,
+      requestId: IDS.request,
+      authorization: humanAuthorization,
+      channel: 'sms' as const,
+      renderedMessage: smsConsequence.renderedMessage,
+      integrationStatus: smsConsequence.integrationStatus,
+      sequence: 1,
+      endpointCount: 1,
+      createdAt: CREATED_AT,
+    };
+    const result = {
+      facilityId: IDS.facility,
+      outboxRecord: {
+        id: IDS.outbox,
+        message,
+        status: 'published' as const,
+        attempts: 1,
+        availableAt: CREATED_AT,
+        lockedUntil: null,
+        publishedAt: CREATED_AT,
+        failedAt: null,
+        lastErrorCode: null,
+      },
+      batches: [batch],
+    };
+    expect(DispatchOutboxResultSchema.safeParse(result).success).toBe(true);
+    expect(
+      DispatchOutboxResultSchema.safeParse({
+        ...result,
+        outboxRecord: {
+          ...result.outboxRecord,
+          message: {
+            ...message,
+            channels: [{ ...smsConsequence, endpointCount: 2 }],
+          },
+        },
+        batches: [{ ...batch, endpointCount: 2 }],
+      }).success,
+    ).toBe(false);
   });
 
   test('allows exactly one email consequence only with staff DRILL delivery-test provenance', () => {

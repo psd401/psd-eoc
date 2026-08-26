@@ -9,7 +9,6 @@ import {
   FacilityPageSchema,
   FacilitySchema,
   IntegrationStatusSchema,
-  IntegrationVerificationReferenceSchema,
   RecipientSchema,
   RosterGroupSourceRefSchema,
   RosterSnapshotSchema,
@@ -117,17 +116,33 @@ export const DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV =
   Object.freeze({
     push: 'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
     email: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
-    sms: 'PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE',
+    sms: 'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
   } as const satisfies Readonly<Record<NotificationChannel, string>>);
 
 export type DeliveryTestCredentialVerificationReferences = Readonly<
   Record<NotificationChannel, string | null>
 >;
 
+function isDeliveryTestVerificationReference(
+  value: string | null | undefined,
+): value is string {
+  return (
+    value !== null &&
+    value !== undefined &&
+    value !== 'UNVERIFIED' &&
+    value !== 'UNCONFIGURED' &&
+    value === value.trim() &&
+    value.length >= 16 &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9._:-]+$/u.test(value)
+  );
+}
+
 /**
- * Loads non-secret, deploy-time credential verification references. A live
- * truth label alone is deliberately insufficient; the reference must bind the
- * running deployment to the exact append-only integration verification row.
+ * Loads non-secret, deploy-time provider verification references. Push and
+ * email bind the running deployment to the exact append-only integration row;
+ * SMS independently binds the deployment to retained carrier-registration
+ * evidence.
  */
 export function readDeliveryTestCredentialVerificationReferences(
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -135,11 +150,7 @@ export function readDeliveryTestCredentialVerificationReferences(
   const read = (channel: NotificationChannel): string | null => {
     const value =
       environment[DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV[channel]];
-    return value !== undefined &&
-      value !== 'UNVERIFIED' &&
-      IntegrationVerificationReferenceSchema.safeParse(value).success
-      ? value
-      : null;
+    return isDeliveryTestVerificationReference(value) ? value : null;
   };
   return Object.freeze({
     push: read('push'),
@@ -155,13 +166,17 @@ export function deliveryTestCredentialIsVerified(
     authorizationReference: string | null;
   }>,
   verificationReference: string | null,
+  channel: NotificationChannel,
 ): boolean {
-  return (
+  const verified =
     status.label === 'live-verified' &&
     status.verifiedAt !== null &&
-    verificationReference !== null &&
-    status.authorizationReference === verificationReference
-  );
+    verificationReference !== null;
+  if (!verified) return false;
+  if (channel === 'sms') {
+    return isDeliveryTestVerificationReference(verificationReference);
+  }
+  return status.authorizationReference === verificationReference;
 }
 
 /** Persistence boundary for the two query capabilities owned by start flow. */
@@ -770,6 +785,7 @@ function deliveryTestCredentialBlockingReasonCodes(
               authorizationReference: null,
             },
             references[channel],
+            channel,
           ),
       )
       .map((channel) => `${channel.toUpperCase()}_CREDENTIAL_UNVERIFIED`)
@@ -825,7 +841,10 @@ export async function loadDeliveryTestTargetSet(
       : endpointReferences.length === 1 &&
           endpointReferences[0]?.channel === 'push'
         ? ('controlled-push-canary' as const)
-        : null;
+        : endpointReferences.length === 1 &&
+            endpointReferences[0]?.channel === 'sms'
+          ? ('controlled-sms-canary' as const)
+          : null;
   return DeliveryTestTargetSetVersionSchema.parse({
     ...(controlledMode === null ? {} : { mode: controlledMode }),
     id: row.id,
@@ -1230,6 +1249,7 @@ async function createDeliveryTestPreviewFromDatabase(
       credentialVerified: deliveryTestCredentialIsVerified(
         channel.integrationStatus,
         credentialVerificationReferences[channel.channel],
+        channel.channel,
       ),
     })),
     consequenceDigest: activationPreview.consequenceDigest,

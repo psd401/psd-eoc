@@ -100,9 +100,7 @@ describe('issue-32 mobile E2E harness', () => {
     expect(start).toContain(
       "element:\n      text: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'\n    direction: DOWN",
     );
-    expect(start).not.toContain(
-      "element:\n      id: 'issue-21-confirm-drill'",
-    );
+    expect(start).not.toContain("element:\n      id: 'issue-21-confirm-drill'");
     expect(start).toContain('- runFlow: activation-result.yaml');
     expect(start).not.toContain("visible: 'Allow'");
     const activationResult = await Bun.file(

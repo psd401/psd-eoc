@@ -86,7 +86,10 @@ function deliveredEvent(): unknown {
       messageType: 'TRANSACTIONAL',
       messageStatus: 'DELIVERED',
       messageStatusDescription: 'Synthetic delivery proof.',
-      context: { psdAttemptId: IDS.attempt },
+      context: {
+        psdAttemptId: IDS.attempt,
+        psdProviderClaimToken: IDS.secondAttempt,
+      },
     },
   };
 }
@@ -275,7 +278,7 @@ class SmsSendLedger implements AwsEumSmsSendLedger {
     this.claimCalls += 1;
     return Promise.resolve({
       kind: 'acquired',
-      leaseToken: 'synthetic-provider-lease',
+      leaseToken: IDS.secondAttempt,
     });
   }
 
@@ -406,12 +409,13 @@ function harness(overrides: HarnessOverrides = {}) {
       counters.deliveryLookups += 1;
       return Promise.resolve(null);
     },
-    loadUnknownAttemptById(provider, attemptId) {
+    loadUnknownAttemptById(provider, attemptId, correlationToken) {
       counters.deliveryLookups += 1;
       const latestEvidence = evidenceWriter.requests.at(-1)?.evidence;
       return Promise.resolve(
         provider === 'aws-eum-sms' &&
           attemptId === IDS.attempt &&
+          correlationToken === IDS.secondAttempt &&
           latestEvidence?.state === 'unknown' &&
           latestEvidence.provider === provider &&
           latestEvidence.providerReference === null
@@ -527,6 +531,11 @@ describe('AWS EUM SMS production runtime boundary', () => {
       { state: 'unexpected' },
       { state: 'enabled', authorizeLiveProvider: () => true },
       { state: 'enabled', authorizeLiveSend: () => true },
+      {
+        state: 'enabled',
+        authorizeLiveProvider: () => true,
+        authorizeLiveSend: () => true,
+      },
     ]) {
       expect(() => harness({ mode: mode as SmsRuntimeMode })).toThrow(
         'runtime request was rejected safely',
@@ -582,6 +591,10 @@ describe('AWS EUM SMS production runtime boundary', () => {
           state: 'enabled',
           authorizeLiveProvider: () => true,
           authorizeLiveSend: () => true,
+          authorizeProviderSend: () => ({
+            authorized: true,
+            timeToLiveSeconds: 300,
+          }),
         },
       });
 
@@ -970,6 +983,10 @@ describe('AWS EUM SMS production runtime boundary', () => {
         state: 'enabled',
         authorizeLiveProvider: () => true,
         authorizeLiveSend: () => true,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
       },
       resolveDestination: true,
       providerResponse: {
@@ -1037,6 +1054,10 @@ describe('AWS EUM SMS production runtime boundary', () => {
         state: 'enabled',
         authorizeLiveProvider: () => true,
         authorizeLiveSend: () => true,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
       },
       providerResponses: [
         ...pages,
@@ -1100,6 +1121,10 @@ describe('AWS EUM SMS production runtime boundary', () => {
         state: 'enabled',
         authorizeLiveProvider: () => true,
         authorizeLiveSend: () => true,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
       },
       resolveDestination: true,
       providerResponse: {
@@ -1173,6 +1198,10 @@ describe('AWS EUM SMS production runtime boundary', () => {
         state: 'enabled',
         authorizeLiveProvider: () => true,
         authorizeLiveSend: () => true,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
       },
     });
 

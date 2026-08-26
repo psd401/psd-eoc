@@ -73,6 +73,34 @@ export function assertExactDirectPushVerificationReference(
   }
 }
 
+export interface SmsWorkerReadiness {
+  readonly ready: boolean;
+  readonly registrationVerificationReference: string | null;
+}
+
+function isSmsRegistrationVerificationReference(
+  value: string | null,
+): value is string {
+  return (
+    value !== null &&
+    value !== 'UNVERIFIED' &&
+    value !== 'UNCONFIGURED' &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(value)
+  );
+}
+
+export function readSmsWorkerReadiness(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): SmsWorkerReadiness {
+  const reference =
+    environment.PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE ?? null;
+  const validReference = isSmsRegistrationVerificationReference(reference);
+  return Object.freeze({
+    ready: environment.PSD_EOC_SMS_WORKER_READY === 'true' && validReference,
+    registrationVerificationReference: validReference ? reference : null,
+  });
+}
+
 interface ChannelConfigurationState {
   readonly enabled: boolean;
   readonly statusId: string;
@@ -179,14 +207,16 @@ function parseChannelResultReference(value: string): Readonly<{
 
 /**
  * Enforces the issue #26 channel boundary independently of presentation state.
- * SMS stays dark until the external carrier-registration work is complete, and
- * every live-verified change requires a pre-issued authorization artifact.
+ * Every channel stays dark until its integration has independently reached a
+ * live-verified status, and every live change requires a pre-issued
+ * authorization artifact.
  * The handler additionally verifies its status, human, session, state,
  * digests, commitment, expiry, and single-use persistence.
  */
 export function assertChannelChangeAllowed(
   input: SetChannelEnabledInput,
   status: IntegrationStatus,
+  smsWorkerReadiness: SmsWorkerReadiness = readSmsWorkerReadiness(),
 ): void {
   const initialMobileVerification =
     input.integrationId === MOBILE_PUSH_INTEGRATION_ID &&
@@ -194,10 +224,28 @@ export function assertChannelChangeAllowed(
     input.verificationReference !== undefined &&
     input.authorization === null &&
     status.label === 'configured-unverified';
-  if (input.enabled && input.integrationId === SMS_INTEGRATION_ID) {
+  if (
+    input.enabled &&
+    input.integrationId === SMS_INTEGRATION_ID &&
+    status.label !== 'live-verified'
+  ) {
     throw new AdminCapabilityError(
       'CONFLICT',
-      'SMS remains disabled until carrier registration is complete and separately verified.',
+      'SMS can only be enabled after independent live verification.',
+      409,
+    );
+  }
+  if (
+    input.enabled &&
+    input.integrationId === SMS_INTEGRATION_ID &&
+    (!smsWorkerReadiness.ready ||
+      !isSmsRegistrationVerificationReference(
+        smsWorkerReadiness.registrationVerificationReference,
+      ))
+  ) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'SMS can only be enabled when the verified worker deployment is ready.',
       409,
     );
   }
@@ -535,6 +583,7 @@ export function createSetChannelEnabledRegistration(
   directPushVerificationReference:
     | string
     | null = readDirectPushVerificationReference(),
+  smsWorkerReadiness: () => SmsWorkerReadiness = readSmsWorkerReadiness,
 ): ServerCapabilityRegistration<
   'set-channel-enabled',
   AdminCapabilityTransaction
@@ -565,7 +614,11 @@ export function createSetChannelEnabledRegistration(
           404,
         );
       }
-      assertChannelChangeAllowed(input, statusFromRow(status));
+      assertChannelChangeAllowed(
+        input,
+        statusFromRow(status),
+        smsWorkerReadiness(),
+      );
 
       const changedAt = await readCapabilityTime(context);
       const initialMobileVerification =
@@ -762,6 +815,7 @@ export function executeSetChannelEnabledCapability(input: {
   readonly authenticated: AuthenticatedSession;
   readonly command: CapabilityInput<'set-channel-enabled'>;
   readonly metadata: AdminMutationMetadata;
+  readonly smsWorkerReadiness?: SmsWorkerReadiness;
   readonly store?: AdminCapabilityStore;
   readonly directPushVerificationReference?: string | null;
 }): Promise<ChannelConfiguration> {
@@ -771,12 +825,17 @@ export function executeSetChannelEnabledCapability(input: {
       getDefaultAdminDatabase(),
       input.authenticated,
     );
-  return executeAdminMutationCapability(
-    input.directPushVerificationReference === undefined
+  const readiness = input.smsWorkerReadiness;
+  const directPushReference = input.directPushVerificationReference;
+  const registration =
+    readiness === undefined && directPushReference === undefined
       ? setChannelEnabledRegistration
       : createSetChannelEnabledRegistration(
-          input.directPushVerificationReference,
-        ),
+          directPushReference,
+          readiness === undefined ? readSmsWorkerReadiness : () => readiness,
+        );
+  return executeAdminMutationCapability(
+    registration,
     input.command,
     input.authenticated,
     store,
