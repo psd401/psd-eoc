@@ -350,6 +350,38 @@ function evidenceMatchesInput(
   );
 }
 
+function strongerEvidenceDisposition(
+  evidence: DeliveryEvidence,
+  input: AttemptEvidenceInput,
+): 'subsumes' | 'conflicts' | null {
+  if (
+    evidence.subject.kind !== 'attempt' ||
+    evidence.subject.attemptId !== input.subject.attemptId
+  ) {
+    return null;
+  }
+  const terminal = ['delivered', 'failed', 'expired'].includes(evidence.state);
+  if (input.state === 'unknown') {
+    if (
+      input.providerReference !== null ||
+      (evidence.state !== 'provider-accepted' && !terminal)
+    ) {
+      return null;
+    }
+    // Provider-neutral reconciliation facts may be superseded by any stronger
+    // provider truth. A provider-attributed unknown must still match exactly,
+    // so one provider can never claim another provider's terminal evidence.
+    return input.provider === null || evidence.provider === input.provider
+      ? 'subsumes'
+      : 'conflicts';
+  }
+  if (!terminal || input.state !== 'provider-accepted') return null;
+  return evidence.provider === input.provider &&
+    evidence.providerReference === input.providerReference
+    ? 'subsumes'
+    : 'conflicts';
+}
+
 async function readDatabaseTime(
   database: DeliveryStateQueryDatabase,
 ): Promise<Date> {
@@ -619,6 +651,20 @@ export function createDrizzleDeliveryEvidenceStore(
         }
         if (evidenceMatchesInput(latest, request.evidence)) {
           return latest;
+        }
+        const strongerDisposition = strongerEvidenceDisposition(
+          latest,
+          request.evidence,
+        );
+        if (strongerDisposition === 'subsumes') {
+          return latest;
+        }
+        if (strongerDisposition === 'conflicts') {
+          throw new DeliveryStateError(
+            'INVALID_DELIVERY_TRANSITION',
+            409,
+            'The requested delivery-state transition conflicts with retained provider lineage.',
+          );
         }
 
         // At-least-once worker and provider callbacks may replay an older

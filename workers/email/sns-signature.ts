@@ -29,6 +29,18 @@ const NOTIFICATION_KEYS = new Set([
   'SigningCertURL',
   'UnsubscribeURL',
 ]);
+const SUBSCRIPTION_CONFIRMATION_KEYS = new Set([
+  'Type',
+  'MessageId',
+  'Token',
+  'TopicArn',
+  'Message',
+  'SubscribeURL',
+  'Timestamp',
+  'SignatureVersion',
+  'Signature',
+  'SigningCertURL',
+]);
 
 export const MAX_SNS_MESSAGE_BYTES = 256 * 1024;
 export const MAX_SNS_SIGNING_CERTIFICATE_BYTES = 64 * 1024;
@@ -47,13 +59,31 @@ export interface SnsNotificationEnvelope {
   readonly SigningCertURL: string;
 }
 
+export interface SnsSubscriptionConfirmationEnvelope {
+  readonly Type: 'SubscriptionConfirmation';
+  readonly MessageId: string;
+  readonly Token: string;
+  readonly TopicArn: string;
+  readonly Message: string;
+  readonly SubscribeURL: string;
+  readonly Timestamp: string;
+  readonly SignatureVersion: SnsSignatureVersion;
+  readonly Signature: string;
+  readonly SigningCertURL: string;
+}
+
+export type SnsVerifiableEnvelope =
+  | SnsNotificationEnvelope
+  | SnsSubscriptionConfirmationEnvelope;
+
 export type SnsSignatureErrorCode =
   | 'INVALID_ENVELOPE'
   | 'WRONG_TOPIC'
   | 'INVALID_CERTIFICATE_URL'
   | 'CERTIFICATE_UNAVAILABLE'
   | 'INVALID_CERTIFICATE'
-  | 'INVALID_SIGNATURE';
+  | 'INVALID_SIGNATURE'
+  | 'CONFIRMATION_UNAVAILABLE';
 
 export class SnsSignatureError extends Error {
   public constructor(public readonly code: SnsSignatureErrorCode) {
@@ -157,11 +187,7 @@ function strictBase64(value: string): Buffer | undefined {
   return decoded.toString('base64') === value ? decoded : undefined;
 }
 
-/**
- * Parses only signed SNS Notification envelopes for the one configured SES
- * topic. Subscription confirmations are intentionally not followed by this
- * webhook because connecting production callbacks is a human-approved change.
- */
+/** Parses signed SNS Notification envelopes for the configured SES topic. */
 export function parseSnsEnvelope(
   value: unknown,
   expectedTopicArn: string,
@@ -222,23 +248,137 @@ export function parseSnsEnvelope(
   });
 }
 
-function canonicalSnsSigningString(envelope: SnsNotificationEnvelope): string {
-  const fields: readonly (readonly [string, string])[] = [
-    ['Message', envelope.Message],
-    ['MessageId', envelope.MessageId],
-    ...(envelope.Subject === undefined
-      ? []
-      : ([['Subject', envelope.Subject]] as const)),
-    ['Timestamp', envelope.Timestamp],
-    ['TopicArn', envelope.TopicArn],
-    ['Type', envelope.Type],
-  ];
-  return fields.map(([name, value]) => `${name}\n${value}`).join('\n');
+function assertSubscribeUrl(
+  value: string,
+  expectedTopicArn: string,
+  expectedToken: string,
+): void {
+  const topic = parseSnsTopicArn(expectedTopicArn);
+  const hostname =
+    topic.partition === 'aws-cn'
+      ? `sns.${topic.region}.amazonaws.com.cn`
+      : `sns.${topic.region}.amazonaws.com`;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SnsSignatureError('INVALID_ENVELOPE');
+  }
+  const keys = [...url.searchParams.keys()];
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname !== hostname ||
+    url.port !== '' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.pathname !== '/' ||
+    url.hash !== '' ||
+    keys.length !== 3 ||
+    new Set(keys).size !== 3 ||
+    !keys.every((key) => ['Action', 'TopicArn', 'Token'].includes(key)) ||
+    url.searchParams.get('Action') !== 'ConfirmSubscription' ||
+    url.searchParams.get('TopicArn') !== expectedTopicArn ||
+    url.searchParams.get('Token') !== expectedToken
+  ) {
+    throw new SnsSignatureError('INVALID_ENVELOPE');
+  }
+}
+
+/** Parses the one signed callback type needed to confirm the managed HTTPS subscription. */
+export function parseSnsSubscriptionConfirmationEnvelope(
+  value: unknown,
+  expectedTopicArn: string,
+): SnsSubscriptionConfirmationEnvelope {
+  parseSnsTopicArn(expectedTopicArn);
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) => !SUBSCRIPTION_CONFIRMATION_KEYS.has(key),
+    ) ||
+    value.Type !== 'SubscriptionConfirmation' ||
+    value.TopicArn !== expectedTopicArn ||
+    (value.SignatureVersion !== '1' && value.SignatureVersion !== '2')
+  ) {
+    throw new SnsSignatureError(
+      isRecord(value) && value.TopicArn !== expectedTopicArn
+        ? 'WRONG_TOPIC'
+        : 'INVALID_ENVELOPE',
+    );
+  }
+  const messageId = boundedString(value.MessageId, 100);
+  const token = boundedString(value.Token, 4_096);
+  const message = boundedString(value.Message, MAX_SNS_MESSAGE_BYTES);
+  const subscribeUrl = boundedString(value.SubscribeURL, 8_192);
+  const timestamp = boundedString(value.Timestamp, 100);
+  const signature = boundedString(value.Signature, 4_096);
+  const signingCertUrl = boundedString(value.SigningCertURL, 2_048);
+  if (
+    messageId === undefined ||
+    !UuidSchema.safeParse(messageId).success ||
+    token === undefined ||
+    message === undefined ||
+    subscribeUrl === undefined ||
+    timestamp === undefined ||
+    !TimestampSchema.safeParse(timestamp).success ||
+    signature === undefined ||
+    strictBase64(signature) === undefined ||
+    signingCertUrl === undefined
+  ) {
+    throw new SnsSignatureError('INVALID_ENVELOPE');
+  }
+  assertSigningCertificateUrl(signingCertUrl, expectedTopicArn);
+  assertSubscribeUrl(subscribeUrl, expectedTopicArn, token);
+  return Object.freeze({
+    Type: 'SubscriptionConfirmation',
+    MessageId: messageId,
+    Token: token,
+    TopicArn: expectedTopicArn,
+    Message: message,
+    SubscribeURL: subscribeUrl,
+    Timestamp: timestamp,
+    SignatureVersion: value.SignatureVersion,
+    Signature: signature,
+    SigningCertURL: signingCertUrl,
+  });
+}
+
+export function parseSnsCallbackEnvelope(
+  value: unknown,
+  expectedTopicArn: string,
+): SnsVerifiableEnvelope {
+  return isRecord(value) && value.Type === 'SubscriptionConfirmation'
+    ? parseSnsSubscriptionConfirmationEnvelope(value, expectedTopicArn)
+    : parseSnsEnvelope(value, expectedTopicArn);
+}
+
+function canonicalSnsSigningString(envelope: SnsVerifiableEnvelope): string {
+  const fields: readonly (readonly [string, string])[] =
+    envelope.Type === 'SubscriptionConfirmation'
+      ? [
+          ['Message', envelope.Message],
+          ['MessageId', envelope.MessageId],
+          ['SubscribeURL', envelope.SubscribeURL],
+          ['Timestamp', envelope.Timestamp],
+          ['Token', envelope.Token],
+          ['TopicArn', envelope.TopicArn],
+          ['Type', envelope.Type],
+        ]
+      : [
+          ['Message', envelope.Message],
+          ['MessageId', envelope.MessageId],
+          ...(envelope.Subject === undefined
+            ? []
+            : ([['Subject', envelope.Subject]] as const)),
+          ['Timestamp', envelope.Timestamp],
+          ['TopicArn', envelope.TopicArn],
+          ['Type', envelope.Type],
+        ];
+  return `${fields.map(([name, value]) => `${name}\n${value}`).join('\n')}\n`;
 }
 
 /** Digest of exactly the SNS-signed fields, suitable for replay conflicts. */
 export function canonicalSnsEnvelopeDigest(
-  envelope: SnsNotificationEnvelope,
+  envelope: SnsVerifiableEnvelope,
 ): string {
   return createHash('sha256')
     .update(canonicalSnsSigningString(envelope), 'utf8')
@@ -312,7 +452,7 @@ function certificateBytes(value: string | Uint8Array): Uint8Array {
 
 /** Verifies the canonical v1 (SHA-1) or v2 (SHA-256) SNS signature. */
 export async function verifySnsSignature(
-  envelope: SnsNotificationEnvelope,
+  envelope: SnsVerifiableEnvelope,
   options: SnsSignatureVerificationOptions = {},
 ): Promise<void> {
   parseSnsTopicArn(envelope.TopicArn);
@@ -367,5 +507,35 @@ export async function verifySnsSignature(
   }
   if (!verified) {
     throw new SnsSignatureError('INVALID_SIGNATURE');
+  }
+}
+
+/** Follows only the exact, already signature-verified AWS confirmation URL. */
+export async function confirmSnsSubscription(
+  envelope: SnsSubscriptionConfirmationEnvelope,
+  fetchImplementation: (
+    input: string,
+    init: RequestInit,
+  ) => Promise<Response> = (input, init) => globalThis.fetch(input, init),
+): Promise<void> {
+  assertSubscribeUrl(envelope.SubscribeURL, envelope.TopicArn, envelope.Token);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetchImplementation(envelope.SubscribeURL, {
+      cache: 'no-store',
+      method: 'GET',
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    await response.body?.cancel().catch(() => undefined);
+    if (!response.ok) {
+      throw new SnsSignatureError('CONFIRMATION_UNAVAILABLE');
+    }
+  } catch (error) {
+    if (error instanceof SnsSignatureError) throw error;
+    throw new SnsSignatureError('CONFIRMATION_UNAVAILABLE');
+  } finally {
+    clearTimeout(timeout);
   }
 }

@@ -298,4 +298,50 @@ describe('supported deployment workflow', () => {
       '::error::The current commit does not have a bootstrap image in the repository',
     );
   });
+
+  test('stages email enablement only after the compatible app and disables it for rollback', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    expect(
+      workflow.match(
+        /\$STACK_NAME:EnableEmailWorker=\$(?:staged_email_enabled|target_email_enabled)/gu,
+      ),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /\$STACK_NAME:SesCredentialVerificationReference=\$(?:staged_ses_reference|target_ses_reference)/gu,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).toContain(
+      'staged_email_enabled="$PREVIOUS_EMAIL_ENABLED"',
+    );
+    expect(workflow).toContain(
+      'staged_ses_reference="$PREVIOUS_SES_REFERENCE"',
+    );
+    expect(
+      workflow.match(/if \[\[ -n "\$\{ROLLBACK_DIGEST:-\}" \]\]; then/gu)
+        ?.length ?? 0,
+    ).toBeGreaterThanOrEqual(2);
+    expect(workflow).toContain("staged_email_enabled='false'");
+    expect(workflow).toContain("target_email_enabled='false'");
+    expect(workflow).toContain("staged_ses_reference='UNVERIFIED'");
+    expect(workflow).toContain("target_ses_reference='UNVERIFIED'");
+    expect(workflow).toContain(
+      'ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}',
+    );
+    expect(workflow).toContain('if [[ -z "$ROLLBACK_IMAGE_DIGEST" ]]; then');
+    expect(workflow).toContain(
+      'SES_CREDENTIAL_VERIFICATION_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$',
+    );
+  });
+
+  test('normalizes absent legacy email parameters before the first staged deploy', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    expect(workflow).toContain(
+      `if [[ "$previous_ses_reference" != 'UNVERIFIED' && ! "$previous_ses_reference" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$ ]]; then`,
+    );
+    expect(workflow).toContain("previous_ses_reference='UNVERIFIED'");
+    expect('None').not.toMatch(
+      /^(?:UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$/u,
+    );
+  });
 });

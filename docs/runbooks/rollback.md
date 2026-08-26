@@ -95,6 +95,13 @@ an event.
   contracts/schema compatibility and side-effect-free `/api/health` behavior.
 - Do not enable App Runner auto-deploy, use a mutable tag, or substitute a local
   build.
+- The supported digest rollback first scales the email send worker to zero and
+  resets its deployment verification reference while the current application
+  is still serving. The retained SNS-to-SQS callback subscription is never
+  removed. Its separately permissioned consumer stays on the current
+  callback-compatible image; if the rolled-back application cannot accept the
+  signed route, messages remain in the callback DLQ for verified redrive after
+  a compatible application is restored.
 - Verify service revision/digest, health or expected paused state, 5xx/latency,
   and database access. Resolve ambiguous activation outcomes from immutable
   evidence; never retry for the user.
@@ -109,6 +116,9 @@ an event.
   interval after rollback. Do not purge or redrive queues.
 - Verify provider-call counts, queue ages, DLQs, bounded reason codes, and
   append-only attempt/evidence transitions. `Unknown` remains unknown.
+- Re-enabling email after a rollback is a new deployment verification and a new
+  authenticated administrator action. A previous reference never authorizes an
+  older or changed runtime.
 
 ## Infrastructure or configuration rollback
 

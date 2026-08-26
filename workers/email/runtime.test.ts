@@ -134,7 +134,7 @@ class MemorySesLedger implements DurableSesSendLedger {
     this.claims += 1;
     return Promise.resolve({
       kind: 'acquired' as const,
-      leaseToken: 'durable-ses-lease',
+      leaseToken: IDS.confirmation,
     });
   }
 

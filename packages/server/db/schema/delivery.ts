@@ -1029,6 +1029,37 @@ export const smsProviderIo = pgTable(
   ],
 );
 
+/**
+ * Irreversible permit for one SES provider-I/O call.
+ *
+ * SES does not accept a caller idempotency key. An unfinished claim therefore
+ * never expires: the worker may have lost the response after SES accepted the
+ * message, and retrying that call would risk a duplicate email.
+ */
+export const sesEmailProviderIo = pgTable(
+  'ses_email_provider_io',
+  {
+    attemptId: uuid('attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    requestFingerprint: digest('request_fingerprint').notNull(),
+    claimToken: uuid('claim_token').defaultRandom().notNull(),
+    outcome: jsonb('outcome'),
+    claimedAt: occurredAt('claimed_at').defaultNow().notNull(),
+    completedAt: occurredAt('completed_at'),
+  },
+  (table) => [
+    check(
+      'ses_email_provider_io_completion_pairing',
+      sql`(${table.outcome} is null) = (${table.completedAt} is null)`,
+    ),
+    check(
+      'ses_email_provider_io_outcome_object',
+      sql`${table.outcome} is null or jsonb_typeof(${table.outcome}) = 'object'`,
+    ),
+  ],
+);
+
 /** Durable receipt polling state; targets contain no push token. */
 export const expoPushReceiptPolls = pgTable(
   'expo_push_receipt_polls',

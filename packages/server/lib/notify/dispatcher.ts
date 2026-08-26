@@ -1901,6 +1901,19 @@ async function loadDrizzleEmailEndpointPolicy(
       endpointId: rosterEndpoints.id,
       recipientId: rosterEndpoints.recipientId,
       status: rosterEndpoints.status,
+      permanentlySuppressed: sql<boolean>`exists (
+        select 1
+        from endpoint_status_records as historical_status
+        inner join roster_endpoints as historical_endpoint
+          on historical_endpoint.roster_snapshot_id = historical_status.roster_snapshot_id
+          and historical_endpoint.recipient_id = historical_status.recipient_id
+          and historical_endpoint.id = historical_status.endpoint_id
+          and historical_endpoint.population = historical_status.population
+          and historical_endpoint.channel = historical_status.channel
+        where historical_status.channel = 'email'
+          and historical_status.status in ('invalid', 'disabled')
+          and lower(historical_endpoint.email) = lower(${rosterEndpoints.email})
+      )`,
     })
     .from(rosterEndpoints)
     .where(
@@ -1939,10 +1952,15 @@ async function loadDrizzleEmailEndpointPolicy(
       desc(endpointStatusRecords.sequence),
     );
   const effectiveStatuses = new Map<string, EndpointStatus>();
+  const permanentlySuppressed = new Set<string>();
   for (const endpoint of endpointRows) {
+    const key = emailCandidateKey(endpoint);
+    if (endpoint.permanentlySuppressed) permanentlySuppressed.add(key);
     effectiveStatuses.set(
-      emailCandidateKey(endpoint),
-      EndpointStatusSchema.parse(endpoint.status),
+      key,
+      EndpointStatusSchema.parse(
+        endpoint.permanentlySuppressed ? 'disabled' : endpoint.status,
+      ),
     );
   }
   for (const status of statusRows) {
@@ -1950,7 +1968,9 @@ async function loadDrizzleEmailEndpointPolicy(
     if (!expectedKeys.has(key)) {
       throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
     }
-    effectiveStatuses.set(key, EndpointStatusSchema.parse(status.status));
+    if (!permanentlySuppressed.has(key)) {
+      effectiveStatuses.set(key, EndpointStatusSchema.parse(status.status));
+    }
   }
 
   return Object.freeze(
