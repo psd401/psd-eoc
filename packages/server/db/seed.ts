@@ -15,7 +15,7 @@ import {
   type Recipient,
   type RosterGroupSourceRef,
 } from '@psd-eoc/contracts';
-import { sql } from 'drizzle-orm';
+import { desc, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -661,36 +661,120 @@ export async function seedReferenceData(
       .values(templateRows)
       .onConflictDoNothing();
 
-    await transaction
-      .insert(integrationStatuses)
-      .values(
-        integrationStatusRows.map((status, index) => ({
-          id: integrationStatusIds[index],
-          integrationId: status.integrationId,
-          label: status.label,
-          verifiedAt: null,
-          verifiedByUserId: null,
-          authorizationReference: null,
-          reasonCode: status.reasonCode,
-          observedAt: SEED_TIME,
-        })),
+    // The insert guard uses this same per-integration lock to serialize truth
+    // observations. Take every seed-owned lock in lexical order before reading
+    // history so a concurrent live verification cannot appear between the read
+    // and a deterministic initial insert.
+    const seededIntegrationIds = integrationStatusRows
+      .map((status) => status.integrationId)
+      .sort();
+    for (const integrationId of seededIntegrationIds) {
+      await transaction.execute(sql`
+        select pg_advisory_xact_lock(
+          hashtextextended(${integrationId}, 0)
+        )
+      `);
+    }
+
+    const integrationsWithHistory = new Set(
+      (
+        await transaction
+          .select({ integrationId: integrationStatuses.integrationId })
+          .from(integrationStatuses)
+          .where(
+            inArray(
+              integrationStatuses.integrationId,
+              integrationStatusRows.map((status) => status.integrationId),
+            ),
+          )
+      ).map((status) => status.integrationId),
+    );
+    const initialStatuses = integrationStatusRows.flatMap((status, index) =>
+      integrationsWithHistory.has(status.integrationId)
+        ? []
+        : [
+            {
+              id: integrationStatusIds[index],
+              integrationId: status.integrationId,
+              label: status.label,
+              verifiedAt: null,
+              verifiedByUserId: null,
+              authorizationReference: null,
+              reasonCode: status.reasonCode,
+              observedAt: SEED_TIME,
+            },
+          ],
+    );
+    if (initialStatuses.length > 0) {
+      await transaction
+        .insert(integrationStatuses)
+        .values(initialStatuses)
+        .onConflictDoNothing();
+    }
+    const initiallySeededIntegrations = new Set(
+      initialStatuses.map((status) => status.integrationId),
+    );
+
+    // A live database can predate the deterministic initial observations. Its
+    // append-only guard correctly rejects inserting those old observations
+    // after newer truth exists, so missing channel rows must point at the
+    // latest retained observation instead of assuming the seed ID exists.
+    const latestStatuses = await transaction
+      .select({
+        id: integrationStatuses.id,
+        integrationId: integrationStatuses.integrationId,
+        label: integrationStatuses.label,
+        observedAt: integrationStatuses.observedAt,
+      })
+      .from(integrationStatuses)
+      .where(
+        inArray(
+          integrationStatuses.integrationId,
+          channelConfigurationRows.map(
+            (configuration) => configuration.integrationId,
+          ),
+        ),
       )
-      .onConflictDoNothing();
+      .orderBy(
+        desc(integrationStatuses.observedAt),
+        desc(integrationStatuses.id),
+      );
+    const latestStatusByIntegration = new Map<
+      string,
+      (typeof latestStatuses)[number]
+    >();
+    for (const status of latestStatuses) {
+      if (!latestStatusByIntegration.has(status.integrationId)) {
+        latestStatusByIntegration.set(status.integrationId, status);
+      }
+    }
     await transaction
       .insert(channelConfigurations)
       .values(
-        channelConfigurationRows.map((configuration) => ({
-          integrationId: configuration.integrationId,
-          enabled: configuration.enabled,
-          statusId:
-            configuration.integrationId === 'mobile-push'
-              ? ids.integrationMobilePush
-              : configuration.integrationId === 'ses-email'
-                ? ids.integrationSesEmail
-                : ids.integrationAwsEumSms,
-          statusLabel: configuration.status.label,
-          changedAt: SEED_TIME,
-        })),
+        channelConfigurationRows.map((configuration) => {
+          const status = latestStatusByIntegration.get(
+            configuration.integrationId,
+          );
+          if (status === undefined) {
+            throw new Error(
+              `Reference status is unavailable for ${configuration.integrationId}.`,
+            );
+          }
+          return {
+            integrationId: configuration.integrationId,
+            enabled: configuration.enabled,
+            statusId: status.id,
+            statusLabel: status.label,
+            changedAt: initiallySeededIntegrations.has(
+              configuration.integrationId,
+            )
+              ? SEED_TIME
+              : sql`greatest(
+                  statement_timestamp(),
+                  ${status.observedAt.toISOString()}::timestamptz
+                )`,
+          };
+        }),
       )
       .onConflictDoNothing();
   });

@@ -25,6 +25,7 @@ import {
 } from '../db/client';
 import {
   seedDatabase,
+  seedReferenceData,
   type SeedDatabaseOptions,
   type SeedSummary,
 } from '../db/seed';
@@ -1926,6 +1927,232 @@ function monitoringQueryWithBucket(
     .replaceAll(':bucket_end', `'${bucketEnd}'`)
     .replaceAll(':display_time_zone', `'${displayTimeZone}'`);
 }
+
+describeWithDatabase('production-safe reference seed', () => {
+  test('does not backfill stale initial truth over newer integration history', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error(
+        'TEST_DATABASE_URL is required for database integration tests.',
+      );
+    }
+
+    const owned = await createDisposableDatabase(
+      'psd_eoc_reference_seed',
+      testDatabaseUrl,
+    );
+    const opened = createDatabaseClient({
+      driver: 'postgres',
+      url: owned.url,
+      maxConnections: 2,
+    });
+    if (opened.driver !== 'postgres') {
+      throw new Error(
+        'Integration tests require the direct PostgreSQL driver.',
+      );
+    }
+
+    try {
+      await migrateDatabase(opened);
+      await opened.db.execute(sql`
+        insert into integration_statuses (
+          id, integration_id, label, reason_code, observed_at
+        ) values
+          (
+            '10000000-0000-4000-8000-000000000300'::uuid,
+            'google-groups', 'mocked', null,
+            '2026-08-26T12:00:00.000Z'::timestamptz
+          ),
+          (
+            '10000000-0000-4000-8000-000000000301'::uuid,
+            'expo-push', 'configured-unverified', null,
+            '2026-08-26T12:00:00.000Z'::timestamptz
+          ),
+          (
+            '10000000-0000-4000-8000-000000000302'::uuid,
+            'mobile-push', 'configured-unverified', null,
+            '2026-08-26T12:00:00.000Z'::timestamptz
+          ),
+          (
+            '10000000-0000-4000-8000-000000000303'::uuid,
+            'ses-email', 'configured-unverified', null,
+            '2026-08-26T12:00:00.000Z'::timestamptz
+          ),
+          (
+            '10000000-0000-4000-8000-000000000304'::uuid,
+            'aws-eum-sms', 'blocked', 'CARRIER_REGISTRATION_PENDING',
+            '2026-08-27T12:00:00.000Z'::timestamptz
+          ),
+          (
+            '10000000-0000-4000-8000-000000000305'::uuid,
+            's3-media', 'mocked', null,
+            '2026-08-26T12:00:00.000Z'::timestamptz
+          )
+      `);
+
+      await seedReferenceData(opened.db);
+      await seedReferenceData(opened.db);
+
+      const [proof] = await opened.db.execute<{
+        configuration_count: number;
+        retained_status_count: number;
+        stale_configuration_time_count: number;
+        stale_status_count: number;
+        truth_mismatch_count: number;
+      }>(sql`
+        select
+          (select count(*)::integer from channel_configurations)
+            as configuration_count,
+          (select count(*)::integer from integration_statuses
+            where observed_at >= '2026-08-26T12:00:00.000Z'::timestamptz)
+            as retained_status_count,
+          (select count(*)::integer from integration_statuses
+            where observed_at = '2026-08-06T12:00:00.000Z'::timestamptz)
+            as stale_status_count,
+          (select count(*)::integer
+            from channel_configurations as configuration
+            join integration_statuses as status
+              on status.id = configuration.status_id
+            where configuration.changed_at < status.observed_at)
+            as stale_configuration_time_count,
+          (select count(*)::integer
+            from channel_configurations as configuration
+            join integration_statuses as status
+              on status.id = configuration.status_id
+            where status.integration_id <> configuration.integration_id
+              or status.label <> configuration.status_label
+              or exists (
+                select 1
+                from integration_statuses as newer
+                where newer.integration_id = status.integration_id
+                  and (newer.observed_at, newer.id)
+                    > (status.observed_at, status.id)
+              ))
+            as truth_mismatch_count
+      `);
+      expect(proof).toEqual({
+        configuration_count: 3,
+        retained_status_count: 6,
+        stale_configuration_time_count: 0,
+        stale_status_count: 0,
+        truth_mismatch_count: 0,
+      });
+    } finally {
+      await closeAndDropDisposableDatabase(() => opened.close(), owned);
+    }
+  });
+
+  test('serializes its history read with a concurrent live observation', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error(
+        'TEST_DATABASE_URL is required for database integration tests.',
+      );
+    }
+
+    const owned = await createDisposableDatabase(
+      'psd_eoc_reference_seed_race',
+      testDatabaseUrl,
+    );
+    const holder = createDatabaseClient({
+      driver: 'postgres',
+      url: owned.url,
+      maxConnections: 1,
+    });
+    const seederUrl = new URL(owned.url);
+    seederUrl.searchParams.set(
+      'application_name',
+      'psd_eoc_reference_seed_race',
+    );
+    const seeder = createDatabaseClient({
+      driver: 'postgres',
+      url: seederUrl.toString(),
+      maxConnections: 1,
+    });
+    if (holder.driver !== 'postgres' || seeder.driver !== 'postgres') {
+      throw new Error(
+        'Integration tests require the direct PostgreSQL driver.',
+      );
+    }
+
+    let seedRun: ReturnType<typeof seedReferenceData> | undefined;
+    let waitingForLock = false;
+    try {
+      await migrateDatabase(holder);
+      await holder.db.transaction(async (lockOwner) => {
+        await lockOwner.execute(sql`
+          select pg_advisory_xact_lock(
+            hashtextextended('aws-eum-sms', 0)
+          )
+        `);
+        seedRun = seedReferenceData(seeder.db);
+
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const [activity] = await lockOwner.execute<{ waiting: boolean }>(sql`
+            select exists (
+              select 1
+              from pg_locks
+              where locktype = 'advisory'
+                and database = (
+                  select oid from pg_database where datname = current_database()
+                )
+                and not granted
+            ) as waiting
+          `);
+          if (activity?.waiting === true) {
+            waitingForLock = true;
+            break;
+          }
+          await Bun.sleep(10);
+        }
+
+        await lockOwner.execute(sql`
+          insert into integration_statuses (
+            id, integration_id, label, reason_code, observed_at
+          ) values (
+            '20000000-0000-4000-8000-000000000304'::uuid,
+            'aws-eum-sms', 'blocked', 'CARRIER_REGISTRATION_PENDING',
+            '2026-08-26T13:00:00.000Z'::timestamptz
+          )
+        `);
+      });
+      if (seedRun === undefined) {
+        throw new Error('Concurrent reference seed did not start.');
+      }
+      await seedRun;
+      expect(waitingForLock).toBe(true);
+
+      const [proof] = await holder.db.execute<{
+        configuration_status_id: string;
+        current_status_count: number;
+        stale_status_count: number;
+      }>(sql`
+        select
+          (select count(*)::integer
+            from integration_statuses
+            where integration_id = 'aws-eum-sms'
+              and observed_at = '2026-08-26T13:00:00.000Z'::timestamptz)
+            as current_status_count,
+          (select count(*)::integer
+            from integration_statuses
+            where integration_id = 'aws-eum-sms'
+              and observed_at = '2026-08-06T12:00:00.000Z'::timestamptz)
+            as stale_status_count,
+          (select status_id::text
+            from channel_configurations
+            where integration_id = 'aws-eum-sms')
+            as configuration_status_id
+      `);
+      expect(proof).toEqual({
+        configuration_status_id: '20000000-0000-4000-8000-000000000304',
+        current_status_count: 1,
+        stale_status_count: 0,
+      });
+    } finally {
+      await closeAndDropDisposableDatabase(async () => {
+        await Promise.all([holder.close(), seeder.close()]);
+      }, owned);
+    }
+  });
+});
 
 describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
   beforeAll(async () => {

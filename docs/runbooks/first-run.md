@@ -13,15 +13,21 @@ still an authenticated human confirming a consequence preview.
 ## What the deploy already gave you
 
 `seedReferenceData` runs during bootstrap on every deploy. It is safe to run
-repeatedly and it loads catalogs only:
+repeatedly. On a fresh database it loads these catalogs and fail-closed
+integration baselines:
 
 | Seeded                 | Count |
 | ---------------------- | ----- |
 | Event types            | 8     |
 | Event type versions    | 8     |
 | Event type templates   | 72    |
-| Integration statuses   | 5     |
+| Integration statuses   | 6     |
 | Channel configurations | 3     |
+
+On an existing database, bootstrap preserves its append-only integration
+history. It creates a baseline only for an integration with no history and
+binds any missing, disabled channel configuration to that integration's latest
+retained observation.
 
 Read the list of what it does **not** create carefully, because every item on
 it is work you still have to do: facilities, neighborhoods, group sources,
