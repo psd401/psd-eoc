@@ -100,6 +100,10 @@ test('the drill workflow uses a fresh exact stack and receives no live secret na
   expect(drill).toContain('FAILURE_DRILL_CDK_STACK_ID: FailureDrill');
   expect(drill).toContain('deploy "$FAILURE_DRILL_CDK_STACK_ID"');
   expect(drill).toContain('destroy "$FAILURE_DRILL_CDK_STACK_ID"');
+  expect(drill).toContain(
+    '--parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=false"',
+  );
+  expect(drill).not.toContain('--parameters "$FAILURE_DRILL_CDK_STACK_ID:');
   expect(drill).not.toContain('deploy "$FAILURE_DRILL_STACK_NAME"');
   expect(drill).not.toContain('destroy "$FAILURE_DRILL_STACK_NAME"');
   expect(drill).toContain('aws cloudformation list-stack-resources');
