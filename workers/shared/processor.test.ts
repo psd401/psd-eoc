@@ -484,15 +484,11 @@ describe('attempt-ID idempotent processing', () => {
 
   test('crash after provider side effect relies on attempt-ID provider idempotency', async () => {
     let logicalSends = 0;
-    const observedSideEffects: string[] = [];
     const providerResults = new Map<string, ProviderSendOutcome>();
     const adapter = new MockAdapter('mocked', (request) => {
       const existing = providerResults.get(request.idempotencyKey);
       if (existing !== undefined) return Promise.resolve(existing);
       logicalSends += 1;
-      observedSideEffects.push(
-        `attempt:${request.workItem.attempt.id}:endpoint:${request.workItem.attempt.endpointId}`,
-      );
       providerResults.set(request.idempotencyKey, ACCEPTED);
       return Promise.resolve(ACCEPTED);
     });
@@ -517,25 +513,6 @@ describe('attempt-ID idempotent processing', () => {
       IDS.attempt,
     ]);
     expect(logicalSends).toBe(1);
-    if (
-      process.env.PSD_EOC_FAILURE_DRILL_CAPTURE_SCENARIO ===
-      'worker-termination-mid-fanout'
-    ) {
-      console.log(
-        JSON.stringify({
-          kind: 'failure-drill-focused-result',
-          scenarioId: 'worker-termination-mid-fanout',
-          expectedSideEffects: [
-            `attempt:${item.attempt.id}:endpoint:${item.attempt.endpointId}`,
-          ],
-          observedSideEffects,
-          facts: {
-            logicalSideEffectCount: logicalSends,
-            providerInvocationCount: adapter.requests.length,
-          },
-        }),
-      );
-    }
   });
 
   test('recovers adapter-retained provider truth before a dark live gate', async () => {

@@ -28,12 +28,6 @@ immutable image, stages the current bootstrap image, applies forward-only
 migrations, updates the application, and verifies the deployed digest and
 health. Manual `cdk deploy` commands are not maintained or supported.
 
-The supported isolated recovery proof is the manual
-`.github/workflows/failure-drill.yml` workflow. It creates a separate
-synthetic-only stack, executes the eight-scenario proof, captures browser and
-runtime evidence, and destroys that exact stack. See the
-[failure-recovery drill runbook](../docs/runbooks/failure-recovery-drill.md).
-
 ## Alarm response runbooks
 
 CloudWatch alarm descriptions append the stable anchors below to the configured

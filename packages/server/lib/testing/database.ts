@@ -30,16 +30,11 @@ export function requireSyntheticTestDatabaseUrl(
   } catch {
     throw new Error('TEST_DATABASE_URL must name a synthetic test database.');
   }
-  const hasAcceptedTlsQuery =
-    parsed.search.length === 0 ||
-    (allowRemote &&
-      parsed.searchParams.size === 1 &&
-      parsed.searchParams.get('sslmode') === 'verify-full');
   if (
     (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') ||
     parsed.hostname.length === 0 ||
     !/^[A-Za-z0-9_-]+[-_]test$/u.test(databaseName) ||
-    !hasAcceptedTlsQuery ||
+    parsed.search.length > 0 ||
     parsed.hash.length > 0 ||
     (!LOOPBACK_HOSTS.has(parsed.hostname) && !allowRemote)
   ) {
