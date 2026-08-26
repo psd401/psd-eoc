@@ -64,6 +64,7 @@ const exampleConfiguration = Object.freeze({
   ),
   sesFromAddress: `eoc-alerts@${exampleHostedDomain}`,
   sesIdentityDomain: exampleHostedDomain,
+  sourceRepositoryUrl: `https://code.${exampleHostedDomain}/example/eoc`,
   syntheticGroups: [
     {
       displayName: 'Example synthetic staff',
@@ -90,6 +91,7 @@ const app = new App({
     'psdEoc:privacyContactUrl': exampleConfiguration.privacyContactUrl,
     'psdEoc:sesFromAddress': exampleConfiguration.sesFromAddress,
     'psdEoc:sesIdentityDomain': exampleConfiguration.sesIdentityDomain,
+    'psdEoc:sourceRepositoryUrl': exampleConfiguration.sourceRepositoryUrl,
     'psdEoc:syntheticGroups': exampleConfiguration.syntheticGroups,
   },
 });
@@ -102,6 +104,7 @@ const stack = new PsdEocStack(app, 'ExampleDistrictVerification', {
     region: exampleDeploymentTarget.region,
   },
   stackName: 'example-district-eoc-verification',
+  sourceSha: 'a'.repeat(40),
   terminationProtection: false,
 });
 const template = Template.fromStack(stack);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { App } from 'aws-cdk-lib';
+import { App, IgnoreStrategy } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
 import productionConfiguration from '../../cdk.json';
@@ -18,7 +18,6 @@ import {
   EMAIL_WORKER_LOG_GROUP_NAME,
   DEPLOYMENT_ENVIRONMENT,
   HEALTH_PATH,
-  IMAGE_DIGEST_SENTINEL,
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
   SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME,
@@ -28,7 +27,10 @@ import {
   readDeploymentIdentity,
   readDeploymentTarget,
 } from '../../src/stack/config';
-import { PsdEocStack } from '../../src/stack/psd-eoc-stack';
+import {
+  APPLICATION_IMAGE_EXCLUDES,
+  PsdEocStack,
+} from '../../src/stack/psd-eoc-stack';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_EVENT_DESTINATION_NAME,
@@ -183,6 +185,7 @@ const {
   sesFromAddress: SES_FROM_ADDRESS,
   sesIdentityDomain: SES_IDENTITY_DOMAIN,
 } = currentDeploymentTarget;
+const SOURCE_SHA = 'a'.repeat(40);
 
 const app = new App({
   context: {
@@ -201,12 +204,39 @@ const stack = new PsdEocStack(app, STACK_NAME, {
     region: AWS_REGION,
   },
   stackName: STACK_NAME,
+  sourceSha: SOURCE_SHA,
 });
 const template = Template.fromStack(stack);
 const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
 describe('deployment boundary', () => {
+  it('keeps ignored local environment files out of CDK asset staging', () => {
+    const strategy = IgnoreStrategy.docker('/synthetic/psd-eoc', [
+      ...APPLICATION_IMAGE_EXCLUDES,
+    ]);
+
+    expect(
+      strategy.ignores('/synthetic/psd-eoc/packages/server/.env.local'),
+    ).toBe(true);
+    expect(strategy.ignores('/synthetic/psd-eoc/.env.production')).toBe(true);
+    expect(
+      strategy.ignores('/synthetic/psd-eoc/packages/server/build/output.js'),
+    ).toBe(true);
+    expect(
+      strategy.ignores('/synthetic/psd-eoc/packages/server/runtime.log'),
+    ).toBe(true);
+    expect(
+      strategy.ignores('/synthetic/psd-eoc/packages/server/.turbo/cache'),
+    ).toBe(true);
+    expect(
+      strategy.ignores('/synthetic/psd-eoc/.verification/evidence.png'),
+    ).toBe(true);
+    expect(
+      strategy.ignores('/synthetic/psd-eoc/packages/server/package.json'),
+    ).toBe(false);
+  });
+
   it('keeps the documented CloudFormation parameter index exact', async () => {
     const configuration = await Bun.file(
       new URL('../../../docs/CONFIGURATION.md', import.meta.url),
@@ -360,6 +390,7 @@ describe('deployment boundary', () => {
           {
             deploymentTarget: currentDeploymentTarget,
             env: { account: '000000000000', region: AWS_REGION },
+            sourceSha: SOURCE_SHA,
           },
         ),
     ).toThrow(`AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS})`);
@@ -380,6 +411,7 @@ describe('deployment boundary', () => {
           {
             deploymentTarget: currentDeploymentTarget,
             env: { account: AWS_ACCOUNT, region: 'us-east-1' },
+            sourceSha: SOURCE_SHA,
           },
         ),
     ).toThrow(`in ${AWS_REGION}`);
@@ -413,8 +445,10 @@ describe('deployment boundary', () => {
             region,
             sesFromAddress: 'eoc-alerts@example.invalid',
             sesIdentityDomain: 'example.invalid',
+            sourceRepositoryUrl: 'https://code.example.invalid/example/psd-eoc',
           },
           env: { account, region },
+          sourceSha: SOURCE_SHA,
         },
       );
       const partitionTemplate = asRecord(
@@ -441,16 +475,16 @@ describe('deployment boundary', () => {
     }
   });
 
-  it('requires separate reviewed bootstrap and deploy digests plus protected identity', () => {
+  it('keeps image publication and source identity inside the CDK deployment', () => {
     const parameters = asRecord(synthesized.Parameters);
     const provision = asRecord(parameters.ProvisionApplication);
-    const appDigest = asRecord(parameters.AppImageDigest);
-    const bootstrapDigest = asRecord(parameters.BootstrapImageDigest);
     const runtimeIdleTimeout = asRecord(
       parameters.RuntimeDatabaseIdleTimeoutSeconds,
     );
-    const sourceSha = asRecord(parameters.SourceSha);
-    const bootstrapSourceSha = asRecord(parameters.BootstrapSourceSha);
+    const rollbackDigest = asRecord(parameters.RollbackApplicationImageDigest);
+    const rollbackRepository = asRecord(
+      parameters.RollbackApplicationRepository,
+    );
     const oauthArn = asRecord(parameters.GoogleOauthSecretArn);
     const initialAccessGroupId = asRecord(parameters.InitialAccessGroupId);
     const initialAccessGroupEmail = asRecord(
@@ -463,20 +497,31 @@ describe('deployment boundary', () => {
 
     expect(provision.AllowedValues).toEqual(['false', 'true']);
     expect(provision).not.toHaveProperty('Default');
-    expect(appDigest.Default).toBe(IMAGE_DIGEST_SENTINEL);
-    expect(appDigest.AllowedPattern).toBe('^sha256:[0-9a-f]{64}$');
-    expect(bootstrapDigest.AllowedPattern).toBe('^sha256:[0-9a-f]{64}$');
-    expect(bootstrapDigest).not.toHaveProperty('Default');
+    expect(parameters).not.toHaveProperty('AppImageDigest');
+    expect(parameters).not.toHaveProperty('BootstrapImageDigest');
+    expect(parameters).not.toHaveProperty('SourceSha');
+    expect(parameters).not.toHaveProperty('BootstrapSourceSha');
+    expect(rollbackDigest).toMatchObject({
+      AllowedPattern: '^(CURRENT_CDK_ASSET|sha256:[0-9a-f]{64})$',
+      Default: 'CURRENT_CDK_ASSET',
+      Type: 'String',
+    });
+    expect(parameters).not.toHaveProperty('RollbackApplicationSourceSha');
+    expect(rollbackRepository).toMatchObject({
+      AllowedValues: [
+        'CURRENT_CDK_ASSET',
+        'CDK_ASSET_REPOSITORY',
+        'LEGACY_APPLICATION_REPOSITORY',
+      ],
+      Default: 'CURRENT_CDK_ASSET',
+      Type: 'String',
+    });
     expect(runtimeIdleTimeout).toMatchObject({
       Default: 0,
       MaxValue: 600,
       MinValue: 0,
       Type: 'Number',
     });
-    expect(sourceSha.AllowedPattern).toBe('^[0-9a-f]{40}$');
-    expect(sourceSha).not.toHaveProperty('Default');
-    expect(bootstrapSourceSha.AllowedPattern).toBe('^[0-9a-f]{40}$');
-    expect(bootstrapSourceSha).not.toHaveProperty('Default');
     expect(oauthArn.NoEcho).toBe(true);
     expect(oauthArn.AllowedPattern).toBe(
       '^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$',
@@ -510,28 +555,40 @@ describe('deployment boundary', () => {
     expect(transitionEmailDigest).not.toHaveProperty('Default');
 
     const rules = asRecord(synthesized.Rules);
-    const digestRule = asRecord(rules.ApplicationRequiresPublishedDigest);
-    expect(digestRule.RuleCondition).toEqual({
-      'Fn::Equals': [{ Ref: 'ProvisionApplication' }, 'true'],
-    });
-    expect(JSON.stringify(digestRule.Assertions)).toContain(
-      IMAGE_DIGEST_SENTINEL,
-    );
-    const bootstrapRule = asRecord(rules.BootstrapRequiresPublishedDigest);
-    expect(bootstrapRule).not.toHaveProperty('RuleCondition');
-    expect(JSON.stringify(bootstrapRule.Assertions)).toContain(
-      IMAGE_DIGEST_SENTINEL,
-    );
+    expect(rules).not.toHaveProperty('ApplicationRequiresPublishedDigest');
+    expect(rules).not.toHaveProperty('BootstrapRequiresPublishedDigest');
+    expect(rules).not.toHaveProperty('ApplicationRequiresReviewedSource');
+    expect(rules).not.toHaveProperty('BootstrapRequiresReviewedSource');
     expect(
       JSON.stringify(
-        asRecord(rules.ApplicationRequiresReviewedSource).Assertions,
+        asRecord(rules.RollbackApplicationSelectionIsComplete).Assertions,
       ),
-    ).toContain('0'.repeat(40));
+    ).toContain('RollbackApplicationImageDigest');
     expect(
       JSON.stringify(
-        asRecord(rules.BootstrapRequiresReviewedSource).Assertions,
+        asRecord(rules.RollbackApplicationSelectionIsComplete).Assertions,
       ),
-    ).toContain('0'.repeat(40));
+    ).toContain('RollbackApplicationRepository');
+    const rollbackDarkRule = asRecord(
+      rules.RollbackRequiresPersistentlyDarkProviders,
+    );
+    const serializedRollbackDarkRule = JSON.stringify(rollbackDarkRule);
+    for (const parameter of [
+      'EnableAwsEumSmsWorker',
+      'EnableDirectPush',
+      'EnableEmailWorker',
+      'EnableExpoPushWorker',
+      'DirectPushCredentialVerificationReference',
+      'ExpoCredentialVerificationReference',
+      'SesCredentialVerificationReference',
+      'PushProviderCutover',
+    ]) {
+      expect(serializedRollbackDarkRule).toContain(parameter);
+    }
+    expect(serializedRollbackDarkRule).toContain('UNVERIFIED');
+    expect(JSON.stringify(rollbackDarkRule.RuleCondition)).toContain(
+      'RollbackApplicationImageDigest',
+    );
     const directCutoverRule = asRecord(rules.DirectCutoverRequiresDirectPush);
     expect(directCutoverRule.RuleCondition).toEqual({
       'Fn::Or': [
@@ -569,6 +626,18 @@ describe('deployment boundary', () => {
     expect(
       onlyResource('AWS::AppRunner::AutoScalingConfiguration').Condition,
     ).toBe('ShouldProvisionApplication');
+    expect(
+      JSON.stringify(conditions.ShouldUseRollbackApplicationImage),
+    ).toContain('RollbackApplicationImageDigest');
+    for (const conditionName of [
+      'ShouldRunExpoPushWorker',
+      'ShouldRunAwsEumSmsWorker',
+      'ShouldRunEmailWorker',
+    ]) {
+      expect(JSON.stringify(conditions[conditionName])).toContain(
+        'RollbackApplicationImageDigest',
+      );
+    }
   });
 
   it('tags every stateful or executable resource except the immutable App Runner identities as the live pilot', () => {
@@ -606,9 +675,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 6);
     template.resourceCountIs('AWS::ECS::Service', 4);
-    // Eight log groups: bootstrap/access sync, push, SMS, email send, email
-    // callback, Aurora failover, the delivery router, and the alarm mailer.
-    template.resourceCountIs('AWS::Logs::LogGroup', 8);
+    // Nine log groups: bootstrap/access sync, deployment bootstrap, push, SMS,
+    // email send, email callback, Aurora failover, router, and alarm mailer.
+    template.resourceCountIs('AWS::Logs::LogGroup', 9);
     // Thirteen queues: health, source/dead-letter pairs for delivery, email,
     // SMS work, SMS receipts, and push, plus the SES callback source/DLQ pair.
     template.resourceCountIs('AWS::SQS::Queue', 13);
@@ -744,7 +813,9 @@ describe('minimal isolated resource shape', () => {
     // Three functions, all outside the VPC and none able to reach the database.
     // Only the alarm mailer may reach a provider, and only SES, and only from
     // the operational alarm address.
-    template.resourceCountIs('AWS::Lambda::Function', 3);
+    // Three application/monitoring functions, the image digest resolver, two
+    // bootstrap handlers, and the asynchronous provider framework.
+    template.resourceCountIs('AWS::Lambda::Function', 11);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
     // Six: database, shared bootstrap task, App Runner connector, and the three
@@ -995,13 +1066,16 @@ describe('App Runner runtime safety boundary', () => {
 
     expect(source.AutoDeploymentsEnabled).toBe(false);
     expect(image.ImageRepositoryType).toBe('ECR');
-    expect(JSON.stringify(image.ImageIdentifier)).toContain('ImageRepository');
-    expect(JSON.stringify(image.ImageIdentifier)).toContain('AppImageDigest');
-    expect(JSON.stringify(image.ImageIdentifier)).not.toContain(
-      'BootstrapImageDigest',
-    );
-    expect(JSON.stringify(image.ImageIdentifier)).toContain('"@"');
-    expect(JSON.stringify(image.ImageIdentifier)).not.toContain(':latest');
+    const imageIdentifier = JSON.stringify(image.ImageIdentifier);
+    expect(imageIdentifier).toContain('cdk-hnb659fds-container-assets');
+    expect(imageIdentifier).toContain('ApplicationImageDigestLookup');
+    expect(imageIdentifier).toContain('imageDetails.0.imageDigest');
+    expect(imageIdentifier).toContain('RollbackApplicationImageDigest');
+    expect(imageIdentifier).toContain('ShouldUseLegacyRollbackRepository');
+    expect(imageIdentifier).toContain('@');
+    expect(imageIdentifier).not.toContain(':latest');
+    expect(imageIdentifier).not.toContain('AppImageDigest');
+    expect(imageIdentifier).not.toContain('BootstrapImageDigest');
     expect(serviceProperties.Tags).toEqual([
       {
         Key: 'Application',
@@ -1165,7 +1239,9 @@ describe('App Runner runtime safety boundary', () => {
     expect(
       variables.get('PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE'),
     ).toEqual({ Ref: 'DirectPushCredentialVerificationReference' });
-    expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
+    expect(JSON.stringify(variables.get('SOURCE_SHA'))).toContain(
+      'RollbackImageValidation',
+    );
     expect(variables.get('PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('OperationsAlarmTopic'),
     });
@@ -1699,7 +1775,7 @@ describe('App Runner runtime safety boundary', () => {
       'build.apprunner.amazonaws.com',
     );
     const statements = inlineStatementsForRole(imageRole);
-    const actions = allAllowedActions(statements).sort();
+    const actions = [...new Set(allAllowedActions(statements))].sort();
     expect(actions).toEqual(
       [
         'ecr:BatchCheckLayerAvailability',
@@ -1711,9 +1787,13 @@ describe('App Runner runtime safety boundary', () => {
     const repositoryStatement = statements.find((statement) =>
       asStringArray(statement.Action).includes('ecr:BatchGetImage'),
     );
-    expect(repositoryStatement?.Resource).toEqual({
-      'Fn::GetAtt': [expect.stringContaining('ImageRepository'), 'Arn'],
-    });
+    expect(JSON.stringify(repositoryStatement?.Resource)).toContain(
+      'cdk-hnb659fds-container-assets',
+    );
+    expect(JSON.stringify(repositoryStatement?.Resource)).not.toContain(
+      'ImageRepository',
+    );
+    expect(JSON.stringify(statements)).toContain('ImageRepository');
     const authorization = statements.find((statement) =>
       asStringArray(statement.Action).includes('ecr:GetAuthorizationToken'),
     );
@@ -1736,14 +1816,25 @@ describe('one-off native bootstrap boundary', () => {
 
     expect(container.Name).toBe('native-bootstrap');
     expect(container.Command).toEqual([
+      'timeout',
+      '-s',
+      'TERM',
+      '-k',
+      '30s',
+      '25m',
       'bun',
       'packages/server/scripts/operations/bootstrap.ts',
     ]);
     expect(container.ReadonlyRootFilesystem).toBe(true);
     expect(container).not.toHaveProperty('Privileged');
-    expect(JSON.stringify(container.Image)).toContain('BootstrapImageDigest');
+    expect(JSON.stringify(container.Image)).toContain(
+      'ApplicationImageDigestLookup',
+    );
     expect(JSON.stringify(container.Image)).not.toContain('AppImageDigest');
-    expect(JSON.stringify(container.Image)).toContain('"@"');
+    expect(JSON.stringify(container.Image)).not.toContain(
+      'BootstrapImageDigest',
+    );
+    expect(JSON.stringify(container.Image)).toContain('@');
 
     const environment = new Map(
       asArray(container.Environment).map((item) => {
@@ -1763,9 +1854,7 @@ describe('one-off native bootstrap boundary', () => {
     expect(environment.get('DATABASE_MAX_CONNECTIONS')).toBe('1');
     expect(environment.get('DATABASE_CONNECT_TIMEOUT_SECONDS')).toBe('10');
     expect(environment.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toBe('20');
-    expect(environment.get('SOURCE_SHA')).toEqual({
-      Ref: 'BootstrapSourceSha',
-    });
+    expect(environment.get('SOURCE_SHA')).toBe(SOURCE_SHA);
     expect(environment.get('PSD_EOC_INITIAL_ACCESS_GROUP_ID')).toEqual({
       Ref: 'InitialAccessGroupId',
     });
@@ -1826,6 +1915,177 @@ describe('one-off native bootstrap boundary', () => {
     expect(emailLogGroup.RetentionInDays).toBe(14);
     expect(emailLogGroupResource?.DeletionPolicy).toBe('Retain');
     expect(emailLogGroupResource?.UpdateReplacePolicy).toBe('Retain');
+  });
+
+  it('blocks every image consumer on one successful CloudFormation bootstrap', () => {
+    const deploymentLogGroup = resourceEntries('AWS::Logs::LogGroup').find(
+      ([, resource]) =>
+        properties(resource).LogGroupName === '/psd-eoc/deployment/bootstrap',
+    )?.[1];
+    expect(deploymentLogGroup).toBeDefined();
+    expect(asRecord(deploymentLogGroup).DeletionPolicy).toBe(
+      'RetainExceptOnCreate',
+    );
+    expect(asRecord(deploymentLogGroup).UpdateReplacePolicy).toBe('Retain');
+
+    const deployments = resourceEntries('Custom::PsdEocBootstrapDeployment');
+    expect(deployments).toHaveLength(1);
+    const [deploymentLogicalId, deployment] = deployments[0] ?? [];
+    expect(deploymentLogicalId).toBeDefined();
+    const deploymentProperties = properties(deployment ?? {});
+    expect(deploymentProperties.ContainerName).toBe('native-bootstrap');
+    expect(deploymentProperties.DeploymentRevision).toBe(SOURCE_SHA);
+    expect(JSON.stringify(deploymentProperties.ClusterArn)).toContain(
+      'BootstrapEcsCluster',
+    );
+    expect(JSON.stringify(deploymentProperties.TaskDefinitionArn)).toContain(
+      'BootstrapTaskDefinition',
+    );
+    expect(asArray(deploymentProperties.SubnetIds)).toHaveLength(2);
+
+    const rollbackValidations = resourceEntries(
+      'Custom::PsdEocRollbackImageValidation',
+    );
+    expect(rollbackValidations).toHaveLength(1);
+    const validationProperties = properties(rollbackValidations[0]?.[1] ?? {});
+    expect(validationProperties.CurrentSourceSha).toBe(SOURCE_SHA);
+    expect(validationProperties.ExpectedSourceRepositoryUrl).toBe(
+      currentDeploymentTarget.sourceRepositoryUrl,
+    );
+    expect(validationProperties.ImageDigest).toEqual({
+      Ref: 'RollbackApplicationImageDigest',
+    });
+    expect(validationProperties.Operation).toBe('ROLLBACK_IMAGE_VALIDATION');
+    expect(JSON.stringify(validationProperties.RepositoryKind)).toContain(
+      'RollbackApplicationRepository',
+    );
+    expect(JSON.stringify(validationProperties.RepositoryName)).toContain(
+      'cdk-hnb659fds-container-assets',
+    );
+    expect(JSON.stringify(validationProperties.RepositoryName)).toContain(
+      'ImageRepository',
+    );
+    expect(JSON.stringify(validationProperties.ServiceToken)).toContain(
+      'RollbackImageValidationProvider',
+    );
+    expect(JSON.stringify(validationProperties.ServiceToken)).not.toContain(
+      'RollbackImageValidationHandler',
+    );
+    const validationPolicy = resourceEntries('AWS::IAM::Policy').find(
+      ([, resource]) =>
+        JSON.stringify(properties(resource)).includes(
+          'RollbackImageValidationHandlerServiceRole',
+        ) && JSON.stringify(properties(resource)).includes('ecr:BatchGetImage'),
+    )?.[1];
+    expect(validationPolicy).toBeDefined();
+    const serializedValidationPolicy = JSON.stringify(
+      properties(validationPolicy ?? {}),
+    );
+    expect(serializedValidationPolicy).toContain('ecr:GetDownloadUrlForLayer');
+    expect(serializedValidationPolicy).toContain(
+      'cdk-hnb659fds-container-assets',
+    );
+    expect(serializedValidationPolicy).toContain('ImageRepository');
+    expect(serializedValidationPolicy).not.toContain('ecr:DescribeImages');
+    expect(serializedValidationPolicy).toContain('ecs:DescribeServices');
+    expect(serializedValidationPolicy).toContain('BootstrapEcsCluster');
+    expect(serializedValidationPolicy).toContain('psd-eoc-expo-push-worker');
+    expect(serializedValidationPolicy).toContain('psd-eoc-aws-eum-sms-worker');
+    expect(serializedValidationPolicy).toContain('psd-eoc-email-worker');
+
+    const quiescence = resourceEntries('Custom::PsdEocRollbackQuiescence');
+    expect(quiescence).toHaveLength(1);
+    const [quiescenceLogicalId, quiescenceResource] = quiescence[0] ?? [];
+    expect(quiescenceLogicalId).toBeDefined();
+    const quiescenceProperties = properties(quiescenceResource ?? {});
+    expect(quiescenceProperties.Operation).toBe('ROLLBACK_QUIESCENCE');
+    expect(quiescenceProperties.RollbackSelected).toEqual({
+      'Fn::If': ['ShouldUseRollbackApplicationImage', 'true', 'false'],
+    });
+    expect(asArray(quiescenceProperties.ServiceNames)).toHaveLength(3);
+    const sendServices = resourceEntries('AWS::ECS::Service').filter(
+      ([, resource]) =>
+        [
+          'psd-eoc-aws-eum-sms-worker',
+          'psd-eoc-email-worker',
+          'psd-eoc-expo-push-worker',
+        ].includes(String(properties(resource).ServiceName)),
+    );
+    expect(sendServices).toHaveLength(3);
+    for (const [, service] of sendServices) {
+      expect(asArray(asRecord(service).DependsOn)).toContain(
+        quiescenceLogicalId,
+      );
+    }
+    const appRunnerResource = onlyResource('AWS::AppRunner::Service');
+    expect(asArray(asRecord(appRunnerResource).DependsOn)).toContain(
+      quiescenceLogicalId,
+    );
+
+    const digestLookup = properties(onlyResource('Custom::AWS'));
+    expect(String(digestLookup.Create)).toContain('describeImages');
+    expect(String(digestLookup.Create)).toContain(
+      'cdk-hnb659fds-container-assets',
+    );
+    expect(String(digestLookup.Create)).not.toContain('psd-eoc/server');
+    for (const [, taskDefinition] of resourceEntries(
+      'AWS::ECS::TaskDefinition',
+    )) {
+      expect(
+        JSON.stringify(properties(taskDefinition).ContainerDefinitions),
+      ).not.toContain('RollbackApplicationImageDigest');
+    }
+
+    const runtimeResources = [
+      onlyResource('AWS::AppRunner::Service'),
+      ...resourceEntries('AWS::ECS::Service').map(([, resource]) => resource),
+      resourceEntries('AWS::Events::Rule').find(
+        ([, resource]) =>
+          properties(resource).Name ===
+          'psd-eoc-access-membership-sync-every-two-hours',
+      )?.[1],
+    ];
+    expect(runtimeResources).toHaveLength(6);
+    for (const resource of runtimeResources) {
+      expect(resource).toBeDefined();
+      expect(asArray(asRecord(resource).DependsOn)).toContain(
+        deploymentLogicalId,
+      );
+    }
+
+    const runTaskPolicies = resourceEntries('AWS::IAM::Policy').filter(
+      ([, resource]) =>
+        JSON.stringify(properties(resource).PolicyDocument).includes(
+          'ecs:RunTask',
+        ) &&
+        JSON.stringify(properties(resource).PolicyDocument).includes(
+          'cloudformation:DescribeStacks',
+        ),
+    );
+    expect(runTaskPolicies).toHaveLength(1);
+    const startPolicy = JSON.stringify(
+      properties(runTaskPolicies[0]?.[1] ?? {}),
+    );
+    expect(startPolicy).toContain('BootstrapTaskDefinition');
+    expect(startPolicy).toContain('iam:PassRole');
+    expect(startPolicy).toContain('cloudformation:DescribeStacks');
+    expect(startPolicy).not.toContain('ses:Send');
+    expect(startPolicy).not.toContain('sns:Publish');
+
+    const stopTaskPolicies = resourceEntries('AWS::IAM::Policy').filter(
+      ([, resource]) =>
+        JSON.stringify(properties(resource).PolicyDocument).includes(
+          'ecs:StopTask',
+        ),
+    );
+    expect(stopTaskPolicies).toHaveLength(1);
+    const stopTaskPolicy = JSON.stringify(
+      properties(stopTaskPolicies[0]?.[1] ?? {}),
+    );
+    expect(stopTaskPolicy).toContain('ecs:DescribeTasks');
+    expect(stopTaskPolicy).toContain('BootstrapEcsCluster');
+    expect(stopTaskPolicy).not.toContain('ses:Send');
+    expect(stopTaskPolicy).not.toContain('sns:Publish');
   });
 
   it('keeps bootstrap secret reads on the execution role and task role empty', () => {
@@ -1974,8 +2234,13 @@ describe('protected access-membership publication boundary', () => {
     ]);
     expect(container.ReadonlyRootFilesystem).toBe(true);
     expect(container).not.toHaveProperty('Privileged');
-    expect(JSON.stringify(container.Image)).toContain('BootstrapImageDigest');
+    expect(JSON.stringify(container.Image)).toContain(
+      'ApplicationImageDigestLookup',
+    );
     expect(JSON.stringify(container.Image)).not.toContain('AppImageDigest');
+    expect(JSON.stringify(container.Image)).not.toContain(
+      'BootstrapImageDigest',
+    );
 
     const environment = new Map(
       asArray(container.Environment).map((item) => {
@@ -2000,9 +2265,7 @@ describe('protected access-membership publication boundary', () => {
         'TMPDIR',
       ].sort(),
     );
-    expect(environment.get('SOURCE_SHA')).toEqual({
-      Ref: 'BootstrapSourceSha',
-    });
+    expect(environment.get('SOURCE_SHA')).toBe(SOURCE_SHA);
     // Without this the task cannot resolve a member address against the
     // district's staff domain, and every run fails closed with
     // `GOOGLE_OIDC_HOSTED_DOMAIN must be configured.` — which is exactly what
@@ -2429,18 +2692,20 @@ describe('configured-unverified provider readiness boundary', () => {
     ]) {
       template.resourceCountIs(forbiddenType, 0);
     }
-    // Monitoring introduces compute and schedules, so the boundary is stated
-    // by name rather than by count: the only function is the Aurora failover
-    // bridge, and the only rules drive it, a targetless human reminder, and the
-    // access-membership refresh that keeps sign-in from aging out.
+    // Named application functions are bounded. CDK also synthesizes unnamed
+    // image-lookup and asynchronous custom-resource framework handlers.
     expect(
       resourceEntries('AWS::Lambda::Function')
-        .map(([, resource]) => String(properties(resource).FunctionName))
+        .map(([, resource]) => properties(resource).FunctionName)
+        .filter((name): name is string => typeof name === 'string')
         .sort(),
     ).toEqual([
       'psd-eoc-alarm-mailer',
       'psd-eoc-aurora-failover-metric',
+      'psd-eoc-bootstrap-deployment-check',
+      'psd-eoc-bootstrap-deployment-start',
       'psd-eoc-delivery-router',
+      'psd-eoc-rollback-image-validation',
     ]);
     expect(
       resourceEntries('AWS::Events::Rule')
@@ -2524,10 +2789,16 @@ describe('configured-unverified provider readiness boundary', () => {
         .sort(),
     ).toEqual(['lambda', 'lambda', 'sms', 'sms', 'sqs']);
     expect(
-      Object.values(resources).some((resource) =>
-        String(asRecord(resource).Type).startsWith('Custom::'),
-      ),
-    ).toBe(false);
+      Object.values(resources)
+        .map((resource) => String(asRecord(resource).Type))
+        .filter((type) => type.startsWith('Custom::'))
+        .sort(),
+    ).toEqual([
+      'Custom::AWS',
+      'Custom::PsdEocBootstrapDeployment',
+      'Custom::PsdEocRollbackImageValidation',
+      'Custom::PsdEocRollbackQuiescence',
+    ]);
     const serializedTemplate = JSON.stringify(synthesized);
     expect(serializedTemplate).not.toContain('rds-data:');
     expect(serializedTemplate).not.toContain('aws-data-api');
@@ -2689,7 +2960,7 @@ describe('configured-unverified provider readiness boundary', () => {
       'workers/email/callback-service.ts',
     ]);
     expect(JSON.stringify(callbackContainer.Image)).toContain(
-      'BootstrapImageDigest',
+      'ApplicationImageDigestLookup',
     );
     expect(JSON.stringify(callbackContainer.LogConfiguration)).toContain(
       'EmailCallbackWorkerLogGroup',
@@ -2803,8 +3074,6 @@ describe('configured-unverified provider readiness boundary', () => {
         'AppRunnerServiceArn',
         'AppRunnerServiceUrl',
         'AppRunnerVpcConnectorArn',
-        'BootstrapCandidateImageDigest',
-        'BootstrapCandidateSourceSha',
         'BootstrapEcsClusterArn',
         'BootstrapLogGroupName',
         'BootstrapPrivateSubnetIds',
@@ -2817,10 +3086,12 @@ describe('configured-unverified provider readiness boundary', () => {
         'DatabaseApplicationSecretArn',
         'DatabaseClusterArn',
         'DatabaseName',
+        'DeployedApplicationImageDigest',
+        'DeployedApplicationSourceSha',
+        'DeploymentBootstrapImageDigest',
         'DeploymentAccount',
         'DeploymentRegion',
-        'DeployedAppImageDigest',
-        'DeployedAppSourceSha',
+        'DeploymentSourceSha',
         'EmailChannelState',
         'EmailCallbackDeadLetterQueueArn',
         'EmailCallbackQueueArn',
@@ -2896,18 +3167,16 @@ describe('configured-unverified provider readiness boundary', () => {
         'disabled',
       ],
     });
-    expect(asRecord(outputs.BootstrapCandidateImageDigest).Value).toEqual({
-      Ref: 'BootstrapImageDigest',
-    });
-    expect(asRecord(outputs.DeployedAppImageDigest).Value).toEqual({
-      Ref: 'AppImageDigest',
-    });
-    expect(asRecord(outputs.BootstrapCandidateSourceSha).Value).toEqual({
-      Ref: 'BootstrapSourceSha',
-    });
-    expect(asRecord(outputs.DeployedAppSourceSha).Value).toEqual({
-      Ref: 'SourceSha',
-    });
+    expect(
+      JSON.stringify(asRecord(outputs.DeploymentBootstrapImageDigest).Value),
+    ).toContain('ApplicationImageDigestLookup');
+    expect(asRecord(outputs.DeploymentSourceSha).Value).toBe(SOURCE_SHA);
+    expect(
+      JSON.stringify(asRecord(outputs.DeployedApplicationImageDigest).Value),
+    ).toContain('RollbackApplicationImageDigest');
+    expect(
+      JSON.stringify(asRecord(outputs.DeployedApplicationSourceSha).Value),
+    ).toContain('RollbackImageValidation');
     for (const outputName of [
       'AppRunnerHealthCheckUrl',
       'AppRunnerServiceArn',
