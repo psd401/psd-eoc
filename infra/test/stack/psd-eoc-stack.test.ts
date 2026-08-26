@@ -188,6 +188,7 @@ const app = new App({
     'psdEoc:hostedDomain': 'example.invalid',
     'psdEoc:iosBundleId': 'invalid.example.eoc',
     'psdEoc:organizationName': 'Example School District',
+    'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
     'psdEoc:displayTimeZone': 'America/New_York',
   },
 });
@@ -269,6 +270,7 @@ describe('deployment boundary', () => {
             'psdEoc:hostedDomain': 'example.invalid',
             'psdEoc:iosBundleId': 'invalid.example.eoc',
             'psdEoc:organizationName': organizationName,
+            'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
             'psdEoc:displayTimeZone': 'America/New_York',
           }[key];
         },
@@ -286,6 +288,35 @@ describe('deployment boundary', () => {
     ]) {
       expect(() => identityFor(invalid)).toThrow(
         'CDK context psdEoc:organizationName',
+      );
+    }
+  });
+
+  it('requires a public hostname for the privacy contact at synth time', () => {
+    const identityFor = (privacyContactUrl: string) =>
+      readDeploymentIdentity({
+        tryGetContext(key) {
+          return {
+            'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+            'psdEoc:hostedDomain': 'example.invalid',
+            'psdEoc:iosBundleId': 'invalid.example.eoc',
+            'psdEoc:organizationName': 'Example School District',
+            'psdEoc:privacyContactUrl': privacyContactUrl,
+            'psdEoc:displayTimeZone': 'America/New_York',
+          }[key];
+        },
+      });
+
+    for (const invalid of [
+      'https://localhost/contact',
+      'https://privacy.localhost/contact',
+      'https://127.0.0.1/contact',
+      'https://2130706433/contact',
+      'https://[::1]/contact',
+      'https://%/contact',
+    ]) {
+      expect(() => identityFor(invalid)).toThrow(
+        'CDK context psdEoc:privacyContactUrl',
       );
     }
   });
@@ -319,6 +350,7 @@ describe('deployment boundary', () => {
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
               'psdEoc:organizationName': 'Example School District',
+              'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
               'psdEoc:displayTimeZone': 'America/New_York',
             },
           }),
@@ -338,6 +370,7 @@ describe('deployment boundary', () => {
               'psdEoc:hostedDomain': 'example.invalid',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
               'psdEoc:organizationName': 'Example School District',
+              'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
               'psdEoc:displayTimeZone': 'America/New_York',
             },
           }),
@@ -362,6 +395,7 @@ describe('deployment boundary', () => {
           'psdEoc:hostedDomain': 'example.invalid',
           'psdEoc:iosBundleId': 'invalid.example.eoc',
           'psdEoc:organizationName': 'Example School District',
+          'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
           'psdEoc:displayTimeZone': 'America/New_York',
         },
       });
@@ -1035,6 +1069,7 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
         'PSD_EOC_ORGANIZATION_NAME',
+        'PSD_EOC_PRIVACY_CONTACT_URL',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',
         'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
@@ -1060,6 +1095,9 @@ describe('App Runner runtime safety boundary', () => {
     });
     expect(variables.get('PSD_EOC_ORGANIZATION_NAME')).toBe(
       'Example School District',
+    );
+    expect(variables.get('PSD_EOC_PRIVACY_CONTACT_URL')).toBe(
+      'https://www.example.invalid/contact',
     );
     expect(variables.get('PSD_EOC_DISPLAY_TIME_ZONE')).toBe('America/New_York');
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });

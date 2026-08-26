@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { AuthApiClient, parseAuthApiBaseUrl } from './auth-api-client';
+import {
+  AuthApiClient,
+  parseAuthApiBaseUrl,
+  privacyPolicyUrl,
+} from './auth-api-client';
 import { MobileAuthError } from './auth-errors';
 import { sessionFixture, TEST_TOKEN } from './auth-test-fixtures';
 
@@ -47,6 +51,18 @@ describe('mobile auth API client', () => {
     );
     expect(() =>
       parseAuthApiBaseUrl('http://eoc.example.invalid', true),
+    ).toThrow(MobileAuthError);
+  });
+
+  test('derives the public privacy route from the exact configured origin', () => {
+    expect(privacyPolicyUrl('https://eoc.example.invalid/', false)).toBe(
+      'https://eoc.example.invalid/privacy',
+    );
+    expect(privacyPolicyUrl('http://127.0.0.1:3000', true)).toBe(
+      'http://127.0.0.1:3000/privacy',
+    );
+    expect(() =>
+      privacyPolicyUrl('https://eoc.example.invalid/not-an-origin', false),
     ).toThrow(MobileAuthError);
   });
 

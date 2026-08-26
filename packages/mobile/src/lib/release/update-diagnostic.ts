@@ -1,6 +1,7 @@
 import * as Application from 'expo-application';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
+import { Platform } from 'react-native';
 
 export type LaunchedUpdateDiagnosticStatus = 'known' | 'unknown';
 export type LaunchedUpdateMode = 'embedded-only' | 'unknown';
@@ -33,13 +34,15 @@ export interface ReadOnlyUpdateConstants {
   readonly configuredCheckAutomatically: unknown;
   readonly configuredUpdateUrl: unknown;
   readonly configuredApplicationVersion: unknown;
+  readonly configuredApplicationId: unknown;
   readonly configuredRuntimeVersion: unknown;
   readonly applicationId: unknown;
   readonly applicationVersion: unknown;
   readonly nativeBuildVersion: unknown;
 }
 
-const APPLICATION_ID = 'net.psd401.eoc';
+const APPLICATION_ID_PATTERN =
+  /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)+$/u;
 const APPLICATION_VERSION_PATTERN = /^[0-9]+(?:\.[0-9]+){2}$/u;
 const NATIVE_BUILD_VERSION_PATTERN = /^[1-9][0-9]{0,17}$/u;
 
@@ -56,8 +59,15 @@ function exactToken(value: unknown, pattern: RegExp): string | null {
 export function createLaunchedUpdateDiagnostic(
   constants: ReadOnlyUpdateConstants,
 ): LaunchedUpdateDiagnostic {
+  const configuredApplicationId = exactToken(
+    constants.configuredApplicationId,
+    APPLICATION_ID_PATTERN,
+  );
   const applicationId =
-    constants.applicationId === APPLICATION_ID ? APPLICATION_ID : null;
+    configuredApplicationId !== null &&
+    constants.applicationId === configuredApplicationId
+      ? configuredApplicationId
+      : null;
   const applicationVersion = exactToken(
     constants.applicationVersion,
     APPLICATION_VERSION_PATTERN,
@@ -143,6 +153,12 @@ export function readLaunchedUpdateDiagnostic(): LaunchedUpdateDiagnostic {
       Constants.expoConfig?.updates?.checkAutomatically,
     configuredUpdateUrl: Constants.expoConfig?.updates?.url,
     configuredApplicationVersion: Constants.expoConfig?.version,
+    configuredApplicationId:
+      Platform.OS === 'ios'
+        ? Constants.expoConfig?.ios?.bundleIdentifier
+        : Platform.OS === 'android'
+          ? Constants.expoConfig?.android?.package
+          : undefined,
     configuredRuntimeVersion: Constants.expoConfig?.runtimeVersion,
     applicationId: Application.applicationId,
     applicationVersion: Application.nativeApplicationVersion,

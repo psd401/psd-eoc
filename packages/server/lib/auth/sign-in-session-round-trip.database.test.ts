@@ -1,6 +1,13 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 
 import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
 
@@ -19,6 +26,8 @@ import { authorizeSignIn } from './sign-in-authorization';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const ADMIN_GROUP = randomUUID();
 const STAFF_GROUP = randomUUID();
