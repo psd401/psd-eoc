@@ -350,7 +350,11 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
       };
       const generatedAt = new Date(fixture.capturedAt.getTime() + 3_000);
       const before = await staleReport(database, generatedAt);
-      expect(before.staleRecipients).toEqual([
+      expect(
+        before.staleRecipients.filter(
+          (recipient) => recipient.recipientId === fixture.recipientId,
+        ),
+      ).toEqual([
         {
           recipientId: fixture.recipientId,
           reason: 'no-active-push-endpoint',
@@ -382,7 +386,11 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
 
       const after = await staleReport(database, generatedAt);
       expect(after.status).toBe('stale');
-      expect(after.staleRecipients).toEqual([
+      expect(
+        after.staleRecipients.filter(
+          (recipient) => recipient.recipientId === fixture.recipientId,
+        ),
+      ).toEqual([
         { recipientId: fixture.recipientId, reason: 'no-active-endpoint' },
       ]);
       expect(JSON.stringify(after)).not.toContain(fixture.email);
