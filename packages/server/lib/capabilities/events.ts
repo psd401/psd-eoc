@@ -2747,6 +2747,7 @@ async function resolveActivationSourceFromDatabase(
           !deliveryTestCredentialIsVerified(
             channel.integrationStatus,
             credentialReferences[channel.channel],
+            channel.channel,
           ),
       )
     ) {

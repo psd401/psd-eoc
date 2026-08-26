@@ -12,8 +12,9 @@ COPY packages/contracts/package.json packages/contracts/tsconfig.json packages/c
 COPY packages/server/package.json packages/server/tsconfig.json packages/server/
 COPY workers/package.json workers/tsconfig.json workers/
 
-# The immutable image also runs the separately permissioned push task. Its ECS
-# role and command remain distinct from App Runner even though the bytes match.
+# The immutable image also runs the separately permissioned channel tasks. The
+# ECS roles and commands remain distinct from App Runner even though the bytes
+# match.
 RUN bun -e 'const path = "/app/package.json"; const manifest = await Bun.file(path).json(); manifest.workspaces = ["packages/contracts", "packages/server", "workers"]; await Bun.write(path, `${JSON.stringify(manifest)}\n`);'
 RUN bun install --lockfile-only
 
@@ -26,7 +27,7 @@ RUN bun install --frozen-lockfile
 
 COPY packages/contracts/src packages/contracts/src
 COPY packages/server packages/server
-# Copy only the transitive source closure of the push worker entry point. This
+# Copy only the transitive source closure of the channel worker entry points. This
 # keeps test fixtures and unrelated channel workers out of the production image.
 COPY workers/shared/attempt.ts workers/shared/attempt.ts
 COPY workers/shared/attempt-execution-client.ts workers/shared/attempt-execution-client.ts
@@ -34,6 +35,7 @@ COPY workers/shared/batch-message.ts workers/shared/batch-message.ts
 COPY workers/shared/delivery-state-client.ts workers/shared/delivery-state-client.ts
 COPY workers/shared/processor.ts workers/shared/processor.ts
 COPY workers/shared/retry.ts workers/shared/retry.ts
+COPY workers/shared/index.ts workers/shared/index.ts
 COPY workers/email/aws-arn.ts workers/email/aws-arn.ts
 COPY workers/email/ses-events.ts workers/email/ses-events.ts
 COPY workers/email/sns-signature.ts workers/email/sns-signature.ts
@@ -55,6 +57,14 @@ COPY workers/push/service.ts workers/push/service.ts
 COPY workers/push/state-client.ts workers/push/state-client.ts
 COPY workers/push/transport.ts workers/push/transport.ts
 COPY workers/push/worker.ts workers/push/worker.ts
+COPY workers/sms/aws-eum-adapter.ts workers/sms/aws-eum-adapter.ts
+COPY workers/sms/aws-eum-client.ts workers/sms/aws-eum-client.ts
+COPY workers/sms/delivery-events.ts workers/sms/delivery-events.ts
+COPY workers/sms/opt-out.ts workers/sms/opt-out.ts
+COPY workers/sms/runtime.ts workers/sms/runtime.ts
+COPY workers/sms/service.ts workers/sms/service.ts
+COPY workers/sms/state-client.ts workers/sms/state-client.ts
+COPY workers/sms/worker.ts workers/sms/worker.ts
 
 RUN bun run --cwd packages/server build
 

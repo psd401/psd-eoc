@@ -503,6 +503,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-344',
     );
+    const committedIssue279EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-279',
+    );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedEvidenceDirectory
@@ -522,6 +527,11 @@ async function main(): Promise<void> {
         ? committedIssue344EvidenceDirectory
         : join(createdStateDirectory, 'evidence-344');
     await mkdir(issue344EvidenceDirectory, { recursive: true });
+    const issue279EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue279EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-279');
+    await mkdir(issue279EvidenceDirectory, { recursive: true });
     const issue32EvidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedIssue32EvidenceDirectory
@@ -656,6 +666,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
           PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR: issue32EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_279_EVIDENCE_DIR: issue279EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,

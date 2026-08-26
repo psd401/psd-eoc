@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 
 import {
   RecordDeliveryEvidenceInputSchema,
+  SMS_PROVIDER_MINIMUM_TTL_SECONDS,
+  SmsProviderSendAuthorizationSchema,
   type IntegrationTruthLabel,
+  type SmsProviderSendAuthorization,
 } from '@psd-eoc/contracts';
 
 import {
@@ -121,7 +124,10 @@ export interface AwsEumSendTextMessageRequest {
   readonly ConfigurationSetName: string;
   readonly MaxPrice: string;
   readonly TimeToLive: number;
-  readonly Context: Readonly<{ psdAttemptId: string }>;
+  readonly Context: Readonly<{
+    psdAttemptId: string;
+    psdProviderClaimToken: string;
+  }>;
   readonly DryRun: false;
   readonly ProtectConfigurationId: string;
 }
@@ -217,6 +223,10 @@ export type AwsEumSmsLiveAuthorizer = (
   context: AwsEumSmsLiveAuthorizationContext,
 ) => boolean | Promise<boolean>;
 
+export type AwsEumSmsProviderAuthorizer = (
+  workItem: WorkerAttemptWorkItem,
+) => SmsProviderSendAuthorization | Promise<SmsProviderSendAuthorization>;
+
 export interface AwsEumSmsAdapterOptions {
   readonly client: AwsEumSmsClient;
   readonly ledger: AwsEumSmsSendLedger;
@@ -229,6 +239,10 @@ export interface AwsEumSmsAdapterOptions {
   readonly featureEnabled?: boolean;
   /** Omission denies every live send even when the feature flag is true. */
   readonly authorizeLiveSend?: AwsEumSmsLiveAuthorizer;
+  /** Fresh full-work-item authorization immediately before provider I/O. */
+  readonly authorizeProviderSend?: AwsEumSmsProviderAuthorizer;
+  /** Monotonic-enough wall clock used to age the server-issued provider TTL. */
+  readonly clock?: () => number;
   readonly ledgerLeaseMilliseconds?: number;
 }
 
@@ -716,7 +730,7 @@ function errorCompletion(
   });
 }
 
-/** Live AWS adapter. It remains dark unless both explicit gates allow a send. */
+/** Live AWS adapter. It remains dark unless every explicit gate allows a send. */
 export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'sms' as const;
   public readonly integrationId = AWS_EUM_SMS_INTEGRATION_ID;
@@ -728,6 +742,8 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   readonly #ledger: AwsEumSmsSendLedger;
   readonly #featureEnabled: boolean;
   readonly #authorizeLiveSend: AwsEumSmsLiveAuthorizer | undefined;
+  readonly #authorizeProviderSend: AwsEumSmsProviderAuthorizer | undefined;
+  readonly #clock: () => number;
   readonly #ledgerLeaseMilliseconds: number;
   readonly #requestConfiguration: Readonly<
     Pick<
@@ -753,6 +769,8 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
     this.#ledger = options.ledger;
     this.#featureEnabled = options.featureEnabled === true;
     this.#authorizeLiveSend = options.authorizeLiveSend;
+    this.#authorizeProviderSend = options.authorizeProviderSend;
+    this.#clock = options.clock ?? Date.now;
     this.#ledgerLeaseMilliseconds = parseLease(options.ledgerLeaseMilliseconds);
     this.#requestConfiguration = Object.freeze({
       OriginationIdentity: requiredConfigurationValue(
@@ -879,7 +897,13 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
       );
     }
 
-    if (!this.#featureEnabled || this.#authorizeLiveSend === undefined) {
+    const authorizeLiveSend = this.#authorizeLiveSend;
+    const authorizeProviderSend = this.#authorizeProviderSend;
+    if (
+      !this.#featureEnabled ||
+      authorizeLiveSend === undefined ||
+      authorizeProviderSend === undefined
+    ) {
       throw new ProviderDispatchError(
         'AWS_EUM_FEATURE_DISABLED',
         'terminal-failure',
@@ -888,9 +912,8 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
     let authorized = false;
     try {
       authorized =
-        (await this.#authorizeLiveSend(
-          authorizationContext(request.workItem),
-        )) === true;
+        (await authorizeLiveSend(authorizationContext(request.workItem))) ===
+        true;
     } catch {
       authorized = false;
     }
@@ -952,6 +975,60 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
       }
     };
 
+    // The durable provider ledger claim above is the irreversible-send fence.
+    // Re-read full endpoint and integration truth after that fence, with no
+    // awaited work between this decision and the single provider wire attempt.
+    const authorizationUnavailable = async (
+      code:
+        | 'AWS_EUM_AUTHORIZATION_UNAVAILABLE'
+        | 'AWS_EUM_AUTHORIZATION_EXPIRED',
+    ): Promise<never> => {
+      const failure = new ProviderDispatchError(code, 'safe-to-retry');
+      await complete(errorCompletion(failure));
+      throw failure;
+    };
+    let authorizationStartedAt: number;
+    let providerAuthorization: SmsProviderSendAuthorization;
+    try {
+      authorizationStartedAt = this.#clock();
+      if (!Number.isFinite(authorizationStartedAt)) {
+        throw new TypeError('SMS authorization clock is invalid.');
+      }
+      providerAuthorization = SmsProviderSendAuthorizationSchema.parse(
+        await authorizeProviderSend(request.workItem),
+      );
+    } catch {
+      return authorizationUnavailable('AWS_EUM_AUTHORIZATION_UNAVAILABLE');
+    }
+    if (!providerAuthorization.authorized) {
+      const denial = new ProviderDispatchError(
+        'AWS_EUM_SEND_UNAUTHORIZED',
+        'terminal-failure',
+      );
+      await complete(errorCompletion(denial));
+      throw denial;
+    }
+    let timeToLiveSeconds: number;
+    try {
+      const authorizedAt = this.#clock();
+      if (
+        !Number.isFinite(authorizedAt) ||
+        authorizedAt < authorizationStartedAt
+      ) {
+        throw new TypeError('SMS authorization clock is invalid.');
+      }
+      timeToLiveSeconds = Math.min(
+        this.#requestConfiguration.TimeToLive,
+        providerAuthorization.timeToLiveSeconds -
+          Math.ceil((authorizedAt - authorizationStartedAt) / 1_000),
+      );
+    } catch {
+      return authorizationUnavailable('AWS_EUM_AUTHORIZATION_UNAVAILABLE');
+    }
+    if (timeToLiveSeconds < SMS_PROVIDER_MINIMUM_TTL_SECONDS) {
+      return authorizationUnavailable('AWS_EUM_AUTHORIZATION_EXPIRED');
+    }
+
     const providerRequest: AwsEumSendTextMessageRequest = Object.freeze({
       DestinationPhoneNumber: request.workItem.endpoint.phoneNumber,
       OriginationIdentity: this.#requestConfiguration.OriginationIdentity,
@@ -959,8 +1036,11 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
       MessageType: 'TRANSACTIONAL',
       ConfigurationSetName: this.#requestConfiguration.ConfigurationSetName,
       MaxPrice: this.#requestConfiguration.MaxPrice,
-      TimeToLive: this.#requestConfiguration.TimeToLive,
-      Context: Object.freeze({ psdAttemptId: request.idempotencyKey }),
+      TimeToLive: timeToLiveSeconds,
+      Context: Object.freeze({
+        psdAttemptId: request.idempotencyKey,
+        psdProviderClaimToken: claim.leaseToken,
+      }),
       DryRun: false,
       ProtectConfigurationId: this.#requestConfiguration.ProtectConfigurationId,
     });

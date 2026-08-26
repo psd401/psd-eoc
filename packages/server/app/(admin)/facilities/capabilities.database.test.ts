@@ -48,6 +48,7 @@ import { executeAuditedCapabilityTransaction } from '../../../lib/capabilities/e
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
+  SMS_INTEGRATION_ID,
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
   liveChannelChangeAuthorizationCommitment,
@@ -3451,6 +3452,77 @@ describeWithDatabase('facilities administrator database flow', () => {
       category: 'access-denial',
       outcome: 'denied',
       reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+    });
+  });
+
+  test('enables SMS with separate carrier readiness evidence and exact live authorization', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    await persistLiveAuthorizationActor(database, authenticated, 'sms-live');
+    if (authenticated.actor.kind !== 'human') {
+      throw new Error('The SMS live authorization actor must be human.');
+    }
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const [previousConfiguration] = await database
+      .select({
+        enabled: channelConfigurations.enabled,
+        statusId: channelConfigurations.statusId,
+      })
+      .from(channelConfigurations)
+      .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
+      .limit(1);
+    const statusId = randomUUID();
+    const issuedAt = new Date(Date.now() - 1_000);
+    const authorization = liveAuthorizationFor({
+      authenticated,
+      integrationId: SMS_INTEGRATION_ID,
+      integrationStatusId: statusId,
+      // The immutable-status trigger advances the existing channel row to this
+      // status before the enable capability locks it.
+      previousConfiguration: {
+        enabled: previousConfiguration?.enabled ?? false,
+        statusId,
+      },
+      issuedAt,
+    });
+    const authorizationCommitment =
+      liveChannelChangeAuthorizationCommitment(authorization);
+    const registrationVerificationReference =
+      'carrier-registration-case-279-database';
+    expect(authorizationCommitment).not.toBe(registrationVerificationReference);
+    await database.insert(integrationStatuses).values({
+      id: statusId,
+      integrationId: SMS_INTEGRATION_ID,
+      label: 'live-verified',
+      verifiedAt: issuedAt,
+      verifiedByUserId: authenticated.actor.userId,
+      authorizationReference: authorizationCommitment,
+      reasonCode: null,
+      observedAt: issuedAt,
+    });
+
+    const result = await executeSetChannelEnabledCapability({
+      authenticated,
+      store,
+      command: {
+        integrationId: SMS_INTEGRATION_ID,
+        enabled: true,
+        authorization,
+      },
+      metadata: metadata('sms-live-enable', []),
+      smsWorkerReadiness: {
+        ready: true,
+        registrationVerificationReference,
+      },
+    });
+
+    expect(result).toMatchObject({
+      integrationId: SMS_INTEGRATION_ID,
+      enabled: true,
+      status: {
+        authorizationReference: authorizationCommitment,
+        label: 'live-verified',
+      },
     });
   });
 

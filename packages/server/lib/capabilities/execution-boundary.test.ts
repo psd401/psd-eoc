@@ -25,6 +25,7 @@ const LOWER_TIER_PRODUCTION_ALLOWLIST = Object.freeze([
   'packages/server/lib/notify/dispatcher.ts',
   'packages/server/lib/notify/reconcile.ts',
   'packages/server/lib/notify/sms-policy.ts',
+  'packages/server/lib/notify/sms-runtime-store.ts',
   'packages/server/scripts/operations/sync-access-membership.ts',
 ] as const);
 

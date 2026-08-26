@@ -6,7 +6,7 @@
  *
  * `configureInfrastructureMonitoring` is what the live stack calls. It deploys
  * the alarms whose metrics AWS publishes on its own — App Runner, Aurora, and
- * every notification queue and dead-letter queue. When the protected Expo
+ * every notification queue and dead-letter queue. When a protected channel
  * worker is enabled, it also deploys conditional log-derived worker metrics
  * and alarms alongside their real publisher.
  *
@@ -69,6 +69,7 @@ export interface MonitoringProps {
   readonly database: rds.DatabaseCluster;
   readonly displayTimeZone: string;
   readonly delivery: QueueWithDeadLetterQueue;
+  readonly smsReceipt: QueueWithDeadLetterQueue;
   readonly channelQueues: Readonly<
     Record<(typeof NOTIFICATION_CHANNELS)[number], QueueWithDeadLetterQueue>
   >;
@@ -77,9 +78,127 @@ export interface MonitoringProps {
   readonly monitoringRunbookBaseUrl: string;
   readonly pushWorkerCondition?: CfnCondition;
   readonly pushWorkerLogGroup?: logs.ILogGroup;
+  readonly smsWorkerCondition?: CfnCondition;
+  readonly smsWorkerLogGroup?: logs.ILogGroup;
   readonly sesIdentityDomain: string;
   /** The condition guarding App Runner, applied to anything that reads it. */
   readonly applicationCondition?: CfnCondition;
+}
+
+function configureSmsWorkerMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  if (
+    props.smsWorkerLogGroup === undefined ||
+    props.smsWorkerCondition === undefined
+  ) {
+    return;
+  }
+  const definitions = [
+    {
+      id: 'SmsWorkerHeartbeatMetric',
+      pattern: '{ $.event = "sms-worker-heartbeat" }',
+      metricName: 'SmsWorkerHeartbeat',
+      metricValue: '1',
+      unit: cloudwatch.Unit.COUNT,
+    },
+    {
+      id: 'SmsProviderLatencyMetric',
+      pattern: '{ $.event = "sms-worker-message-completed" }',
+      metricName: 'SmsOutboxToProviderLatency',
+      metricValue: '$.durationMilliseconds',
+      unit: cloudwatch.Unit.MILLISECONDS,
+    },
+    {
+      id: 'SmsWorkerFailureMetric',
+      pattern: '{ $.event = "sms-worker-message-failed" }',
+      metricName: 'SmsWorkerFailureCount',
+      metricValue: '$.count',
+      unit: cloudwatch.Unit.COUNT,
+    },
+  ] as const;
+  for (const definition of definitions) {
+    const filter = new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: props.smsWorkerLogGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: definition.metricValue,
+      unit: definition.unit,
+    });
+    (filter.node.defaultChild as logs.CfnMetricFilter).cfnOptions.condition =
+      props.smsWorkerCondition;
+  }
+
+  const alarmDefinitions = [
+    {
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      id: 'SmsWorkerHealthAlarm',
+      metric: new cloudwatch.Metric({
+        metricName: 'SmsWorkerHeartbeat',
+        namespace: MONITORING_METRIC_NAMESPACE,
+        period: Duration.minutes(20),
+        statistic: 'Sum',
+        unit: cloudwatch.Unit.COUNT,
+      }),
+      name: 'psd-eoc-sms-worker-health',
+      summary: 'The enabled SMS worker stopped emitting sanitized heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      id: 'SmsProviderLatencyAlarm',
+      metric: customMetric('SmsOutboxToProviderLatency', {
+        statistic: 'p95',
+        unit: cloudwatch.Unit.MILLISECONDS,
+      }),
+      name: 'psd-eoc-sms-outbox-to-provider-p95',
+      summary: 'SMS outbox-to-provider p95 exceeded the 15-second SLO.',
+      threshold: 15_000,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      id: 'SmsWorkerFailureAlarm',
+      metric: customMetric('SmsWorkerFailureCount', { statistic: 'Sum' }),
+      name: 'psd-eoc-sms-worker-message-failures',
+      summary:
+        'The SMS worker reported a bounded work, receipt, or opt-out processing failure.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ] as const;
+  for (const definition of alarmDefinitions) {
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        'runbook-outbox-to-provider-latency',
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator: definition.comparisonOperator,
+      datapointsToAlarm: definition.datapointsToAlarm,
+      evaluationPeriods: definition.evaluationPeriods,
+      metric: definition.metric,
+      threshold: definition.threshold,
+      treatMissingData: definition.treatMissingData,
+    });
+    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      props.smsWorkerCondition;
+  }
 }
 
 function configurePushWorkerMonitoring(
@@ -903,6 +1022,7 @@ function configureDashboard(
   });
   const queues = [
     ['delivery', props.delivery],
+    ['sms-receipt', props.smsReceipt],
     ...NOTIFICATION_CHANNELS.map(
       (channel) => [channel, props.channelQueues[channel]] as const,
     ),
@@ -1314,6 +1434,7 @@ function configureAlarms(
 
   const queues = [
     ['Delivery', 'delivery', props.delivery],
+    ['SmsReceipt', 'sms-receipt', props.smsReceipt],
     ...NOTIFICATION_CHANNELS.map(
       (channel) =>
         [
@@ -1560,8 +1681,8 @@ function publishDashboardOutputs(
  *   latency, and the monthly delivery test;
  * - Aurora replica lag, because the cluster runs a single writer with no
  *   reader, so `AuroraReplicaLagMaximum` never reports;
- * - email/SMS outbox-to-provider latency, because those channel workers are
- *   not deployed. Expo metrics are added conditionally with its worker.
+ * - email outbox-to-provider latency, because that channel worker is not
+ *   deployed. Expo and SMS metrics are added conditionally with their workers.
  *
  * Several of those treat missing data as breaching. Deploying them against a
  * metric nobody publishes would page the operations team every minute forever,
@@ -1594,6 +1715,7 @@ export function configureInfrastructureMonitoring(
   );
   configureAlarms(scope, props, metrics, false);
   configurePushWorkerMonitoring(scope, props);
+  configureSmsWorkerMonitoring(scope, props);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);
 }

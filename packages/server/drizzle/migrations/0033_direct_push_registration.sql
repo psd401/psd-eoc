@@ -140,18 +140,31 @@ ALTER TABLE "notification_intent_channels" ADD CONSTRAINT "notification_intent_c
       ));--> statement-breakpoint
 ALTER TABLE "outbox" ADD CONSTRAINT "outbox_channel_plan_shape" CHECK (case
         when jsonb_typeof("outbox"."channels") = 'array' then
-          jsonb_array_length("outbox"."channels") between 2 and 3
-          and jsonb_array_length(jsonb_path_query_array(
-            "outbox"."channels", '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
-          )) = 1
-          and jsonb_array_length(jsonb_path_query_array(
-            "outbox"."channels", '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
-          )) = 1
-          and jsonb_array_length(jsonb_path_query_array(
-            "outbox"."channels", '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-          )) <= 1
-          and jsonb_array_length(jsonb_path_query_array(
+          (
+            (
+              jsonb_array_length("outbox"."channels") between 2 and 3
+              and jsonb_array_length(jsonb_path_query_array(
+                "outbox"."channels", '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
+              )) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                "outbox"."channels", '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
+              )) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                "outbox"."channels", '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+              )) <= 1
+            ) or (
+              "outbox"."event_kind" = 'drill'
+              and "outbox"."template_mode" = 'drill'
+              and "outbox"."purpose" = 'activation'
+              and "outbox"."roster_population" = 'staff'
+              and jsonb_typeof("outbox"."message" -> 'deliveryTest') is not distinct from 'object'
+              and jsonb_array_length("outbox"."channels") = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                "outbox"."channels", '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+              )) = 1
+            )
+          ) and jsonb_array_length(jsonb_path_query_array(
             "outbox"."channels", '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
           )) = jsonb_array_length("outbox"."channels")
         else false
-      end);
+      end) NOT VALID;
