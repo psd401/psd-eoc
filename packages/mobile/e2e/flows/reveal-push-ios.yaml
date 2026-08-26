@@ -1,4 +1,4 @@
-appId: ${APP_ID}
+appId: ${SYSTEM_APP_ID}
 name: Issue 32 - reveal the synthetic drill notification on iOS
 tags: [issue-32, synthetic-only, ios]
 ---

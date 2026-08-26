@@ -385,6 +385,10 @@ export const devicePushTokenRegistrations = pgTable(
     deviceEnrollmentId: uuid('device_enrollment_id').notNull(),
     platform: devicePlatformEnum('platform').notNull(),
     provider: varchar('provider', { length: 32 }).default('expo').notNull(),
+    serviceEnvironment: varchar('service_environment', { length: 32 })
+      .default('production')
+      .notNull(),
+    supersedesRegistrationId: uuid('supersedes_registration_id'),
     applicationId: varchar('application_id', { length: 255 }),
     applicationVersion: varchar('application_version', {
       length: 64,
@@ -402,10 +406,18 @@ export const devicePushTokenRegistrations = pgTable(
       table.id,
       table.deviceEnrollmentId,
     ),
+    unique('device_push_token_registrations_supersedes_uq').on(
+      table.supersedesRegistrationId,
+    ),
     foreignKey({
       columns: [table.deviceEnrollmentId, table.platform],
       foreignColumns: [deviceEnrollments.id, deviceEnrollments.platform],
       name: 'device_push_token_registrations_device_platform_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.supersedesRegistrationId, table.deviceEnrollmentId],
+      foreignColumns: [table.id, table.deviceEnrollmentId],
+      name: 'device_push_token_registrations_supersedes_device_fk',
     }).onDelete('restrict'),
     index('device_push_token_registrations_device_idx').on(
       table.deviceEnrollmentId,
@@ -416,8 +428,23 @@ export const devicePushTokenRegistrations = pgTable(
       sql`${table.platform} in ('ios', 'android')`,
     ),
     check(
-      'device_push_token_registrations_expo_only',
-      sql`${table.provider} = 'expo'`,
+      'device_push_token_registrations_provider',
+      sql`${table.provider} in ('expo', 'apns', 'fcm')`,
+    ),
+    check(
+      'device_push_token_registrations_service_environment',
+      sql`${table.serviceEnvironment} in ('development', 'production')`,
+    ),
+    check(
+      'device_push_token_registrations_provider_platform',
+      sql`${table.provider} = 'expo'
+        or (${table.provider} = 'apns' and ${table.platform} = 'ios')
+        or (${table.provider} = 'fcm' and ${table.platform} = 'android')`,
+    ),
+    check(
+      'device_push_token_registrations_not_self_superseding',
+      sql`${table.supersedesRegistrationId} is null
+        or ${table.supersedesRegistrationId} <> ${table.id}`,
     ),
     check(
       'device_push_token_registrations_application_id_format',

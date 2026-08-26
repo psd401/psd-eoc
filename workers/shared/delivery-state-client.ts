@@ -124,6 +124,7 @@ function sameEvidenceInput(
     result.state === input.state &&
     result.provider === input.provider &&
     result.providerReference === input.providerReference &&
+    result.providerOccurredAt === input.providerOccurredAt &&
     JSON.stringify(result.proof) === JSON.stringify(input.proof) &&
     result.reasonCode === input.reasonCode &&
     result.diagnosticDigest === input.diagnosticDigest;

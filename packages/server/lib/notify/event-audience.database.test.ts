@@ -57,6 +57,11 @@ const DISABLED_DEVICE = randomUUID();
 
 const LIVE_REGISTRATION = randomUUID();
 const RETIRED_REGISTRATION = randomUUID();
+const EXPO_CUTOVER = Object.freeze({
+  version: 1 as const,
+  ios: 'expo' as const,
+  android: 'expo' as const,
+});
 
 let connection: PostgresDatabaseConnection | undefined;
 let disposable: DisposableDatabase | undefined;
@@ -221,11 +226,15 @@ describeWithDatabase('event audience resolved from the domain', () => {
   });
 
   test('addresses every member by email, including those who never signed in', async () => {
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
 
     // The property that makes this read the group and not `users`: a member
     // with no account still gets an address.
@@ -243,11 +252,15 @@ describeWithDatabase('event audience resolved from the domain', () => {
   });
 
   test('a member who never signed in has an address and no device', async () => {
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
     const recipient = audience.recipients.find(
       ({ email }) => email === NEVER_SIGNED_IN,
     );
@@ -259,11 +272,15 @@ describeWithDatabase('event audience resolved from the domain', () => {
   });
 
   test('adds a push endpoint only for a live registration on a live device', async () => {
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
     const recipient = audience.recipients.find(
       ({ email }) => email === ENROLLED,
     );
@@ -275,16 +292,22 @@ describeWithDatabase('event audience resolved from the domain', () => {
     expect(push).toHaveLength(1);
     expect(push?.[0]?.id).toBe(LIVE_REGISTRATION);
     expect(push?.[0]?.platform).toBe('ios');
+    expect(push?.[0]?.provider).toBe('expo');
+    expect(push?.[0]?.serviceEnvironment).toBe('production');
     expect(recipient?.displayName).toBe('Enrolled Person');
   });
 
   test('a revoked device receives nothing', async () => {
     // Revocation is how a lost phone stops being a notification target.
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
     const recipient = audience.recipients.find(
       ({ email }) => email === REVOKED_DEVICE,
     );
@@ -297,11 +320,15 @@ describeWithDatabase('event audience resolved from the domain', () => {
   test('a disabled account keeps its address but loses its devices', async () => {
     // Disabling somebody revokes their access to the system, not their
     // employment at the school an incident is happening in.
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
     const recipient = audience.recipients.find(
       ({ email }) => email === DISABLED_ACCOUNT,
     );
@@ -313,11 +340,15 @@ describeWithDatabase('event audience resolved from the domain', () => {
   });
 
   test('never emits a push token belonging to somebody else', async () => {
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
 
     for (const recipient of audience.recipients) {
       for (const endpoint of recipient.endpoints) {
@@ -331,11 +362,15 @@ describeWithDatabase('event audience resolved from the domain', () => {
   });
 
   test('recipient identity is derived, stable, and case-insensitive', async () => {
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
     const recipient = audience.recipients.find(
       ({ email }) => email === ENROLLED,
     );
@@ -366,12 +401,40 @@ describeWithDatabase('event audience resolved from the domain', () => {
     expect(audience.facilityIds).toEqual([EMPTY_SCHOOL]);
   });
 
+  test('fails closed when active push endpoints have no provider selection', async () => {
+    await expect(
+      resolveEventAudience(database(), {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      }),
+    ).rejects.toThrow('Push provider selection is unavailable.');
+  });
+
+  test('fails closed when the selected provider is missing for an active device', async () => {
+    await expect(
+      resolveEventAudience(
+        database(),
+        {
+          facilityId: SCHOOL,
+          reach: 'building',
+          population: 'staff',
+        },
+        { version: 1, ios: 'direct', android: 'expo' },
+      ),
+    ).rejects.toThrow('Push endpoint selection is incomplete or ambiguous.');
+  });
+
   test('carries the staleness the preview has to show', async () => {
-    const audience = await resolveEventAudience(database(), {
-      facilityId: SCHOOL,
-      reach: 'building',
-      population: 'staff',
-    });
+    const audience = await resolveEventAudience(
+      database(),
+      {
+        facilityId: SCHOOL,
+        reach: 'building',
+        population: 'staff',
+      },
+      EXPO_CUTOVER,
+    );
 
     expect(audience.oldestCapturedAt?.toISOString()).toBe(
       '2026-08-22T12:00:00.000Z',

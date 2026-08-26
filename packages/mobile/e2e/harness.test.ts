@@ -64,13 +64,14 @@ describe('issue-32 mobile E2E harness', () => {
       'open-push-android.yaml',
       'open-push-ios.yaml',
       'prepare-ios.yaml',
+      'push-opened-event-room.yaml',
       'reveal-push-ios.yaml',
       'start-drill.yaml',
     ]);
     for (const flowName of flowNames) {
       const flow = await Bun.file(resolve(flowRoot, flowName)).text();
       expect(flow).toStartWith(
-        flowName === 'open-push-ios.yaml'
+        flowName === 'open-push-ios.yaml' || flowName === 'reveal-push-ios.yaml'
           ? 'appId: ${SYSTEM_APP_ID}\n'
           : 'appId: ${APP_ID}\n',
       );
@@ -96,6 +97,10 @@ describe('issue-32 mobile E2E harness', () => {
     expect(start).toContain(
       "- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'",
     );
+    expect(start).toContain(
+      "element:\n      text: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'\n    direction: DOWN",
+    );
+    expect(start).not.toContain("element:\n      id: 'issue-21-confirm-drill'");
     expect(start).toContain('- runFlow: activation-result.yaml');
     expect(start).not.toContain("visible: 'Allow'");
     const activationResult = await Bun.file(
@@ -118,9 +123,20 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosNotification).toContain("visible: 'Open'");
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
+    expect(iosNotification).not.toContain(
+      'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+    );
+    const openedEventRoom = await Bun.file(
+      resolve(flowRoot, 'push-opened-event-room.yaml'),
+    ).text();
+    expect(openedEventRoom).toContain(
+      "visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'",
+    );
+    expect(openedEventRoom).toContain("assertNotVisible: '^REAL INCIDENT$'");
     const iosReveal = await Bun.file(
       resolve(flowRoot, 'reveal-push-ios.yaml'),
     ).text();
+    expect(iosReveal).toStartWith('appId: ${SYSTEM_APP_ID}\n');
     expect(iosReveal).toContain('start: 25%, 1%');
     expect(iosReveal).toContain('start: 50%, 1%');
     expect(iosReveal).toContain('start: 35%, 1%');
@@ -168,8 +184,18 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain("const metroUrl = 'http://127.0.0.1:8081'");
     expect(runner).toContain("'simctl', 'launch', deviceId, appId");
     expect(runner).toContain('await openIosDevelopmentClient');
+    expect(runner).toContain(
+      "await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);\n    await Bun.sleep(5_000);\n    await maestro('reveal-push-ios.yaml');\n    await maestro('open-push-ios.yaml');",
+    );
+    expect(runner).not.toContain(
+      "await maestro('open-push-ios.yaml');\n    await openIosDevelopmentClient",
+    );
+    expect(runner).toContain("await maestro('push-opened-event-room.yaml')");
     expect(runner).toContain('iOS mobile E2E cannot skip the native build');
     expect(runner).not.toContain('http://10.0.2.2:8081');
+    expect(runner.indexOf('const childEnvironment')).toBeLessThan(
+      runner.indexOf('requireSyntheticMobileE2E(childEnvironment)'),
+    );
 
     const workflow = await Bun.file(
       resolve(mobileRoot, '../../.github/workflows/mobile-e2e.yml'),
@@ -180,6 +206,13 @@ describe('issue-32 mobile E2E harness', () => {
     expect(workflow).toContain('-PreactNativeArchitectures=x86_64');
     expect(workflow).toContain('--no-daemon');
     expect(workflow).not.toContain('--build-cache');
+    expect(workflow).toContain(
+      'cp android/app/build/outputs/apk/debug/app-debug.apk',
+    );
+    expect(workflow).toContain('rm -rf -- android');
+    expect(workflow).toContain(
+      'android_apk="$RUNNER_TEMP/psd-eoc-mobile-e2e.apk"',
+    );
     expect(workflow).toContain('adb install -r "$android_apk"');
     expect(workflow).toContain("PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD: 'true'");
     expect(workflow.indexOf('app:assembleDebug')).toBeLessThan(

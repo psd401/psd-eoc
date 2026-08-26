@@ -88,14 +88,22 @@ function parseTimeout(value: number | undefined): number {
   return timeout;
 }
 
-function parseDeviceNotRegisteredInput(
+const PUSH_INVALIDATION_REASON_CODES: ReadonlySet<string> = new Set([
+  'EXPO_DEVICE_NOT_REGISTERED',
+  'APNS_BAD_DEVICE_TOKEN',
+  'APNS_UNREGISTERED',
+  'FCM_INVALID_ARGUMENT',
+  'FCM_UNREGISTERED',
+]);
+
+function parsePushInvalidationInput(
   value: RecordEndpointStatusInput,
 ): RecordEndpointStatusInput {
   const result = RecordEndpointStatusInputSchema.safeParse(value);
   if (
     !result.success ||
     result.data.status !== 'invalid' ||
-    result.data.reasonCode !== 'EXPO_DEVICE_NOT_REGISTERED'
+    !PUSH_INVALIDATION_REASON_CODES.has(result.data.reasonCode)
   ) {
     throw new PushEndpointInvalidationError('INVALID_INPUT', false);
   }
@@ -183,7 +191,7 @@ export class PushEndpointInvalidationClient implements PushEndpointInvalidator {
   public async invalidate(
     inputValue: RecordEndpointStatusInput,
   ): Promise<void> {
-    const input = parseDeviceNotRegisteredInput(inputValue);
+    const input = parsePushInvalidationInput(inputValue);
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),

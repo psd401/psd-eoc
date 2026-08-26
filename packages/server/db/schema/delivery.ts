@@ -312,7 +312,8 @@ export const notificationIntentChannels = pgTable(
     check(
       'notification_intent_channels_integration_channel',
       sql`(
-        ${table.channel} = 'push' and ${table.integrationId} = 'expo-push'
+        ${table.channel} = 'push'
+        and ${table.integrationId} in ('expo-push', 'mobile-push')
       ) or (
         ${table.channel} = 'email' and ${table.integrationId} = 'ses-email'
       ) or (
@@ -480,7 +481,7 @@ export const outbox = pgTable(
             (
               jsonb_array_length(${table.channels}) between 2 and 3
               and jsonb_array_length(jsonb_path_query_array(
-                ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
+                ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
               )) = 1
               and jsonb_array_length(jsonb_path_query_array(
                 ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
@@ -497,7 +498,7 @@ export const outbox = pgTable(
               and jsonb_array_length(${table.channels}) = 1
               and (
                 jsonb_array_length(jsonb_path_query_array(
-                  ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
+                  ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
                 ))
                 + jsonb_array_length(jsonb_path_query_array(
                   ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
@@ -507,7 +508,7 @@ export const outbox = pgTable(
                 ))
               ) = 1
             )
-          ) and jsonb_array_length(jsonb_path_query_array(
+           ) and jsonb_array_length(jsonb_path_query_array(
             ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
           )) = jsonb_array_length(${table.channels})
         else false
@@ -766,7 +767,8 @@ export const dispatchBatches = pgTable(
     check(
       'dispatch_batches_integration_channel',
       sql`(
-        ${table.channel} = 'push' and ${table.integrationId} = 'expo-push'
+        ${table.channel} = 'push'
+        and ${table.integrationId} in ('expo-push', 'mobile-push')
       ) or (
         ${table.channel} = 'email' and ${table.integrationId} = 'ses-email'
       ) or (
@@ -1225,6 +1227,7 @@ export const deliveryEvidence = pgTable(
     recordedAt: occurredAt('recorded_at').defaultNow().notNull(),
     provider: varchar('provider', { length: 100 }),
     providerReference: varchar('provider_reference', { length: 500 }),
+    providerOccurredAt: occurredAt('provider_occurred_at'),
     proof: jsonb('proof'),
     reasonCode: auditCode('reason_code'),
     diagnosticDigest: digest('diagnostic_digest'),
@@ -1251,6 +1254,23 @@ export const deliveryEvidence = pgTable(
       table.attemptId,
     ),
     check('delivery_evidence_sequence_positive', sql`${table.sequence} > 0`),
+    check(
+      'delivery_evidence_provider_time',
+      sql`${table.providerOccurredAt} is null
+        or ${table.providerOccurredAt} <= ${table.recordedAt} + interval '5 minutes'`,
+    ),
+    check(
+      'delivery_evidence_apns_unregistered_time',
+      sql`(
+        ${table.reasonCode} is distinct from 'APNS_UNREGISTERED'
+        and ${table.providerOccurredAt} is null
+      ) or (
+        ${table.state} = 'failed'
+        and ${table.provider} = 'apns-direct'
+        and ${table.reasonCode} = 'APNS_UNREGISTERED'
+        and ${table.providerOccurredAt} is not null
+      )`,
+    ),
     check(
       'delivery_evidence_subject',
       sql`(

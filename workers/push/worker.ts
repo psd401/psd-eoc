@@ -81,6 +81,7 @@ export interface ExpoPushWorkerOptions {
  */
 export type ProductionExpoPushWorkerOptions = Readonly<
   Omit<ExpoPushWorkerOptions, 'adapter' | 'endpointEligibility'> & {
+    readonly integrationId?: 'expo-push' | 'mobile-push';
     readonly expoAccessToken: string;
     readonly authorizeLiveTransport: ExpoLiveTransportAuthorizer;
     readonly sendLedger: DurableExpoSendLedger;
@@ -710,7 +711,8 @@ export class ExpoPushWorker {
   public constructor(options: ExpoPushWorkerOptions) {
     if (
       options.adapter.channel !== 'push' ||
-      options.adapter.integrationId !== 'expo-push'
+      (options.adapter.integrationId !== 'expo-push' &&
+        options.adapter.integrationId !== 'mobile-push')
     ) {
       throw new TypeError('Expo worker adapter is invalid.');
     }
@@ -868,6 +870,9 @@ export function createProductionExpoPushWorker(
     transport,
     sendLedger: options.sendLedger,
     endpointEligibility,
+    ...(options.integrationId === undefined
+      ? {}
+      : { integrationId: options.integrationId }),
     ...(options.batchWindowMilliseconds === undefined
       ? {}
       : { batchWindowMilliseconds: options.batchWindowMilliseconds }),

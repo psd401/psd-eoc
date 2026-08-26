@@ -60,7 +60,7 @@ tags: [issue-32, synthetic-only]
 - assertVisible: '.*Integration: Mocked — training data only.*'
 - scrollUntilVisible:
     element:
-      id: 'issue-21-confirm-drill'
+      text: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
     direction: DOWN
 - assertVisible: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
 - tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
