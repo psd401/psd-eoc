@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
   ReceiveMessageCommand,
 } from '@aws-sdk/client-sqs';
@@ -294,6 +295,67 @@ describe('SMS long-poll service', () => {
     expect(
       commands.some((command) => command instanceof DeleteMessageCommand),
     ).toBe(false);
+  });
+
+  test('acknowledges a terminal DLQ attempt without visibility deferral', async () => {
+    const commands: unknown[] = [];
+    const logs: unknown[] = [];
+    let loopChecks = 0;
+    await runSmsService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => NOW,
+      shouldContinue: () => loopChecks++ === 0,
+      log: (value) => logs.push(value),
+      runtime: {
+        processDeliveryEvent: () => Promise.reject(new Error('unused')),
+        processQueueAttempt: () =>
+          Promise.resolve({
+            attemptResult: { kind: 'dlq' },
+            optOutRecord: null,
+          } as never),
+        reconcileOptOuts: () => Promise.reject(new Error('unused')),
+      },
+      state: {
+        resolveRetry: () =>
+          Promise.resolve({ kind: 'ready', workItem: {} } as never),
+      } as unknown as SmsRuntimeClient,
+      sqs: {
+        send(command) {
+          commands.push(command);
+          return command instanceof ReceiveMessageCommand
+            ? Promise.resolve({
+                Messages: [
+                  {
+                    Body: JSON.stringify({
+                      kind: 'sms-attempt-reference',
+                      attemptId: '00000000-0000-4000-8000-000000000279',
+                    }),
+                    ReceiptHandle: 'synthetic-dlq-receipt-handle',
+                    Attributes: {
+                      SentTimestamp: String(NOW - 1_000),
+                      ApproximateReceiveCount: '1',
+                    },
+                  },
+                ],
+              })
+            : Promise.resolve({});
+        },
+      },
+    });
+
+    expect(
+      commands.some((command) => command instanceof DeleteMessageCommand),
+    ).toBe(true);
+    expect(
+      commands.some(
+        (command) => command instanceof ChangeMessageVisibilityCommand,
+      ),
+    ).toBe(false);
+    expect(logs).toContainEqual({
+      event: 'sms-worker-message-completed',
+      count: 1,
+      durationMilliseconds: 1_000,
+    });
   });
 
   test('retains failed work for SQS redrive without logging provider detail', async () => {

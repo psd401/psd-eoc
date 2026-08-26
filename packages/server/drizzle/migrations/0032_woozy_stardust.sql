@@ -551,6 +551,10 @@ END;
 $$;--> statement-breakpoint
 ALTER TABLE "outbox" DROP CONSTRAINT "outbox_channel_plan_shape";
 --> statement-breakpoint
+-- Replacing this check must not scan the retained outbox while ALTER TABLE
+-- holds ACCESS EXCLUSIVE. NOT VALID skips the historical-row scan but still
+-- rejects every nonconforming INSERT or UPDATE after this statement. Validate
+-- the retained rows after deploy with the documented operational step.
 ALTER TABLE "outbox" ADD CONSTRAINT "outbox_channel_plan_shape" CHECK (case
 	when jsonb_typeof("outbox"."channels") = 'array' then
 		(
@@ -580,10 +584,12 @@ ALTER TABLE "outbox" ADD CONSTRAINT "outbox_channel_plan_shape" CHECK (case
 			"outbox"."channels", '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
 		)) = jsonb_array_length("outbox"."channels")
 	else false
-end);
+end) NOT VALID;
 --> statement-breakpoint
 ALTER TABLE "delivery_test_reports" DROP CONSTRAINT "delivery_test_reports_channels_shape";
 --> statement-breakpoint
+-- As above, keep the replacement lock brief and validate retained history in
+-- the explicit post-migration operation. New report rows are checked now.
 ALTER TABLE "delivery_test_reports" ADD CONSTRAINT "delivery_test_reports_channels_shape" CHECK (
 	jsonb_typeof("delivery_test_reports"."channels") is not distinct from 'array'
 	and (
@@ -595,4 +601,4 @@ ALTER TABLE "delivery_test_reports" ADD CONSTRAINT "delivery_test_reports_channe
 			)) = 1
 		)
 	)
-);
+) NOT VALID;

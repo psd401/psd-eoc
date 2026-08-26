@@ -650,28 +650,6 @@ export function createDrizzleSmsRuntimeStore(
         throw new SmsRuntimeStoreError('RETRY_SOURCE_CONFLICT');
       }
       return database.transaction(async (transaction) => {
-        const [existing] = await transaction
-          .select()
-          .from(smsRetrySchedules)
-          .where(eq(smsRetrySchedules.sourceAttemptId, input.sourceAttempt.id))
-          .limit(1)
-          .for('update');
-        if (existing !== undefined) {
-          if (!retryRequestMatches(existing, input)) {
-            throw new SmsRuntimeStoreError('RETRY_CONFLICT');
-          }
-          if (now() >= existing.expiresAt.getTime()) {
-            return Object.freeze({ kind: 'expired' as const });
-          }
-          return Object.freeze({
-            kind: 'scheduled' as const,
-            attemptId: existing.nextAttemptId,
-            retryAt: iso(existing.retryAt),
-          });
-        }
-        if (now() >= expiresAtMilliseconds) {
-          return Object.freeze({ kind: 'expired' as const });
-        }
         const [inserted] = await transaction
           .insert(smsRetrySchedules)
           .values({
@@ -683,14 +661,28 @@ export function createDrizzleSmsRuntimeStore(
             expiresAt: new Date(expiresAtMilliseconds),
             reasonCode: input.reasonCode,
           })
+          .onConflictDoNothing({ target: smsRetrySchedules.sourceAttemptId })
           .returning();
-        if (inserted === undefined) {
+        const [persisted] =
+          inserted === undefined
+            ? await transaction
+                .select()
+                .from(smsRetrySchedules)
+                .where(
+                  eq(smsRetrySchedules.sourceAttemptId, input.sourceAttempt.id),
+                )
+                .limit(1)
+            : [inserted];
+        if (persisted === undefined || !retryRequestMatches(persisted, input)) {
           throw new SmsRuntimeStoreError('RETRY_CONFLICT');
+        }
+        if (now() >= persisted.expiresAt.getTime()) {
+          return Object.freeze({ kind: 'expired' as const });
         }
         return Object.freeze({
           kind: 'scheduled' as const,
-          attemptId: inserted.nextAttemptId,
-          retryAt: iso(inserted.retryAt),
+          attemptId: persisted.nextAttemptId,
+          retryAt: iso(persisted.retryAt),
         });
       });
     },

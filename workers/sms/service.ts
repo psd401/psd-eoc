@@ -515,10 +515,7 @@ async function processWorkItem(
     );
     return 'complete';
   }
-  return result.attemptResult.kind === 'in-progress' ||
-    result.attemptResult.kind === 'dlq'
-    ? 'defer'
-    : 'complete';
+  return result.attemptResult.kind === 'in-progress' ? 'defer' : 'complete';
 }
 
 async function processBody(

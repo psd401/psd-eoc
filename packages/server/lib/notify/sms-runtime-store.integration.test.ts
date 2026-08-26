@@ -906,6 +906,95 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     });
   });
 
+  test('serializes concurrent retry scheduling and preserves request conflicts', async () => {
+    currentTime = Date.parse(CREATED_AT) + 1_000;
+    const baseWorkItem = await resolvedSmallWorkItem();
+    const sameWorkItem: SmsWorkerAttemptWorkItem = Object.freeze({
+      ...baseWorkItem,
+      attempt: Object.freeze({
+        ...baseWorkItem.attempt,
+        id: randomUUID(),
+        attemptNumber: 2,
+      }),
+    });
+    await persistAttempt(databaseConnection().db, sameWorkItem);
+    const sameRequest = {
+      operation: 'schedule-retry' as const,
+      sourceAttempt: sameWorkItem.attempt,
+      sourceFingerprint: '4'.repeat(64),
+      nextAttemptNumber: 3,
+      delayMilliseconds: 60_000,
+      reasonCode: 'SMS_CONCURRENT_RETRY',
+    };
+
+    const identicalResults = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        runtimeStore().scheduleRetry(sameRequest),
+      ),
+    );
+    expect(identicalResults).toHaveLength(8);
+    expect(
+      identicalResults.every((result) => result.kind === 'scheduled'),
+    ).toBe(true);
+    expect(
+      new Set(identicalResults.map((result) => JSON.stringify(result))).size,
+    ).toBe(1);
+
+    const conflictingWorkItem: SmsWorkerAttemptWorkItem = Object.freeze({
+      ...baseWorkItem,
+      attempt: Object.freeze({
+        ...baseWorkItem.attempt,
+        id: randomUUID(),
+        attemptNumber: 3,
+      }),
+    });
+    await persistAttempt(databaseConnection().db, conflictingWorkItem);
+    const firstRequest = {
+      operation: 'schedule-retry' as const,
+      sourceAttempt: conflictingWorkItem.attempt,
+      sourceFingerprint: '5'.repeat(64),
+      nextAttemptNumber: 4,
+      delayMilliseconds: 60_000,
+      reasonCode: 'SMS_CONCURRENT_CONFLICT',
+    };
+    const secondRequest = {
+      ...firstRequest,
+      sourceFingerprint: '6'.repeat(64),
+    };
+    const conflictingResults = await Promise.allSettled([
+      runtimeStore().scheduleRetry(firstRequest),
+      runtimeStore().scheduleRetry(secondRequest),
+    ]);
+    const winners = conflictingResults.filter(
+      (result) => result.status === 'fulfilled',
+    );
+    const conflicts = conflictingResults.filter(
+      (result) => result.status === 'rejected',
+    );
+    expect(winners).toHaveLength(1);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      reason: expect.objectContaining({ code: 'RETRY_CONFLICT' }),
+    });
+
+    const winningResult = conflictingResults.find(
+      (result) => result.status === 'fulfilled',
+    );
+    if (winningResult?.status !== 'fulfilled') {
+      throw new Error('No concurrent SMS retry schedule won the insert race.');
+    }
+    const firstWon = conflictingResults[0]?.status === 'fulfilled';
+    const winningRequest = firstWon ? firstRequest : secondRequest;
+    const losingRequest = firstWon ? secondRequest : firstRequest;
+    await expect(runtimeStore().scheduleRetry(winningRequest)).resolves.toEqual(
+      winningResult.value,
+    );
+    await expectStoreError(
+      () => runtimeStore().scheduleRetry(losingRequest),
+      'RETRY_CONFLICT',
+    );
+  });
+
   test('binds unknown receipt recovery to the provider claim and correlates repeated MessageId evidence once', async () => {
     currentTime = Date.parse(CREATED_AT) + 1_000;
     const resolution = await runtimeStore().resolveBatch({

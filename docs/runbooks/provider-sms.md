@@ -36,6 +36,28 @@ source definitions do not prove they are deployed or authorize provider I/O.
   purpose. Leave the retained provider resources provisioned when darkening the
   worker; do not force deletion of a carrier pool as an outage response.
 
+## Complete the channel-constraint migration
+
+Migration `0032_woozy_stardust.sql` replaces two retained-history checks with
+`NOT VALID` constraints. PostgreSQL enforces both checks for every row written
+after the migration, while avoiding a historical-row scan under the migration's
+`ACCESS EXCLUSIVE` lock. After the deploy succeeds, use the approved database
+administrator path to validate retained history outside the migration
+transaction:
+
+```sql
+ALTER TABLE public.outbox
+  VALIDATE CONSTRAINT outbox_channel_plan_shape;
+ALTER TABLE public.delivery_test_reports
+  VALIDATE CONSTRAINT delivery_test_reports_channels_shape;
+```
+
+Validation permits ordinary reads and writes but can wait behind other schema
+changes. If it cannot complete safely, cancel it and leave the constraints
+unvalidated; do not drop or weaken them. Confirm both rows report
+`convalidated = true` in `pg_catalog.pg_constraint` before recording migration
+completion. This step performs no provider I/O and sends no notification.
+
 ## Respond
 
 1. Confirm the protected account/region, exact deployed worker/configuration
