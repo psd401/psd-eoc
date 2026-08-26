@@ -146,3 +146,47 @@ project provisioning and token-free EAS credential assignment only. It does
 not prove an exact native build, Expo ticket, final receipt, device
 presentation, app tap, or human observation, and it authorizes no automated
 notification.
+
+## Exact native builds and private distribution — 2026-08-26 UTC
+
+EAS built both embedded-only 1.0.5 production artifacts from commit
+`99e478361c01c8072104c64fcd5e3ca34d008e76`:
+
+- iOS build 12 is EAS build `ca6b4b4d-5ccd-4414-a7ec-bea95ee52191`,
+  artifact
+  `https://expo.dev/artifacts/eas/o_L5fGxzFby6kLBLLiO7olJBnHROFdI5SEWeZDpN5t4.ipa`,
+  and SHA-256
+  `9c414f3384aa8e04b9dc716233fa92482f39273b0c6282e86d7c507d71115814`.
+  Exact submission `73c0a30d-23eb-46c7-bc8f-f62ea2b178cb` completed Apple
+  upload and processing. App Store Connect build
+  `43a11cd2-64de-443d-b439-eb8b32685f51` is assigned to the existing
+  `PSD EOC Testers` external group with automatic notifications disabled and
+  is waiting for beta review. The superseded build 11 was removed from review
+  before build 12 was submitted.
+- Android code 6 is EAS build `1556fd0a-f1da-4fcf-8565-caedfc4fe772`,
+  artifact
+  `https://expo.dev/artifacts/eas/8TFcecmf94GN20w6tks4luyV7OmQGt31pH670kqVjKM.aab`,
+  and SHA-256
+  `f8d5f987d2637e507dbd1d559159833723d201f854b06b9fbbb4a7f310fad2f0`.
+  Exact submission `fb278800-12bb-4807-9421-2d4595d9b695` completed and Play
+  release 4 shows code 6 active for the existing `PSD EOC initial pilot`
+  Internal testers. EAS submission `dc0a9d0d-6c98-4c03-956c-09119dcdb77f`
+  could not upload the same code a second time; Play's artifact library was
+  therefore used to save that exact code 6 in Alpha draft release 1 with the
+  same tester list and United States targeting. The Alpha draft was not rolled
+  out or sent for review.
+
+At `2026-08-26T21:37:50Z`, production stack `PsdEoc` was
+`UPDATE_COMPLETE`, `EnableExpoPushWorker` remained `false`, and both
+`psd-eoc-push` and `psd-eoc-push-dlq` reported zero visible, in-flight, and
+delayed messages. Protected allowlist version
+`765d13e0-f6ae-4c44-8e24-6df6b61d4de6` read back only exact iOS build 12 and
+Android code 6 tuples. The Expo server secret still reported status
+`UNCONFIGURED`; no token value was read or retained.
+
+Evidence reference: `issue-278-exact-builds-2026-08-26T213750Z`. This proves
+signed exact builds, private-store placement, exact registration
+authorization, and a quiescent dark worker boundary only. It does not prove an
+Expo ticket, receipt, operating-system presentation, app tap, physical
+installation, or human observation, and it authorizes no automated
+notification.

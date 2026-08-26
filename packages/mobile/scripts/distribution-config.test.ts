@@ -524,8 +524,8 @@ describe('mobile distribution configuration', () => {
     const update = rowFor('EAS Update');
 
     expect(build).toContain('| `live-verified`');
-    expect(build).toContain('iOS build 11');
-    expect(build).toContain('Android version code 5');
+    expect(build).toContain('iOS build 12');
+    expect(build).toContain('Android version code 6');
     expect(update).toContain('| `blocked`');
     expect(update).toContain('Remote updates are disabled');
     expect(rowFor('EAS Submit')).toContain('| `live-verified`');
@@ -534,15 +534,15 @@ describe('mobile distribution configuration', () => {
     const play = rowFor('Google Play device installation');
     expect(apple).toContain('| `configured-unverified`');
     expect(play).toContain('| `configured-unverified`');
-    expect(apple).toContain('1.0.5/build 11');
-    expect(apple).toContain('assigned to the approved external group');
+    expect(apple).toContain('1.0.5/build 12');
+    expect(apple).toContain('assigned to the existing `PSD EOC Testers`');
     expect(apple).toContain('automatic tester notifications disabled');
     expect(apple).toContain('`Waiting for Review`');
     expect(apple).toContain(
-      'no exact 1.0.5 physical-device installation, launch, or diagnostic readback exists',
+      'No exact build 12 physical-device installation, launch, or diagnostic readback exists',
     );
-    expect(play).toContain('1.0.5/code 5');
-    expect(play).toContain('durable group-based Closed test is not yet active');
+    expect(play).toContain('1.0.5/code 6');
+    expect(play).toContain('saved in the existing Alpha Closed-testing draft');
     const privacy = rowFor('Public mobile privacy policy');
     expect(privacy).toContain('| `live-verified`');
     expect(privacy).toContain("configured production origin's `/privacy`");
