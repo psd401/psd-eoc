@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useMobileAuth } from '../../lib/auth';
+import { privacyPolicyUrl } from '../../lib/auth/auth-api-client';
 
 const UNEXPECTED_SIGN_IN_ERROR =
   'PSD EOC could not start secure sign-in. Try again or contact district technology support.';
@@ -48,6 +50,19 @@ export default function SignInScreen() {
     }
   }
 
+  async function handlePrivacyPolicy(): Promise<void> {
+    setLocalError(null);
+    try {
+      await Linking.openURL(
+        privacyPolicyUrl(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL, __DEV__),
+      );
+    } catch {
+      setLocalError(
+        'PSD EOC could not open the privacy policy. Check your connection and try again.',
+      );
+    }
+  }
+
   return (
     <SafeAreaView style={styles.page}>
       <ScrollView
@@ -57,13 +72,13 @@ export default function SignInScreen() {
         style={styles.page}
       >
         <View style={styles.brand}>
-          <Text style={styles.eyebrow}>PENINSULA SCHOOL DISTRICT</Text>
+          <Text style={styles.eyebrow}>DISTRICT STAFF</Text>
           <Text accessibilityRole="header" style={styles.title}>
             Sign in to PSD EOC
           </Text>
           <Text style={styles.subtitle}>
             Use your district Google account to enroll this staff device. Access
-            requires current membership in a designated PSD Google Group.
+            requires current membership in a designated staff access group.
           </Text>
         </View>
 
@@ -73,7 +88,7 @@ export default function SignInScreen() {
             accessibilityRole="alert"
             style={styles.errorNotice}
           >
-            <Text style={styles.errorTitle}>Sign-in needs attention</Text>
+            <Text style={styles.errorTitle}>Action needs attention</Text>
             <Text style={styles.errorBody}>{visibleError}</Text>
           </View>
         ) : null}
@@ -82,7 +97,7 @@ export default function SignInScreen() {
           <Text style={styles.cardTitle}>Secure device enrollment</Text>
           <Text style={styles.cardBody}>
             Google verifies your district identity, and the server checks the
-            designated PSD access group. PSD EOC then stores only its opaque
+            designated staff access group. PSD EOC then stores only its opaque
             device session in encrypted system storage.
           </Text>
 
@@ -113,7 +128,7 @@ export default function SignInScreen() {
             </Pressable>
           ) : (
             <Pressable
-              accessibilityHint="Opens Google sign-in in the system browser; only authorized PSD staff can enroll"
+              accessibilityHint="Opens Google sign-in in the system browser; only authorized staff can enroll"
               accessibilityLabel="Sign in with Google"
               accessibilityRole="button"
               accessibilityState={{ busy, disabled: busy }}
@@ -147,6 +162,21 @@ export default function SignInScreen() {
             creates a separate app PIN.
           </Text>
         </View>
+
+        <Pressable
+          accessibilityHint="Opens the public policy for this configured district deployment"
+          accessibilityLabel="Privacy policy"
+          accessibilityRole="link"
+          onPress={() => {
+            void handlePrivacyPolicy();
+          }}
+          style={({ pressed }) => [
+            styles.privacyLink,
+            pressed && styles.buttonPressed,
+          ]}
+        >
+          <Text style={styles.privacyLinkText}>Privacy policy</Text>
+        </Pressable>
       </ScrollView>
     </SafeAreaView>
   );
@@ -267,5 +297,19 @@ const styles = StyleSheet.create({
     color: '#334E68',
     fontSize: 15,
     lineHeight: 22,
+  },
+  privacyLink: {
+    alignSelf: 'center',
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  privacyLinkText: {
+    color: '#175A8E',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 22,
+    textDecorationLine: 'underline',
   },
 });

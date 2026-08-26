@@ -1,4 +1,5 @@
 import { OrganizationNameSchema } from '@psd-eoc/contracts';
+import { isIP } from 'node:net';
 
 /**
  * The values that differ between one district's deployment and another's.
@@ -71,6 +72,38 @@ export function organizationName(
     );
   }
   return result.data;
+}
+
+/** Public, non-secret channel for privacy questions and data requests. */
+export function privacyContactUrl(
+  environment: DeploymentEnvironment = process.env,
+): string {
+  const value = required(environment, 'PSD_EOC_PRIVACY_CONTACT_URL');
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_PRIVACY_CONTACT_URL must be a public HTTPS URL.',
+    );
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, '');
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    isIP(hostname) !== 0 ||
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    !HOSTED_DOMAIN_PATTERN.test(hostname) ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_PRIVACY_CONTACT_URL must be a public HTTPS URL without credentials, query, or fragment.',
+    );
+  }
+  return parsed.href;
 }
 
 /** IANA time zone used for stable server- and client-rendered timestamps. */
