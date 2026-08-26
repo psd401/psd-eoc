@@ -242,6 +242,9 @@ function evidenceFromRow(row: DeliveryEvidenceRow): DeliveryEvidence {
     recordedAt: dateIso(row.recordedAt),
     provider: row.provider,
     providerReference: row.providerReference,
+    ...(row.providerOccurredAt === null
+      ? {}
+      : { providerOccurredAt: dateIso(row.providerOccurredAt) }),
     proof: row.proof,
     reasonCode: row.reasonCode,
     diagnosticDigest: row.diagnosticDigest,
@@ -344,6 +347,7 @@ function evidenceMatchesInput(
     evidence.state === input.state &&
     evidence.provider === input.provider &&
     evidence.providerReference === input.providerReference &&
+    evidence.providerOccurredAt === input.providerOccurredAt &&
     JSON.stringify(evidence.proof) === JSON.stringify(input.proof) &&
     evidence.reasonCode === input.reasonCode &&
     evidence.diagnosticDigest === input.diagnosticDigest
@@ -439,6 +443,12 @@ async function loadMatchingEvidence(
         input.providerReference === null
           ? isNull(deliveryEvidence.providerReference)
           : eq(deliveryEvidence.providerReference, input.providerReference),
+        input.providerOccurredAt === undefined
+          ? isNull(deliveryEvidence.providerOccurredAt)
+          : eq(
+              deliveryEvidence.providerOccurredAt,
+              new Date(input.providerOccurredAt),
+            ),
         input.reasonCode === null
           ? isNull(deliveryEvidence.reasonCode)
           : eq(deliveryEvidence.reasonCode, input.reasonCode),
@@ -471,6 +481,9 @@ async function appendEvidence(
     recordedAt: recordedAt.toISOString(),
     provider: input.provider,
     providerReference: input.providerReference,
+    ...(input.providerOccurredAt === undefined
+      ? {}
+      : { providerOccurredAt: input.providerOccurredAt }),
     proof: input.proof,
     reasonCode: input.reasonCode,
     diagnosticDigest: input.diagnosticDigest,
@@ -487,6 +500,10 @@ async function appendEvidence(
     recordedAt,
     provider: evidence.provider,
     providerReference: evidence.providerReference,
+    providerOccurredAt:
+      evidence.providerOccurredAt === undefined
+        ? null
+        : new Date(evidence.providerOccurredAt),
     proof: evidence.proof,
     reasonCode: evidence.reasonCode,
     diagnosticDigest: evidence.diagnosticDigest,

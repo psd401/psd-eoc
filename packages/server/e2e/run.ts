@@ -251,7 +251,10 @@ async function createSyntheticDrill(
     .update(channelConfigurations)
     .set({ enabled: true, changedAt: new Date() })
     .where(
-      inArray(channelConfigurations.integrationId, ['expo-push', 'ses-email']),
+      inArray(channelConfigurations.integrationId, [
+        'mobile-push',
+        'ses-email',
+      ]),
     );
   const preview = await executeStartFlowCapability(
     'create-activation-preview',

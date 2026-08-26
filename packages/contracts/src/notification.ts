@@ -31,6 +31,9 @@ import {
 import {
   EndpointIdSchema,
   PushPlatformSchema,
+  PushProviderSchema,
+  PushServiceEnvironmentSchema,
+  pushProviderMatchesPlatform,
   RecipientIdSchema,
   RosterPopulationSchema,
   RosterSnapshotIdSchema,
@@ -167,9 +170,20 @@ export const PushEndpointSendEligibilityInputSchema = z
     recipientId: RecipientIdSchema,
     endpointId: EndpointIdSchema,
     platform: PushPlatformSchema,
+    provider: PushProviderSchema,
+    serviceEnvironment: PushServiceEnvironmentSchema,
     tokenDigest: z.string().regex(/^[a-f0-9]{64}$/u),
   })
   .strict()
+  .superRefine((input, context) => {
+    if (!pushProviderMatchesPlatform(input.provider, input.platform)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Push provider is incompatible with the native platform.',
+        path: ['provider'],
+      });
+    }
+  })
   .readonly();
 
 /** Exact send-time endpoint eligibility query inferred from its schema. */
@@ -696,6 +710,7 @@ export const DeliveryEvidenceSchema = z
     recordedAt: TimestampSchema,
     provider: z.string().trim().min(1).max(100).nullable(),
     providerReference: z.string().trim().min(1).max(500).nullable(),
+    providerOccurredAt: TimestampSchema.optional(),
     proof: DeliveryProofSchema.nullable(),
     reasonCode: z
       .string()
@@ -802,6 +817,37 @@ export const DeliveryEvidenceSchema = z
         code: 'custom',
         message: 'Diagnostic digests require a safe reason code.',
         path: ['diagnosticDigest'],
+      });
+    }
+    const isApnsUnregistered =
+      evidence.state === 'failed' &&
+      evidence.provider === 'apns-direct' &&
+      evidence.reasonCode === 'APNS_UNREGISTERED';
+    if ((evidence.reasonCode === 'APNS_UNREGISTERED') !== isApnsUnregistered) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'APNs unregistration requires failed evidence from the direct APNs provider.',
+        path: ['reasonCode'],
+      });
+    }
+    if (isApnsUnregistered !== (evidence.providerOccurredAt !== undefined)) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'APNs unregistration evidence requires its authoritative provider occurrence time.',
+        path: ['providerOccurredAt'],
+      });
+    }
+    if (
+      evidence.providerOccurredAt !== undefined &&
+      Date.parse(evidence.providerOccurredAt) >
+        Date.parse(evidence.recordedAt) + 300_000
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Provider occurrence time cannot be materially in the future.',
+        path: ['providerOccurredAt'],
       });
     }
   })
@@ -1179,6 +1225,7 @@ export const RecordDeliveryEvidenceInputSchema = z
     state: DeliveryTruthStateSchema,
     provider: z.string().trim().min(1).max(100).nullable(),
     providerReference: z.string().trim().min(1).max(500).nullable(),
+    providerOccurredAt: TimestampSchema.optional(),
     proof: DeliveryProofSchema.nullable(),
     reasonCode: z
       .string()
@@ -1243,6 +1290,26 @@ export const RecordDeliveryEvidenceInputSchema = z
         code: 'custom',
         message: 'Diagnostic digests require a safe reason code.',
         path: ['diagnosticDigest'],
+      });
+    }
+    const isApnsUnregistered =
+      input.state === 'failed' &&
+      input.provider === 'apns-direct' &&
+      input.reasonCode === 'APNS_UNREGISTERED';
+    if ((input.reasonCode === 'APNS_UNREGISTERED') !== isApnsUnregistered) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'APNs unregistration requires failed evidence from the direct APNs provider.',
+        path: ['reasonCode'],
+      });
+    }
+    if (isApnsUnregistered !== (input.providerOccurredAt !== undefined)) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'APNs unregistration evidence requires its authoritative provider occurrence time.',
+        path: ['providerOccurredAt'],
       });
     }
   })
@@ -1370,7 +1437,8 @@ const NonProviderEndpointLifecycleReasonSchema =
   EndpointLifecycleReasonSchema.refine(
     (reasonCode) =>
       reasonCode !== SMS_OPT_OUT_REASON_CODE &&
-      reasonCode !== SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+      reasonCode !== SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE &&
+      reasonCode !== 'APNS_UNREGISTERED',
     'SMS lifecycle reasons require exact provider provenance.',
   );
 
@@ -1428,6 +1496,24 @@ const ManagedSmsOptOutShape = {
   ...SmsEndpointLifecycleProviderShape,
 } as const;
 
+const ApnsUnregisteredEndpointStatusShape = {
+  ...EndpointStatusIdentityShape,
+  status: z.literal('invalid'),
+  reasonCode: z.literal('APNS_UNREGISTERED'),
+  provider: z.never().optional(),
+  providerReference: z.never().optional(),
+  providerOccurredAt: TimestampSchema,
+} as const;
+
+const ApnsUnregisteredEndpointStatusRecordShape = {
+  ...EndpointStatusIdentityShape,
+  status: z.literal('invalid'),
+  reasonCode: z.literal('APNS_UNREGISTERED'),
+  provider: z.never().optional(),
+  providerReference: z.never().optional(),
+  providerOccurredAt: z.never().optional(),
+} as const;
+
 /**
  * Owns a request to append endpoint lifecycle evidence. It references the
  * pinned endpoint rather than accepting a contact destination from a provider.
@@ -1439,6 +1525,7 @@ export const RecordEndpointStatusInputSchema = z
     z.object(NonProviderEndpointStatusShape).strict().readonly(),
     z.object(ProviderVerifiedSmsOptInShape).strict().readonly(),
     z.object(ManagedSmsOptOutShape).strict().readonly(),
+    z.object(ApnsUnregisteredEndpointStatusShape).strict().readonly(),
   ])
   .readonly();
 
@@ -1475,6 +1562,14 @@ export const EndpointStatusRecordSchema = z
       })
       .strict()
       .superRefine(addProviderOccurrenceIssues)
+      .readonly(),
+    z
+      .object({
+        id: UuidSchema,
+        ...ApnsUnregisteredEndpointStatusRecordShape,
+        recordedAt: TimestampSchema,
+      })
+      .strict()
       .readonly(),
   ])
   .readonly();

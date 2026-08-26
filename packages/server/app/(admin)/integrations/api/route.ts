@@ -40,6 +40,7 @@ export async function POST(request: Request): Promise<Response> {
       'integrationId',
       'enabled',
       'authorization',
+      'verificationReference',
     ]);
     if (form.required('intent') !== 'set-channel-enabled') {
       throw new AdminFormError(
@@ -50,6 +51,8 @@ export async function POST(request: Request): Promise<Response> {
       integrationId: form.required('integrationId'),
       enabled: parseEnabled(form.required('enabled')),
       authorization: parseAuthorization(form.optional('authorization')),
+      verificationReference:
+        form.optional('verificationReference') ?? undefined,
     });
     await executeSetChannelEnabledCapability({
       authenticated,

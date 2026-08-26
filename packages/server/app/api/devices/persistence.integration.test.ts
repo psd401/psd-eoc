@@ -133,12 +133,20 @@ const pushBuild = Object.freeze({
 });
 const registrationIdentity = Object.freeze({
   provider: 'expo' as const,
+  serviceEnvironment: 'production' as const,
   build: pushBuild,
 });
 const pushBuildAllowlist = Object.freeze([
   Object.freeze({
     platform: 'ios' as const,
     provider: 'expo' as const,
+    serviceEnvironment: 'production' as const,
+    build: pushBuild,
+  }),
+  Object.freeze({
+    platform: 'ios' as const,
+    provider: 'apns' as const,
+    serviceEnvironment: 'production' as const,
     build: pushBuild,
   }),
 ]);
@@ -557,6 +565,8 @@ async function publishRosterEndpointFixture(
       status: 'active',
       capturedAt,
       platform: 'ios',
+      provider: 'expo',
+      serviceEnvironment: 'production',
       token: registration.token,
       email: null,
       phoneNumber: null,
@@ -650,6 +660,8 @@ async function publishSyntheticRosterEndpointFixture(
           status: 'active' as const,
           capturedAt,
           platform: 'ios' as const,
+          provider: 'expo' as const,
+          serviceEnvironment: 'production' as const,
           token: registration.token,
           email: null,
           phoneNumber: null,
@@ -711,6 +723,8 @@ function pushResolutionFixture(
           status: 'active',
           capturedAt: SEEDED.integrationObservedAt,
           platform: 'ios',
+          provider: 'expo',
+          serviceEnvironment: 'production',
           token: registration.token,
         })),
       },
@@ -1126,6 +1140,131 @@ describeWithDatabase('device push-token persistence', () => {
     await cleanupResources();
   });
 
+  test('atomically registers provider-scoped native and Expo fallback lineages', async () => {
+    const database = databaseConnection().db;
+    const expoToken = `ExponentPushToken[synthetic-${fixtureSuffix}-atomic]`;
+    const nativeToken = `synthetic-apns-${fixtureSuffix}-atomic`;
+
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios',
+        provider: 'apns',
+        serviceEnvironment: 'production',
+        build: pushBuild,
+        token: nativeToken,
+        expoFallbackToken: expoToken,
+      },
+      humanInvocation('atomic-provider-generation'),
+      deviceCapabilityStore(database),
+    );
+
+    const active = await database
+      .select({
+        provider: devicePushTokenRegistrations.provider,
+        token: devicePushTokenRegistrations.token,
+      })
+      .from(devicePushTokenRegistrations)
+      .leftJoin(
+        devicePushTokenUnregistrations,
+        eq(
+          devicePushTokenUnregistrations.registrationId,
+          devicePushTokenRegistrations.id,
+        ),
+      )
+      .where(
+        and(
+          eq(devicePushTokenRegistrations.deviceEnrollmentId, fixture.deviceId),
+          isNull(devicePushTokenUnregistrations.id),
+        ),
+      )
+      .orderBy(asc(devicePushTokenRegistrations.provider));
+    expect(active).toEqual([
+      { provider: 'apns', token: nativeToken },
+      { provider: 'expo', token: expoToken },
+    ]);
+
+    const directRosterStore = createDrizzleRosterSyncStore(database, {
+      version: 1,
+      ios: 'direct',
+      android: 'expo',
+    });
+    await expect(
+      directRosterStore.loadLocalContacts([googleSubject]),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        pushEndpoints: [expect.objectContaining({ provider: 'apns' })],
+      }),
+    ]);
+
+    const expoRosterStore = createDrizzleRosterSyncStore(database, {
+      version: 1,
+      ios: 'expo',
+      android: 'expo',
+    });
+    await expect(
+      expoRosterStore.loadLocalContacts([googleSubject]),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        pushEndpoints: [expect.objectContaining({ provider: 'expo' })],
+      }),
+    ]);
+
+    const [expoRegistration] = await database
+      .select({ id: devicePushTokenRegistrations.id })
+      .from(devicePushTokenRegistrations)
+      .where(
+        and(
+          eq(devicePushTokenRegistrations.deviceEnrollmentId, fixture.deviceId),
+          eq(devicePushTokenRegistrations.provider, 'expo'),
+          eq(devicePushTokenRegistrations.token, expoToken),
+        ),
+      )
+      .limit(1);
+    if (expoRegistration === undefined) {
+      throw new Error('Atomic Expo fallback registration was not retained.');
+    }
+    await database.insert(devicePushTokenUnregistrations).values({
+      registrationId: expoRegistration.id,
+      deviceEnrollmentId: fixture.deviceId,
+      unregisteredAt: new Date(),
+    });
+    await expect(
+      expoRosterStore.loadLocalContacts([googleSubject]),
+    ).rejects.toMatchObject({ code: 'DIRECT_PUSH_COVERAGE_INCOMPLETE' });
+
+    await executeDeviceCapability(
+      'unregister-push-token',
+      { deviceEnrollmentId: fixture.deviceId },
+      humanInvocation('atomic-provider-generation-cleanup'),
+      deviceCapabilityStore(database),
+    );
+
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios',
+        provider: 'expo',
+        serviceEnvironment: 'production',
+        build: pushBuild,
+        token: expoToken,
+      },
+      humanInvocation('incomplete-direct-generation'),
+      deviceCapabilityStore(database),
+    );
+    await expect(
+      directRosterStore.loadLocalContacts([googleSubject]),
+    ).rejects.toMatchObject({ code: 'DIRECT_PUSH_COVERAGE_INCOMPLETE' });
+    await executeDeviceCapability(
+      'unregister-push-token',
+      { deviceEnrollmentId: fixture.deviceId },
+      humanInvocation('incomplete-direct-generation-cleanup'),
+      deviceCapabilityStore(database),
+    );
+  });
+
   test('allows exactly one active owner for a concurrently registered push token', async () => {
     const database = databaseConnection().db;
     const store = deviceCapabilityStore(database);
@@ -1225,6 +1364,8 @@ describeWithDatabase('device push-token persistence', () => {
       capturedAt: installed.attempt.attemptedAt,
       channel: 'push',
       platform: 'ios',
+      provider: 'expo',
+      serviceEnvironment: 'production',
       token,
     });
     const workItem = Object.freeze({
@@ -1398,6 +1539,8 @@ describeWithDatabase('device push-token persistence', () => {
         capturedAt: installed.attempt.attemptedAt,
         channel: 'push',
         platform: 'ios',
+        provider: 'expo',
+        serviceEnvironment: 'production',
         token: endpointToken,
       }),
     });
@@ -1504,6 +1647,8 @@ describeWithDatabase('device push-token persistence', () => {
           capturedAt: installed.attempt.attemptedAt,
           channel: 'push',
           platform: 'ios',
+          provider: 'expo',
+          serviceEnvironment: 'production',
           token: endpointToken,
         }),
       });
@@ -1716,12 +1861,32 @@ describeWithDatabase('device push-token persistence', () => {
       }),
     ]);
 
-    const rosterStore = createDrizzleRosterSyncStore(database);
+    const missingCutoverStore = createDrizzleRosterSyncStore(database, null);
+    for (const identityKeys of [[], [googleSubject]] as const) {
+      await expect(
+        missingCutoverStore.loadLocalContacts(identityKeys),
+      ).rejects.toMatchObject({
+        code: 'LOCAL_CONTACT_CAPTURE_INVALID',
+        message: 'Roster publication requires an exact push-provider cutover.',
+      });
+    }
+
+    const rosterStore = createDrizzleRosterSyncStore(database, {
+      version: 1,
+      ios: 'expo',
+      android: 'expo',
+    });
     const beforeInvalidation = await rosterStore.loadLocalContacts([
       googleSubject,
     ]);
     expect(beforeInvalidation[0]?.pushEndpoints).toEqual([
-      { id: active.id, platform: 'ios', token: replacementToken },
+      {
+        id: active.id,
+        platform: 'ios',
+        provider: 'expo',
+        serviceEnvironment: 'production',
+        token: replacementToken,
+      },
     ]);
 
     const invalidationInput = {
@@ -2010,6 +2175,8 @@ describeWithDatabase('device push-token persistence', () => {
       {
         id: newerRegistration.id,
         platform: 'ios',
+        provider: 'expo',
+        serviceEnvironment: 'production',
         token: replacementToken,
       },
     ]);

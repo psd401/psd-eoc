@@ -6,8 +6,9 @@ Expo Router owns navigation. Shared domain types come from
 
 Push registration is implemented behind an exact, fail-closed build opt-in.
 Without that opt-in the app does not request notification permission or contact
-Expo, removes any earlier server endpoint when authenticated, and explains that
-registration is disabled. Working code and mock tests do not prove
+Expo or the native provider, removes any earlier server endpoints when
+authenticated, and explains that registration is disabled. Working code and
+mock tests do not prove
 physical-device delivery; current provider state lives only in
 `docs/INTEGRATIONS.md`.
 The native appearance stays light until the app has complete dark navigation,
@@ -45,17 +46,26 @@ version, native build number, EAS project UUID, and embedded-only update mode,
 and the server accepts registration only when the exact tuple appears in the
 protected build allowlist documented in
 [CONFIGURATION.md](../../docs/CONFIGURATION.md#expo-push-activation-boundary).
+The allowlist separately authorizes provider and service environment; native
+provider identity is never inferred from token text.
 
 On every launch the app writes Expo's persisted automatic server-registration
 state to the explicit non-null value `{ "isEnabled": false }`. Runtime code
 deliberately avoids the `expo-notifications` package barrel because Expo 57
 evaluates persisted auto-registration when that barrel loads. Token acquisition
-instead performs one request to the fixed Expo token endpoint only after build
+instead obtains the native APNs/FCM token and performs one request to the fixed
+Expo token endpoint only after build
 opt-in, authenticated-online session, permission, native-build identity, and
 native-token gates. That request has an eight-second deadline, is cancelled if
 authenticated state is lost, and never re-enables Expo's independent
 registration side path. Only a response matching Expo's strict push-token shape
-is posted to PSD EOC's canonical device capability.
+is combined with the native `apns` or `fcm` token in one request to PSD EOC's
+canonical device capability. The server authorizes, inserts, and rotates that
+native/Expo pair in one transaction. A failure commits neither member of a new
+pair and makes no claim that a first-time fallback exists; any previously
+committed generation remains governed by its existing endpoint history.
+Replacements and cleanup are scoped by provider so the two active endpoints
+can coexist without overwriting each other.
 
 Android creates `eoc-alerts` before permission/token work with maximum
 importance, default sound, vibration, and public lock-screen visibility. iOS
@@ -71,9 +81,17 @@ unlock, and routed only by the canonical event ID. Sign-out authenticates when
 locked and requires successful server revocation/push cleanup before local
 SecureStore state is removed; cleanup is never queued offline.
 
-Physical delivery remains a controlled external-integration run. The activation
-record is
-[`issue-278-expo-push.md`](../../docs/archive/evidence/issue-278-expo-push.md);
+Server-side protected configuration chooses Expo or direct delivery separately
+for iOS and Android. Changing that cutover does not change mobile code, rewrite
+registration history, or cause a second copy to be sent. Development and
+preview builds remain disabled; only an exact allowlisted privately distributed
+build may dual-register.
+
+Physical delivery remains a controlled external-integration run. The Expo
+activation record is
+[`issue-278-expo-push.md`](../../docs/archive/evidence/issue-278-expo-push.md)
+and the direct-provider record is
+[`issue-43-direct-push.md`](../../docs/archive/evidence/issue-43-direct-push.md);
 current state is in `docs/INTEGRATIONS.md`. APNs and FCM credentials, exact
 private builds, and the two physical-device drills require authenticated human
 work. Never place push tokens, credentials, real recipients, or raw provider

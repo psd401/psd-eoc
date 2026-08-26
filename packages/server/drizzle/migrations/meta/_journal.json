@@ -225,6 +225,13 @@
       "when": 1787718612380,
       "tag": "0031_known_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1787743902732,
+      "tag": "0032_direct_push_registration",
+      "breakpoints": true
     }
   ]
 }

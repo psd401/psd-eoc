@@ -1275,7 +1275,7 @@ describeWithDatabase('event journal database guarantees', () => {
       );
       const fixtureTime = new Date();
       await insertSyntheticAdminSession(transactionalDatabase, fixtureTime);
-      const integrationIds = ['expo-push', 'ses-email'] as const;
+      const integrationIds = ['mobile-push', 'ses-email'] as const;
       const originalConfigurations = await transaction
         .select()
         .from(channelConfigurations)
@@ -1396,7 +1396,7 @@ describeWithDatabase('event journal database guarantees', () => {
                 title: '[DRILL] SYNTHETIC TEST ACTIVATION',
                 body: '[DRILL] Synthetic test activation only.',
               },
-              integrationStatus: integrationStatusFor('expo-push'),
+              integrationStatus: integrationStatusFor('mobile-push'),
             },
             {
               channel: 'email',
@@ -2049,7 +2049,7 @@ describeWithDatabase('event journal database guarantees', () => {
       ]);
     });
 
-    const integrationIds = ['expo-push', 'ses-email'] as const;
+    const integrationIds = ['mobile-push', 'ses-email'] as const;
     const originalConfigurations = await fixtureDatabase
       .select()
       .from(channelConfigurations)
@@ -2140,7 +2140,7 @@ describeWithDatabase('event journal database guarantees', () => {
               title: '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
               body: '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
             },
-            integrationStatus: statusFor('expo-push'),
+            integrationStatus: statusFor('mobile-push'),
           },
           {
             channel: 'email',
@@ -2597,7 +2597,7 @@ describeWithDatabase('event journal database guarantees', () => {
       });
 
       const pushStatus = liveStatuses.find(
-        (status) => status.value.integrationId === 'expo-push',
+        (status) => status.value.integrationId === 'mobile-push',
       );
       if (pushStatus === undefined) {
         throw new Error('The live push fixture is unavailable.');
@@ -2606,7 +2606,7 @@ describeWithDatabase('event journal database guarantees', () => {
       const newerObservedAt = new Date(fixtureTime.getTime() - 1_000);
       await fixtureDatabase.insert(integrationStatuses).values({
         id: newerPushStatusId,
-        integrationId: 'expo-push',
+        integrationId: 'mobile-push',
         label: 'live-verified',
         verifiedAt,
         verifiedByUserId: HUMAN_ACTOR.userId,
@@ -2622,7 +2622,7 @@ describeWithDatabase('event journal database guarantees', () => {
           statusLabel: 'live-verified',
           changedAt: newerObservedAt,
         })
-        .where(eq(channelConfigurations.integrationId, 'expo-push'));
+        .where(eq(channelConfigurations.integrationId, 'mobile-push'));
       await expect(
         executeEventCapability(
           'all-clear-event',
@@ -2653,7 +2653,7 @@ describeWithDatabase('event journal database guarantees', () => {
           statusLabel: pushStatus.value.label,
           changedAt: fixtureTime,
         })
-        .where(eq(channelConfigurations.integrationId, 'expo-push'));
+        .where(eq(channelConfigurations.integrationId, 'mobile-push'));
 
       const allClearIdempotencyKey = `issue77-real-all-clear-${suffix}`;
       const allClear = await executeEventCapability(

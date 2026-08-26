@@ -211,4 +211,42 @@ describe('integrations admin view', () => {
     expect(markup).toContain('<dd>unknown</dd>');
     expect(markup).toContain('<dd>None recorded</dd>');
   });
+
+  test('renders an executable initial mobile-push verification path', () => {
+    const mobileStatus = IntegrationStatusSchema.parse({
+      integrationId: 'mobile-push',
+      label: 'configured-unverified',
+      verifiedAt: null,
+      verifiedByUserId: null,
+      authorizationReference: null,
+      reasonCode: null,
+      observedAt: AT,
+    });
+    const markup = render({
+      ...PROPS,
+      integrationHealth: IntegrationHealthSchema.parse({
+        statuses: [...STATUSES, mobileStatus],
+        observedAt: AT,
+      }),
+      channelConfigurations: [
+        ...PROPS.channelConfigurations,
+        ChannelConfigurationSchema.parse({
+          integrationId: 'mobile-push',
+          enabled: false,
+          status: mobileStatus,
+          changedAt: AT,
+        }),
+      ],
+    });
+
+    expect(markup).toMatch(
+      /name="integrationId" value="mobile-push"[\s\S]*?<option value="true">Enabled<\/option>/u,
+    );
+    expect(markup).toMatch(
+      /<input(?=[^>]*name="verificationReference")(?=[^>]*required="")[^>]*>/u,
+    );
+    expect(markup).toContain(
+      'Saving Enabled appends live verification and enables the channel atomically.',
+    );
+  });
 });

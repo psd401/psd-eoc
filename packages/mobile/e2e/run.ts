@@ -19,7 +19,19 @@ const platform = Bun.argv[2] as MobileE2EPlatform | undefined;
 if (platform !== 'ios' && platform !== 'android') {
   throw new Error('Usage: bun packages/mobile/e2e/run.ts <ios|android>');
 }
-requireSyntheticMobileE2E(process.env);
+const childEnvironment: Record<string, string | undefined> = {
+  ...process.env,
+  CI: 'true',
+  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'issue-21',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: 'issue-32',
+  MAESTRO_CLI_NO_ANALYTICS: '1',
+  NODE_OPTIONS: '--dns-result-order=ipv4first',
+  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
+  SYSTEM_APP_ID: 'com.apple.springboard',
+};
+requireSyntheticMobileE2E(childEnvironment);
 
 const identity = mobileE2EIdentity(
   await Bun.file(resolve(mobileRoot, 'app.json')).json(),
@@ -43,19 +55,7 @@ await Bun.write(
   ].join('\n'),
 );
 
-const childEnvironment: Record<string, string | undefined> = {
-  ...process.env,
-  CI: 'true',
-  APP_ID: identity.appId,
-  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'issue-21',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: 'issue-32',
-  MAESTRO_CLI_NO_ANALYTICS: '1',
-  NODE_OPTIONS: '--dns-result-order=ipv4first',
-  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
-  SYSTEM_APP_ID: 'com.apple.springboard',
-};
+childEnvironment.APP_ID = identity.appId;
 
 class CommandExitError extends Error {
   constructor(

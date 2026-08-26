@@ -115,6 +115,8 @@ function roster(population: RosterPopulation): RosterSnapshot {
             status: 'active',
             capturedAt: CREATED_AT_ISO,
             platform: 'ios',
+            provider: 'expo',
+            serviceEnvironment: 'production',
             token: 'synthetic-unroutable:preview-test',
           }),
         ]),
@@ -200,9 +202,9 @@ function channelConfigurations(
     });
   return Object.freeze([
     Object.freeze({
-      integrationId: 'expo-push',
+      integrationId: 'mobile-push',
       enabled: true,
-      status: status('expo-push'),
+      status: status('mobile-push'),
       changedAt: CREATED_AT_ISO,
     }),
     Object.freeze({

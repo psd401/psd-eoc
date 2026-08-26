@@ -63,12 +63,15 @@ Repository/environment variables:
 - `AWS_DEPLOY_ROLE_ARN`
 - `AWS_REGION`
 - `ECR_REPOSITORY`
+- `DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE`
+- `DIRECT_PUSH_ENABLED`
 - `EXPO_CREDENTIAL_VERIFICATION_REFERENCE`
 - `EXPO_PUSH_WORKER_ENABLED`
 - `GOOGLE_GROUPS_SECRET_ARN`
 - `GOOGLE_OAUTH_SECRET_ARN`
 - `INITIAL_ACCESS_GROUP_ID`
 - `INITIAL_ACCESS_GROUP_NAME`
+- `PUSH_PROVIDER_CUTOVER`
 - `STACK_NAME`
 <!-- docs-contract:workflow-vars:end -->
 
@@ -104,6 +107,8 @@ The current synthesized stack contains exactly these parameters:
 - `BootstrapImageDigest`
 - `BootstrapSourceSha`
 - `BootstrapVersion`
+- `DirectPushCredentialVerificationReference`
+- `EnableDirectPush`
 - `EnableExpoPushWorker`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
@@ -115,15 +120,15 @@ The current synthesized stack contains exactly these parameters:
 - `OperationsTeamAlarmEmail`
 - `OperationsTeamAlarmSmsNumber`
 - `ProvisionApplication`
+- `PushProviderCutover`
 - `RuntimeDatabaseIdleTimeoutSeconds`
 - `SourceSha`
 <!-- docs-contract:template-parameters:end -->
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
-parameter and has a default. `EnableExpoPushWorker` and
-`ExpoCredentialVerificationReference` default to the safe, dark state when
-their protected workflow variables are absent. The workflow supplies the
-other 16 explicitly.
+parameter and has a default. Expo and direct-provider enablement and evidence
+parameters default to their safe, dark values when protected workflow
+variables are absent. The workflow supplies every non-bootstrap parameter.
 
 ### Parameters supplied by the workflow
 
@@ -132,6 +137,8 @@ other 16 explicitly.
 - `AppImageDigest`
 - `BootstrapImageDigest`
 - `BootstrapSourceSha`
+- `DirectPushCredentialVerificationReference`
+- `EnableDirectPush`
 - `EnableExpoPushWorker`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
@@ -143,6 +150,7 @@ other 16 explicitly.
 - `OperationsTeamAlarmEmail`
 - `OperationsTeamAlarmSmsNumber`
 - `ProvisionApplication`
+- `PushProviderCutover`
 - `RuntimeDatabaseIdleTimeoutSeconds`
 - `SourceSha`
 <!-- docs-contract:workflow-parameters:end -->
@@ -189,6 +197,7 @@ approved build:
   {
     "platform": "ios",
     "provider": "expo",
+    "serviceEnvironment": "production",
     "build": {
       "applicationId": "org.example.eoc",
       "applicationVersion": "1.2.3",
@@ -214,6 +223,62 @@ application on each approved device. The delivery-test target mode for this
 drill is `controlled-push-canary`, which permits exactly one current
 product-owner-approved push endpoint without requiring the unrelated email
 provider; ordinary delivery-test target sets still require push and email.
+
+## Direct APNs/FCM activation and cutover
+
+Direct provider delivery is an additional dark boundary on the same push
+worker. `DIRECT_PUSH_ENABLED` defaults to `false`; when false, the task cannot
+construct either direct transport even if credentials exist. Enabling it also
+requires the Expo worker to be enabled, a bounded retained evidence reference,
+and both protected provider secrets to report exact `verified` status. The
+tenant cutover defaults to Expo on both platforms:
+
+```json
+{ "version": 1, "ios": "expo", "android": "expo" }
+```
+
+`PUSH_PROVIDER_CUTOVER` accepts only that canonical shape, with each platform
+set independently to `expo` or `direct`. For future audience snapshots,
+`direct` resolves to APNs on iOS and FCM on Android. Missing, partial, mixed,
+or malformed configuration denies selection. A dispatch already contains its
+immutable endpoint provider, so changing the cutover never rewrites history
+and never reroutes ambiguous work.
+
+The retained Secrets Manager values are server-runtime credentials, separate
+from anything EAS uses to sign a mobile build:
+
+- `/psd-eoc/providers/apns-direct` contains exactly `status`, `keyId`,
+  `teamId`, `topic`, `environment`, and `privateKey`. `environment` is
+  `development` or `production`; `topic` must equal the configured iOS bundle
+  ID. The private key is an APNs token-signing key in PEM form.
+- `/psd-eoc/providers/fcm-direct` contains exactly `status`, `projectId`,
+  `clientEmail`, `environment`, and `privateKey`. The identity must be scoped
+  to sending FCM HTTP v1 messages in the isolated Firebase project. The
+  private key is a service-account key in PEM form.
+
+Only the push ECS execution role can read these two secrets. They are not
+available to App Runner, mobile builds, logs, metrics, deployment output, or
+evidence. The checked-in secret values are non-credential placeholders and
+make startup fail closed. Store the secret contents through an approved
+secret-input path, validate rotation without printing them, then set
+`DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE` to a non-secret retained
+record identifier. Use [the direct push runbook](runbooks/provider-direct-push.md)
+for activation, per-platform cutover, credential rotation, and rollback.
+
+Dual-registration builds submit one Expo fallback endpoint plus one native
+endpoint (`apns` for iOS, `fcm` for Android) only after the same build opt-in,
+authentication, permission, enrollment, and server allowlist gates. The
+allowlist must authorize each exact provider and service environment for the
+same build identity. Endpoint replacement and invalidation are provider-scoped,
+so rotating a native token cannot retire its Expo fallback.
+
+Cut over only one platform at a time after isolated provider evidence. To roll
+back, set that platform to `expo` and deploy normally; this affects only future
+snapshots. Keep direct authorization, credentials, native registrations, and
+history available for at least seven calendar days after both platform
+cutovers and until three bounded synthetic runs per platform have no
+unexplained `unknown` outcome. Never automatically replay an ambiguous direct
+attempt, and never send two copies to one endpoint to collect comparison data.
 
 ## Validate without a provider
 

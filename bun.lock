@@ -168,6 +168,7 @@
         "@aws-sdk/client-pinpoint-sms-voice-v2": "3.1108.0",
         "@aws-sdk/client-sqs": "3.1108.0",
         "@psd-eoc/contracts": "workspace:*",
+        "jose": "6.1.0",
       },
     },
   },

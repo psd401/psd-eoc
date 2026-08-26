@@ -137,6 +137,9 @@ function evidenceFromRow(row: DeliveryEvidenceRow): DeliveryEvidence {
     recordedAt: dateIso(row.recordedAt),
     provider: row.provider,
     providerReference: row.providerReference,
+    ...(row.providerOccurredAt === null
+      ? {}
+      : { providerOccurredAt: dateIso(row.providerOccurredAt) }),
     proof: row.proof,
     reasonCode: row.reasonCode,
     diagnosticDigest: row.diagnosticDigest,
@@ -275,6 +278,10 @@ async function appendUnknownEvidence(
     recordedAt,
     provider: evidence.provider,
     providerReference: evidence.providerReference,
+    providerOccurredAt:
+      evidence.providerOccurredAt === undefined
+        ? null
+        : new Date(evidence.providerOccurredAt),
     proof: null,
     reasonCode: evidence.reasonCode,
     diagnosticDigest: null,
@@ -322,6 +329,9 @@ export function buildReconciliationUnknownEvidence(
     recordedAt: recordedAt.toISOString(),
     provider: previous.provider,
     providerReference: previous.providerReference,
+    ...(previous.providerOccurredAt === undefined
+      ? {}
+      : { providerOccurredAt: previous.providerOccurredAt }),
     proof: null,
     reasonCode: RECONCILIATION_REASON_CODE,
     diagnosticDigest: null,

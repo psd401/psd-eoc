@@ -101,6 +101,33 @@ export const PUSH_ENDPOINT_INVALIDATION_SERVICE_ID =
 /** Provider-terminal reason retained without copying the rejected token. */
 export const EXPO_DEVICE_NOT_REGISTERED_REASON =
   'EXPO_DEVICE_NOT_REGISTERED' as const;
+export const APNS_BAD_DEVICE_TOKEN_REASON = 'APNS_BAD_DEVICE_TOKEN' as const;
+export const APNS_UNREGISTERED_REASON = 'APNS_UNREGISTERED' as const;
+export const FCM_INVALID_ARGUMENT_REASON = 'FCM_INVALID_ARGUMENT' as const;
+export const FCM_UNREGISTERED_REASON = 'FCM_UNREGISTERED' as const;
+
+export const PUSH_ENDPOINT_INVALIDATION_REASONS = Object.freeze([
+  EXPO_DEVICE_NOT_REGISTERED_REASON,
+  APNS_BAD_DEVICE_TOKEN_REASON,
+  APNS_UNREGISTERED_REASON,
+  FCM_INVALID_ARGUMENT_REASON,
+  FCM_UNREGISTERED_REASON,
+]);
+
+export function pushInvalidationReasonMatchesProvider(
+  reasonCode: string,
+  provider: string,
+): boolean {
+  return (
+    (provider === 'expo' && reasonCode === EXPO_DEVICE_NOT_REGISTERED_REASON) ||
+    (provider === 'apns' &&
+      (reasonCode === APNS_BAD_DEVICE_TOKEN_REASON ||
+        reasonCode === APNS_UNREGISTERED_REASON)) ||
+    (provider === 'fcm' &&
+      (reasonCode === FCM_INVALID_ARGUMENT_REASON ||
+        reasonCode === FCM_UNREGISTERED_REASON))
+  );
+}
 
 /** Protected runtime allowlist for exact mobile builds permitted to register. */
 export const PUSH_REGISTRATION_BUILD_ALLOWLIST_ENV =
@@ -140,11 +167,21 @@ export function pushRegistrationBuildIsAuthorized(
   input: CapabilityInput<'register-push-token'>,
   allowlist: readonly PushRegistrationBuildAuthorization[],
 ): boolean {
-  return allowlist.some(
-    (entry) =>
-      entry.platform === input.platform &&
-      entry.provider === input.provider &&
-      JSON.stringify(entry.build) === JSON.stringify(input.build),
+  if (input.provider !== 'expo' && input.expoFallbackToken === undefined) {
+    return false;
+  }
+  const requiredProviders =
+    input.expoFallbackToken === undefined
+      ? [input.provider]
+      : [input.provider, 'expo'];
+  return requiredProviders.every((provider) =>
+    allowlist.some(
+      (entry) =>
+        entry.platform === input.platform &&
+        entry.provider === provider &&
+        entry.serviceEnvironment === input.serviceEnvironment &&
+        JSON.stringify(entry.build) === JSON.stringify(input.build),
+    ),
   );
 }
 
@@ -225,6 +262,8 @@ interface PushEndpointSendEligibilityEvidence {
   readonly recipientId: string;
   readonly endpointId: string;
   readonly platform: 'ios' | 'android';
+  readonly provider: 'expo' | 'apns' | 'fcm';
+  readonly serviceEnvironment: 'development' | 'production';
   readonly tokenDigest: string;
   readonly endpointStatus: EndpointStatus;
   readonly effectiveStatus: EndpointStatus;
@@ -247,6 +286,8 @@ function parsePushEndpointSendEligibilityEvidence(
     'recipientId',
     'endpointId',
     'platform',
+    'provider',
+    'serviceEnvironment',
     'tokenDigest',
     'endpointStatus',
     'effectiveStatus',
@@ -263,6 +304,11 @@ function parsePushEndpointSendEligibilityEvidence(
     typeof record.recipientId !== 'string' ||
     typeof record.endpointId !== 'string' ||
     (record.platform !== 'ios' && record.platform !== 'android') ||
+    (record.provider !== 'expo' &&
+      record.provider !== 'apns' &&
+      record.provider !== 'fcm') ||
+    (record.serviceEnvironment !== 'development' &&
+      record.serviceEnvironment !== 'production') ||
     typeof record.tokenDigest !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(record.tokenDigest) ||
     !endpointStatus.success ||
@@ -276,6 +322,8 @@ function parsePushEndpointSendEligibilityEvidence(
     recipientId: record.recipientId,
     endpointId: record.endpointId,
     platform: record.platform,
+    provider: record.provider,
+    serviceEnvironment: record.serviceEnvironment,
     tokenDigest: record.tokenDigest,
     endpointStatus: endpointStatus.data,
     effectiveStatus: effectiveStatus.data,
@@ -309,6 +357,8 @@ export async function checkPushEndpointSendEligibility(
     evidence.recipientId === parsed.data.recipientId &&
     evidence.endpointId === parsed.data.endpointId &&
     evidence.platform === parsed.data.platform &&
+    evidence.provider === parsed.data.provider &&
+    evidence.serviceEnvironment === parsed.data.serviceEnvironment &&
     evidence.tokenDigest === parsed.data.tokenDigest &&
     evidence.endpointStatus === 'active' &&
     evidence.effectiveStatus === 'active'
@@ -434,7 +484,8 @@ function parsePushBatch(value: unknown): DispatchBatch {
   if (
     !parsed.success ||
     parsed.data.channel !== 'push' ||
-    parsed.data.integrationStatus.integrationId !== 'expo-push'
+    (parsed.data.integrationStatus.integrationId !== 'expo-push' &&
+      parsed.data.integrationStatus.integrationId !== 'mobile-push')
   ) {
     throw new PushEndpointResolutionError('PUSH_BATCH_INVALID');
   }
@@ -815,6 +866,8 @@ async function loadDrizzlePushEndpointPolicy(
         devicePushTokenRegistrations.deviceEnrollmentId,
       registrationPlatform: devicePushTokenRegistrations.platform,
       registrationProvider: devicePushTokenRegistrations.provider,
+      registrationServiceEnvironment:
+        devicePushTokenRegistrations.serviceEnvironment,
       registrationApplicationId: devicePushTokenRegistrations.applicationId,
       registrationApplicationVersion:
         devicePushTokenRegistrations.applicationVersion,
@@ -822,9 +875,12 @@ async function loadDrizzlePushEndpointPolicy(
         devicePushTokenRegistrations.nativeBuildVersion,
       registrationExpoProjectId: devicePushTokenRegistrations.expoProjectId,
       registrationUpdateMode: devicePushTokenRegistrations.updateMode,
+      rosterProvider: rosterEndpoints.provider,
       registrationMatchesEndpoint: sql<boolean | null>`case
         when ${devicePushTokenRegistrations.id} is null then null
         else ${devicePushTokenRegistrations.platform}::text = ${rosterEndpoints.platform}::text
+          and ${devicePushTokenRegistrations.provider} = ${rosterEndpoints.provider}
+          and ${devicePushTokenRegistrations.serviceEnvironment} = ${rosterEndpoints.serviceEnvironment}
           and ${devicePushTokenRegistrations.token} = ${rosterEndpoints.token}
       end`,
       unregisteredRegistrationId: devicePushTokenUnregistrations.registrationId,
@@ -889,7 +945,11 @@ async function loadDrizzlePushEndpointPolicy(
       hasRegistration &&
       (endpoint.registrationPlatform === 'ios' ||
         endpoint.registrationPlatform === 'android') &&
-      endpoint.registrationProvider === 'expo' &&
+      (endpoint.registrationProvider === 'expo' ||
+        endpoint.registrationProvider === 'apns' ||
+        endpoint.registrationProvider === 'fcm') &&
+      (endpoint.registrationServiceEnvironment === 'development' ||
+        endpoint.registrationServiceEnvironment === 'production') &&
       endpoint.registrationApplicationId !== null &&
       endpoint.registrationApplicationVersion !== null &&
       endpoint.registrationNativeBuildVersion !== null &&
@@ -899,6 +959,8 @@ async function loadDrizzlePushEndpointPolicy(
         (entry) =>
           entry.platform === endpoint.registrationPlatform &&
           entry.provider === endpoint.registrationProvider &&
+          entry.serviceEnvironment ===
+            endpoint.registrationServiceEnvironment &&
           entry.build.applicationId === endpoint.registrationApplicationId &&
           entry.build.applicationVersion ===
             endpoint.registrationApplicationVersion &&
@@ -935,9 +997,17 @@ async function loadDrizzlePushEndpointPolicy(
     );
   });
   statusRows.forEach((status) => {
+    const endpoint = endpointRows.find(
+      (candidate) => pushCandidateKey(candidate) === pushCandidateKey(status),
+    );
     if (
+      endpoint === undefined ||
       status.status !== 'invalid' ||
-      status.reasonCode !== EXPO_DEVICE_NOT_REGISTERED_REASON ||
+      endpoint.rosterProvider === null ||
+      !pushInvalidationReasonMatchesProvider(
+        status.reasonCode,
+        endpoint.rosterProvider,
+      ) ||
       status.provider !== null ||
       status.providerReference !== null ||
       status.providerOccurredAt !== null
@@ -1004,6 +1074,8 @@ async function loadDrizzlePushEndpointSendEligibility(
       endpointId: rosterEndpoints.id,
       endpointStatus: rosterEndpoints.status,
       platform: rosterEndpoints.platform,
+      provider: rosterEndpoints.provider,
+      serviceEnvironment: rosterEndpoints.serviceEnvironment,
       token: rosterEndpoints.token,
     })
     .from(rosterEndpoints)
@@ -1023,6 +1095,11 @@ async function loadDrizzlePushEndpointSendEligibility(
   const row = rows[0]!;
   if (
     (row.platform !== 'ios' && row.platform !== 'android') ||
+    (row.provider !== 'expo' &&
+      row.provider !== 'apns' &&
+      row.provider !== 'fcm') ||
+    (row.serviceEnvironment !== 'development' &&
+      row.serviceEnvironment !== 'production') ||
     typeof row.token !== 'string'
   ) {
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
@@ -1047,6 +1124,8 @@ async function loadDrizzlePushEndpointSendEligibility(
     recipientId: row.recipientId,
     endpointId: row.endpointId,
     platform: row.platform,
+    provider: row.provider,
+    serviceEnvironment: row.serviceEnvironment,
     tokenDigest: createHash('sha256').update(row.token, 'utf8').digest('hex'),
     endpointStatus: EndpointStatusSchema.parse(row.endpointStatus),
     effectiveStatus: policy[0]!.status,
@@ -1170,7 +1249,9 @@ function requirePushInvalidationWorker(
   requirePushInvalidationWorkerInvocation(context);
   if (
     input.status !== 'invalid' ||
-    input.reasonCode !== EXPO_DEVICE_NOT_REGISTERED_REASON
+    !PUSH_ENDPOINT_INVALIDATION_REASONS.includes(
+      input.reasonCode as (typeof PUSH_ENDPOINT_INVALIDATION_REASONS)[number],
+    )
   ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',
@@ -1182,7 +1263,7 @@ function requirePushInvalidationWorker(
 }
 
 function registrationReference(output: PushTokenRegistrationReceipt): string {
-  return `push-registration:${output.deviceEnrollmentId}:${output.platform}`;
+  return `push-registration:${output.deviceEnrollmentId}:${output.platform}:${output.provider}:${output.serviceEnvironment}`;
 }
 
 function unregistrationReference(
@@ -1443,6 +1524,7 @@ interface ActivePushRegistration {
   readonly token: string;
   readonly registeredAt: Date | string;
   readonly provider: string;
+  readonly serviceEnvironment: string;
   readonly applicationId: string | null;
   readonly applicationVersion: string | null;
   readonly nativeBuildVersion: string | null;
@@ -1453,16 +1535,19 @@ interface ActivePushRegistration {
 const MAX_ACTIVE_PUSH_REGISTRATIONS_PER_DEVICE = 100;
 const PUSH_TOKEN_ADVISORY_LOCK_NAMESPACE = 12_012;
 
-function pushTokenLockDigest(token: string): string {
-  return createHash('sha256').update(token, 'utf8').digest('hex');
+function pushTokenLockDigest(provider: string, token: string): string {
+  return createHash('sha256')
+    .update(`${provider}\u0000${token}`, 'utf8')
+    .digest('hex');
 }
 
 /** Serializes one opaque token without exposing token material to lock telemetry. */
 async function lockPushToken(
   database: DeviceQueryDatabase,
+  provider: string,
   token: string,
 ): Promise<void> {
-  const digest = pushTokenLockDigest(token);
+  const digest = pushTokenLockDigest(provider, token);
   await database.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${digest}, ${PUSH_TOKEN_ADVISORY_LOCK_NAMESPACE}))`,
   );
@@ -1471,6 +1556,7 @@ async function lockPushToken(
 async function assertPushTokenAvailableForDevice(
   database: DeviceQueryDatabase,
   deviceEnrollmentId: string,
+  provider: string,
   token: string,
 ): Promise<void> {
   const [conflicting] = await database
@@ -1486,6 +1572,7 @@ async function assertPushTokenAvailableForDevice(
     .where(
       and(
         eq(devicePushTokenRegistrations.token, token),
+        eq(devicePushTokenRegistrations.provider, provider),
         ne(devicePushTokenRegistrations.deviceEnrollmentId, deviceEnrollmentId),
         isNull(devicePushTokenUnregistrations.id),
       ),
@@ -1501,11 +1588,13 @@ async function assertPushTokenAvailableForDevice(
 async function assertPushTokenRegistrationAllowed(
   database: DeviceQueryDatabase,
   deviceEnrollmentId: string,
+  provider: string,
   token: string,
   registeredAt: Date,
 ): Promise<PushTokenFailureCutoff | null> {
   const failure = await latestPushTokenFailureCutoff(
     database,
+    provider,
     token,
     registeredAt,
   );
@@ -1532,9 +1621,42 @@ interface PushTokenFailureCutoff {
 
 async function latestPushTokenFailureCutoff(
   database: DeviceQueryDatabase,
+  registrationProvider: string,
   token: string,
   observedThrough: Date,
 ): Promise<PushTokenFailureCutoff | null> {
+  const providerFailurePredicate =
+    registrationProvider === 'expo'
+      ? and(
+          eq(deliveryEvidence.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
+          or(
+            and(
+              eq(channelAttempts.rosterPopulation, 'staff'),
+              eq(deliveryEvidence.provider, 'expo-push'),
+            ),
+            and(
+              eq(channelAttempts.rosterPopulation, 'synthetic'),
+              eq(deliveryEvidence.provider, 'mock-expo-push'),
+            ),
+          ),
+        )
+      : registrationProvider === 'apns'
+        ? and(
+            inArray(deliveryEvidence.reasonCode, [
+              APNS_BAD_DEVICE_TOKEN_REASON,
+              APNS_UNREGISTERED_REASON,
+            ]),
+            eq(deliveryEvidence.provider, 'apns-direct'),
+          )
+        : registrationProvider === 'fcm'
+          ? and(
+              inArray(deliveryEvidence.reasonCode, [
+                FCM_INVALID_ARGUMENT_REASON,
+                FCM_UNREGISTERED_REASON,
+              ]),
+              eq(deliveryEvidence.provider, 'fcm-direct'),
+            )
+          : sql`false`;
   const [failure] = await database
     .select({
       attemptedAt: channelAttempts.attemptedAt,
@@ -1572,18 +1694,8 @@ async function latestPushTokenFailureCutoff(
         eq(channelAttempts.channel, 'push'),
         eq(rosterEndpoints.token, token),
         eq(deliveryEvidence.state, 'failed'),
-        eq(deliveryEvidence.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
         lte(deliveryEvidence.recordedAt, observedThrough),
-        or(
-          and(
-            eq(channelAttempts.rosterPopulation, 'staff'),
-            eq(deliveryEvidence.provider, 'expo-push'),
-          ),
-          and(
-            eq(channelAttempts.rosterPopulation, 'synthetic'),
-            eq(deliveryEvidence.provider, 'mock-expo-push'),
-          ),
-        ),
+        providerFailurePredicate,
       ),
     )
     .orderBy(
@@ -1661,6 +1773,7 @@ async function appendPushTokenUnregistrationFacts(
 
 async function appendActivePushTokenUnregistrations(
   database: DeviceQueryDatabase,
+  provider: string,
   token: string,
   invalidThrough: Date,
   originDeviceEnrollmentId: string | null,
@@ -1683,6 +1796,7 @@ async function appendActivePushTokenUnregistrations(
     .where(
       and(
         eq(devicePushTokenRegistrations.token, token),
+        eq(devicePushTokenRegistrations.provider, provider),
         isNull(devicePushTokenUnregistrations.id),
       ),
     )
@@ -1720,20 +1834,28 @@ async function appendActivePushTokenUnregistrations(
  * Callers serialize this plan with the device-enrollment row lock.
  */
 export function planPushTokenRegistration(
-  activeRegistrations: readonly Readonly<{ id: string; token: string }>[],
+  activeRegistrations: readonly Readonly<{
+    id: string;
+    provider: string;
+    token: string;
+  }>[],
   requestedToken: string,
+  requestedProvider: 'expo' | 'apns' | 'fcm',
 ): Readonly<{
   keepRegistrationId: string | null;
   registrationRequired: boolean;
   unregisterRegistrationIds: readonly string[];
 }> {
-  const matching = activeRegistrations.find(
+  const providerRegistrations = activeRegistrations.filter(
+    (registration) => registration.provider === requestedProvider,
+  );
+  const matching = providerRegistrations.find(
     (registration) => registration.token === requestedToken,
   );
   return Object.freeze({
     keepRegistrationId: matching?.id ?? null,
     registrationRequired: matching === undefined,
-    unregisterRegistrationIds: activeRegistrations
+    unregisterRegistrationIds: providerRegistrations
       .filter((registration) => registration.id !== matching?.id)
       .map((registration) => registration.id),
   });
@@ -1749,6 +1871,7 @@ async function activePushRegistrations(
       token: devicePushTokenRegistrations.token,
       registeredAt: devicePushTokenRegistrations.registeredAt,
       provider: devicePushTokenRegistrations.provider,
+      serviceEnvironment: devicePushTokenRegistrations.serviceEnvironment,
       applicationId: devicePushTokenRegistrations.applicationId,
       applicationVersion: devicePushTokenRegistrations.applicationVersion,
       nativeBuildVersion: devicePushTokenRegistrations.nativeBuildVersion,
@@ -1798,7 +1921,7 @@ async function appendPushUnregistrations(
   );
 }
 
-async function registerPushTokenWithDatabase(
+async function registerOnePushTokenWithDatabase(
   database: DeviceQueryDatabase,
   input: CapabilityInput<'register-push-token'>,
   actor: Extract<Actor, { kind: 'human' }>,
@@ -1810,22 +1933,28 @@ async function registerPushTokenWithDatabase(
     actor,
     input.platform,
   );
-  await lockPushToken(database, input.token);
+  await lockPushToken(database, input.provider, input.token);
   const priorFailure = await assertPushTokenRegistrationAllowed(
     database,
     device.id,
+    input.provider,
     input.token,
     registeredAt,
   );
-  await assertPushTokenAvailableForDevice(database, device.id, input.token);
+  await assertPushTokenAvailableForDevice(
+    database,
+    device.id,
+    input.provider,
+    input.token,
+  );
   const active = await activePushRegistrations(database, device.id);
-  const plan = planPushTokenRegistration(active, input.token);
+  const plan = planPushTokenRegistration(active, input.token, input.provider);
   const keptRegistration = active.find(
     (registration) => registration.id === plan.keepRegistrationId,
   );
   const rotateDifferentBuild =
     keptRegistration !== undefined &&
-    (keptRegistration.provider !== input.provider ||
+    (keptRegistration.serviceEnvironment !== input.serviceEnvironment ||
       keptRegistration.applicationId !== input.build.applicationId ||
       keptRegistration.applicationVersion !== input.build.applicationVersion ||
       keptRegistration.nativeBuildVersion !== input.build.nativeBuildVersion ||
@@ -1859,6 +1988,9 @@ async function registerPushTokenWithDatabase(
         deviceEnrollmentId: device.id,
         platform: device.platform,
         provider: input.provider,
+        serviceEnvironment: input.serviceEnvironment,
+        supersedesRegistrationId:
+          plan.keepRegistrationId ?? plan.unregisterRegistrationIds[0] ?? null,
         applicationId: input.build.applicationId,
         applicationVersion: input.build.applicationVersion,
         nativeBuildVersion: input.build.nativeBuildVersion,
@@ -1871,6 +2003,7 @@ async function registerPushTokenWithDatabase(
         deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
         platform: devicePushTokenRegistrations.platform,
         provider: devicePushTokenRegistrations.provider,
+        serviceEnvironment: devicePushTokenRegistrations.serviceEnvironment,
         applicationId: devicePushTokenRegistrations.applicationId,
         applicationVersion: devicePushTokenRegistrations.applicationVersion,
         nativeBuildVersion: devicePushTokenRegistrations.nativeBuildVersion,
@@ -1883,6 +2016,7 @@ async function registerPushTokenWithDatabase(
       inserted.deviceEnrollmentId !== device.id ||
       inserted.platform !== device.platform ||
       inserted.provider !== input.provider ||
+      inserted.serviceEnvironment !== input.serviceEnvironment ||
       inserted.applicationId !== input.build.applicationId ||
       inserted.applicationVersion !== input.build.applicationVersion ||
       inserted.nativeBuildVersion !== input.build.nativeBuildVersion ||
@@ -1898,8 +2032,49 @@ async function registerPushTokenWithDatabase(
   return PushTokenRegistrationReceiptSchema.parse({
     deviceEnrollmentId: device.id,
     platform: device.platform,
+    provider: input.provider,
+    serviceEnvironment: input.serviceEnvironment,
     status: 'registered',
   });
+}
+
+/** Rotates the Expo fallback and native provider as one capability transaction. */
+async function registerPushTokenWithDatabase(
+  database: DeviceQueryDatabase,
+  input: CapabilityInput<'register-push-token'>,
+  actor: Extract<Actor, { kind: 'human' }>,
+  registeredAt: Date,
+): Promise<PushTokenRegistrationReceipt> {
+  const { expoFallbackToken, ...directInput } = input;
+  if (expoFallbackToken === undefined) {
+    if (directInput.provider !== 'expo') {
+      throw deviceConflict(
+        'A direct push registration requires its atomic Expo fallback.',
+      );
+    }
+    return registerOnePushTokenWithDatabase(
+      database,
+      directInput,
+      actor,
+      registeredAt,
+    );
+  }
+  await registerOnePushTokenWithDatabase(
+    database,
+    {
+      ...directInput,
+      provider: 'expo',
+      token: expoFallbackToken,
+    },
+    actor,
+    registeredAt,
+  );
+  return registerOnePushTokenWithDatabase(
+    database,
+    directInput,
+    actor,
+    registeredAt,
+  );
 }
 
 async function unregisterPushTokenWithDatabase(
@@ -1984,15 +2159,43 @@ function endpointStatusFromRow(
   });
 }
 
-async function requireDeviceNotRegisteredAttempt(
+async function requirePushEndpointInvalidationAttempt(
   database: DeviceQueryDatabase,
   input: CapabilityInput<'record-endpoint-status'>,
+  registrationProvider: string,
   recordedAt: Date,
 ): Promise<PushTokenFailureCutoff> {
+  if (
+    !pushInvalidationReasonMatchesProvider(
+      input.reasonCode,
+      registrationProvider,
+    )
+  ) {
+    throw deviceConflict(
+      'Endpoint invalidation reason does not match its retained provider.',
+    );
+  }
+  const deliveryProviderPredicate =
+    registrationProvider === 'expo'
+      ? or(
+          and(
+            eq(channelAttempts.rosterPopulation, 'staff'),
+            eq(deliveryEvidence.provider, 'expo-push'),
+          ),
+          and(
+            eq(channelAttempts.rosterPopulation, 'synthetic'),
+            eq(deliveryEvidence.provider, 'mock-expo-push'),
+          ),
+        )
+      : eq(
+          deliveryEvidence.provider,
+          registrationProvider === 'apns' ? 'apns-direct' : 'fcm-direct',
+        );
   const [evidence] = await database
     .select({
       attemptedAt: channelAttempts.attemptedAt,
       evidenceRecordedAt: deliveryEvidence.recordedAt,
+      providerOccurredAt: deliveryEvidence.providerOccurredAt,
       deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
     })
     .from(channelAttempts)
@@ -2015,17 +2218,8 @@ async function requireDeviceNotRegisteredAttempt(
         eq(channelAttempts.endpointId, input.endpointId),
         eq(channelAttempts.channel, 'push'),
         eq(deliveryEvidence.state, 'failed'),
-        or(
-          and(
-            eq(channelAttempts.rosterPopulation, 'staff'),
-            eq(deliveryEvidence.provider, 'expo-push'),
-          ),
-          and(
-            eq(channelAttempts.rosterPopulation, 'synthetic'),
-            eq(deliveryEvidence.provider, 'mock-expo-push'),
-          ),
-        ),
-        eq(deliveryEvidence.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
+        deliveryProviderPredicate,
+        eq(deliveryEvidence.reasonCode, input.reasonCode),
         lte(deliveryEvidence.recordedAt, recordedAt),
       ),
     )
@@ -2042,6 +2236,10 @@ async function requireDeviceNotRegisteredAttempt(
   }
   const attemptedAt = new Date(evidence.attemptedAt);
   const evidenceRecordedAt = new Date(evidence.evidenceRecordedAt);
+  const providerOccurredAt =
+    evidence.providerOccurredAt === null
+      ? null
+      : new Date(evidence.providerOccurredAt);
   if (
     !Number.isFinite(attemptedAt.getTime()) ||
     !Number.isFinite(evidenceRecordedAt.getTime()) ||
@@ -2052,8 +2250,25 @@ async function requireDeviceNotRegisteredAttempt(
       'Endpoint invalidation provider evidence has inconsistent time.',
     );
   }
+  if (input.reasonCode === 'APNS_UNREGISTERED') {
+    if (
+      input.providerOccurredAt === undefined ||
+      providerOccurredAt === null ||
+      !Number.isFinite(providerOccurredAt.getTime()) ||
+      providerOccurredAt.toISOString() !== input.providerOccurredAt ||
+      providerOccurredAt.getTime() > evidenceRecordedAt.getTime() + 300_000
+    ) {
+      throw deviceConflict(
+        'APNs invalidation requires matching provider occurrence evidence.',
+      );
+    }
+  } else if (providerOccurredAt !== null) {
+    throw deviceConflict(
+      'Endpoint invalidation provider occurrence evidence is inconsistent.',
+    );
+  }
   return Object.freeze({
-    attemptedAt,
+    attemptedAt: providerOccurredAt ?? attemptedAt,
     deviceEnrollmentId: evidence.deviceEnrollmentId,
   });
 }
@@ -2080,6 +2295,8 @@ async function recordEndpointStatusWithDatabase(
   if (
     endpoint.channel !== 'push' ||
     endpoint.platform === null ||
+    endpoint.provider === null ||
+    endpoint.serviceEnvironment === null ||
     endpoint.token === null
   ) {
     throw deviceConflict('The endpoint is not a push registration.');
@@ -2093,6 +2310,8 @@ async function recordEndpointStatusWithDatabase(
   if (registration !== undefined) {
     if (
       registration.platform !== endpoint.platform ||
+      registration.provider !== endpoint.provider ||
+      registration.serviceEnvironment !== endpoint.serviceEnvironment ||
       registration.token !== endpoint.token
     ) {
       throw deviceConflict(
@@ -2101,14 +2320,16 @@ async function recordEndpointStatusWithDatabase(
     }
   }
 
-  await lockPushToken(database, endpoint.token);
-  const failure = await requireDeviceNotRegisteredAttempt(
+  await lockPushToken(database, endpoint.provider, endpoint.token);
+  const failure = await requirePushEndpointInvalidationAttempt(
     database,
     input,
+    endpoint.provider,
     recordedAt,
   );
   await appendActivePushTokenUnregistrations(
     database,
+    endpoint.provider,
     endpoint.token,
     failure.attemptedAt,
     failure.deviceEnrollmentId,
@@ -2156,15 +2377,26 @@ async function recordEndpointStatusWithDatabase(
 function parseRegistrationReference(reference: string): {
   readonly deviceEnrollmentId: string;
   readonly platform: NativePlatform;
+  readonly provider: 'expo' | 'apns' | 'fcm';
+  readonly serviceEnvironment: 'development' | 'production';
 } | null {
   const match =
-    /^push-registration:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):(ios|android)$/u.exec(
+    /^push-registration:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):(ios|android):(expo|apns|fcm):(development|production)$/u.exec(
       reference,
     );
-  if (match?.[1] === undefined || match[2] === undefined) return null;
+  if (
+    match?.[1] === undefined ||
+    match[2] === undefined ||
+    match[3] === undefined ||
+    match[4] === undefined
+  ) {
+    return null;
+  }
   return {
     deviceEnrollmentId: match[1],
     platform: match[2] as NativePlatform,
+    provider: match[3] as 'expo' | 'apns' | 'fcm',
+    serviceEnvironment: match[4] as 'development' | 'production',
   };
 }
 
@@ -2202,6 +2434,8 @@ async function loadPushTokenRegistrationReplayFromDatabase(
   return PushTokenRegistrationReceiptSchema.parse({
     deviceEnrollmentId: device.id,
     platform: device.platform,
+    provider: parsed.provider,
+    serviceEnvironment: parsed.serviceEnvironment,
     status: 'registered',
   });
 }

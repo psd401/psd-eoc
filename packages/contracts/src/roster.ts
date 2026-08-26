@@ -86,6 +86,48 @@ export const PushPlatformSchema = z.enum(['ios', 'android']);
 /** Native push platform inferred from its schema. */
 export type PushPlatform = z.infer<typeof PushPlatformSchema>;
 
+/** Closed provider vocabulary for retained native push registrations. */
+export const PushProviderSchema = z.enum(['expo', 'apns', 'fcm']);
+
+/** Push provider inferred from {@link PushProviderSchema}. */
+export type PushProvider = z.infer<typeof PushProviderSchema>;
+
+/** Provider service environment captured with an immutable registration. */
+export const PushServiceEnvironmentSchema = z.enum([
+  'development',
+  'production',
+]);
+
+/** Provider service environment inferred from its schema. */
+export type PushServiceEnvironment = z.infer<
+  typeof PushServiceEnvironmentSchema
+>;
+
+/** Protected tenant decision selecting one delivery provider per platform. */
+export const PushProviderCutoverSchema = z
+  .object({
+    version: z.literal(1),
+    ios: z.enum(['expo', 'direct']),
+    android: z.enum(['expo', 'direct']),
+  })
+  .strict()
+  .readonly();
+
+/** Tenant push-provider cutover inferred from its canonical schema. */
+export type PushProviderCutover = z.infer<typeof PushProviderCutoverSchema>;
+
+/** APNs is iOS-only and FCM is Android-only; Expo remains a fallback on both. */
+export function pushProviderMatchesPlatform(
+  provider: PushProvider,
+  platform: PushPlatform,
+): boolean {
+  return (
+    provider === 'expo' ||
+    (provider === 'apns' && platform === 'ios') ||
+    (provider === 'fcm' && platform === 'android')
+  );
+}
+
 const endpointCommonShape = {
   id: EndpointIdSchema,
   status: EndpointStatusSchema,
@@ -101,9 +143,20 @@ export const PushEndpointSchema = z
     ...endpointCommonShape,
     channel: z.literal('push'),
     platform: PushPlatformSchema,
+    provider: PushProviderSchema,
+    serviceEnvironment: PushServiceEnvironmentSchema,
     token: z.string().trim().min(16).max(4096),
   })
   .strict()
+  .superRefine((endpoint, context) => {
+    if (!pushProviderMatchesPlatform(endpoint.provider, endpoint.platform)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Push provider is incompatible with the native platform.',
+        path: ['provider'],
+      });
+    }
+  })
   .readonly();
 
 /** Immutable push endpoint snapshot inferred from its schema. */

@@ -1896,7 +1896,7 @@ async function listEventRecordsFromDatabase(
 }
 
 const INTEGRATION_BY_CHANNEL = Object.freeze({
-  push: 'expo-push',
+  push: 'mobile-push',
   email: 'ses-email',
   sms: 'aws-eum-sms',
 });

@@ -73,6 +73,10 @@ import {
   MobilePushReceivePayloadSchema,
   PushEndpointSendEligibilityInputSchema,
   PushEndpointSendEligibilityResultSchema,
+  PushProviderCutoverSchema,
+  PushRegistrationBuildAuthorizationSchema,
+  PushTokenRegistrationReceiptSchema,
+  RegisterPushTokenInputSchema,
   NotificationIntentSchema,
   NotificationOutboxMessageSchema,
   NotificationStatusSchema,
@@ -1288,6 +1292,12 @@ describe('event type, targeting, and activation contracts', () => {
     ).toBe(false);
     expect(
       IntegrationStatusSchema.safeParse({
+        ...integrationStatus('push', 'staff'),
+        authorizationReference: 'v1/legacy proof',
+      }).success,
+    ).toBe(true);
+    expect(
+      IntegrationStatusSchema.safeParse({
         ...integrationStatus('push', 'synthetic'),
         verifiedAt: times.created,
       }).success,
@@ -1591,6 +1601,33 @@ describe('event type, targeting, and activation contracts', () => {
         authorization,
       }).success,
     ).toBe(false);
+    const directVerification = {
+      integrationId: 'mobile-push',
+      enabled: true,
+      authorization: null,
+      verificationReference: 'issue-43-direct-push-proof-001',
+    } as const;
+    expect(
+      SetChannelEnabledInputSchema.safeParse(directVerification).success,
+    ).toBe(true);
+    for (const invalid of [
+      { ...directVerification, integrationId: 'expo-push' },
+      { ...directVerification, enabled: false },
+      { ...directVerification, authorization },
+      {
+        ...directVerification,
+        verificationReference: 'recipient@example.invalid',
+      },
+      { ...directVerification, verificationReference: 'UNVERIFIED' },
+      {
+        ...directVerification,
+        verificationReference: 'issue-43/direct-push-proof-001',
+      },
+    ]) {
+      expect(SetChannelEnabledInputSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+    }
   });
 });
 
@@ -2948,6 +2985,20 @@ describe('human-only capability boundary', () => {
     expect(RecordEndpointStatusInputSchema.parse(nonProviderStatus)).toEqual(
       nonProviderStatus,
     );
+    const apnsUnregistered = {
+      ...nonProviderStatus,
+      reasonCode: 'APNS_UNREGISTERED',
+      providerOccurredAt: '2026-08-11T18:00:00.000Z',
+    } as const;
+    expect(RecordEndpointStatusInputSchema.parse(apnsUnregistered)).toEqual(
+      apnsUnregistered,
+    );
+    expect(
+      RecordEndpointStatusInputSchema.safeParse({
+        ...apnsUnregistered,
+        providerOccurredAt: undefined,
+      }).success,
+    ).toBe(false);
     expect(
       RecordEndpointStatusInputSchema.safeParse({
         ...nonProviderStatus,
@@ -3354,6 +3405,36 @@ describe('notification delivery truth', () => {
         state: 'accepted',
       }).success,
     ).toBe(false);
+    const apnsUnregistered = {
+      ...commonEvidence,
+      subject: attemptSubject,
+      state: 'failed',
+      provider: 'apns-direct',
+      reasonCode: 'APNS_UNREGISTERED',
+      providerOccurredAt: times.activated,
+    } as const;
+    expect(DeliveryEvidenceSchema.safeParse(apnsUnregistered).success).toBe(
+      true,
+    );
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...apnsUnregistered,
+        provider: null,
+        providerOccurredAt: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...apnsUnregistered,
+        provider: 'fcm-direct',
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...apnsUnregistered,
+        providerOccurredAt: undefined,
+      }).success,
+    ).toBe(false);
   });
 
   test('allows only monotonic evidence transitions, including late truth', () => {
@@ -3438,6 +3519,8 @@ describe('notification and outbox classification continuity', () => {
       recipientId: ids.recipient,
       endpointId: ids.endpoint,
       platform: 'ios',
+      provider: 'apns',
+      serviceEnvironment: 'production',
       tokenDigest: 'a'.repeat(64),
     } as const;
 
@@ -3451,6 +3534,12 @@ describe('notification and outbox classification continuity', () => {
     expect(
       PushEndpointSendEligibilityInputSchema.safeParse({ ...input, token: 'x' })
         .success,
+    ).toBe(false);
+    expect(
+      PushEndpointSendEligibilityInputSchema.safeParse({
+        ...input,
+        provider: 'fcm',
+      }).success,
     ).toBe(false);
     expect(
       PushEndpointSendEligibilityResultSchema.safeParse({
@@ -3740,6 +3829,68 @@ describe('notification and outbox classification continuity', () => {
 });
 
 describe('roster, facility, and identity boundaries', () => {
+  test('binds dual push registrations to provider, environment, and platform without token receipts', () => {
+    const build = {
+      applicationId: 'example.synthetic.eoc',
+      applicationVersion: '1.0.4',
+      nativeBuildVersion: '7',
+      expoProjectId: '00000000-0000-4000-8000-000000000099',
+      updateMode: 'embedded-only',
+    } as const;
+    const apns = {
+      deviceEnrollmentId: ids.device,
+      platform: 'ios',
+      provider: 'apns',
+      serviceEnvironment: 'development',
+      build,
+      token: 'synthetic-apns-token-material',
+      expoFallbackToken: 'ExponentPushToken[synthetic-fallback-token]',
+    } as const;
+    expect(RegisterPushTokenInputSchema.safeParse(apns).success).toBe(true);
+    expect(
+      RegisterPushTokenInputSchema.safeParse({
+        ...apns,
+        expoFallbackToken: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      RegisterPushTokenInputSchema.safeParse({
+        ...apns,
+        platform: 'android',
+      }).success,
+    ).toBe(false);
+    expect(
+      RegisterPushTokenInputSchema.safeParse({
+        ...apns,
+        provider: 'expo',
+      }).success,
+    ).toBe(false);
+    expect(
+      PushRegistrationBuildAuthorizationSchema.safeParse({
+        platform: 'android',
+        provider: 'fcm',
+        serviceEnvironment: 'production',
+        build,
+      }).success,
+    ).toBe(true);
+    expect(
+      PushProviderCutoverSchema.safeParse({
+        version: 1,
+        ios: 'direct',
+        android: 'expo',
+      }).success,
+    ).toBe(true);
+    const receipt = PushTokenRegistrationReceiptSchema.parse({
+      deviceEnrollmentId: ids.device,
+      platform: 'ios',
+      provider: 'apns',
+      serviceEnvironment: 'development',
+      status: 'registered',
+    });
+    expect(JSON.stringify(receipt)).not.toContain(apns.token);
+    expect(JSON.stringify(receipt)).not.toContain(apns.expoFallbackToken);
+  });
+
   test('keeps organization identity display-safe and byte-bounded', () => {
     expect(Contracts.OrganizationNameSchema.parse('  Example District  ')).toBe(
       'Example District',
@@ -3819,6 +3970,8 @@ describe('roster, facility, and identity boundaries', () => {
             channel: 'push',
             status: 'active',
             platform: 'ios',
+            provider: 'expo',
+            serviceEnvironment: 'production',
             token: 'synthetic-unroutable:device-one',
             capturedAt: times.created,
           },

@@ -1,5 +1,7 @@
 import { fileURLToPath } from 'node:url';
 
+import { INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE } from '@psd-eoc/contracts';
+
 import {
   Arn,
   ArnFormat,
@@ -187,6 +189,33 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    const enableDirectPush = new CfnParameter(this, 'EnableDirectPush', {
+      allowedValues: ['false', 'true'],
+      default: 'false',
+      description:
+        'Authorize direct APNs and FCM provider I/O only after isolated credentials and retained verification evidence exist.',
+      type: 'String',
+    });
+    const directPushCredentialVerificationReference = new CfnParameter(
+      this,
+      'DirectPushCredentialVerificationReference',
+      {
+        allowedPattern: `^(UNVERIFIED|${INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE})$`,
+        default: 'UNVERIFIED',
+        description:
+          'Token-free reference to retained direct APNs and FCM credential verification evidence.',
+        maxLength: 255,
+        type: 'String',
+      },
+    );
+    const pushProviderCutover = new CfnParameter(this, 'PushProviderCutover', {
+      allowedPattern:
+        '^\\{"version":1,"ios":"(expo|direct)","android":"(expo|direct)"\\}$',
+      default: '{"version":1,"ios":"expo","android":"expo"}',
+      description:
+        'Protected exact per-platform provider selection. Changing it affects only newly snapshotted push endpoints.',
+      type: 'String',
+    });
     const bootstrapImageDigest = new CfnParameter(
       this,
       'BootstrapImageDigest',
@@ -333,6 +362,13 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldAuthorizeDirectPush = new CfnCondition(
+      this,
+      'ShouldAuthorizeDirectPush',
+      {
+        expression: Fn.conditionEquals(enableDirectPush.valueAsString, 'true'),
+      },
+    );
     new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
       assertions: [
         {
@@ -358,6 +394,54 @@ export class PsdEocStack extends Stack {
       ruleCondition: Fn.conditionEquals(
         enableExpoPushWorker.valueAsString,
         'true',
+      ),
+    });
+    new CfnRule(this, 'DirectPushRequiresWorkerAndEvidence', {
+      assertions: [
+        {
+          assert: Fn.conditionAnd(
+            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
+            Fn.conditionEquals(enableExpoPushWorker.valueAsString, 'true'),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                directPushCredentialVerificationReference.valueAsString,
+                'UNVERIFIED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                appImageDigest.valueAsString,
+                IMAGE_DIGEST_SENTINEL,
+              ),
+            ),
+          ),
+          assertDescription:
+            'EnableDirectPush=true requires the live push worker, a reviewed image digest, and retained direct-provider credential evidence.',
+        },
+      ],
+      ruleCondition: Fn.conditionEquals(enableDirectPush.valueAsString, 'true'),
+    });
+    new CfnRule(this, 'DirectCutoverRequiresDirectPush', {
+      assertions: [
+        {
+          assert: Fn.conditionEquals(enableDirectPush.valueAsString, 'true'),
+          assertDescription:
+            'Any direct platform cutover requires EnableDirectPush=true.',
+        },
+      ],
+      ruleCondition: Fn.conditionOr(
+        Fn.conditionEquals(
+          pushProviderCutover.valueAsString,
+          '{"version":1,"ios":"direct","android":"expo"}',
+        ),
+        Fn.conditionEquals(
+          pushProviderCutover.valueAsString,
+          '{"version":1,"ios":"expo","android":"direct"}',
+        ),
+        Fn.conditionEquals(
+          pushProviderCutover.valueAsString,
+          '{"version":1,"ios":"direct","android":"direct"}',
+        ),
       ),
     });
     new CfnRule(this, 'ApplicationRequiresPublishedDigest', {
@@ -622,6 +706,49 @@ export class PsdEocStack extends Stack {
         },
         removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/providers/expo-access-token`,
+      },
+    );
+    const apnsDirectCredentialSecret = new secretsmanager.Secret(
+      this,
+      'ApnsDirectCredentialSecret',
+      {
+        description:
+          'Direct APNs provider identity. Replace every generated placeholder field through Secrets Manager before direct push is enabled.',
+        generateSecretString: {
+          excludePunctuation: true,
+          generateStringKey: 'privateKey',
+          passwordLength: 128,
+          secretStringTemplate: JSON.stringify({
+            environment: 'production',
+            keyId: 'UNCONFIGURED',
+            status: 'UNCONFIGURED',
+            teamId: 'UNCONFIGURED',
+            topic: 'UNCONFIGURED',
+          }),
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/providers/apns-direct`,
+      },
+    );
+    const fcmDirectCredentialSecret = new secretsmanager.Secret(
+      this,
+      'FcmDirectCredentialSecret',
+      {
+        description:
+          'Direct FCM HTTP v1 sender identity. Replace every generated placeholder field through Secrets Manager before direct push is enabled.',
+        generateSecretString: {
+          excludePunctuation: true,
+          generateStringKey: 'privateKey',
+          passwordLength: 128,
+          secretStringTemplate: JSON.stringify({
+            clientEmail: 'UNCONFIGURED',
+            environment: 'production',
+            projectId: 'UNCONFIGURED',
+            status: 'UNCONFIGURED',
+          }),
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/providers/fcm-direct`,
       },
     );
     const pushRegistrationBuildAllowlistSecret = new secretsmanager.Secret(
@@ -1221,7 +1348,7 @@ export class PsdEocStack extends Stack {
       {
         allowAllOutbound: false,
         description:
-          'HTTPS-only egress for the isolated Expo push worker; no database route.',
+          'HTTPS-only egress for the isolated mobile push worker; no database route.',
         securityGroupName: 'psd-eoc-push-worker',
         vpc: network as unknown as ec2.IVpc,
       },
@@ -1237,13 +1364,13 @@ export class PsdEocStack extends Stack {
       {
         assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
         description:
-          'Pulls the reviewed image and injects only Expo push worker credentials.',
+          'Pulls the reviewed image and injects only mobile push worker credentials.',
       },
     );
     const pushWorkerTaskRole = new iam.Role(this, 'PushWorkerTaskRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       description:
-        'Consumes and retries only the Expo push queue; provider access uses the protected HTTPS token.',
+        'Consumes and retries only the mobile push queue; provider access uses protected runtime credentials.',
     });
     const pushWorkerTaskDefinition = new ecs.FargateTaskDefinition(
       this,
@@ -1280,7 +1407,16 @@ export class PsdEocStack extends Stack {
             'enabled',
             'dark',
           ).toString(),
+          PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE:
+            directPushCredentialVerificationReference.valueAsString,
+          PSD_EOC_DIRECT_PUSH_PROVIDER_AUTHORIZED: Fn.conditionIf(
+            shouldAuthorizeDirectPush.logicalId,
+            'true',
+            'false',
+          ).toString(),
+          PSD_EOC_PUSH_PROVIDER_CUTOVER: pushProviderCutover.valueAsString,
           PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
+          PSD_EOC_IOS_BUNDLE_ID: deploymentIdentity.iosBundleId,
           PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
           SOURCE_SHA: sourceSha.valueAsString,
           TMPDIR: '/tmp',
@@ -1299,6 +1435,30 @@ export class PsdEocStack extends Stack {
         }),
         readonlyRootFilesystem: true,
         secrets: {
+          APNS_CREDENTIAL_STATUS: ecs.Secret.fromSecretsManager(
+            apnsDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'status',
+          ),
+          APNS_ENVIRONMENT: ecs.Secret.fromSecretsManager(
+            apnsDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'environment',
+          ),
+          APNS_KEY_ID: ecs.Secret.fromSecretsManager(
+            apnsDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'keyId',
+          ),
+          APNS_PRIVATE_KEY: ecs.Secret.fromSecretsManager(
+            apnsDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'privateKey',
+          ),
+          APNS_TEAM_ID: ecs.Secret.fromSecretsManager(
+            apnsDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'teamId',
+          ),
+          APNS_TOPIC: ecs.Secret.fromSecretsManager(
+            apnsDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'topic',
+          ),
           EXPO_ACCESS_TOKEN: ecs.Secret.fromSecretsManager(
             expoAccessTokenSecret as unknown as secretsmanager.ISecret,
             'accessToken',
@@ -1319,6 +1479,26 @@ export class PsdEocStack extends Stack {
           PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
             pushEndpointWorkerSecret as unknown as secretsmanager.ISecret,
           ),
+          FCM_CLIENT_EMAIL: ecs.Secret.fromSecretsManager(
+            fcmDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'clientEmail',
+          ),
+          FCM_CREDENTIAL_STATUS: ecs.Secret.fromSecretsManager(
+            fcmDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'status',
+          ),
+          FCM_ENVIRONMENT: ecs.Secret.fromSecretsManager(
+            fcmDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'environment',
+          ),
+          FCM_PRIVATE_KEY: ecs.Secret.fromSecretsManager(
+            fcmDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'privateKey',
+          ),
+          FCM_PROJECT_ID: ecs.Secret.fromSecretsManager(
+            fcmDirectCredentialSecret as unknown as secretsmanager.ISecret,
+            'projectId',
+          ),
         },
       },
     );
@@ -1329,7 +1509,9 @@ export class PsdEocStack extends Stack {
     });
     imageRepository.grantPull(pushWorkerTaskExecutionRole);
     for (const secret of [
+      apnsDirectCredentialSecret,
       expoAccessTokenSecret,
+      fcmDirectCredentialSecret,
       attemptExecutionWorkerSecret,
       deliveryStateWorkerSecret,
       expoPushRuntimeWorkerSecret,
@@ -1683,6 +1865,15 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_DISPLAY_TIME_ZONE',
                   value: deploymentIdentity.displayTimeZone,
+                },
+                {
+                  name: 'PSD_EOC_PUSH_PROVIDER_CUTOVER',
+                  value: pushProviderCutover.valueAsString,
+                },
+                {
+                  name: 'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
+                  value:
+                    directPushCredentialVerificationReference.valueAsString,
                 },
                 {
                   name: 'DATABASE_DRIVER',

@@ -9,6 +9,7 @@ import {
   FacilityPageSchema,
   FacilitySchema,
   IntegrationStatusSchema,
+  IntegrationVerificationReferenceSchema,
   RecipientSchema,
   RosterGroupSourceRefSchema,
   RosterSnapshotSchema,
@@ -114,7 +115,7 @@ const ROSTER_QUERY_LIMITS = Object.freeze({
 
 export const DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV =
   Object.freeze({
-    push: 'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
+    push: 'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
     email: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
     sms: 'PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE',
   } as const satisfies Readonly<Record<NotificationChannel, string>>);
@@ -135,10 +136,8 @@ export function readDeliveryTestCredentialVerificationReferences(
     const value =
       environment[DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV[channel]];
     return value !== undefined &&
-      value === value.trim() &&
-      value.length >= 16 &&
-      value.length <= 255 &&
-      /^[A-Za-z0-9._:-]+$/u.test(value)
+      value !== 'UNVERIFIED' &&
+      IntegrationVerificationReferenceSchema.safeParse(value).success
       ? value
       : null;
   };
@@ -556,6 +555,8 @@ export async function loadRosterSnapshot(
             ...common,
             channel: row.channel,
             platform: row.platform,
+            provider: row.provider,
+            serviceEnvironment: row.serviceEnvironment,
             token: row.token,
           }
         : row.channel === 'email'
@@ -634,7 +635,7 @@ async function loadChannelConfigurations(
     )
     .where(
       inArray(channelConfigurations.integrationId, [
-        'expo-push',
+        'mobile-push',
         'ses-email',
         'aws-eum-sms',
       ]),
@@ -733,6 +734,7 @@ interface DeliveryTestPreviewContext {
 }
 
 const DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID = Object.freeze({
+  'mobile-push': 'push',
   'expo-push': 'push',
   'ses-email': 'email',
   'aws-eum-sms': 'sms',
