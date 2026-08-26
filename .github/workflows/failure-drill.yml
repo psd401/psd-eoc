@@ -213,7 +213,7 @@ jobs:
           mobile_digest=$(printf 'f%.0s' {1..64})
           application_origin="https://$FAILURE_DRILL_RUN_ID.example.invalid"
           bunx --bun cdk \
-            --app "bun bin/failure-drill.ts" \
+            --app cdk.out \
             deploy "$FAILURE_DRILL_CDK_STACK_ID" \
             --exclusively \
             --require-approval never \
@@ -267,7 +267,7 @@ jobs:
           mobile_digest=$(printf 'f%.0s' {1..64})
           application_origin="https://$FAILURE_DRILL_RUN_ID.example.invalid"
           bunx --bun cdk \
-            --app "bun bin/failure-drill.ts" \
+            --app cdk.out \
             deploy "$FAILURE_DRILL_CDK_STACK_ID" \
             --exclusively \
             --require-approval never \
@@ -296,7 +296,7 @@ jobs:
           application_origin=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".AppRunnerServiceUrl" "$outputs")
           mobile_digest=$(printf 'f%.0s' {1..64})
           bunx --bun cdk \
-            --app "bun bin/failure-drill.ts" \
+            --app cdk.out \
             deploy "$FAILURE_DRILL_CDK_STACK_ID" \
             --exclusively \
             --require-approval never \
@@ -443,7 +443,7 @@ jobs:
             fi
           fi
           bunx --bun cdk \
-            --app "bun bin/failure-drill.ts" \
+            --app cdk.out \
             destroy "$FAILURE_DRILL_CDK_STACK_ID" \
             --exclusively \
             --force \

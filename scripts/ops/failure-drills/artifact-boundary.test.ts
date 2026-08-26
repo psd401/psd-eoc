@@ -122,6 +122,20 @@ test('the drill workflow uses a fresh exact stack and receives no live secret na
   expect(drill).not.toContain('--parameters "$FAILURE_DRILL_CDK_STACK_ID:');
   expect(drill).not.toContain('deploy "$FAILURE_DRILL_STACK_NAME"');
   expect(drill).not.toContain('destroy "$FAILURE_DRILL_STACK_NAME"');
+  const foundation = workflowStep(drill, 'Deploy the disposable foundation');
+  expect(foundation).toContain('--app "bun bin/failure-drill.ts"');
+  expect(foundation).not.toContain('--app cdk.out');
+  for (const stepName of [
+    'Pin the exact artifacts into the stack',
+    'Deploy the synthetic application',
+    'Bind the exact generated App Runner origin',
+    'Destroy the exact synthetic stack',
+  ]) {
+    const step = workflowStep(drill, stepName);
+    expect(step).toContain('--app cdk.out');
+    expect(step).not.toContain('--app "bun bin/failure-drill.ts"');
+  }
+  expect(drill.match(/--app "bun bin\/failure-drill\.ts"/gu)).toHaveLength(1);
   expect(drill).toContain('aws cloudformation list-stack-resources');
   expect(drill).toContain('checkedResources:[],remainingResources:[]');
   expect(drill).toContain('aws ecs stop-task');
