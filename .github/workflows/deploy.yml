@@ -21,7 +21,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: psd-eoc-deploy
+  group: ${{ inputs.failure_drill_run_id != '' && 'psd-eoc-synthetic-failure-drill-entry' || 'psd-eoc-deploy' }}
   cancel-in-progress: false
 
 env:
