@@ -6964,9 +6964,10 @@ describe('Google Groups inventory', () => {
   });
 
   // This preserves the complete former command-line self-test in ordinary
-  // discovery. A two-core CI runner needs just over one minute for the bounded
-  // subprocess, filesystem, and mapping cases together.
+  // discovery. It runs near two minutes alone and can take more than three
+  // minutes while the six-shard full gate is also exercising PostgreSQL and
+  // native subprocesses, so its timeout includes that measured contention.
   test('passes the complete synthetic safety and mapping suite', async () => {
     await runSelfTest();
-  }, 120_000);
+  }, 240_000);
 });
