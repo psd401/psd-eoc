@@ -51,9 +51,10 @@ separately.
 
 ## Deploy
 
-From `infra`, run direct `cdk deploy PsdEoc` with the parameters above and the
-other required parameters in [CONFIGURATION.md](../CONFIGURATION.md). There is
-no repository configuration or alternate deployment path.
+From the repository root, add the parameters above to the single direct CDK
+command in [CONFIGURATION.md](../CONFIGURATION.md). That command builds the
+image, runs this bootstrap, and promotes the application only after bootstrap
+succeeds. There is no repository configuration or alternate deployment path.
 
 This step only ever acts when the deployment has **no** access group at all —
 not "none active", not "none matching". Once your district has configured

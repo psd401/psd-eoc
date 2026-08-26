@@ -9,8 +9,10 @@ import {
   CfnOutput,
   CfnParameter,
   CfnRule,
+  CustomResource,
   Duration,
   Fn,
+  IgnoreMode,
   RemovalPolicy,
   SecretValue,
   Stack,
@@ -20,6 +22,7 @@ import {
   aws_ec2 as ec2,
   aws_ecs as ecs,
   aws_ecr as ecr,
+  aws_ecr_assets as ecrAssets,
   aws_events as events,
   aws_events_targets as eventTargets,
   aws_iam as iam,
@@ -33,8 +36,9 @@ import {
   aws_sns as sns,
   aws_sqs as sqs,
   aws_smsvoice as smsvoice,
+  custom_resources as customResources,
 } from 'aws-cdk-lib';
-import type { StackProps } from 'aws-cdk-lib';
+import type { CfnResource, StackProps } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
 import type { Construct } from 'constructs';
 
@@ -70,7 +74,6 @@ import {
   SMS_WORKER_LOG_GROUP_NAME,
   DEPLOYMENT_ENVIRONMENT,
   HEALTH_PATH,
-  IMAGE_DIGEST_SENTINEL,
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
   readDeploymentIdentity,
@@ -83,13 +86,45 @@ import type { DeploymentTarget } from './config';
 const SECRET_PREFIX = '/psd-eoc';
 const APP_RUNNER_PORT = '3000';
 const APPLICATION_SUBNET_GROUP_NAME = 'Application';
+const BOOTSTRAP_CLUSTER_NAME = 'psd-eoc-bootstrap';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
 const ACCESS_SYNC_CONTAINER_NAME = 'access-membership-sync';
+const PUSH_WORKER_SERVICE_NAME = 'psd-eoc-expo-push-worker';
+const SMS_WORKER_SERVICE_NAME = 'psd-eoc-aws-eum-sms-worker';
+const EMAIL_WORKER_SERVICE_NAME = 'psd-eoc-email-worker';
 const EMAIL_QUEUE_MAX_RECEIVES = 5;
+const CURRENT_CDK_ASSET = 'CURRENT_CDK_ASSET';
+const CDK_ASSET_REPOSITORY = 'CDK_ASSET_REPOSITORY';
+const LEGACY_APPLICATION_REPOSITORY = 'LEGACY_APPLICATION_REPOSITORY';
+export const APPLICATION_IMAGE_EXCLUDES = Object.freeze([
+  '.git',
+  '.github',
+  '.agents',
+  '.codex',
+  '.verification',
+  '**/.DS_Store',
+  '**/.expo',
+  '**/.env*',
+  '**/.next',
+  '**/.turbo',
+  '**/*.log',
+  '**/build',
+  '**/cdk.out',
+  '**/coverage',
+  '**/dist',
+  '**/node_modules',
+  'docs',
+  'infra',
+  'packages/mcp',
+  'packages/mobile',
+  'scripts',
+]);
 
 export interface PsdEocStackProps extends StackProps {
   /** Cloud/provider identity read from deployment configuration. */
   readonly deploymentTarget: DeploymentTarget;
+  /** Exact local Git commit packaged into the CDK image asset. */
+  readonly sourceSha: string;
 }
 
 function secretJsonKeyArn(secret: secretsmanager.Secret, key: string): string {
@@ -109,10 +144,9 @@ function ecsSecretJsonKey(
 /**
  * Stable AWS environment for a staff-minimized live pilot.
  *
- * The first deployment sets ProvisionApplication=false so CloudFormation can
- * create the ECR repository. After the reviewed image is pushed by digest and
- * the database is bootstrapped, an update with ProvisionApplication=true adds
- * the single App Runner service. The same stack owns both phases.
+ * CDK builds and publishes one content-addressed image asset. CloudFormation
+ * runs the native database bootstrap from that exact image before it promotes
+ * App Runner or any worker service to the same revision.
  */
 export class PsdEocStack extends Stack {
   public constructor(scope: Construct, id: string, props: PsdEocStackProps) {
@@ -125,7 +159,14 @@ export class PsdEocStack extends Stack {
       region,
       sesFromAddress,
       sesIdentityDomain,
+      sourceRepositoryUrl,
     } = props.deploymentTarget;
+    const { sourceSha } = props;
+    if (!/^[a-f0-9]{40}$/u.test(sourceSha) || /^0{40}$/u.test(sourceSha)) {
+      throw new Error(
+        'PsdEoc sourceSha must identify one reviewed Git commit.',
+      );
+    }
     const partition = RegionInfo.get(region).partition;
     if (partition === undefined) {
       throw new Error(`AWS region ${region} has no known ARN partition.`);
@@ -159,19 +200,10 @@ export class PsdEocStack extends Stack {
       {
         allowedValues: ['false', 'true'],
         description:
-          'Explicitly set false for first-phase repository/data-plane provisioning or true for the reviewed digest-pinned App Runner service.',
+          'Explicitly set false for a dark data-plane deployment or true to run App Runner after the CDK-managed bootstrap succeeds.',
         type: 'String',
       },
     );
-    const appImageDigest = new CfnParameter(this, 'AppImageDigest', {
-      allowedPattern: '^sha256:[0-9a-f]{64}$',
-      constraintDescription:
-        'Use one lowercase SHA-256 digest in sha256:<64 hex characters> form.',
-      default: IMAGE_DIGEST_SENTINEL,
-      description:
-        "Immutable digest already present in this stack's ECR repository; the all-zero sentinel is accepted only while ProvisionApplication=false.",
-      type: 'String',
-    });
     const enableExpoPushWorker = new CfnParameter(
       this,
       'EnableExpoPushWorker',
@@ -322,46 +354,44 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
-    const bootstrapImageDigest = new CfnParameter(
-      this,
-      'BootstrapImageDigest',
-      {
-        allowedPattern: '^sha256:[0-9a-f]{64}$',
-        constraintDescription:
-          'Use one non-sentinel lowercase SHA-256 digest in sha256:<64 hex characters> form.',
-        description:
-          "Immutable candidate digest already present in this stack's ECR repository. The native bootstrap task uses this digest before AppImageDigest is promoted.",
-        type: 'String',
-      },
-    );
     const runtimeDatabaseIdleTimeoutSeconds = new CfnParameter(
       this,
       'RuntimeDatabaseIdleTimeoutSeconds',
       {
         default: 0,
         description:
-          'App Runner PostgreSQL pool idle timeout. Phase A preserves the currently live value; phase B promotes the candidate-required zero value.',
+          'App Runner PostgreSQL pool idle timeout in seconds; zero keeps the bounded pool connection open.',
         maxValue: 600,
         minValue: 0,
         type: 'Number',
       },
     );
-    const sourceSha = new CfnParameter(this, 'SourceSha', {
-      allowedPattern: '^[0-9a-f]{40}$',
-      constraintDescription:
-        'Use the exact lowercase 40-character Git commit SHA represented by AppImageDigest.',
-      description:
-        'Reviewed source commit represented by the currently deployed AppImageDigest. Preserve this value until bootstrap succeeds.',
-      type: 'String',
-    });
-    const bootstrapSourceSha = new CfnParameter(this, 'BootstrapSourceSha', {
-      allowedPattern: '^[0-9a-f]{40}$',
-      constraintDescription:
-        'Use the exact lowercase 40-character Git commit SHA represented by BootstrapImageDigest.',
-      description:
-        'Reviewed candidate source commit represented by BootstrapImageDigest.',
-      type: 'String',
-    });
+    const rollbackApplicationImageDigest = new CfnParameter(
+      this,
+      'RollbackApplicationImageDigest',
+      {
+        allowedPattern: '^(CURRENT_CDK_ASSET|sha256:[0-9a-f]{64})$',
+        default: CURRENT_CDK_ASSET,
+        description:
+          'Optional prior digest from the selected retained repository. Normal deployments use CURRENT_CDK_ASSET.',
+        type: 'String',
+      },
+    );
+    const rollbackApplicationRepository = new CfnParameter(
+      this,
+      'RollbackApplicationRepository',
+      {
+        allowedValues: [
+          CURRENT_CDK_ASSET,
+          CDK_ASSET_REPOSITORY,
+          LEGACY_APPLICATION_REPOSITORY,
+        ],
+        default: CURRENT_CDK_ASSET,
+        description:
+          'Repository containing RollbackApplicationImageDigest, or CURRENT_CDK_ASSET for a normal deployment.',
+        type: 'String',
+      },
+    );
     const googleOauthSecretArn = new CfnParameter(
       this,
       'GoogleOauthSecretArn',
@@ -458,13 +488,38 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldUseRollbackApplicationImage = new CfnCondition(
+      this,
+      'ShouldUseRollbackApplicationImage',
+      {
+        expression: Fn.conditionNot(
+          Fn.conditionEquals(
+            rollbackApplicationImageDigest.valueAsString,
+            CURRENT_CDK_ASSET,
+          ),
+        ),
+      },
+    );
+    const shouldUseLegacyRollbackRepository = new CfnCondition(
+      this,
+      'ShouldUseLegacyRollbackRepository',
+      {
+        expression: Fn.conditionEquals(
+          rollbackApplicationRepository.valueAsString,
+          LEGACY_APPLICATION_REPOSITORY,
+        ),
+      },
+    );
     const shouldRunExpoPushWorker = new CfnCondition(
       this,
       'ShouldRunExpoPushWorker',
       {
-        expression: Fn.conditionEquals(
-          enableExpoPushWorker.valueAsString,
-          'true',
+        expression: Fn.conditionAnd(
+          Fn.conditionEquals(enableExpoPushWorker.valueAsString, 'true'),
+          Fn.conditionEquals(
+            rollbackApplicationImageDigest.valueAsString,
+            CURRENT_CDK_ASSET,
+          ),
         ),
       },
     );
@@ -479,9 +534,12 @@ export class PsdEocStack extends Stack {
       this,
       'ShouldRunAwsEumSmsWorker',
       {
-        expression: Fn.conditionEquals(
-          enableAwsEumSmsWorker.valueAsString,
-          'true',
+        expression: Fn.conditionAnd(
+          Fn.conditionEquals(enableAwsEumSmsWorker.valueAsString, 'true'),
+          Fn.conditionEquals(
+            rollbackApplicationImageDigest.valueAsString,
+            CURRENT_CDK_ASSET,
+          ),
         ),
       },
     );
@@ -499,7 +557,13 @@ export class PsdEocStack extends Stack {
       this,
       'ShouldRunEmailWorker',
       {
-        expression: Fn.conditionEquals(enableEmailWorker.valueAsString, 'true'),
+        expression: Fn.conditionAnd(
+          Fn.conditionEquals(enableEmailWorker.valueAsString, 'true'),
+          Fn.conditionEquals(
+            rollbackApplicationImageDigest.valueAsString,
+            CURRENT_CDK_ASSET,
+          ),
+        ),
       },
     );
     new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
@@ -513,15 +577,9 @@ export class PsdEocStack extends Stack {
                 'UNVERIFIED',
               ),
             ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                appImageDigest.valueAsString,
-                IMAGE_DIGEST_SENTINEL,
-              ),
-            ),
           ),
           assertDescription:
-            'EnableExpoPushWorker=true requires the live application, a reviewed image digest, and retained credential-verification evidence.',
+            'EnableExpoPushWorker=true requires the live application and retained credential-verification evidence.',
         },
       ],
       ruleCondition: Fn.conditionEquals(
@@ -541,15 +599,9 @@ export class PsdEocStack extends Stack {
                 'UNVERIFIED',
               ),
             ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                appImageDigest.valueAsString,
-                IMAGE_DIGEST_SENTINEL,
-              ),
-            ),
           ),
           assertDescription:
-            'EnableDirectPush=true requires the live push worker, a reviewed image digest, and retained direct-provider credential evidence.',
+            'EnableDirectPush=true requires the live push worker and retained direct-provider credential evidence.',
         },
       ],
       ruleCondition: Fn.conditionEquals(enableDirectPush.valueAsString, 'true'),
@@ -610,15 +662,9 @@ export class PsdEocStack extends Stack {
                 'UNCONFIGURED',
               ),
             ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                appImageDigest.valueAsString,
-                IMAGE_DIGEST_SENTINEL,
-              ),
-            ),
           ),
           assertDescription:
-            'EnableAwsEumSmsWorker=true requires the live application, reviewed image, carrier approval evidence, an approved origination identity, and tenant-reviewed HELP/STOP messages.',
+            'EnableAwsEumSmsWorker=true requires the live application, carrier approval evidence, an approved origination identity, and tenant-reviewed HELP/STOP messages.',
         },
       ],
       ruleCondition: Fn.conditionEquals(
@@ -675,15 +721,9 @@ export class PsdEocStack extends Stack {
                 'UNVERIFIED',
               ),
             ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                appImageDigest.valueAsString,
-                IMAGE_DIGEST_SENTINEL,
-              ),
-            ),
           ),
           assertDescription:
-            'EnableEmailWorker=true requires the live application, a reviewed image digest, and retained SES/callback verification evidence.',
+            'EnableEmailWorker=true requires the live application and retained SES/callback verification evidence.',
         },
       ],
       ruleCondition: Fn.conditionEquals(
@@ -691,62 +731,76 @@ export class PsdEocStack extends Stack {
         'true',
       ),
     });
-    new CfnRule(this, 'ApplicationRequiresPublishedDigest', {
+    new CfnRule(this, 'RollbackApplicationSelectionIsComplete', {
       assertions: [
         {
-          assert: Fn.conditionNot(
-            Fn.conditionEquals(
-              appImageDigest.valueAsString,
-              IMAGE_DIGEST_SENTINEL,
+          assert: Fn.conditionOr(
+            Fn.conditionAnd(
+              Fn.conditionEquals(
+                rollbackApplicationImageDigest.valueAsString,
+                CURRENT_CDK_ASSET,
+              ),
+              Fn.conditionEquals(
+                rollbackApplicationRepository.valueAsString,
+                CURRENT_CDK_ASSET,
+              ),
+            ),
+            Fn.conditionAnd(
+              Fn.conditionNot(
+                Fn.conditionEquals(
+                  rollbackApplicationImageDigest.valueAsString,
+                  CURRENT_CDK_ASSET,
+                ),
+              ),
+              Fn.conditionNot(
+                Fn.conditionEquals(
+                  rollbackApplicationRepository.valueAsString,
+                  CURRENT_CDK_ASSET,
+                ),
+              ),
             ),
           ),
           assertDescription:
-            'ProvisionApplication=true requires a non-sentinel immutable image digest.',
+            'Rollback application repository and image digest must be supplied together; normal deployments leave both on CURRENT_CDK_ASSET.',
         },
       ],
-      ruleCondition: Fn.conditionEquals(
-        provisionApplication.valueAsString,
-        'true',
+    });
+    new CfnRule(this, 'RollbackRequiresPersistentlyDarkProviders', {
+      assertions: [
+        {
+          assert: Fn.conditionAnd(
+            Fn.conditionEquals(enableExpoPushWorker.valueAsString, 'false'),
+            Fn.conditionEquals(enableDirectPush.valueAsString, 'false'),
+            Fn.conditionEquals(enableAwsEumSmsWorker.valueAsString, 'false'),
+            Fn.conditionEquals(enableEmailWorker.valueAsString, 'false'),
+            Fn.conditionEquals(
+              expoCredentialVerificationReference.valueAsString,
+              'UNVERIFIED',
+            ),
+            Fn.conditionEquals(
+              directPushCredentialVerificationReference.valueAsString,
+              'UNVERIFIED',
+            ),
+            Fn.conditionEquals(
+              sesCredentialVerificationReference.valueAsString,
+              'UNVERIFIED',
+            ),
+            Fn.conditionEquals(
+              pushProviderCutover.valueAsString,
+              '{"version":1,"ios":"expo","android":"expo"}',
+            ),
+          ),
+          assertDescription:
+            'Rollback requires every provider-send enablement to remain false and push/email verification state to be reset before the older application is selected.',
+        },
+      ],
+      ruleCondition: Fn.conditionNot(
+        Fn.conditionEquals(
+          rollbackApplicationImageDigest.valueAsString,
+          CURRENT_CDK_ASSET,
+        ),
       ),
     });
-    new CfnRule(this, 'BootstrapRequiresPublishedDigest', {
-      assertions: [
-        {
-          assert: Fn.conditionNot(
-            Fn.conditionEquals(
-              bootstrapImageDigest.valueAsString,
-              IMAGE_DIGEST_SENTINEL,
-            ),
-          ),
-          assertDescription:
-            'BootstrapImageDigest must identify a published candidate image and cannot use the all-zero sentinel.',
-        },
-      ],
-    });
-    for (const [ruleId, parameter, description] of [
-      [
-        'ApplicationRequiresReviewedSource',
-        sourceSha,
-        'SourceSha must identify reviewed deployed source and cannot use the all-zero sentinel.',
-      ],
-      [
-        'BootstrapRequiresReviewedSource',
-        bootstrapSourceSha,
-        'BootstrapSourceSha must identify reviewed candidate source and cannot use the all-zero sentinel.',
-      ],
-    ] as const) {
-      new CfnRule(this, ruleId, {
-        assertions: [
-          {
-            assert: Fn.conditionNot(
-              Fn.conditionEquals(parameter.valueAsString, '0'.repeat(40)),
-            ),
-            assertDescription: description,
-          },
-        ],
-      });
-    }
-
     const imageRepository = new ecr.Repository(this, 'ImageRepository', {
       encryption: ecr.RepositoryEncryption.AES_256,
       emptyOnDelete: false,
@@ -760,6 +814,71 @@ export class PsdEocStack extends Stack {
       maxImageCount: 10,
       rulePriority: 1,
     });
+
+    // CDK builds and publishes this content-addressed asset before it starts
+    // the CloudFormation update. The retained repository above remains in this
+    // transition release so a failed update can restore the previous template
+    // without colliding with an orphaned retained repository.
+    const applicationImage = new ecrAssets.DockerImageAsset(
+      this,
+      'ApplicationImage',
+      {
+        buildArgs: {
+          SOURCE_REPOSITORY_URL: sourceRepositoryUrl,
+          SOURCE_SHA: sourceSha,
+        },
+        directory: fileURLToPath(new URL('../../..', import.meta.url)),
+        exclude: [...APPLICATION_IMAGE_EXCLUDES],
+        file: 'packages/server/container/psd-eoc.Dockerfile',
+        ignoreMode: IgnoreMode.DOCKER,
+        platform: ecrAssets.Platform.LINUX_AMD64,
+      },
+    );
+    const describeApplicationImage: customResources.AwsSdkCall = {
+      action: 'describeImages',
+      parameters: {
+        imageIds: [{ imageTag: applicationImage.imageTag }],
+        repositoryName: applicationImage.repository.repositoryName,
+      },
+      outputPaths: ['imageDetails.0.imageDigest'],
+      physicalResourceId: customResources.PhysicalResourceId.of(
+        applicationImage.assetHash,
+      ),
+      service: 'ECR',
+    };
+    const applicationImageDigest = new customResources.AwsCustomResource(
+      this,
+      'ApplicationImageDigestLookup',
+      {
+        installLatestAwsSdk: false,
+        onCreate: describeApplicationImage,
+        onUpdate: describeApplicationImage,
+        policy: customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['ecr:DescribeImages'],
+            resources: [applicationImage.repository.repositoryArn],
+          }),
+        ]),
+      },
+    );
+    const applicationImageUri = Fn.join('', [
+      applicationImage.repository.repositoryUri,
+      '@',
+      applicationImageDigest.getResponseField('imageDetails.0.imageDigest'),
+    ]);
+    const deployedApplicationImageUri = Fn.conditionIf(
+      shouldUseRollbackApplicationImage.logicalId,
+      Fn.join('', [
+        Fn.conditionIf(
+          shouldUseLegacyRollbackRepository.logicalId,
+          imageRepository.repositoryUri,
+          applicationImage.repository.repositoryUri,
+        ).toString(),
+        '@',
+        rollbackApplicationImageDigest.valueAsString,
+      ]),
+      applicationImageUri,
+    ).toString();
 
     const network = new ec2.Vpc(this, 'DatabaseNetwork', {
       availabilityZones: [`${region}a`, `${region}b`],
@@ -1718,7 +1837,7 @@ export class PsdEocStack extends Stack {
       retention: logs.RetentionDays.TWO_WEEKS,
     });
     const bootstrapCluster = new ecs.Cluster(this, 'BootstrapEcsCluster', {
-      clusterName: 'psd-eoc-bootstrap',
+      clusterName: BOOTSTRAP_CLUSTER_NAME,
       containerInsightsV2: ecs.ContainerInsights.DISABLED,
       vpc: network as unknown as ec2.IVpc,
     });
@@ -1755,7 +1874,16 @@ export class PsdEocStack extends Stack {
     const bootstrapContainer = bootstrapTaskDefinition.addContainer(
       BOOTSTRAP_CONTAINER_NAME,
       {
-        command: ['bun', 'packages/server/scripts/operations/bootstrap.ts'],
+        command: [
+          'timeout',
+          '-s',
+          'TERM',
+          '-k',
+          '30s',
+          '25m',
+          'bun',
+          'packages/server/scripts/operations/bootstrap.ts',
+        ],
         environment: {
           AWS_ACCOUNT_ID: account,
           AWS_REGION: region,
@@ -1773,17 +1901,11 @@ export class PsdEocStack extends Stack {
           PSD_EOC_INITIAL_ACCESS_GROUP_ID: initialAccessGroupId.valueAsString,
           PSD_EOC_INITIAL_ACCESS_GROUP_NAME:
             initialAccessGroupName.valueAsString,
-          SOURCE_SHA: bootstrapSourceSha.valueAsString,
+          SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
         essential: true,
-        image: ecs.ContainerImage.fromRegistry(
-          Fn.join('', [
-            imageRepository.repositoryUri,
-            '@',
-            bootstrapImageDigest.valueAsString,
-          ]),
-        ),
+        image: ecs.ContainerImage.fromRegistry(applicationImageUri),
         logging: ecs.LogDrivers.awsLogs({
           logGroup: bootstrapLogGroup,
           streamPrefix: BOOTSTRAP_CONTAINER_NAME,
@@ -1818,7 +1940,7 @@ export class PsdEocStack extends Stack {
       readOnly: false,
       sourceVolume: 'native-bootstrap-tmp',
     });
-    imageRepository.grantPull(bootstrapTaskExecutionRole);
+    applicationImage.repository.grantPull(bootstrapTaskExecutionRole);
     databaseAdminSecret.grantRead(bootstrapTaskExecutionRole);
     databaseApplicationSecret.grantRead(bootstrapTaskExecutionRole);
     initialAccessGroupSecret.grantRead(bootstrapTaskExecutionRole);
@@ -1907,17 +2029,11 @@ export class PsdEocStack extends Stack {
           PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
           PSD_EOC_IOS_BUNDLE_ID: deploymentIdentity.iosBundleId,
           PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
-          SOURCE_SHA: sourceSha.valueAsString,
+          SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
         essential: true,
-        image: ecs.ContainerImage.fromRegistry(
-          Fn.join('', [
-            imageRepository.repositoryUri,
-            '@',
-            appImageDigest.valueAsString,
-          ]),
-        ),
+        image: ecs.ContainerImage.fromRegistry(applicationImageUri),
         logging: ecs.LogDrivers.awsLogs({
           logGroup: pushWorkerLogGroup,
           streamPrefix: 'expo-push-worker',
@@ -1996,7 +2112,7 @@ export class PsdEocStack extends Stack {
       readOnly: false,
       sourceVolume: 'push-worker-tmp',
     });
-    imageRepository.grantPull(pushWorkerTaskExecutionRole);
+    applicationImage.repository.grantPull(pushWorkerTaskExecutionRole);
     for (const secret of [
       apnsDirectCredentialSecret,
       expoAccessTokenSecret,
@@ -2022,7 +2138,7 @@ export class PsdEocStack extends Stack {
         maxHealthyPercent: 200,
         minHealthyPercent: 100,
         securityGroups: [pushWorkerSecurityGroup],
-        serviceName: 'psd-eoc-expo-push-worker',
+        serviceName: PUSH_WORKER_SERVICE_NAME,
         taskDefinition: pushWorkerTaskDefinition,
         vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
       },
@@ -2195,17 +2311,11 @@ export class PsdEocStack extends Stack {
           SMS_QUEUE_URL: queuePairs.Sms.queue.queueUrl,
           SMS_RECEIPT_QUEUE_ARN: queuePairs.SmsReceipt.queue.queueArn,
           SMS_RECEIPT_QUEUE_URL: queuePairs.SmsReceipt.queue.queueUrl,
-          SOURCE_SHA: sourceSha.valueAsString,
+          SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
         essential: true,
-        image: ecs.ContainerImage.fromRegistry(
-          Fn.join('', [
-            imageRepository.repositoryUri,
-            '@',
-            appImageDigest.valueAsString,
-          ]),
-        ),
+        image: ecs.ContainerImage.fromRegistry(applicationImageUri),
         logging: ecs.LogDrivers.awsLogs({
           logGroup: smsWorkerLogGroup,
           streamPrefix: 'aws-eum-sms-worker',
@@ -2229,7 +2339,7 @@ export class PsdEocStack extends Stack {
       readOnly: false,
       sourceVolume: 'sms-worker-tmp',
     });
-    imageRepository.grantPull(smsWorkerTaskExecutionRole);
+    applicationImage.repository.grantPull(smsWorkerTaskExecutionRole);
     for (const secret of [
       attemptExecutionWorkerSecret,
       deliveryStateWorkerSecret,
@@ -2246,7 +2356,7 @@ export class PsdEocStack extends Stack {
       maxHealthyPercent: 200,
       minHealthyPercent: 100,
       securityGroups: [smsWorkerSecurityGroup],
-      serviceName: 'psd-eoc-aws-eum-sms-worker',
+      serviceName: SMS_WORKER_SERVICE_NAME,
       taskDefinition: smsWorkerTaskDefinition,
       vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
     });
@@ -2327,17 +2437,11 @@ export class PsdEocStack extends Stack {
             'true',
             'false',
           ).toString(),
-          SOURCE_SHA: sourceSha.valueAsString,
+          SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
         essential: true,
-        image: ecs.ContainerImage.fromRegistry(
-          Fn.join('', [
-            imageRepository.repositoryUri,
-            '@',
-            appImageDigest.valueAsString,
-          ]),
-        ),
+        image: ecs.ContainerImage.fromRegistry(applicationImageUri),
         logging: ecs.LogDrivers.awsLogs({
           logGroup: emailWorkerLogGroup,
           streamPrefix: 'ses-email-worker',
@@ -2361,7 +2465,7 @@ export class PsdEocStack extends Stack {
       readOnly: false,
       sourceVolume: 'email-worker-tmp',
     });
-    imageRepository.grantPull(emailWorkerTaskExecutionRole);
+    applicationImage.repository.grantPull(emailWorkerTaskExecutionRole);
     for (const secret of [
       attemptExecutionWorkerSecret,
       deliveryStateWorkerSecret,
@@ -2383,7 +2487,7 @@ export class PsdEocStack extends Stack {
         maxHealthyPercent: 200,
         minHealthyPercent: 100,
         securityGroups: [emailWorkerSecurityGroup],
-        serviceName: 'psd-eoc-email-worker',
+        serviceName: EMAIL_WORKER_SERVICE_NAME,
         taskDefinition: emailWorkerTaskDefinition,
         vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
       },
@@ -2445,17 +2549,11 @@ export class PsdEocStack extends Stack {
             PSD_EOC_EMAIL_CALLBACK_RUNTIME_MODE: 'enabled',
             PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
             PSD_EOC_SES_SNS_TOPIC_ARN: emailEventsTopic.topicArn,
-            SOURCE_SHA: bootstrapSourceSha.valueAsString,
+            SOURCE_SHA: sourceSha,
             TMPDIR: '/tmp',
           },
           essential: true,
-          image: ecs.ContainerImage.fromRegistry(
-            Fn.join('', [
-              imageRepository.repositoryUri,
-              '@',
-              bootstrapImageDigest.valueAsString,
-            ]),
-          ),
+          image: ecs.ContainerImage.fromRegistry(applicationImageUri),
           logging: ecs.LogDrivers.awsLogs({
             logGroup: emailCallbackWorkerLogGroup,
             streamPrefix: 'ses-email-callback-worker',
@@ -2468,7 +2566,7 @@ export class PsdEocStack extends Stack {
       readOnly: false,
       sourceVolume: 'email-callback-worker-tmp',
     });
-    imageRepository.grantPull(emailCallbackWorkerExecutionRole);
+    applicationImage.repository.grantPull(emailCallbackWorkerExecutionRole);
     emailCallbackQueue.grantConsumeMessages(emailCallbackWorkerRole);
     const emailCallbackWorkerService = new ecs.FargateService(
       this,
@@ -2549,17 +2647,11 @@ export class PsdEocStack extends Stack {
           // and was never added here, which broke every run from that deploy
           // onward: `GOOGLE_OIDC_HOSTED_DOMAIN must be configured.`
           GOOGLE_OIDC_HOSTED_DOMAIN: deploymentIdentity.hostedDomain,
-          SOURCE_SHA: bootstrapSourceSha.valueAsString,
+          SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
         essential: true,
-        image: ecs.ContainerImage.fromRegistry(
-          Fn.join('', [
-            imageRepository.repositoryUri,
-            '@',
-            bootstrapImageDigest.valueAsString,
-          ]),
-        ),
+        image: ecs.ContainerImage.fromRegistry(applicationImageUri),
         logging: ecs.LogDrivers.awsLogs({
           logGroup: bootstrapLogGroup,
           streamPrefix: ACCESS_SYNC_CONTAINER_NAME,
@@ -2588,7 +2680,7 @@ export class PsdEocStack extends Stack {
       readOnly: false,
       sourceVolume: 'access-sync-tmp',
     });
-    imageRepository.grantPull(accessSyncTaskExecutionRole);
+    applicationImage.repository.grantPull(accessSyncTaskExecutionRole);
     databaseApplicationSecret.grantRead(accessSyncTaskExecutionRole);
     bootstrapIdentitySecret.grantRead(accessSyncTaskExecutionRole);
     googleGroupsSecret.grantRead(accessSyncTaskExecutionRole);
@@ -2625,13 +2717,264 @@ export class PsdEocStack extends Stack {
         retryAttempts: 2,
       }),
     );
+    const accessSyncCfnRule = accessSyncSchedule.node
+      .defaultChild as events.CfnRule;
+
+    // CloudFormation owns the migration ordering. The provider starts the
+    // exact digest-pinned task above and remains incomplete until that task
+    // exits successfully. Runtime services depend on this resource, so a
+    // failed forward migration leaves the previous application revision live.
+    const bootstrapDeploymentLogGroup = new logs.LogGroup(
+      this,
+      'BootstrapDeploymentLogGroup',
+      {
+        logGroupName: '/psd-eoc/deployment/bootstrap',
+        removalPolicy: RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+        retention: logs.RetentionDays.TWO_WEEKS,
+      },
+    );
+    const bootstrapDeploymentCode = lambda.Code.fromAsset(
+      fileURLToPath(
+        new URL('../../lambda/bootstrap-deployment', import.meta.url),
+      ),
+    );
+    const bootstrapDeploymentStart = new lambda.Function(
+      this,
+      'BootstrapDeploymentStart',
+      {
+        code: bootstrapDeploymentCode,
+        description:
+          'Starts one digest-pinned native bootstrap task for a CloudFormation deployment.',
+        functionName: 'psd-eoc-bootstrap-deployment-start',
+        handler: 'index.onEvent',
+        logGroup: bootstrapDeploymentLogGroup,
+        memorySize: 256,
+        reservedConcurrentExecutions: 1,
+        runtime: lambda.Runtime.NODEJS_22_X,
+        timeout: Duration.seconds(30),
+      },
+    );
+    bootstrapDeploymentStart.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:RunTask'],
+        conditions: {
+          ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+        },
+        resources: [bootstrapTaskDefinition.taskDefinitionArn],
+      }),
+    );
+    bootstrapDeploymentStart.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        conditions: {
+          StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' },
+        },
+        resources: [
+          bootstrapTaskExecutionRole.roleArn,
+          bootstrapTaskRole.roleArn,
+        ],
+      }),
+    );
+    bootstrapDeploymentStart.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cloudformation:DescribeStacks'],
+        resources: [this.stackId],
+      }),
+    );
+    const bootstrapDeploymentCheck = new lambda.Function(
+      this,
+      'BootstrapDeploymentCheck',
+      {
+        code: bootstrapDeploymentCode,
+        description:
+          'Waits for the deployment bootstrap task to stop successfully.',
+        functionName: 'psd-eoc-bootstrap-deployment-check',
+        handler: 'index.isComplete',
+        logGroup: bootstrapDeploymentLogGroup,
+        memorySize: 256,
+        reservedConcurrentExecutions: 1,
+        runtime: lambda.Runtime.NODEJS_22_X,
+        timeout: Duration.seconds(30),
+      },
+    );
+    bootstrapDeploymentCheck.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:DescribeTasks', 'ecs:StopTask'],
+        conditions: {
+          ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+        },
+        resources: ['*'],
+      }),
+    );
+    const bootstrapDeploymentProvider = new customResources.Provider(
+      this,
+      'BootstrapDeploymentProvider',
+      {
+        isCompleteHandler: bootstrapDeploymentCheck,
+        logGroup: bootstrapDeploymentLogGroup,
+        onEventHandler: bootstrapDeploymentStart,
+        queryInterval: Duration.seconds(10),
+        totalTimeout: Duration.minutes(30),
+      },
+    );
+    const bootstrapDeployment = new CustomResource(
+      this,
+      'BootstrapDeployment',
+      {
+        properties: {
+          ClusterArn: bootstrapCluster.clusterArn,
+          ContainerName: BOOTSTRAP_CONTAINER_NAME,
+          DeploymentRevision: sourceSha,
+          SecurityGroupId: applicationSecurityGroup.securityGroupId,
+          SubnetIds: applicationSubnets.subnetIds,
+          TaskDefinitionArn: bootstrapTaskDefinition.taskDefinitionArn,
+        },
+        resourceType: 'Custom::PsdEocBootstrapDeployment',
+        serviceToken: bootstrapDeploymentProvider.serviceToken,
+      },
+    );
+    const bootstrapDeploymentResource = bootstrapDeployment.node
+      .defaultChild as CfnResource;
+    for (const service of [
+      pushWorkerCfnService,
+      smsWorkerCfnService,
+      emailWorkerCfnService,
+      emailCallbackWorkerCfnService,
+    ]) {
+      service.addResourceDependency(bootstrapDeploymentResource);
+    }
+    accessSyncCfnRule.addResourceDependency(bootstrapDeploymentResource);
+
+    const rollbackImageValidationHandler = new lambda.Function(
+      this,
+      'RollbackImageValidationHandler',
+      {
+        code: bootstrapDeploymentCode,
+        description:
+          'Derives reviewed source identity from one selected immutable rollback image.',
+        functionName: 'psd-eoc-rollback-image-validation',
+        handler: 'index.resolveRollbackImage',
+        logGroup: bootstrapDeploymentLogGroup,
+        memorySize: 256,
+        reservedConcurrentExecutions: 1,
+        runtime: lambda.Runtime.NODEJS_22_X,
+        timeout: Duration.seconds(30),
+      },
+    );
+    rollbackImageValidationHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
+        resources: [
+          applicationImage.repository.repositoryArn,
+          imageRepository.repositoryArn,
+        ],
+      }),
+    );
+    rollbackImageValidationHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:DescribeServices'],
+        conditions: {
+          ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+        },
+        resources: [
+          PUSH_WORKER_SERVICE_NAME,
+          SMS_WORKER_SERVICE_NAME,
+          EMAIL_WORKER_SERVICE_NAME,
+        ].flatMap((serviceName) => [
+          this.formatArn({
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+            resource: 'service',
+            resourceName: `${BOOTSTRAP_CLUSTER_NAME}/${serviceName}`,
+            service: 'ecs',
+          }),
+          this.formatArn({
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+            resource: 'service',
+            resourceName: serviceName,
+            service: 'ecs',
+          }),
+        ]),
+      }),
+    );
+    const rollbackImageValidationProvider = new customResources.Provider(
+      this,
+      'RollbackImageValidationProvider',
+      {
+        logGroup: bootstrapDeploymentLogGroup,
+        onEventHandler: rollbackImageValidationHandler,
+      },
+    );
+    const rollbackImageValidation = new CustomResource(
+      this,
+      'RollbackImageValidation',
+      {
+        properties: {
+          CurrentSourceSha: sourceSha,
+          ExpectedSourceRepositoryUrl: sourceRepositoryUrl,
+          ImageDigest: rollbackApplicationImageDigest.valueAsString,
+          Operation: 'ROLLBACK_IMAGE_VALIDATION',
+          RepositoryKind: rollbackApplicationRepository.valueAsString,
+          RepositoryName: Fn.conditionIf(
+            shouldUseLegacyRollbackRepository.logicalId,
+            imageRepository.repositoryName,
+            applicationImage.repository.repositoryName,
+          ).toString(),
+        },
+        resourceType: 'Custom::PsdEocRollbackImageValidation',
+        serviceToken: rollbackImageValidationProvider.serviceToken,
+      },
+    );
+    const deployedApplicationSourceSha =
+      rollbackImageValidation.getAttString('SourceSha');
+    const rollbackQuiescence = new CustomResource(this, 'RollbackQuiescence', {
+      properties: {
+        ClusterArn: bootstrapCluster.clusterArn,
+        DeploymentRevision: sourceSha,
+        DirectPushCredentialVerificationReference:
+          directPushCredentialVerificationReference.valueAsString,
+        EnableAwsEumSmsWorker: enableAwsEumSmsWorker.valueAsString,
+        EnableDirectPush: enableDirectPush.valueAsString,
+        EnableEmailWorker: enableEmailWorker.valueAsString,
+        EnableExpoPushWorker: enableExpoPushWorker.valueAsString,
+        ExpoCredentialVerificationReference:
+          expoCredentialVerificationReference.valueAsString,
+        Operation: 'ROLLBACK_QUIESCENCE',
+        PushProviderCutover: pushProviderCutover.valueAsString,
+        RollbackSelected: Fn.conditionIf(
+          shouldUseRollbackApplicationImage.logicalId,
+          'true',
+          'false',
+        ),
+        ServiceNames: [
+          PUSH_WORKER_SERVICE_NAME,
+          SMS_WORKER_SERVICE_NAME,
+          EMAIL_WORKER_SERVICE_NAME,
+        ],
+        SesCredentialVerificationReference:
+          sesCredentialVerificationReference.valueAsString,
+      },
+      resourceType: 'Custom::PsdEocRollbackQuiescence',
+      serviceToken: rollbackImageValidationProvider.serviceToken,
+    });
+    const rollbackQuiescenceResource = rollbackQuiescence.node
+      .defaultChild as CfnResource;
+    for (const service of [
+      pushWorkerCfnService,
+      smsWorkerCfnService,
+      emailWorkerCfnService,
+    ]) {
+      service.addResourceDependency(rollbackQuiescenceResource);
+    }
 
     const imageAccessRole = new iam.Role(this, 'AppRunnerImageAccessRole', {
       assumedBy: new iam.ServicePrincipal('build.apprunner.amazonaws.com'),
       description:
         'Reads only the digest-pinned server image from its isolated ECR repository.',
     });
-    const imagePullGrant = imageRepository.grantPull(imageAccessRole);
+    const imagePullGrants = [
+      applicationImage.repository.grantPull(imageAccessRole),
+      imageRepository.grantPull(imageAccessRole),
+    ];
 
     const runtimeRole = new iam.Role(this, 'AppRunnerRuntimeRole', {
       assumedBy: new iam.ServicePrincipal('tasks.apprunner.amazonaws.com'),
@@ -2913,21 +3256,19 @@ export class PsdEocStack extends Stack {
                 },
                 {
                   name: 'SOURCE_SHA',
-                  value: sourceSha.valueAsString,
+                  value: deployedApplicationSourceSha,
                 },
               ],
             },
-            imageIdentifier: Fn.join('', [
-              imageRepository.repositoryUri,
-              '@',
-              appImageDigest.valueAsString,
-            ]),
+            imageIdentifier: deployedApplicationImageUri,
             imageRepositoryType: 'ECR',
           },
         },
       },
     );
     appRunnerService.cfnOptions.condition = shouldProvisionApplication;
+    appRunnerService.addResourceDependency(bootstrapDeploymentResource);
+    appRunnerService.addResourceDependency(rollbackQuiescenceResource);
     // Same constraint as the VPC connector above: App Runner replaces the
     // service when its tags change, so this was retired in the same outage.
     Tags.of(appRunnerService).add('Application', 'PSD EOC', {
@@ -2940,7 +3281,7 @@ export class PsdEocStack extends Stack {
       priority: 300,
     });
     Tags.of(appRunnerService).remove('DataScope', { priority: 300 });
-    imagePullGrant.applyBefore(appRunnerService);
+    for (const grant of imagePullGrants) grant.applyBefore(appRunnerService);
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
 
     // Alarms. Until the canary and the metrics collector have the credentials
@@ -2995,17 +3336,23 @@ export class PsdEocStack extends Stack {
     new CfnOutput(this, 'ImageRepositoryUri', {
       value: imageRepository.repositoryUri,
     });
-    new CfnOutput(this, 'BootstrapCandidateImageDigest', {
-      value: bootstrapImageDigest.valueAsString,
+    new CfnOutput(this, 'DeploymentBootstrapImageDigest', {
+      value: applicationImageDigest.getResponseField(
+        'imageDetails.0.imageDigest',
+      ),
     });
-    new CfnOutput(this, 'DeployedAppImageDigest', {
-      value: appImageDigest.valueAsString,
+    new CfnOutput(this, 'DeploymentSourceSha', {
+      value: sourceSha,
     });
-    new CfnOutput(this, 'BootstrapCandidateSourceSha', {
-      value: bootstrapSourceSha.valueAsString,
+    new CfnOutput(this, 'DeployedApplicationImageDigest', {
+      value: Fn.conditionIf(
+        shouldUseRollbackApplicationImage.logicalId,
+        rollbackApplicationImageDigest.valueAsString,
+        applicationImageDigest.getResponseField('imageDetails.0.imageDigest'),
+      ).toString(),
     });
-    new CfnOutput(this, 'DeployedAppSourceSha', {
-      value: sourceSha.valueAsString,
+    new CfnOutput(this, 'DeployedApplicationSourceSha', {
+      value: deployedApplicationSourceSha,
     });
     new CfnOutput(this, 'DatabaseClusterArn', {
       value: database.clusterArn,

@@ -2,9 +2,17 @@
 .github
 .agents
 .codex
+.verification
 **/.DS_Store
+**/.expo
+**/.env*
 **/.next
+**/.turbo
+**/*.log
+**/build
+**/cdk.out
 **/coverage
+**/dist
 **/node_modules
 docs
 infra

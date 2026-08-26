@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 import { App } from 'aws-cdk-lib';
 
 import {
@@ -7,9 +9,12 @@ import {
   STACK_NAME,
 } from '../src/stack/config';
 import { PsdEocStack } from '../src/stack/psd-eoc-stack';
+import { readSourceRevision } from '../src/source-revision';
 
 const app = new App();
 const deploymentTarget = readDeploymentTarget(app.node);
+const enforceProtectedTarget =
+  process.env.PSD_EOC_ENFORCE_DEPLOYMENT_TARGET === 'true';
 assertProtectedDeploymentTarget(
   deploymentTarget,
   readDeploymentIdentity(app.node),
@@ -30,6 +35,10 @@ new PsdEocStack(app, STACK_NAME, {
     region: deploymentTarget.region,
   },
   stackName: STACK_NAME,
+  sourceSha: readSourceRevision({
+    enforceClean: enforceProtectedTarget,
+    repositoryRoot: fileURLToPath(new URL('../..', import.meta.url)),
+  }),
   terminationProtection: false,
 });
 

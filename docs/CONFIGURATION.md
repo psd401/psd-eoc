@@ -27,6 +27,7 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:privacyContactUrl`
 - `psdEoc:sesFromAddress`
 - `psdEoc:sesIdentityDomain`
+- `psdEoc:sourceRepositoryUrl`
 - `psdEoc:syntheticGroups`
 <!-- docs-contract:cdk-context:end -->
 
@@ -60,15 +61,20 @@ AWS locally with short-lived credentials and supplies deployment values
 directly to `cdk deploy`. Sensitive values remain in AWS Secrets Manager or the
 operator's local environment and are never committed.
 
+CDK derives the exact Git commit from the local checkout, refuses a dirty
+protected deployment, builds and publishes the server image as a
+content-addressed CDK asset, resolves that asset to an immutable ECR digest,
+and runs the native bootstrap task. CloudFormation does not promote App Runner,
+the channel workers, the callback worker, or the access-sync schedule until the
+bootstrap container exits successfully. No separate image-build, image-push,
+migration, or promotion command exists.
+
 ## Synthesized CloudFormation parameters
 
 The current synthesized stack contains exactly these parameters:
 
 <!-- docs-contract:template-parameters:start -->
 
-- `AppImageDigest`
-- `BootstrapImageDigest`
-- `BootstrapSourceSha`
 - `BootstrapVersion`
 - `DirectPushCredentialVerificationReference`
 - `EnableAwsEumSmsWorker`
@@ -87,6 +93,8 @@ The current synthesized stack contains exactly these parameters:
 - `ProvisionApplication`
 - `ProvisionAwsEumSmsResources`
 - `PushProviderCutover`
+- `RollbackApplicationImageDigest`
+- `RollbackApplicationRepository`
 - `RuntimeDatabaseIdleTimeoutSeconds`
 - `SesCredentialVerificationReference`
 - `SmsDestinationCountryCode`
@@ -94,7 +102,6 @@ The current synthesized stack contains exactly these parameters:
 - `SmsOriginationIdentityArn`
 - `SmsRegistrationVerificationReference`
 - `SmsStopMessage`
-- `SourceSha`
 <!-- docs-contract:template-parameters:end -->
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
@@ -102,6 +109,41 @@ parameter and has a default. Push and SMS workers, direct-provider enablement,
 and their evidence inputs default to safe, dark, or unconfigured states when
 optional values are absent. Parameters without defaults must be supplied
 directly to `cdk deploy`.
+
+Normal deployments leave both rollback parameters at `CURRENT_CDK_ASSET`.
+They exist only to recover App Runner to an exact digest already retained in
+either the CDK asset repository (`CDK_ASSET_REPOSITORY`) or the transition-era
+application repository (`LEGACY_APPLICATION_REPOSITORY`). A rollback supplies
+the repository selector and digest on the same direct CDK command. CloudFormation
+derives the source commit from the selected immutable image and refuses a
+missing, ambiguous, malformed, or unsupported provenance record. The database
+bootstrap, callback worker, and access-sync task stay on the current CDK asset,
+while a CloudFormation quiescence barrier proves that every provider-send
+worker is at zero before App Runner can select the older digest.
+
+Intentional rollback requires a previously completed, persistently dark
+baseline from the same current reviewed infrastructure commit. If the deployed
+stack does not already meet that exact baseline, create it with two direct CDK
+updates:
+
+1. Leave both rollback parameters at `CURRENT_CDK_ASSET`. Persist `false` for
+   `EnableExpoPushWorker`, `EnableDirectPush`, `EnableAwsEumSmsWorker`, and
+   `EnableEmailWorker`; reset the Expo, direct-push, and SES verification
+   references to `UNVERIFIED`; reset `PushProviderCutover` to its all-Expo
+   default; and wait for that update and all three send services to reach zero.
+2. Keep that dark configuration unchanged and run the direct CDK command again
+   with the selected rollback repository and digest. The preflight compares the
+   custom resource's previously persisted properties and the pre-update ECS
+   counts before App Runner or any send service can change. A one-step rollback
+   from provider-live state is rejected. An already-dark deployment at the same
+   infrastructure revision satisfies step 1 without a no-op update.
+
+If the second update fails, CloudFormation therefore returns to the already-dark
+first update rather than restoring live provider workers. Clearing the rollback
+selector later also remains dark until a separately approved deployment
+explicitly re-verifies and re-enables a provider. The SMS registration reference
+may remain because it also proves retained carrier resource provisioning;
+`EnableAwsEumSmsWorker=false` remains the send boundary.
 
 The source also defines three canary-only parameters inside the full monitoring
 composition: `MonitoringCanaryCredentialSecretArn`,
@@ -311,15 +353,19 @@ Google, a notification provider, DNS, or a live recipient.
 
 ## Deploy
 
-From `infra`, use a locally authenticated AWS session and run:
+From the repository root, use a locally authenticated AWS session. Set the
+protected-target environment values from the same approved local operator
+configuration as the AWS profile, then run one command:
 
 ```sh
-cdk deploy PsdEoc
+AWS_PROFILE=<profile> AWS_ACCOUNT_ID=<account> AWS_REGION=<region> APP_PUBLIC_ORIGIN=<origin> bun run --cwd infra deploy -- PsdEoc --profile <profile> --region <region>
 ```
 
 Supply required and changed values from the parameter list above with CDK's
-`--parameters` option. No GitHub repository configuration participates in the
-deployment.
+`--parameters` option on that same command. The deploy script also refuses a
+dirty worktree, so the runtime revision and container label cannot claim a Git
+commit whose bytes were locally modified. No GitHub repository configuration
+participates in the deployment.
 
 Current deployed and provider state belongs only in
 [the readiness register](INTEGRATIONS.md), not in this index.
