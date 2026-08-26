@@ -95,3 +95,23 @@ receipt; an Expo receipt is not operating-system presentation; presentation is
 not an app tap; and none of them alone proves human observation. Until both
 physical tables and prerequisites are complete, no physical-device delivery is
 claimed and no automated send is permitted.
+
+## Superseding provider-free and dark-deployment readback — 2026-08-26 UTC
+
+The earlier provider-free section's statement that final CI and two-platform
+native artifacts were pending is superseded by completed workflow run
+`32940527287` at commit `56cd9fd010b202d17349519b0b1b93b9fcd50c15`:
+
+- the authoritative repository gate and issue #278 provider-free lifecycle
+  verification passed;
+- the synthetic iOS drill lifecycle passed and retained artifact
+  `mobile-e2e-ios-32940527287-1` (`9596988305`); and
+- the synthetic Android drill lifecycle passed and retained artifact
+  `mobile-e2e-android-32940527287-1` (`9597111031`).
+
+Production deployment run `32975859074` completed from commit
+`22592929ceb6044c70a5904f06ba28f8ad2a7d2c`. It created the conditional Expo
+worker, queue/DLQ, protected secret boundaries, and alarms in dark mode with
+the worker disabled. This remains deployment-topology proof only. It does not
+prove a credentialed provider handoff, a physical-device presentation or tap,
+or human receipt, and it does not authorize an automated notification.
