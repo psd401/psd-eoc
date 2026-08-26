@@ -127,19 +127,19 @@ jobs:
             --require-approval never \
             --no-notices \
             --outputs-file ../artifacts/failure-drill/stack-outputs.json \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:ProvisionApplication=false" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:AppImageDigest=$sentinel" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:RuntimeDatabaseIdleTimeoutSeconds=0" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapImageDigest=$sentinel" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapSourceSha=$GITHUB_SHA" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupEmail=operator@example.invalid" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupName=Synthetic failure-drill administrators" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialMobileTransitionEmailSha256=$mobile_digest" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillApplicationOrigin=$application_origin" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:SourceSha=$GITHUB_SHA"
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=false" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$sentinel" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$sentinel" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
 
       - name: Log in to the isolated ECR repository
         uses: aws-actions/amazon-ecr-login@v2
@@ -219,19 +219,19 @@ jobs:
             --require-approval never \
             --no-notices \
             --outputs-file ../artifacts/failure-drill/stack-outputs.json \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:ProvisionApplication=false" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:RuntimeDatabaseIdleTimeoutSeconds=0" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapSourceSha=$GITHUB_SHA" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupEmail=operator@example.invalid" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupName=Synthetic failure-drill administrators" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialMobileTransitionEmailSha256=$mobile_digest" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillApplicationOrigin=$application_origin" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:SourceSha=$GITHUB_SHA"
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=false" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
 
       - name: Run native database bootstrap
         shell: bash
@@ -273,19 +273,19 @@ jobs:
             --require-approval never \
             --no-notices \
             --outputs-file ../artifacts/failure-drill/stack-outputs.json \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:ProvisionApplication=true" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:RuntimeDatabaseIdleTimeoutSeconds=0" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapSourceSha=$GITHUB_SHA" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupEmail=operator@example.invalid" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupName=Synthetic failure-drill administrators" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialMobileTransitionEmailSha256=$mobile_digest" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillApplicationOrigin=$application_origin" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:SourceSha=$GITHUB_SHA"
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=true" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
 
       - name: Bind the exact generated App Runner origin
         working-directory: infra
@@ -302,19 +302,19 @@ jobs:
             --require-approval never \
             --no-notices \
             --outputs-file "$outputs" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:ProvisionApplication=true" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:RuntimeDatabaseIdleTimeoutSeconds=0" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:BootstrapSourceSha=$GITHUB_SHA" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupEmail=operator@example.invalid" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialAccessGroupName=Synthetic failure-drill administrators" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:InitialMobileTransitionEmailSha256=$mobile_digest" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:FailureDrillApplicationOrigin=$application_origin" \
-            --parameters "$FAILURE_DRILL_CDK_STACK_ID:SourceSha=$GITHUB_SHA"
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=true" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
 
       - name: Wait for the synthetic application
         shell: bash
