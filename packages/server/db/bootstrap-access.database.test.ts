@@ -10,7 +10,10 @@ import {
 } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
-import { createDisposableDatabase } from '../lib/testing/database';
+import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+} from '../lib/testing/database';
 import { migrateDatabase } from '../drizzle/migrate';
 import { decideAccess } from '../lib/auth/trusted-group-access';
 import {
@@ -177,10 +180,14 @@ describeWithDatabase(
     });
 
     afterAll(async () => {
-      await connection?.close();
+      const opened = connection;
+      const ownedDatabase = disposable;
       connection = undefined;
-      await disposable?.drop();
       disposable = undefined;
+      await closeAndDropDisposableDatabase(
+        opened === undefined ? undefined : () => opened.close(),
+        ownedDatabase,
+      );
     });
 
     test('a freshly migrated deployment admits nobody', async () => {

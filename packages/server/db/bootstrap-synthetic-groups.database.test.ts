@@ -16,7 +16,10 @@ import {
 } from './client';
 import { migrateDatabase } from '../drizzle/migrate';
 import { resolveEventRecipients } from '../lib/notify/event-recipients';
-import { createDisposableDatabase } from '../lib/testing/database';
+import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+} from '../lib/testing/database';
 import { bootstrapSyntheticGroups } from './bootstrap-synthetic-groups';
 import { facilities, groupMembers, groupSources } from './schema';
 
@@ -83,10 +86,14 @@ describeWithDatabase('synthetic group bootstrap', () => {
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const opened = connection;
+    const ownedDatabase = disposable;
     connection = undefined;
-    await disposable?.drop();
     disposable = undefined;
+    await closeAndDropDisposableDatabase(
+      opened === undefined ? undefined : () => opened.close(),
+      ownedDatabase,
+    );
   });
 
   test('creates the group and its members, and skips an unknown facility', async () => {

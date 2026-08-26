@@ -52,6 +52,38 @@ export interface DisposableDatabase {
   drop(): Promise<void>;
 }
 
+/**
+ * Releases a suite's connection and owned database without letting one failed
+ * cleanup operation prevent the other from running.
+ */
+export async function closeAndDropDisposableDatabase(
+  closeConnection: (() => Promise<void>) | undefined,
+  database: DisposableDatabase | undefined,
+): Promise<void> {
+  const errors: unknown[] = [];
+  const operations: Array<(() => Promise<void>) | undefined> = [
+    closeConnection,
+    database === undefined ? undefined : () => database.drop(),
+  ];
+
+  for (const operation of operations) {
+    if (operation === undefined) continue;
+    try {
+      await operation();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      'Failed to close and drop a disposable test database.',
+    );
+  }
+}
+
 async function withMaintenanceConnection<T>(
   baseUrl: string,
   run: (sql: postgres.Sql) => Promise<T>,
