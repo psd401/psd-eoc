@@ -610,10 +610,10 @@ async function main(): Promise<void> {
       opened,
       districtAdministrator,
     );
-    const issue31EventId = await createSyntheticDrill(
-      opened,
-      districtAdministrator,
-    );
+    // Both recovery flows only append synthetic updates and leave the drill
+    // active. Reusing this fixture keeps the all-flows records inventory
+    // stable while the issue-specific grep still exercises its own behavior.
+    const issue31EventId = issue344EventId;
     const issue32Media = await seedIssue32ReadyMedia(
       opened,
       issue32EventId,
