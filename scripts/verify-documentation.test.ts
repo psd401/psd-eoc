@@ -271,13 +271,30 @@ describe('documentation contract', () => {
           'records-retention mapping status, date, and evidence are inconsistent',
         file: 'docs/INTEGRATIONS.md',
       },
+      ...[
+        'One classification remains unresolved.',
+        'The transport class was not reviewed.',
+        'Ambiguities remain PENDING.',
+      ].map((contradiction, index) => ({
+        name: `reviewed-contradiction-${String(index)}`,
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? reviewedRetentionEvidence(contents, '2026-08-25').replace(
+                '<!-- psd-eoc:records-retention-review-status:end -->',
+                `${contradiction}\n\n<!-- psd-eoc:records-retention-review-status:end -->`,
+              )
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      })),
       {
         name: 'source-date-drift',
         transform: (path: string, contents: string): string =>
           path === 'docs/INTEGRATIONS.md'
             ? contents.replace(
+                'official sources were rechecked on 2026-08-26:',
                 'official sources were rechecked on 2026-08-25:',
-                'official sources were rechecked on 2026-08-24:',
               )
             : contents,
         message:
@@ -289,11 +306,11 @@ describe('documentation contract', () => {
         transform: (_path: string, contents: string): string =>
           contents
             .replace(
-              'official sources were rechecked on 2026-08-25',
+              'official sources were rechecked on 2026-08-26',
               'official sources were rechecked on 9999-12-31',
             )
             .replace(
-              'Official sources last rechecked: `2026-08-25`.',
+              'Official sources last rechecked: `2026-08-26`.',
               'Official sources last rechecked: `9999-12-31`.',
             ),
         message:
@@ -306,11 +323,11 @@ describe('documentation contract', () => {
           path === 'docs/INTEGRATIONS.md'
             ? contents
                 .replace(
-                  'official sources were rechecked on 2026-08-25',
+                  'official sources were rechecked on 2026-08-26',
                   'official sources were rechecked on 1900-01-01',
                 )
                 .replace(
-                  'Official sources last rechecked: `2026-08-25`.',
+                  'Official sources last rechecked: `2026-08-26`.',
                   'Official sources last rechecked: `1900-01-01`.',
                 )
             : contents,
@@ -396,6 +413,19 @@ describe('documentation contract', () => {
             ? contents.replace(
                 '<!-- docs-contract:records-retention-candidates:end -->',
                 '<!-- docs-contract:records-retention-candidates:end -->\n\nRoutine/minor responses use `GS50-18-29 Rev. 2` and retain for one year, then destroy.',
+              )
+            : contents,
+        message:
+          'records-retention candidate evidence appears outside its bounded contract',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'candidate-paraphrase-outside-contract',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                '<!-- docs-contract:records-retention-candidates:end -->',
+                '<!-- docs-contract:records-retention-candidates:end -->\n\nRoutine/minor responses are retained for one year and destroyed afterward.',
               )
             : contents,
         message:
@@ -524,6 +554,8 @@ describe('documentation contract', () => {
       'Deletion is not prohibited.',
       'No approval is needed, administrators may purge all retained event records.',
       'Administrators may purge event records if no legal hold exists.',
+      'No user except administrators may purge retained event records.',
+      'No one other than records administrators may delete retained event records.',
     ]) {
       expect(
         currentDocumentationViolations(

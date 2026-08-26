@@ -33,7 +33,12 @@ function containsConflictingDispositionAuthorization(
       return DISPOSITION_AUTHORIZATION_PATTERNS.some((pattern) =>
         [...clause.matchAll(pattern)].some((match) => {
           const prefix = clause.slice(0, match.index ?? 0);
-          return !/\bno(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]*$/iu.test(prefix);
+          const noSubject = /\bno(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]*$/iu.test(
+            prefix,
+          );
+          const exception =
+            /\b(?:except|unless)\b|\bother[ \t\r\n]+than\b/iu.test(prefix);
+          return !noSubject || exception;
         }),
       );
     });
@@ -646,6 +651,7 @@ export function validateRecordsRetentionDocumentation(
   const retentionReview = reviewSection ?? '';
   const normalizedArchitecture = normalizedDocumentationText(retentionGuidance);
   const normalizedIntegrations = normalizedDocumentationText(retentionReview);
+  const normalizedReviewLower = normalizedIntegrations.toLowerCase();
 
   for (const contract of [
     'records-retention-classes',
@@ -735,6 +741,9 @@ export function validateRecordsRetentionDocumentation(
       : retentionReview.replace(candidatesSection, '');
   if (
     /\b(?:GS2017-016|GS2012-025|GS50-18-29|GS2010-008|SD2011-153)[ \t]+Rev\.[ \t]+\d+\b|\bRetain for \d+ years\b|\bthen (?:destroy|transfer to Washington State Archives)\b/iu.test(
+      reviewWithoutCandidateContract,
+    ) ||
+    /\b(?:routine\/minor|uncommon\/major|emergency[- ]drills?|security incidents?|school safety plans?|notification (?:documentation|communications?)|mixed-content(?: events?)?)\b[\s\S]{0,160}\b(?:retain(?:ed)?|retention|destroy(?:ed)?|transfer(?:red)?|dispos(?:e|ed|ition))\b/iu.test(
       reviewWithoutCandidateContract,
     )
   ) {
@@ -885,11 +894,14 @@ export function validateRecordsRetentionDocumentation(
   const pendingEvidence = normalizedIntegrations.includes(
     'No completed records-officer review or ambiguity guidance has been supplied',
   );
+  const unresolvedReviewedEvidence =
+    /\b(?:pending|unresolved|not reviewed|not completed|incomplete)\b/u.test(
+      normalizedReviewLower,
+    );
   if (
     !reviewEvidenceIsHonest ||
     (status === 'pending' && !pendingEvidence) ||
-    (status === 'reviewed' &&
-      (pendingEvidence || normalizedIntegrations.includes('pending')))
+    (status === 'reviewed' && (pendingEvidence || unresolvedReviewedEvidence))
   ) {
     errors.push(
       recordsRetentionError(

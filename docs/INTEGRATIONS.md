@@ -39,7 +39,7 @@ Last consolidated from retained evidence: **2026-08-25**.
 
 <!-- psd-eoc:records-retention-review-status:start -->
 
-The following official sources were rechecked on 2026-08-25:
+The following official sources were rechecked on 2026-08-26:
 
 - [Local Government Common Records Retention Schedule (CORE)](https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF):
   version 5.0, approved and effective October 2, 2024.
@@ -68,7 +68,7 @@ repository-owned classifications:
 
 <!-- docs-contract:records-retention-candidates:end -->
 
-- Official sources last rechecked: `2026-08-25`.
+- Official sources last rechecked: `2026-08-26`.
 - Controlled mapping review status: `pending`.
 - Controlled mapping review date: `not completed`.
 - Controlled mapping inventory coverage: `not completed`.
