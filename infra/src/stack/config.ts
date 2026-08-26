@@ -75,6 +75,7 @@ export interface DeploymentTarget {
   readonly region: string;
   readonly sesFromAddress: string;
   readonly sesIdentityDomain: string;
+  readonly sourceRepositoryUrl: string;
 }
 
 /** Reads cloud and provider identity from the same CDK context as the tenant. */
@@ -111,6 +112,10 @@ export function readDeploymentTarget(node: {
     region: read('psdEoc:awsRegion', /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u),
     sesFromAddress,
     sesIdentityDomain,
+    sourceRepositoryUrl: read(
+      'psdEoc:sourceRepositoryUrl',
+      /^https:\/\/[^\s/]+\/[^\s]+$/u,
+    ),
   });
 }
 
