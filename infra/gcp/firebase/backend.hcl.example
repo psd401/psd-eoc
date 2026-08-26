@@ -1,0 +1,2 @@
+bucket = "replace-with-dedicated-firebase-state-bucket"
+prefix = "terraform/gcp/firebase-isolated"

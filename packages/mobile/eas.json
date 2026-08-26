@@ -11,20 +11,29 @@
       "credentialsSource": "remote",
       "developmentClient": true,
       "distribution": "internal",
-      "environment": "development"
+      "environment": "development",
+      "env": {
+        "EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED": "false"
+      }
     },
     "preview": {
       "bun": "1.2.23",
       "credentialsSource": "remote",
       "distribution": "internal",
-      "environment": "preview"
+      "environment": "preview",
+      "env": {
+        "EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED": "false"
+      }
     },
     "production": {
       "bun": "1.2.23",
       "credentialsSource": "remote",
       "distribution": "store",
       "environment": "production",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED": "true"
+      }
     }
   },
   "submit": {

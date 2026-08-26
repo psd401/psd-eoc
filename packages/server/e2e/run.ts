@@ -490,6 +490,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-32',
     );
+    const committedIssue277EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-277',
+    );
     const committedIssue341EvidenceDirectory = join(
       REPOSITORY_ROOT,
       '.verification',
@@ -499,6 +504,11 @@ async function main(): Promise<void> {
       REPOSITORY_ROOT,
       '.verification',
       'issue-344',
+    );
+    const committedIssue279EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-279',
     );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
@@ -514,11 +524,21 @@ async function main(): Promise<void> {
         ? committedIssue341EvidenceDirectory
         : join(createdStateDirectory, 'evidence-341');
     await mkdir(issue341EvidenceDirectory, { recursive: true });
+    const issue277EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue277EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-277');
+    await mkdir(issue277EvidenceDirectory, { recursive: true });
     const issue344EvidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedIssue344EvidenceDirectory
         : join(createdStateDirectory, 'evidence-344');
     await mkdir(issue344EvidenceDirectory, { recursive: true });
+    const issue279EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue279EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-279');
+    await mkdir(issue279EvidenceDirectory, { recursive: true });
     const issue32EvidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedIssue32EvidenceDirectory
@@ -652,13 +672,20 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
           PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
           PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
+          PSD_EOC_E2E_ISSUE_277_EVIDENCE_DIR: issue277EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR: issue32EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_279_EVIDENCE_DIR: issue279EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
+          PSD_EOC_PRIVACY_CONTACT_URL:
+            'https://www.example.invalid/privacy-contact',
           PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
+          PSD_EOC_EMAIL_WORKER_ENABLED: 'true',
           PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,
+          PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE:
+            'synthetic-e2e-ses-verification-reference',
           GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
         },
         stdin: 'inherit',

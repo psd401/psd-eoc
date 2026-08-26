@@ -97,6 +97,159 @@ describe('fixed-path delivery-state client', () => {
     expect('mutateEvent' in client).toBe(false);
   });
 
+  test('accepts retained stronger truth only from the same provider lineage', async () => {
+    const attempted = request();
+    const providerAccepted: DeliveryStateWriteRequest = {
+      attempt: attempted.attempt,
+      evidence: {
+        ...attempted.evidence,
+        state: 'provider-accepted',
+        provider: 'aws-ses-v2',
+        providerReference: 'synthetic-provider-reference',
+      },
+    };
+    const delivered = {
+      ...evidenceResult(),
+      id: '00000000-0000-4000-8000-000000000102',
+      sequence: 3,
+      previousEvidenceId: '00000000-0000-4000-8000-000000000101',
+      state: 'delivered',
+      provider: 'aws-ses-v2',
+      providerReference: 'synthetic-provider-reference',
+      proof: {
+        kind: 'provider-delivery-receipt',
+        provider: 'aws-ses-v2',
+        receiptId: 'synthetic-receipt',
+        deliveredAt: TIMES.recorded,
+      },
+    } as const;
+    const client = new DeliveryStateWritebackClient({
+      serviceOrigin: 'https://internal.psd-eoc.invalid',
+      bearerToken: TOKEN,
+      fetch: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ result: delivered }), { status: 200 }),
+        ),
+    });
+
+    await expect(
+      client.recordAttemptEvidence(providerAccepted),
+    ).resolves.toEqual(delivered);
+
+    for (const mismatchedTerminal of [
+      {
+        ...delivered,
+        providerReference: 'different-provider-reference',
+      },
+      {
+        ...delivered,
+        provider: 'different-provider',
+        proof: { ...delivered.proof, provider: 'different-provider' },
+      },
+    ]) {
+      const mismatchedLineageClient = new DeliveryStateWritebackClient({
+        serviceOrigin: 'https://internal.psd-eoc.invalid',
+        bearerToken: TOKEN,
+        fetch: () =>
+          Promise.resolve(
+            new Response(JSON.stringify({ result: mismatchedTerminal }), {
+              status: 200,
+            }),
+          ),
+      });
+      await expect(
+        mismatchedLineageClient.recordAttemptEvidence(providerAccepted),
+      ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+    }
+
+    const referenceFreeUnknown: DeliveryStateWriteRequest = {
+      attempt: attempted.attempt,
+      evidence: {
+        ...attempted.evidence,
+        state: 'unknown',
+        provider: 'aws-ses-v2',
+        providerReference: null,
+        reasonCode: 'SES_SEND_OUTCOME_UNKNOWN',
+        diagnosticDigest: 'a'.repeat(64),
+      },
+    };
+    await expect(
+      client.recordAttemptEvidence(referenceFreeUnknown),
+    ).resolves.toEqual(delivered);
+
+    const providerNeutralUnknown: DeliveryStateWriteRequest = {
+      attempt: attempted.attempt,
+      evidence: {
+        ...referenceFreeUnknown.evidence,
+        provider: null,
+        reasonCode: 'RECONCILIATION_DEADLINE_EXCEEDED',
+        diagnosticDigest: null,
+      },
+    };
+    await expect(
+      client.recordAttemptEvidence(providerNeutralUnknown),
+    ).resolves.toEqual(delivered);
+
+    const accepted = {
+      ...evidenceResult(),
+      id: '00000000-0000-4000-8000-000000000103',
+      sequence: 2,
+      previousEvidenceId: '00000000-0000-4000-8000-000000000101',
+      state: 'provider-accepted',
+      provider: 'aws-ses-v2',
+      providerReference: 'synthetic-provider-reference',
+    } as const;
+    const acceptedClient = new DeliveryStateWritebackClient({
+      serviceOrigin: 'https://internal.psd-eoc.invalid',
+      bearerToken: TOKEN,
+      fetch: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ result: accepted }), { status: 200 }),
+        ),
+    });
+    await expect(
+      acceptedClient.recordAttemptEvidence(referenceFreeUnknown),
+    ).resolves.toEqual(accepted);
+
+    const mismatchedAcceptedClient = new DeliveryStateWritebackClient({
+      serviceOrigin: 'https://internal.psd-eoc.invalid',
+      bearerToken: TOKEN,
+      fetch: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              result: { ...accepted, provider: 'different-provider' },
+            }),
+            { status: 200 },
+          ),
+        ),
+    });
+    await expect(
+      mismatchedAcceptedClient.recordAttemptEvidence(referenceFreeUnknown),
+    ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+
+    const mismatchedUnknownClient = new DeliveryStateWritebackClient({
+      serviceOrigin: 'https://internal.psd-eoc.invalid',
+      bearerToken: TOKEN,
+      fetch: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              result: {
+                ...delivered,
+                provider: 'different-provider',
+                proof: { ...delivered.proof, provider: 'different-provider' },
+              },
+            }),
+            { status: 200 },
+          ),
+        ),
+    });
+    await expect(
+      mismatchedUnknownClient.recordAttemptEvidence(referenceFreeUnknown),
+    ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+  });
+
   test('does not transport intent evidence or mismatched attempts', async () => {
     let calls = 0;
     const client = new DeliveryStateWritebackClient({

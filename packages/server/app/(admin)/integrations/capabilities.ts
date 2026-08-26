@@ -3,6 +3,7 @@ import {
   IntegrationChannelChangeAuthorizationSchema,
   IntegrationIdSchema,
   IntegrationHealthSchema,
+  SesVerificationReferenceSchema,
   type Actor,
   type CapabilityInput,
   type ChannelConfiguration,
@@ -40,6 +41,37 @@ import {
 } from '../../../lib/capabilities/admin';
 
 export const SMS_INTEGRATION_ID = 'aws-eum-sms' as const;
+export const SES_VERIFICATION_REFERENCE_ENV =
+  'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE' as const;
+export const EMAIL_WORKER_ENABLED_ENV = 'PSD_EOC_EMAIL_WORKER_ENABLED' as const;
+
+export interface SmsWorkerReadiness {
+  readonly ready: boolean;
+  readonly registrationVerificationReference: string | null;
+}
+
+function isSmsRegistrationVerificationReference(
+  value: string | null,
+): value is string {
+  return (
+    value !== null &&
+    value !== 'UNVERIFIED' &&
+    value !== 'UNCONFIGURED' &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(value)
+  );
+}
+
+export function readSmsWorkerReadiness(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): SmsWorkerReadiness {
+  const reference =
+    environment.PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE ?? null;
+  const validReference = isSmsRegistrationVerificationReference(reference);
+  return Object.freeze({
+    ready: environment.PSD_EOC_SMS_WORKER_READY === 'true' && validReference,
+    registrationVerificationReference: validReference ? reference : null,
+  });
+}
 
 interface ChannelConfigurationState {
   readonly enabled: boolean;
@@ -147,19 +179,39 @@ function parseChannelResultReference(value: string): Readonly<{
 
 /**
  * Enforces the issue #26 channel boundary independently of presentation state.
- * SMS stays dark until the external carrier-registration work is complete, and
- * every live-verified change requires a pre-issued authorization artifact.
+ * Every channel stays dark until its integration has independently reached a
+ * live-verified status, and every live change requires a pre-issued
+ * authorization artifact.
  * The handler additionally verifies its status, human, session, state,
  * digests, commitment, expiry, and single-use persistence.
  */
 export function assertChannelChangeAllowed(
   input: SetChannelEnabledInput,
   status: IntegrationStatus,
+  smsWorkerReadiness: SmsWorkerReadiness = readSmsWorkerReadiness(),
 ): void {
-  if (input.enabled && input.integrationId === SMS_INTEGRATION_ID) {
+  if (
+    input.enabled &&
+    input.integrationId === SMS_INTEGRATION_ID &&
+    status.label !== 'live-verified'
+  ) {
     throw new AdminCapabilityError(
       'CONFLICT',
-      'SMS remains disabled until carrier registration is complete and separately verified.',
+      'SMS can only be enabled after independent live verification.',
+      409,
+    );
+  }
+  if (
+    input.enabled &&
+    input.integrationId === SMS_INTEGRATION_ID &&
+    (!smsWorkerReadiness.ready ||
+      !isSmsRegistrationVerificationReference(
+        smsWorkerReadiness.registrationVerificationReference,
+      ))
+  ) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'SMS can only be enabled when the verified worker deployment is ready.',
       409,
     );
   }
@@ -478,138 +530,322 @@ async function loadChannelConfiguration(
       });
 }
 
-export const setChannelEnabledRegistration: ServerCapabilityRegistration<
+function createSetChannelEnabledRegistration(
+  smsWorkerReadiness: () => SmsWorkerReadiness,
+): ServerCapabilityRegistration<
   'set-channel-enabled',
   AdminCapabilityTransaction
-> = {
-  id: 'set-channel-enabled',
-  async resolveFacilityId(_input, context) {
-    requireAdminCapabilityAuthorization(
-      context.invocation.actor,
-      context.transaction,
-    );
-    return null;
-  },
-  async handler(input, context) {
-    await lockIntegrationChange(context.transaction, input.integrationId);
-    const previousConfiguration = await lockChannelConfigurationState(
-      context.transaction,
-      input.integrationId,
-    );
-    const status = await latestStatusForChange(
-      context.transaction,
-      input.integrationId,
-    );
-    if (status === null) {
-      throw new AdminCapabilityError(
-        'NOT_FOUND',
-        'The integration status was not found.',
-        404,
+> {
+  return {
+    id: 'set-channel-enabled',
+    async resolveFacilityId(_input, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
       );
-    }
-    assertChannelChangeAllowed(input, statusFromRow(status));
-
-    const changedAt = await readCapabilityTime(context);
-    if (status.label === 'live-verified') {
-      if (input.authorization === null) throw invalidLiveAuthorization();
-      const commitment = assertExactLiveAuthorization({
-        actor: context.invocation.actor,
-        authorization: input.authorization,
-        status,
-        previousConfiguration,
-        consumedAt: changedAt,
-      });
-      if (context.invocation.actor.kind !== 'human') {
-        throw invalidLiveAuthorization();
+      return null;
+    },
+    async handler(input, context) {
+      await lockIntegrationChange(context.transaction, input.integrationId);
+      const previousConfiguration = await lockChannelConfigurationState(
+        context.transaction,
+        input.integrationId,
+      );
+      const status = await latestStatusForChange(
+        context.transaction,
+        input.integrationId,
+      );
+      if (status === null) {
+        throw new AdminCapabilityError(
+          'NOT_FOUND',
+          'The integration status was not found.',
+          404,
+        );
       }
-      const [consumed] = await context.transaction.database
-        .insert(integrationChannelChangeAuthorizations)
-        .values({
-          reference: input.authorization.reference,
-          authorizationCommitment: commitment,
-          integrationStatusId: status.id,
-          integrationId: input.integrationId,
-          statusLabel: 'live-verified',
-          desiredEnabled: input.enabled,
-          requestDigest: input.authorization.requestDigest,
-          consequenceDigest: input.authorization.consequenceDigest,
-          authorizedByUserId: input.authorization.authorizedByUserId,
-          authorizedWithSessionId: input.authorization.authorizedWithSessionId,
-          issuedAt: new Date(input.authorization.issuedAt),
-          expiresAt: new Date(input.authorization.expiresAt),
-          consumedByUserId: context.invocation.actor.userId,
-          consumedWithSessionId: context.invocation.actor.sessionId,
-          consumedRequestId: context.invocation.requestId,
+      assertChannelChangeAllowed(
+        input,
+        statusFromRow(status),
+        smsWorkerReadiness(),
+      );
+
+      const changedAt = await readCapabilityTime(context);
+      if (status.label === 'live-verified') {
+        if (input.authorization === null) throw invalidLiveAuthorization();
+        const commitment = assertExactLiveAuthorization({
+          actor: context.invocation.actor,
+          authorization: input.authorization,
+          status,
+          previousConfiguration,
           consumedAt: changedAt,
-        })
-        .onConflictDoNothing()
-        .returning({ id: integrationChannelChangeAuthorizations.id });
-      if (consumed === undefined) throw invalidLiveAuthorization();
-    }
-    await context.transaction.database
-      .insert(channelConfigurations)
-      .values({
-        integrationId: input.integrationId,
-        enabled: input.enabled,
-        statusId: status.id,
-        statusLabel: status.label,
-        changedAt,
-      })
-      .onConflictDoUpdate({
-        target: channelConfigurations.integrationId,
-        set: {
+        });
+        if (context.invocation.actor.kind !== 'human') {
+          throw invalidLiveAuthorization();
+        }
+        const [consumed] = await context.transaction.database
+          .insert(integrationChannelChangeAuthorizations)
+          .values({
+            reference: input.authorization.reference,
+            authorizationCommitment: commitment,
+            integrationStatusId: status.id,
+            integrationId: input.integrationId,
+            statusLabel: 'live-verified',
+            desiredEnabled: input.enabled,
+            requestDigest: input.authorization.requestDigest,
+            consequenceDigest: input.authorization.consequenceDigest,
+            authorizedByUserId: input.authorization.authorizedByUserId,
+            authorizedWithSessionId:
+              input.authorization.authorizedWithSessionId,
+            issuedAt: new Date(input.authorization.issuedAt),
+            expiresAt: new Date(input.authorization.expiresAt),
+            consumedByUserId: context.invocation.actor.userId,
+            consumedWithSessionId: context.invocation.actor.sessionId,
+            consumedRequestId: context.invocation.requestId,
+            consumedAt: changedAt,
+          })
+          .onConflictDoNothing()
+          .returning({ id: integrationChannelChangeAuthorizations.id });
+        if (consumed === undefined) throw invalidLiveAuthorization();
+      }
+      await context.transaction.database
+        .insert(channelConfigurations)
+        .values({
+          integrationId: input.integrationId,
           enabled: input.enabled,
           statusId: status.id,
           statusLabel: status.label,
           changedAt,
-        },
-      });
-    const result = await loadChannelConfiguration(
-      context.transaction,
-      input.integrationId,
-    );
-    if (result === null) {
-      throw new AdminCapabilityError(
-        'INTERNAL_ERROR',
-        'The channel configuration could not be reloaded.',
-        500,
+        })
+        .onConflictDoUpdate({
+          target: channelConfigurations.integrationId,
+          set: {
+            enabled: input.enabled,
+            statusId: status.id,
+            statusLabel: status.label,
+            changedAt,
+          },
+        });
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        input.integrationId,
       );
-    }
-    return result;
-  },
-  resultReference: channelResultReference,
-  async loadReplay(resultReference, context) {
-    const parsed = parseChannelResultReference(resultReference);
-    const result = await loadChannelConfiguration(
-      context.transaction,
-      parsed.integrationId,
-    );
-    if (result === null) {
-      throw new AdminCapabilityError(
-        'NOT_FOUND',
-        'The previous channel configuration is unavailable.',
-        404,
+      if (result === null) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The channel configuration could not be reloaded.',
+          500,
+        );
+      }
+      return result;
+    },
+    resultReference: channelResultReference,
+    async loadReplay(resultReference, context) {
+      const parsed = parseChannelResultReference(resultReference);
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        parsed.integrationId,
       );
-    }
-    if (digestCapabilityValue(result) !== parsed.outputDigest) {
-      throw new AdminCapabilityError(
-        'CONFLICT',
-        'The original channel result is no longer reconstructable; replay was refused rather than returning changed data.',
-        409,
+      if (result === null) {
+        throw new AdminCapabilityError(
+          'NOT_FOUND',
+          'The previous channel configuration is unavailable.',
+          404,
+        );
+      }
+      if (digestCapabilityValue(result) !== parsed.outputDigest) {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'The original channel result is no longer reconstructable; replay was refused rather than returning changed data.',
+          409,
+        );
+      }
+      return result;
+    },
+    resolveReplayFacilityId(resultReference, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
       );
-    }
-    return result;
-  },
-  resolveReplayFacilityId(resultReference, context) {
-    requireAdminCapabilityAuthorization(
-      context.invocation.actor,
-      context.transaction,
-    );
-    parseChannelResultReference(resultReference);
-    return null;
-  },
-  replayFacilityId: () => null,
-};
+      parseChannelResultReference(resultReference);
+      return null;
+    },
+    replayFacilityId: () => null,
+  };
+}
+
+export const setChannelEnabledRegistration =
+  createSetChannelEnabledRegistration(readSmsWorkerReadiness);
+
+function readSesVerificationReference(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string | null {
+  if (environment[EMAIL_WORKER_ENABLED_ENV] !== 'true') return null;
+  const parsed = SesVerificationReferenceSchema.safeParse(
+    environment[SES_VERIFICATION_REFERENCE_ENV],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+function verifyEmailIntegrationRegistration(
+  verificationReference: string | null,
+): ServerCapabilityRegistration<
+  'verify-email-integration',
+  AdminCapabilityTransaction
+> {
+  return {
+    id: 'verify-email-integration',
+    canonicalizeIdempotencyInput: (input) => ({
+      ...input,
+      verificationReference,
+    }),
+    async resolveFacilityId(_input, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
+      );
+      return null;
+    },
+    async handler(input, context) {
+      if (
+        input.integrationId !== 'ses-email' ||
+        verificationReference === null ||
+        context.invocation.actor.kind !== 'human'
+      ) {
+        throw new AdminCapabilityError(
+          'FORBIDDEN',
+          'SES verification evidence is unavailable to this human session.',
+          403,
+        );
+      }
+      await lockIntegrationChange(context.transaction, input.integrationId);
+      const previousConfiguration = await lockChannelConfigurationState(
+        context.transaction,
+        input.integrationId,
+      );
+      const latest = await latestStatusForChange(
+        context.transaction,
+        input.integrationId,
+      );
+      if (latest === null) {
+        throw new AdminCapabilityError(
+          'NOT_FOUND',
+          'The SES integration status was not found.',
+          404,
+        );
+      }
+      const changedAt = await readCapabilityTime(context);
+      if (latest.label === 'live-verified') {
+        if (
+          previousConfiguration?.enabled !== true ||
+          previousConfiguration.statusId !== latest.id
+        ) {
+          throw new AdminCapabilityError(
+            'CONFLICT',
+            'SES verification cannot re-enable a deliberately disabled channel.',
+            409,
+          );
+        }
+        if (latest.authorizationReference === verificationReference) {
+          const existing = await loadChannelConfiguration(
+            context.transaction,
+            input.integrationId,
+          );
+          if (existing === null) {
+            throw new AdminCapabilityError(
+              'INTERNAL_ERROR',
+              'The verified SES channel could not be reloaded.',
+              500,
+            );
+          }
+          return existing;
+        }
+      } else if (latest.label !== 'configured-unverified') {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'SES integration truth cannot advance from its current state.',
+          409,
+        );
+      }
+      const [inserted] = await context.transaction.database
+        .insert(integrationStatuses)
+        .values({
+          integrationId: input.integrationId,
+          label: 'live-verified',
+          verifiedAt: changedAt,
+          verifiedByUserId: context.invocation.actor.userId,
+          authorizationReference: verificationReference,
+          reasonCode: null,
+          observedAt: changedAt,
+        })
+        .returning({ id: integrationStatuses.id });
+      if (inserted === undefined) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The SES verification observation was not recorded.',
+          500,
+        );
+      }
+      const statusId = inserted.id;
+      await context.transaction.database
+        .insert(channelConfigurations)
+        .values({
+          integrationId: input.integrationId,
+          enabled: true,
+          statusId,
+          statusLabel: 'live-verified',
+          changedAt,
+        })
+        .onConflictDoUpdate({
+          target: channelConfigurations.integrationId,
+          set: {
+            enabled: true,
+            statusId,
+            statusLabel: 'live-verified',
+            changedAt,
+          },
+        });
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        input.integrationId,
+      );
+      if (result === null) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The verified SES channel could not be reloaded.',
+          500,
+        );
+      }
+      return result;
+    },
+    resultReference: channelResultReference,
+    async loadReplay(resultReference, context) {
+      const parsed = parseChannelResultReference(resultReference);
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        parsed.integrationId,
+      );
+      if (
+        result === null ||
+        digestCapabilityValue(result) !== parsed.outputDigest
+      ) {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'The original SES verification result is no longer reconstructable.',
+          409,
+        );
+      }
+      return result;
+    },
+    resolveReplayFacilityId(resultReference, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
+      );
+      parseChannelResultReference(resultReference);
+      return null;
+    },
+    replayFacilityId: () => null,
+  };
+}
 
 /** Executes the canonical health query and captures its typed channel projection. */
 export async function executeIntegrationHealthProjection(input: {
@@ -651,6 +887,36 @@ export function executeSetChannelEnabledCapability(input: {
   readonly authenticated: AuthenticatedSession;
   readonly command: CapabilityInput<'set-channel-enabled'>;
   readonly metadata: AdminMutationMetadata;
+  readonly smsWorkerReadiness?: SmsWorkerReadiness;
+  readonly store?: AdminCapabilityStore;
+}): Promise<ChannelConfiguration> {
+  const store =
+    input.store ??
+    createDrizzleAdminCapabilityStore(
+      getDefaultAdminDatabase(),
+      input.authenticated,
+    );
+  const readiness = input.smsWorkerReadiness;
+  const registration =
+    readiness === undefined
+      ? setChannelEnabledRegistration
+      : createSetChannelEnabledRegistration(() => readiness);
+  return executeAdminMutationCapability(
+    registration,
+    input.command,
+    input.authenticated,
+    store,
+    input.metadata,
+  );
+}
+
+/** Records deploy-time SES evidence and enables the channel in one admin action. */
+export function executeVerifyEmailIntegrationCapability(input: {
+  readonly authenticated: AuthenticatedSession;
+  readonly command: CapabilityInput<'verify-email-integration'>;
+  readonly metadata: AdminMutationMetadata;
+  readonly verificationReference?: string | null;
+  readonly emailWorkerEnabled?: boolean;
   readonly store?: AdminCapabilityStore;
 }): Promise<ChannelConfiguration> {
   const store =
@@ -660,7 +926,13 @@ export function executeSetChannelEnabledCapability(input: {
       input.authenticated,
     );
   return executeAdminMutationCapability(
-    setChannelEnabledRegistration,
+    verifyEmailIntegrationRegistration(
+      input.verificationReference === undefined
+        ? readSesVerificationReference()
+        : input.emailWorkerEnabled === false
+          ? null
+          : input.verificationReference,
+    ),
     input.command,
     input.authenticated,
     store,

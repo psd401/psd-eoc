@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,10 +14,60 @@ import {
   extractContractList,
   validateMarkdownLinks,
   validateMonitoringRunbooks,
+  validateRecordsRetentionDocumentation,
   verifyDocumentation,
 } from './verify-documentation';
 
 const temporaryDirectories: string[] = [];
+const retentionDocumentPaths = [
+  'docs/ARCHITECTURE.md',
+  'docs/INTEGRATIONS.md',
+  'docs/runbooks/go-live.md',
+] as const;
+
+function retentionDocumentationFixture(
+  prefix: string,
+  transform: (path: string, contents: string) => string,
+): string {
+  const repositoryRoot = join(import.meta.dir, '..');
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(root);
+  for (const path of retentionDocumentPaths) {
+    mkdirSync(join(root, path, '..'), { recursive: true });
+    writeFileSync(
+      join(root, path),
+      transform(path, readFileSync(join(repositoryRoot, path), 'utf8')),
+    );
+  }
+  return root;
+}
+
+function reviewedRetentionEvidence(
+  contents: string,
+  reviewDate: string,
+): string {
+  return contents
+    .replace(
+      'Controlled mapping review status: `pending`.',
+      'Controlled mapping review status: `reviewed`.',
+    )
+    .replace(
+      'Controlled mapping review date: `not completed`.',
+      `Controlled mapping review date: \`${reviewDate}\`.`,
+    )
+    .replace(
+      'Controlled mapping inventory coverage: `not completed`.',
+      'Controlled mapping inventory coverage: `all classes`.',
+    )
+    .replace(
+      'Controlled mapping ambiguity status: `not completed`.',
+      'Controlled mapping ambiguity status: `resolved`.',
+    )
+    .replace(
+      /No completed records-officer review or\s+ambiguity\s+guidance has been supplied for this aggregate status\./u,
+      'Records-officer review covers all inventory classes, and retained guidance resolves every ambiguity.',
+    );
+}
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
@@ -90,7 +146,375 @@ describe('documentation contract', () => {
     ).toEqual(['FIRST', 'SECOND']);
   });
 
-  test('rejects phase, tenant, and duplicate readiness claims from current docs', () => {
+  test('keeps records-retention sources, classes, and review status explicit', () => {
+    expect(
+      validateRecordsRetentionDocumentation(join(import.meta.dir, '..')),
+    ).toEqual([]);
+  });
+
+  test('rejects an incomplete record-class inventory', () => {
+    const root = retentionDocumentationFixture(
+      'psd-eoc-retention-docs-',
+      (path, contents) =>
+        path === 'docs/ARCHITECTURE.md'
+          ? contents.replace('- `transport-and-operational-copies`\n', '')
+          : contents,
+    );
+
+    expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+      expect.objectContaining({
+        file: 'docs/ARCHITECTURE.md',
+        message: expect.stringContaining('records-retention classes differ'),
+      }),
+    );
+  });
+
+  test('rejects a reviewed retention status without a review date', () => {
+    const root = retentionDocumentationFixture(
+      'psd-eoc-retention-status-',
+      (path, contents) =>
+        path === 'docs/INTEGRATIONS.md'
+          ? reviewedRetentionEvidence(contents, 'not completed')
+          : contents,
+    );
+
+    expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+      expect.objectContaining({
+        file: 'docs/INTEGRATIONS.md',
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+      }),
+    );
+  });
+
+  test('accepts one consistent reviewed status with a real review date', () => {
+    const root = retentionDocumentationFixture(
+      'psd-eoc-retention-reviewed-',
+      (path, contents) =>
+        path === 'docs/INTEGRATIONS.md'
+          ? reviewedRetentionEvidence(contents, '2026-08-25')
+          : contents,
+    );
+
+    expect(validateRecordsRetentionDocumentation(root)).toEqual([]);
+  });
+
+  test('accepts explicit resolved prose with reviewed evidence', () => {
+    const root = retentionDocumentationFixture(
+      'psd-eoc-retention-resolved-',
+      (path, contents) =>
+        path === 'docs/INTEGRATIONS.md'
+          ? reviewedRetentionEvidence(contents, '2026-08-25').replace(
+              '<!-- psd-eoc:records-retention-review-status:end -->',
+              'No classifications remain unresolved.\n\n<!-- psd-eoc:records-retention-review-status:end -->',
+            )
+          : contents,
+    );
+
+    expect(validateRecordsRetentionDocumentation(root)).toEqual([]);
+  });
+
+  test('rejects duplicate, invalid, future, or inconsistent review evidence', () => {
+    const cases = [
+      {
+        name: 'duplicate-marker',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                '<!-- psd-eoc:records-retention-review-status:start -->',
+                '<!-- psd-eoc:records-retention-review-status:start -->\n<!-- psd-eoc:records-retention-review-status:start -->',
+              )
+            : contents,
+        message: 'expected one bounded records-retention review-status section',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'duplicate-status',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                '- Controlled mapping review status: `pending`.',
+                '- Controlled mapping review status: `pending`.\n- Controlled mapping review status: `reviewed`.',
+              )
+            : contents,
+        message:
+          'records-retention mapping status must occur once and be pending or reviewed',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'status-outside-bounds',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents
+                .replace('- Controlled mapping review status: `pending`.\n', '')
+                .replace(
+                  '<!-- psd-eoc:records-retention-review-status:end -->',
+                  '<!-- psd-eoc:records-retention-review-status:end -->\n\n- Controlled mapping review status: `pending`.',
+                )
+            : contents,
+        message:
+          'records-retention mapping status must occur once and be pending or reviewed',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'invalid-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? reviewedRetentionEvidence(contents, '2026-99-99')
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'future-review-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? reviewedRetentionEvidence(contents, '9999-12-31')
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'pre-schedule-review-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? reviewedRetentionEvidence(contents, '2026-06-02')
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      ...[
+        'One classification remains unresolved.',
+        'The transport class was not reviewed.',
+        'Ambiguities remain PENDING.',
+      ].map((contradiction, index) => ({
+        name: `reviewed-contradiction-${String(index)}`,
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? reviewedRetentionEvidence(contents, '2026-08-25').replace(
+                '<!-- psd-eoc:records-retention-review-status:end -->',
+                `${contradiction}\n\n<!-- psd-eoc:records-retention-review-status:end -->`,
+              )
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      })),
+      {
+        name: 'source-date-drift',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                'official sources were rechecked on 2026-08-26:',
+                'official sources were rechecked on 2026-08-25:',
+              )
+            : contents,
+        message:
+          'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'future-source-date',
+        transform: (_path: string, contents: string): string =>
+          contents
+            .replace(
+              'official sources were rechecked on 2026-08-26',
+              'official sources were rechecked on 9999-12-31',
+            )
+            .replace(
+              'Official sources last rechecked: `2026-08-26`.',
+              'Official sources last rechecked: `9999-12-31`.',
+            ),
+        message:
+          'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'stale-source-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents
+                .replace(
+                  'official sources were rechecked on 2026-08-26',
+                  'official sources were rechecked on 2026-08-25',
+                )
+                .replace(
+                  'Official sources last rechecked: `2026-08-26`.',
+                  'Official sources last rechecked: `2026-08-25`.',
+                )
+            : contents,
+        message:
+          'records-retention official-source date is invalid, stale, future-dated, duplicated, or inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+    ];
+
+    for (const scenario of cases) {
+      const root = retentionDocumentationFixture(
+        `psd-eoc-retention-${scenario.name}-`,
+        scenario.transform,
+      );
+      expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+        expect.objectContaining({
+          file: scenario.file,
+          message: scenario.message,
+        }),
+      );
+    }
+  });
+
+  test('rejects weakened source, override, draft, policy, and go-live contracts', () => {
+    const cases = [
+      {
+        name: 'candidate',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace('GS2017-016 Rev. 0', 'missing candidate')
+            : contents,
+        message:
+          'records-retention candidate mapping differs from required current evidence',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      ...(
+        [
+          ['period', 'Retain for 3 years', 'Retain for 4 years'],
+          [
+            'trigger',
+            'after the matter is resolved or recovery is complete',
+            'after creation',
+          ],
+          [
+            'disposition',
+            'then destroy; non-archival',
+            'then retain permanently',
+          ],
+          ['archival', 'non-archival.', 'archival.'],
+          [
+            'source-designation',
+            '| OPR                |',
+            '| OFM                |',
+          ],
+        ] as const
+      ).map(([name, current, replacement]) => ({
+        name: `candidate-${name}`,
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(current, replacement)
+            : contents,
+        message:
+          'records-retention candidate mapping differs from required current evidence',
+        file: 'docs/INTEGRATIONS.md',
+      })),
+      {
+        name: 'source',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                'local-government-common-records-retention-schedule-CORE.PDF',
+                'missing-CORE.PDF',
+              )
+            : contents,
+        message:
+          'records-retention guidance is missing official source: https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'candidate-outside-contract',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                '<!-- docs-contract:records-retention-candidates:end -->',
+                '<!-- docs-contract:records-retention-candidates:end -->\n\nRoutine/minor responses use `GS50-18-29 Rev. 2` and retain for one year, then destroy.',
+              )
+            : contents,
+        message:
+          'records-retention candidate evidence appears outside its bounded contract',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'candidate-paraphrase-outside-contract',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                '<!-- docs-contract:records-retention-candidates:end -->',
+                '<!-- docs-contract:records-retention-candidates:end -->\n\nRoutine/minor responses are retained for one year and destroyed afterward.',
+              )
+            : contents,
+        message:
+          'records-retention candidate evidence appears outside its bounded contract',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'override',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/ARCHITECTURE.md'
+            ? contents.replace(
+                /active\s+public-records request/u,
+                'closed request',
+              )
+            : contents,
+        message:
+          'records-retention guidance is missing required statement: active public-records request',
+        file: 'docs/ARCHITECTURE.md',
+      },
+      {
+        name: 'draft-current',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents.replace(
+                'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
+                'CORE v5.1 and K-12 v9.2 are current',
+              )
+            : contents,
+        message:
+          'records-retention review is missing required current evidence: CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'policy',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/ARCHITECTURE.md'
+            ? contents.replace(
+                '`automated-disposition: prohibited`',
+                '`automated-disposition: enabled`',
+              )
+            : contents,
+        message: 'records-retention policy differs from the required contract',
+        file: 'docs/ARCHITECTURE.md',
+      },
+      {
+        name: 'go-live',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/runbooks/go-live.md'
+            ? contents.replace(
+                /blocks\s+any later disposition design/u,
+                'allows a later disposition design',
+              )
+            : contents,
+        message:
+          'go-live procedure is missing the retention boundary: blocks any later disposition design',
+        file: 'docs/runbooks/go-live.md',
+      },
+    ];
+
+    for (const scenario of cases) {
+      const root = retentionDocumentationFixture(
+        `psd-eoc-retention-${scenario.name}-`,
+        scenario.transform,
+      );
+      expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+        expect.objectContaining({
+          file: scenario.file,
+          message: scenario.message,
+        }),
+      );
+    }
+  });
+
+  test('rejects unsafe and duplicated claims from current docs', () => {
     expect(
       currentDocumentationViolations(
         'docs/runbooks/provider.md',
@@ -131,5 +555,41 @@ describe('documentation contract', () => {
     ).toEqual([
       'current documentation bypasses the pinned synthetic database commands',
     ]);
+    expect(
+      currentDocumentationViolations(
+        'docs/ARCHITECTURE.md',
+        'CORE v5.0 and GS2017-016 Rev. 0 are current.',
+      ),
+    ).toEqual(['current documentation duplicates volatile retention evidence']);
+    for (const authorization of [
+      'Administrators may purge all retained event records at any time.',
+      'Deletion is permitted after export.',
+      'Operators can dispose of audit records.',
+      'Deletion is permitted after export, not before export.',
+      'Deletion is not prohibited.',
+      'No approval is needed, administrators may purge all retained event records.',
+      'Administrators may purge event records if no legal hold exists.',
+      'No user except administrators may purge retained event records.',
+      'No one other than records administrators may delete retained event records.',
+    ]) {
+      expect(
+        currentDocumentationViolations(
+          'docs/runbooks/records.md',
+          authorization,
+        ),
+      ).toEqual([
+        'current documentation contains conflicting disposition authorization',
+      ]);
+    }
+    for (const prohibition of [
+      'Deletion is not permitted.',
+      'Purge is not allowed.',
+      'Automated disposition is never authorized.',
+      'Down migrations are not permitted.',
+    ]) {
+      expect(
+        currentDocumentationViolations('docs/runbooks/records.md', prohibition),
+      ).toEqual([]);
+    }
   });
 });

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   DeliveryTestCanaryEligibilityFactSchema,
   DeliveryTestTargetSetVersionSchema,
+  IdempotencyKeySchema,
   MonthlyDeliveryTestReportPageSchema,
   MonthlyDeliveryTestReportSchema,
   SecurityAuditEntrySchema,
@@ -14,6 +15,7 @@ import {
   type DeliveryTestChannelReport,
   type DeliveryTestCanaryEligibilityFact,
   type DeliveryTestTargetSetVersion,
+  type DeliveryEvidence,
   type MonthlyDeliveryTestReport,
   type MonthlyDeliveryTestReportPage,
   type NotificationChannel,
@@ -98,6 +100,52 @@ import {
   type AdminCapabilityTransaction,
 } from './admin';
 import { loadRosterSnapshot } from './start';
+
+export const DELIVERY_TEST_REPORT_WORKER_SERVICE_ID =
+  'notification-delivery-worker' as const;
+
+/**
+ * Correlates report idempotency to the immutable evidence fact. Every evidence
+ * ingestion path uses this invocation so provider callbacks and worker
+ * writeback cannot leave different report projections for the same fact.
+ */
+export function deliveryTestReportInvocationForEvidence(
+  evidence: DeliveryEvidence,
+): TrustedCapabilityInvocation {
+  return Object.freeze({
+    actor: Object.freeze({
+      kind: 'system' as const,
+      serviceId: DELIVERY_TEST_REPORT_WORKER_SERVICE_ID,
+    }),
+    source: 'worker' as const,
+    scope: Object.freeze({
+      facilityScope: Object.freeze({ kind: 'district' as const }),
+    }),
+    requestId: randomUUID(),
+    serverTime: new Date(dateIso(evidence.recordedAt)),
+    connectivityEpochId: null,
+    mutation: Object.freeze({
+      idempotencyKey: IdempotencyKeySchema.parse(
+        `delivery-test-report:${evidence.id}`,
+      ),
+      transport: Object.freeze({ kind: 'worker-execution' as const }),
+      humanConfirmationId: null,
+    }),
+  });
+}
+
+/** Provider facts that can make an exact pinned target projection terminal. */
+export function mayFinalizeDeliveryTestReport(
+  evidence: DeliveryEvidence,
+): boolean {
+  return (
+    evidence.state === 'provider-accepted' ||
+    evidence.state === 'delivered' ||
+    evidence.state === 'failed' ||
+    evidence.state === 'expired' ||
+    evidence.state === 'unknown'
+  );
+}
 
 export const DELIVERY_TEST_PRODUCT_OWNER_USER_ID_ENV =
   'PSD_EOC_PRODUCT_OWNER_USER_ID' as const;
@@ -414,7 +462,7 @@ type EndpointReference = Readonly<{
 
 /**
  * Revalidates the target-mode discriminator after opaque eligibility facts
- * have been resolved. The controlled mode is a singleton email branch;
+ * have been resolved. Controlled modes are singleton channel branches;
  * ordinary target sets retain their push-and-email launch floor.
  */
 export function deliveryTestTargetModeMatches(
@@ -423,6 +471,12 @@ export function deliveryTestTargetModeMatches(
 ): boolean {
   if ('mode' in input && input.mode === 'controlled-email-canary') {
     return endpoints.length === 1 && endpoints[0]?.channel === 'email';
+  }
+  if ('mode' in input && input.mode === 'controlled-push-canary') {
+    return endpoints.length === 1 && endpoints[0]?.channel === 'push';
+  }
+  if ('mode' in input && input.mode === 'controlled-sms-canary') {
+    return endpoints.length === 1 && endpoints[0]?.channel === 'sms';
   }
   const channels = new Set(endpoints.map((endpoint) => endpoint.channel));
   return endpoints.length >= 2 && channels.has('push') && channels.has('email');
@@ -489,23 +543,36 @@ async function loadDeliveryTestTargetSetVersion(
       asc(deliveryTestTargetEndpoints.recipientId),
       asc(deliveryTestTargetEndpoints.endpointId),
     );
+  const endpointReferences = endpoints.map((endpoint) => ({
+    eligibilityFactId: endpoint.eligibilityFactId,
+    recipientId: endpoint.recipientId,
+    endpointId: endpoint.endpointId,
+    channel: endpoint.channel,
+    attestation: endpoint.attestation,
+    optedInAt: dateIso(endpoint.optedInAt),
+    attestedAt: dateIso(endpoint.attestedAt),
+    attestedByUserId: endpoint.attestedByUserId,
+    authorizationReference: endpoint.authorizationReference,
+  }));
+  const controlledMode =
+    endpointReferences.length === 1 &&
+    endpointReferences[0]?.channel === 'email'
+      ? ('controlled-email-canary' as const)
+      : endpointReferences.length === 1 &&
+          endpointReferences[0]?.channel === 'push'
+        ? ('controlled-push-canary' as const)
+        : endpointReferences.length === 1 &&
+            endpointReferences[0]?.channel === 'sms'
+          ? ('controlled-sms-canary' as const)
+          : null;
   return DeliveryTestTargetSetVersionSchema.parse({
+    ...(controlledMode === null ? {} : { mode: controlledMode }),
     id: row.id,
     version: row.version,
     facilityId: row.facilityId,
     rosterSnapshotId: row.rosterSnapshotId,
     supersedesVersionId: row.supersedesVersionId,
-    endpoints: endpoints.map((endpoint) => ({
-      eligibilityFactId: endpoint.eligibilityFactId,
-      recipientId: endpoint.recipientId,
-      endpointId: endpoint.endpointId,
-      channel: endpoint.channel,
-      attestation: endpoint.attestation,
-      optedInAt: dateIso(endpoint.optedInAt),
-      attestedAt: dateIso(endpoint.attestedAt),
-      attestedByUserId: endpoint.attestedByUserId,
-      authorizationReference: endpoint.authorizationReference,
-    })),
+    endpoints: endpointReferences,
     endpointReferenceDigest: row.endpointReferenceDigest,
     approvedByUserId: row.approvedByUserId,
     approvedWithSessionId: row.approvedWithSessionId,
@@ -864,6 +931,7 @@ async function createTargetSetVersion(
   const endpointReferenceDigest =
     deliveryTestEndpointReferenceDigest(requestedReferences);
   const output = DeliveryTestTargetSetVersionSchema.parse({
+    ...('mode' in input ? { mode: input.mode } : {}),
     id,
     version,
     facilityId: input.facilityId,
@@ -1630,10 +1698,16 @@ async function deriveReportProjection(
       }),
     ];
   });
+  // Every controlled canary mode is exactly one pinned endpoint. The target
+  // set capability validates the channel-specific discriminator when the
+  // immutable version is created; report projection must preserve the same
+  // singleton contract for email, push, and SMS.
+  const controlledCanary = targetRows.length === 1;
   if (
-    channels.length < 2 ||
-    !channels.some((channel) => channel.channel === 'push') ||
-    !channels.some((channel) => channel.channel === 'email')
+    !controlledCanary &&
+    (channels.length < 2 ||
+      !channels.some((channel) => channel.channel === 'push') ||
+      !channels.some((channel) => channel.channel === 'email'))
   ) {
     throw conflict('The delivery-test target channels are incomplete.');
   }

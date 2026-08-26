@@ -202,7 +202,7 @@ class MemorySendLedger implements AwsEumSmsSendLedger {
     }
     const row: LedgerRow = {
       fingerprint: request.fingerprint,
-      leaseToken: `synthetic-lease:${request.attemptId}`,
+      leaseToken: IDS.secondAttempt,
       completion: null,
       indeterminate: false,
     };
@@ -237,6 +237,7 @@ const BASE_OPTIONS = Object.freeze({
   protectConfigurationId: 'protect-synthetic',
   maxPrice: '0.05',
   timeToLiveSeconds: 300,
+  clock: () => 0,
 });
 
 function adapter(
@@ -248,12 +249,15 @@ function adapter(
   client: RecordingClient;
   ledger: MemorySendLedger;
   authorizationContexts: AwsEumSmsLiveAuthorizationContext[];
+  providerAuthorizationWorkItems: ProviderSendRequest['workItem'][];
 }> {
   const authorizationContexts: AwsEumSmsLiveAuthorizationContext[] = [];
+  const providerAuthorizationWorkItems: ProviderSendRequest['workItem'][] = [];
   return Object.freeze({
     client,
     ledger,
     authorizationContexts,
+    providerAuthorizationWorkItems,
     adapter: new AwsEumSmsAdapter({
       client,
       ledger,
@@ -262,6 +266,10 @@ function adapter(
       authorizeLiveSend: (context) => {
         authorizationContexts.push(context);
         return true;
+      },
+      authorizeProviderSend: (workItem) => {
+        providerAuthorizationWorkItems.push(workItem);
+        return Object.freeze({ authorized: true, timeToLiveSeconds: 299 });
       },
       ...overrides,
     }),
@@ -313,8 +321,11 @@ describe('AWS EUM SMS request and live gates', () => {
         MessageType: 'TRANSACTIONAL',
         ConfigurationSetName: 'psd-eoc-sms',
         MaxPrice: '0.05',
-        TimeToLive: 300,
-        Context: { psdAttemptId: IDS.attempt },
+        TimeToLive: 299,
+        Context: {
+          psdAttemptId: IDS.attempt,
+          psdProviderClaimToken: IDS.secondAttempt,
+        },
         DryRun: false,
         ProtectConfigurationId: 'protect-synthetic',
       },
@@ -326,6 +337,7 @@ describe('AWS EUM SMS request and live gates', () => {
     expect(JSON.stringify(app.authorizationContexts[0])).not.toContain(
       INCIDENT_BODY,
     );
+    expect(app.providerAuthorizationWorkItems).toEqual([request.workItem]);
   });
 
   test('preserves an exact live-verified staff DRILL request at the provider boundary', async () => {
@@ -345,8 +357,11 @@ describe('AWS EUM SMS request and live gates', () => {
         MessageType: 'TRANSACTIONAL',
         ConfigurationSetName: 'psd-eoc-sms',
         MaxPrice: '0.05',
-        TimeToLive: 300,
-        Context: { psdAttemptId: IDS.attempt },
+        TimeToLive: 299,
+        Context: {
+          psdAttemptId: IDS.attempt,
+          psdProviderClaimToken: IDS.secondAttempt,
+        },
         DryRun: false,
         ProtectConfigurationId: 'protect-synthetic',
       },
@@ -387,9 +402,30 @@ describe('AWS EUM SMS request and live gates', () => {
 
   test('is dark by default and also requires a successful runtime authorization', async () => {
     for (const overrides of [
-      { featureEnabled: false, authorizeLiveSend: () => true },
-      { featureEnabled: true, authorizeLiveSend: () => false },
-      { featureEnabled: true },
+      {
+        featureEnabled: false,
+        authorizeLiveSend: () => true,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
+      },
+      {
+        featureEnabled: true,
+        authorizeLiveSend: () => false,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
+      },
+      { featureEnabled: true, authorizeLiveSend: () => true },
+      {
+        featureEnabled: true,
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
+      },
     ] satisfies readonly Partial<AwsEumSmsAdapterOptions>[]) {
       const client = new RecordingClient();
       const ledger = new MemorySendLedger();
@@ -404,6 +440,105 @@ describe('AWS EUM SMS request and live gates', () => {
       );
       expect(client.requests).toHaveLength(0);
       expect(ledger.claimCalls).toBe(0);
+    }
+  });
+
+  test('terminally records a fresh full-work-item denial after the send claim', async () => {
+    const client = new RecordingClient();
+    const ledger = new MemorySendLedger();
+    let authorizationCalls = 0;
+    const request = providerRequest();
+    const app = adapter(client, ledger, {
+      authorizeProviderSend: (workItem) => {
+        authorizationCalls += 1;
+        expect(workItem).toEqual(request.workItem);
+        expect(ledger.claimCalls).toBe(1);
+        expect(ledger.rows.get(IDS.attempt)?.completion).toBeNull();
+        expect(client.requests).toHaveLength(0);
+        return Object.freeze({ authorized: false });
+      },
+    });
+
+    for (let invocation = 0; invocation < 2; invocation += 1) {
+      await expect(app.adapter.send(request)).rejects.toMatchObject({
+        code: 'AWS_EUM_SEND_UNAUTHORIZED',
+        disposition: 'terminal-failure',
+      });
+    }
+
+    expect(authorizationCalls).toBe(1);
+    expect(ledger.claimCalls).toBe(1);
+    expect(ledger.completeCalls).toBe(1);
+    expect(ledger.rows.get(IDS.attempt)?.completion).toEqual({
+      kind: 'provider-error',
+      code: 'AWS_EUM_SEND_UNAUTHORIZED',
+      disposition: 'terminal-failure',
+      diagnosticDigest: null,
+    });
+    expect(client.requests).toHaveLength(0);
+  });
+
+  test('ages the server TTL across authorization transit before provider I/O', async () => {
+    let now = 1_000;
+    const app = adapter(undefined, undefined, {
+      clock: () => now,
+      authorizeProviderSend: () => {
+        now = 2_001;
+        return Object.freeze({ authorized: true, timeToLiveSeconds: 10 });
+      },
+    });
+
+    await expect(app.adapter.send(providerRequest())).resolves.toMatchObject({
+      state: 'provider-accepted',
+    });
+
+    expect(app.client.requests[0]?.TimeToLive).toBe(8);
+  });
+
+  test('safely retries unavailable or expired final authorization without provider I/O', async () => {
+    const cases = [
+      {
+        expectedCode: 'AWS_EUM_AUTHORIZATION_UNAVAILABLE',
+        authorizeProviderSend: () => {
+          throw new Error('Synthetic authorization outage.');
+        },
+        clock: () => 0,
+      },
+      {
+        expectedCode: 'AWS_EUM_AUTHORIZATION_UNAVAILABLE',
+        authorizeProviderSend: () => ({ authorized: true }),
+        clock: () => 0,
+      },
+      {
+        expectedCode: 'AWS_EUM_AUTHORIZATION_EXPIRED',
+        authorizeProviderSend: () => {
+          now = 5_000;
+          return Object.freeze({ authorized: true, timeToLiveSeconds: 5 });
+        },
+        clock: () => now,
+      },
+    ] as const;
+    let now = 0;
+
+    for (const testCase of cases) {
+      now = 0;
+      const client = new RecordingClient();
+      const ledger = new MemorySendLedger();
+      const app = adapter(client, ledger, {
+        clock: testCase.clock,
+        authorizeProviderSend: testCase.authorizeProviderSend as never,
+      });
+
+      await expect(app.adapter.send(providerRequest())).rejects.toMatchObject({
+        code: testCase.expectedCode,
+        disposition: 'safe-to-retry',
+      });
+      expect(ledger.rows.get(IDS.attempt)?.completion).toMatchObject({
+        kind: 'provider-error',
+        code: testCase.expectedCode,
+        disposition: 'safe-to-retry',
+      });
+      expect(client.requests).toHaveLength(0);
     }
   });
 

@@ -476,17 +476,38 @@ export const outbox = pgTable(
       'outbox_channel_plan_shape',
       sql`case
         when jsonb_typeof(${table.channels}) = 'array' then
-          jsonb_array_length(${table.channels}) between 2 and 3
-          and jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
-          )) = 1
-          and jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
-          )) = 1
-          and jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-          )) <= 1
-          and jsonb_array_length(jsonb_path_query_array(
+          (
+            (
+              jsonb_array_length(${table.channels}) between 2 and 3
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
+              )) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
+              )) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+              )) <= 1
+            ) or (
+              ${table.eventKind} = 'drill'
+              and ${table.templateMode} = 'drill'
+              and ${table.purpose} = 'activation'
+              and ${table.rosterPopulation} = 'staff'
+              and jsonb_typeof(${table.message} -> 'deliveryTest') is not distinct from 'object'
+              and jsonb_array_length(${table.channels}) = 1
+              and (
+                jsonb_array_length(jsonb_path_query_array(
+                  ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
+                ))
+                + jsonb_array_length(jsonb_path_query_array(
+                  ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
+                ))
+                + jsonb_array_length(jsonb_path_query_array(
+                  ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+                ))
+              ) = 1
+            )
+          ) and jsonb_array_length(jsonb_path_query_array(
             ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
           )) = jsonb_array_length(${table.channels})
         else false
@@ -925,6 +946,10 @@ export const channelAttempts = pgTable(
 export const channelAttemptExecutions = pgTable(
   'channel_attempt_executions',
   {
+    // The worker claims this outer lease before it appends the canonical
+    // attempted evidence that creates channel_attempts. A foreign key here
+    // would make every first attempt impossible; later provider-I/O state is
+    // separately tied to the canonical attempt after that append succeeds.
     attemptId: uuid('attempt_id').primaryKey(),
     fingerprint: varchar('fingerprint', { length: 200 }).notNull(),
     leaseToken: uuid('lease_token').notNull(),
@@ -946,6 +971,238 @@ export const channelAttemptExecutions = pgTable(
     index('channel_attempt_executions_reclaimable_idx')
       .on(table.leaseExpiresAt)
       .where(sql`${table.completion} is null`),
+  ],
+);
+
+/**
+ * Irreversible permit for one Expo provider-I/O call.
+ *
+ * Unlike the outer attempt lease, this permit never expires: a process can die
+ * after Expo accepted bytes but before it records the response. Reissuing the
+ * permit would create a duplicate notification, so an unfinished row remains
+ * explicitly uncertain until an operator reconciles it.
+ */
+export const expoPushProviderIo = pgTable(
+  'expo_push_provider_io',
+  {
+    attemptId: uuid('attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    workFingerprint: digest('work_fingerprint').notNull(),
+    claimToken: uuid('claim_token').defaultRandom().notNull(),
+    completion: jsonb('completion'),
+    claimedAt: occurredAt('claimed_at').defaultNow().notNull(),
+    completedAt: occurredAt('completed_at'),
+  },
+  (table) => [
+    check(
+      'expo_push_provider_io_completion_pairing',
+      sql`(${table.completion} is null) = (${table.completedAt} is null)`,
+    ),
+    check(
+      'expo_push_provider_io_completion_object',
+      sql`${table.completion} is null or jsonb_typeof(${table.completion}) = 'object'`,
+    ),
+  ],
+);
+
+/**
+ * Irreversible permit for one AWS End User Messaging SMS provider call.
+ *
+ * An unfinished row is intentionally permanent uncertainty. A worker may die
+ * after AWS accepted the message but before it stores the response, and a
+ * replacement worker must never turn that gap into a duplicate alert.
+ */
+export const smsProviderIo = pgTable(
+  'sms_provider_io',
+  {
+    attemptId: uuid('attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    workFingerprint: digest('work_fingerprint').notNull(),
+    claimToken: uuid('claim_token').defaultRandom().notNull(),
+    completion: jsonb('completion'),
+    claimedAt: occurredAt('claimed_at').defaultNow().notNull(),
+    completedAt: occurredAt('completed_at'),
+  },
+  (table) => [
+    check(
+      'sms_provider_io_completion_pairing',
+      sql`(${table.completion} is null) = (${table.completedAt} is null)`,
+    ),
+    check(
+      'sms_provider_io_completion_object',
+      sql`${table.completion} is null or jsonb_typeof(${table.completion}) = 'object'`,
+    ),
+  ],
+);
+
+/**
+ * Irreversible permit for one SES provider-I/O call.
+ *
+ * SES does not accept a caller idempotency key. An unfinished claim therefore
+ * never expires: the worker may have lost the response after SES accepted the
+ * message, and retrying that call would risk a duplicate email.
+ */
+export const sesEmailProviderIo = pgTable(
+  'ses_email_provider_io',
+  {
+    attemptId: uuid('attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    requestFingerprint: digest('request_fingerprint').notNull(),
+    claimToken: uuid('claim_token').defaultRandom().notNull(),
+    outcome: jsonb('outcome'),
+    claimedAt: occurredAt('claimed_at').defaultNow().notNull(),
+    completedAt: occurredAt('completed_at'),
+  },
+  (table) => [
+    check(
+      'ses_email_provider_io_completion_pairing',
+      sql`(${table.outcome} is null) = (${table.completedAt} is null)`,
+    ),
+    check(
+      'ses_email_provider_io_outcome_object',
+      sql`${table.outcome} is null or jsonb_typeof(${table.outcome}) = 'object'`,
+    ),
+  ],
+);
+
+/** Durable receipt polling state; targets contain no push token. */
+export const expoPushReceiptPolls = pgTable(
+  'expo_push_receipt_polls',
+  {
+    attemptId: uuid('attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    receiptId: varchar('receipt_id', { length: 500 }).notNull(),
+    fingerprint: digest('fingerprint').notNull(),
+    target: jsonb('target').notNull(),
+    firstPollAt: occurredAt('first_poll_at').notNull(),
+    horizonAt: occurredAt('horizon_at').notNull(),
+    dueAt: occurredAt('due_at').notNull(),
+    pollAttemptNumber: integer('poll_attempt_number').default(1).notNull(),
+    lastReasonCode: auditCode('last_reason_code'),
+    receiptReferenceState: varchar('receipt_reference_state', { length: 16 })
+      .default('unique')
+      .notNull(),
+    pendingAction: jsonb('pending_action'),
+    leaseToken: uuid('lease_token'),
+    leaseExpiresAt: occurredAt('lease_expires_at'),
+    lastDecision: jsonb('last_decision'),
+    terminalDecision: jsonb('terminal_decision'),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+    updatedAt: occurredAt('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('expo_push_receipt_polls_due_idx')
+      .on(table.dueAt, table.attemptId)
+      .where(sql`${table.terminalDecision} is null`),
+    index('expo_push_receipt_polls_receipt_idx').on(
+      table.receiptId,
+      table.attemptId,
+    ),
+    check(
+      'expo_push_receipt_polls_window',
+      sql`${table.firstPollAt} <= ${table.dueAt}
+        and ${table.dueAt} <= ${table.horizonAt}`,
+    ),
+    check(
+      'expo_push_receipt_polls_attempt_positive',
+      sql`${table.pollAttemptNumber} between 1 and 10000`,
+    ),
+    check(
+      'expo_push_receipt_polls_reference_state',
+      sql`${table.receiptReferenceState} in ('unique', 'conflict')`,
+    ),
+    check(
+      'expo_push_receipt_polls_lease_pairing',
+      sql`(${table.leaseToken} is null) = (${table.leaseExpiresAt} is null)`,
+    ),
+    check(
+      'expo_push_receipt_polls_json_objects',
+      sql`jsonb_typeof(${table.target}) = 'object'
+        and (${table.pendingAction} is null or jsonb_typeof(${table.pendingAction}) = 'object')
+        and (${table.lastDecision} is null or jsonb_typeof(${table.lastDecision}) = 'object')
+        and (${table.terminalDecision} is null or jsonb_typeof(${table.terminalDecision}) = 'object')`,
+    ),
+  ],
+);
+
+/**
+ * Idempotent destination-free schedule for the immutable attempt after a
+ * safe-to-retry send failure or receipt-directed resend.
+ */
+export const expoPushRetrySchedules = pgTable(
+  'expo_push_retry_schedules',
+  {
+    sourceAttemptId: uuid('source_attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    sourceFingerprint: digest('source_fingerprint').notNull(),
+    receiptId: varchar('receipt_id', { length: 500 }),
+    nextAttemptId: uuid('next_attempt_id').defaultRandom().notNull(),
+    nextAttemptNumber: integer('next_attempt_number').notNull(),
+    delayMilliseconds: integer('delay_milliseconds').notNull(),
+    retryAt: occurredAt('retry_at').notNull(),
+    expiresAt: occurredAt('expires_at').notNull(),
+    reasonCode: auditCode('reason_code').notNull(),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    unique('expo_push_retry_schedules_next_attempt_uq').on(table.nextAttemptId),
+    index('expo_push_retry_schedules_retry_at_idx').on(table.retryAt),
+    check(
+      'expo_push_retry_schedules_attempt_positive',
+      sql`${table.nextAttemptNumber} between 2 and 10`,
+    ),
+    check(
+      'expo_push_retry_schedules_delay',
+      sql`${table.delayMilliseconds} between 1 and 3600000`,
+    ),
+    check(
+      'expo_push_retry_schedules_window',
+      sql`${table.retryAt} < ${table.expiresAt}`,
+    ),
+    check(
+      'expo_push_retry_schedules_receipt_reason',
+      sql`${table.receiptId} is null
+        or ${table.reasonCode} = 'EXPO_MESSAGE_RATE_EXCEEDED'`,
+    ),
+  ],
+);
+
+/** Idempotent, destination-free schedule for one immutable SMS retry. */
+export const smsRetrySchedules = pgTable(
+  'sms_retry_schedules',
+  {
+    sourceAttemptId: uuid('source_attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    sourceFingerprint: digest('source_fingerprint').notNull(),
+    nextAttemptId: uuid('next_attempt_id').defaultRandom().notNull(),
+    nextAttemptNumber: integer('next_attempt_number').notNull(),
+    delayMilliseconds: integer('delay_milliseconds').notNull(),
+    retryAt: occurredAt('retry_at').notNull(),
+    expiresAt: occurredAt('expires_at').notNull(),
+    reasonCode: auditCode('reason_code').notNull(),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    unique('sms_retry_schedules_next_attempt_uq').on(table.nextAttemptId),
+    index('sms_retry_schedules_retry_at_idx').on(table.retryAt),
+    check(
+      'sms_retry_schedules_attempt_positive',
+      sql`${table.nextAttemptNumber} between 2 and 10`,
+    ),
+    check(
+      'sms_retry_schedules_delay',
+      sql`${table.delayMilliseconds} between 1 and 3600000`,
+    ),
+    check(
+      'sms_retry_schedules_window',
+      sql`${table.retryAt} < ${table.expiresAt}`,
+    ),
   ],
 );
 
@@ -1201,7 +1458,15 @@ export const deliveryTestReports = pgTable(
     check(
       'delivery_test_reports_channels_shape',
       sql`jsonb_typeof(${table.channels}) is not distinct from 'array'
-        and jsonb_array_length(${table.channels}) between 2 and 3`,
+        and (
+          jsonb_array_length(${table.channels}) between 2 and 3
+          or (
+            jsonb_array_length(${table.channels}) = 1
+            and jsonb_array_length(jsonb_path_query_array(
+              ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
+            )) = 1
+          )
+        )`,
     ),
     check(
       'delivery_test_reports_status_reason_truth',

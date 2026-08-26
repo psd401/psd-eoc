@@ -118,7 +118,7 @@ function sameEvidenceInput(
   input: AttemptEvidenceInput,
   result: DeliveryEvidence,
 ): boolean {
-  return (
+  const exact =
     result.subject.kind === 'attempt' &&
     result.subject.attemptId === input.subject.attemptId &&
     result.state === input.state &&
@@ -126,7 +126,27 @@ function sameEvidenceInput(
     result.providerReference === input.providerReference &&
     JSON.stringify(result.proof) === JSON.stringify(input.proof) &&
     result.reasonCode === input.reasonCode &&
-    result.diagnosticDigest === input.diagnosticDigest
+    result.diagnosticDigest === input.diagnosticDigest;
+  if (exact) return true;
+  if (
+    result.subject.kind !== 'attempt' ||
+    result.subject.attemptId !== input.subject.attemptId
+  ) {
+    return false;
+  }
+  const terminal = ['delivered', 'failed', 'expired'].includes(result.state);
+  if (input.state === 'unknown') {
+    return (
+      input.providerReference === null &&
+      (result.state === 'provider-accepted' || terminal) &&
+      (input.provider === null || result.provider === input.provider)
+    );
+  }
+  return (
+    terminal &&
+    input.state === 'provider-accepted' &&
+    result.provider === input.provider &&
+    result.providerReference === input.providerReference
   );
 }
 

@@ -123,6 +123,7 @@ export type AttemptExecutionClaim =
 
 export type AttemptExecutionLookup =
   | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'reclaimable' }>
   | Readonly<{
       kind: 'completed';
       completion: AttemptExecutionCompletion;
@@ -365,6 +366,8 @@ function parseLookup(
   switch (value.kind) {
     case 'missing':
       return Object.freeze({ kind: 'missing' });
+    case 'reclaimable':
+      return Object.freeze({ kind: 'reclaimable' });
     case 'completed':
       return Object.freeze({
         kind: 'completed',
@@ -476,6 +479,11 @@ export class WorkerAttemptProcessor {
     if (recovered.kind === 'completed') {
       return this.#writeCompletion(attempt, recovered.completion, true);
     }
+
+    // Both a genuinely missing attempt and an expired outer lease must first
+    // consult the adapter's irreversible-send ledger. Only `claim` may issue
+    // a new fencing token, and it happens below after recovery has proved that
+    // a provider call is not already in progress or durably completed.
 
     if (this.#adapter.recover !== undefined) {
       let adapterRecovery: ProviderRecoveryResult;

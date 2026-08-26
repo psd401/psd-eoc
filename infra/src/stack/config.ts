@@ -1,4 +1,5 @@
 import { OrganizationNameSchema } from '@psd-eoc/contracts';
+import { isIP } from 'node:net';
 
 /**
  * The deployed CloudFormation stack's name.
@@ -29,7 +30,12 @@ export const SERVER_REPOSITORY_NAME = 'psd-eoc/server';
 export const HEALTH_QUEUE_NAME = 'psd-eoc-health';
 export const EMAIL_QUEUE_NAME = 'psd-eoc-email';
 export const EMAIL_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-email-dlq';
+export const EMAIL_CALLBACK_QUEUE_NAME = 'psd-eoc-email-callback';
+export const EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME =
+  'psd-eoc-email-callback-dlq';
 export const EMAIL_WORKER_LOG_GROUP_NAME = '/psd-eoc/workers/email';
+export const EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME =
+  '/psd-eoc/workers/email-callback';
 
 /**
  * The notification delivery queues.
@@ -47,8 +53,12 @@ export const DELIVERY_QUEUE_NAME = 'psd-eoc-delivery';
 export const DELIVERY_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-delivery-dlq';
 export const SMS_QUEUE_NAME = 'psd-eoc-sms';
 export const SMS_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-sms-dlq';
+export const SMS_RECEIPT_QUEUE_NAME = 'psd-eoc-sms-receipts';
+export const SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-sms-receipts-dlq';
+export const SMS_WORKER_LOG_GROUP_NAME = '/psd-eoc/workers/sms';
 export const PUSH_QUEUE_NAME = 'psd-eoc-push';
 export const PUSH_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-push-dlq';
+export const PUSH_WORKER_LOG_GROUP_NAME = '/psd-eoc/workers/push';
 /** Redelivery attempts before a batch is retained for human inspection. */
 export const DELIVERY_QUEUE_MAX_RECEIVES = 5;
 export const SES_VERIFICATION_REFERENCE = 'UNVERIFIED';
@@ -123,6 +133,7 @@ export interface DeploymentIdentity {
   readonly hostedDomain: string;
   readonly iosBundleId: string;
   readonly organizationName: string;
+  readonly privacyContactUrl: string;
 }
 
 /**
@@ -256,6 +267,35 @@ export function readDeploymentIdentity(node: {
       'CDK context psdEoc:displayTimeZone must be a valid IANA time zone.',
     );
   }
+  const privacyContactUrl = read(
+    'psdEoc:privacyContactUrl',
+    /^https:\/\/[^\s?#]+$/u,
+  );
+  let parsedPrivacyContactUrl: URL;
+  try {
+    parsedPrivacyContactUrl = new URL(privacyContactUrl);
+  } catch {
+    throw new Error(
+      'CDK context psdEoc:privacyContactUrl must be a valid HTTPS URL.',
+    );
+  }
+  const privacyContactHostname = parsedPrivacyContactUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/gu, '');
+  if (
+    parsedPrivacyContactUrl.username.length > 0 ||
+    parsedPrivacyContactUrl.password.length > 0 ||
+    isIP(privacyContactHostname) !== 0 ||
+    privacyContactHostname === 'localhost' ||
+    privacyContactHostname.endsWith('.localhost') ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u.test(
+      privacyContactHostname,
+    )
+  ) {
+    throw new Error(
+      'CDK context psdEoc:privacyContactUrl must use a public hostname and contain no credentials.',
+    );
+  }
   return Object.freeze({
     applicationOrigin: read(
       'psdEoc:applicationOrigin',
@@ -271,6 +311,7 @@ export function readDeploymentIdentity(node: {
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
     ),
     organizationName: organizationName.data,
+    privacyContactUrl,
   });
 }
 

@@ -6,6 +6,7 @@ import {
   displayTimeZone,
   iosBundleId,
   organizationName,
+  privacyContactUrl,
   staffHostedDomain,
 } from './deployment';
 
@@ -16,6 +17,7 @@ describe('deployment configuration', () => {
       GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
       PSD_EOC_IOS_BUNDLE_ID: 'invalid.example.alerts',
       PSD_EOC_ORGANIZATION_NAME: 'Example Unified School District',
+      PSD_EOC_PRIVACY_CONTACT_URL: 'https://www.example.invalid/contact',
       PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
     };
 
@@ -26,6 +28,9 @@ describe('deployment configuration', () => {
     expect(iosBundleId(environment)).toBe('invalid.example.alerts');
     expect(organizationName(environment)).toBe(
       'Example Unified School District',
+    );
+    expect(privacyContactUrl(environment)).toBe(
+      'https://www.example.invalid/contact',
     );
     expect(displayTimeZone(environment)).toBe('America/New_York');
   });
@@ -57,6 +62,24 @@ describe('deployment configuration', () => {
     ]) {
       expect(() =>
         organizationName({ PSD_EOC_ORGANIZATION_NAME: value }),
+      ).toThrow(DeploymentConfigurationError);
+    }
+  });
+
+  test('requires a public HTTPS privacy contact mechanism', () => {
+    expect(() => privacyContactUrl({})).toThrow(DeploymentConfigurationError);
+    for (const value of [
+      'http://www.example.invalid/contact',
+      'https://localhost/contact',
+      'https://privacy.localhost/contact',
+      'https://127.0.0.1/contact',
+      'https://2130706433/contact',
+      'https://[::1]/contact',
+      'https://user:password@example.invalid/contact',
+      'https://www.example.invalid/contact#private',
+    ]) {
+      expect(() =>
+        privacyContactUrl({ PSD_EOC_PRIVACY_CONTACT_URL: value }),
       ).toThrow(DeploymentConfigurationError);
     }
   });

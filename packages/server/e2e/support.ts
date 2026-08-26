@@ -40,6 +40,14 @@ export function evidencePath(name: string): string {
   return join(directory, name);
 }
 
+export function issue277EvidencePath(name: string): string {
+  const directory = process.env.PSD_EOC_E2E_ISSUE_277_EVIDENCE_DIR;
+  if (directory === undefined) {
+    throw new Error('Issue 277 browser evidence directory is unavailable.');
+  }
+  return join(directory, name);
+}
+
 export function issue341EvidencePath(name: string): string {
   const directory = process.env.PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR;
   if (directory === undefined) {
@@ -60,6 +68,14 @@ export function issue32EvidencePath(name: string): string {
   const directory = process.env.PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR;
   if (directory === undefined) {
     throw new Error('Issue 32 browser evidence directory is unavailable.');
+  }
+  return join(directory, name);
+}
+
+export function issue279EvidencePath(name: string): string {
+  const directory = process.env.PSD_EOC_E2E_ISSUE_279_EVIDENCE_DIR;
+  if (directory === undefined) {
+    throw new Error('Issue 279 browser evidence directory is unavailable.');
   }
   return join(directory, name);
 }

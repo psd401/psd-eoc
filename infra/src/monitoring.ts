@@ -6,8 +6,9 @@
  *
  * `configureInfrastructureMonitoring` is what the live stack calls. It deploys
  * the alarms whose metrics AWS publishes on its own — App Runner, Aurora, and
- * every notification queue and dead-letter queue — and needs no credential
- * beyond the stack's own.
+ * every notification queue and dead-letter queue. When a protected channel
+ * worker is enabled, it also deploys conditional log-derived worker metrics
+ * and alarms alongside their real publisher.
  *
  * `configureMonitoring` additionally deploys the one-minute canary and the
  * metrics collector, and the alarms that read what they publish. It is not
@@ -68,15 +69,422 @@ export interface MonitoringProps {
   readonly database: rds.DatabaseCluster;
   readonly displayTimeZone: string;
   readonly delivery: QueueWithDeadLetterQueue;
+  readonly emailCallbackDeadLetterQueue: sqs.IQueue;
+  readonly emailCallbackWorkerLogGroup?: logs.ILogGroup;
+  readonly emailWorkerCondition?: CfnCondition;
+  readonly emailWorkerLogGroup?: logs.ILogGroup;
+  readonly smsReceipt: QueueWithDeadLetterQueue;
   readonly channelQueues: Readonly<
     Record<(typeof NOTIFICATION_CHANNELS)[number], QueueWithDeadLetterQueue>
   >;
   readonly operationsAlarmTopic: sns.ITopic;
   readonly operationsKey: kms.IKey;
   readonly monitoringRunbookBaseUrl: string;
+  readonly pushWorkerCondition?: CfnCondition;
+  readonly pushWorkerLogGroup?: logs.ILogGroup;
+  readonly smsWorkerCondition?: CfnCondition;
+  readonly smsWorkerLogGroup?: logs.ILogGroup;
   readonly sesIdentityDomain: string;
   /** The condition guarding App Runner, applied to anything that reads it. */
   readonly applicationCondition?: CfnCondition;
+}
+
+function configureSmsWorkerMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  if (
+    props.smsWorkerLogGroup === undefined ||
+    props.smsWorkerCondition === undefined
+  ) {
+    return;
+  }
+  const definitions = [
+    {
+      id: 'SmsWorkerHeartbeatMetric',
+      pattern: '{ $.event = "sms-worker-heartbeat" }',
+      metricName: 'SmsWorkerHeartbeat',
+      metricValue: '1',
+      unit: cloudwatch.Unit.COUNT,
+    },
+    {
+      id: 'SmsProviderLatencyMetric',
+      pattern: '{ $.event = "sms-worker-message-completed" }',
+      metricName: 'SmsOutboxToProviderLatency',
+      metricValue: '$.durationMilliseconds',
+      unit: cloudwatch.Unit.MILLISECONDS,
+    },
+    {
+      id: 'SmsWorkerFailureMetric',
+      pattern: '{ $.event = "sms-worker-message-failed" }',
+      metricName: 'SmsWorkerFailureCount',
+      metricValue: '$.count',
+      unit: cloudwatch.Unit.COUNT,
+    },
+  ] as const;
+  for (const definition of definitions) {
+    const filter = new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: props.smsWorkerLogGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: definition.metricValue,
+      unit: definition.unit,
+    });
+    (filter.node.defaultChild as logs.CfnMetricFilter).cfnOptions.condition =
+      props.smsWorkerCondition;
+  }
+
+  const alarmDefinitions = [
+    {
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      id: 'SmsWorkerHealthAlarm',
+      metric: new cloudwatch.Metric({
+        metricName: 'SmsWorkerHeartbeat',
+        namespace: MONITORING_METRIC_NAMESPACE,
+        period: Duration.minutes(20),
+        statistic: 'Sum',
+        unit: cloudwatch.Unit.COUNT,
+      }),
+      name: 'psd-eoc-sms-worker-health',
+      summary: 'The enabled SMS worker stopped emitting sanitized heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      id: 'SmsProviderLatencyAlarm',
+      metric: customMetric('SmsOutboxToProviderLatency', {
+        statistic: 'p95',
+        unit: cloudwatch.Unit.MILLISECONDS,
+      }),
+      name: 'psd-eoc-sms-outbox-to-provider-p95',
+      summary: 'SMS outbox-to-provider p95 exceeded the 15-second SLO.',
+      threshold: 15_000,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      id: 'SmsWorkerFailureAlarm',
+      metric: customMetric('SmsWorkerFailureCount', { statistic: 'Sum' }),
+      name: 'psd-eoc-sms-worker-message-failures',
+      summary:
+        'The SMS worker reported a bounded work, receipt, or opt-out processing failure.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ] as const;
+  for (const definition of alarmDefinitions) {
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        'runbook-outbox-to-provider-latency',
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator: definition.comparisonOperator,
+      datapointsToAlarm: definition.datapointsToAlarm,
+      evaluationPeriods: definition.evaluationPeriods,
+      metric: definition.metric,
+      threshold: definition.threshold,
+      treatMissingData: definition.treatMissingData,
+    });
+    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      props.smsWorkerCondition;
+  }
+}
+
+function configurePushWorkerMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  if (
+    props.pushWorkerLogGroup === undefined ||
+    props.pushWorkerCondition === undefined
+  ) {
+    return;
+  }
+  const definitions = [
+    {
+      id: 'PushWorkerHeartbeatMetric',
+      pattern: '{ $.event = "push-worker-heartbeat" }',
+      metricName: 'PushWorkerHeartbeat',
+      metricValue: '1',
+    },
+    {
+      id: 'PushProviderLatencyMetric',
+      pattern: '{ $.event = "push-worker-message-completed" }',
+      metricName: 'OutboxToProviderLatency',
+      metricValue: '$.durationMilliseconds',
+    },
+    {
+      id: 'PushProviderIncompleteMetric',
+      pattern:
+        '{ ($.event = "push-worker-message-failed") || ($.event = "push-worker-message-incomplete") }',
+      metricName: 'OutboxToProviderIncompleteCount',
+      metricValue: '$.count',
+    },
+    {
+      id: 'PushReceiptFailureMetric',
+      pattern: '{ $.event = "push-worker-receipts-failed" }',
+      metricName: 'PushReceiptPollFailureCount',
+      metricValue: '1',
+    },
+    {
+      id: 'PushStuckOutboxMetric',
+      pattern: '{ $.event = "push-worker-stuck-outbox-sample" }',
+      metricName: 'PushStuckOutboxCount',
+      metricValue: '$.count',
+    },
+  ] as const;
+  for (const definition of definitions) {
+    const filter = new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: props.pushWorkerLogGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: definition.metricValue,
+      unit:
+        definition.metricName === 'OutboxToProviderLatency'
+          ? cloudwatch.Unit.MILLISECONDS
+          : cloudwatch.Unit.COUNT,
+    });
+    (filter.node.defaultChild as logs.CfnMetricFilter).cfnOptions.condition =
+      props.pushWorkerCondition;
+  }
+
+  const alarmDefinitions = [
+    {
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      id: 'PushWorkerHealthAlarm',
+      metric: customMetric('PushWorkerHeartbeat', { statistic: 'Sum' }),
+      name: 'psd-eoc-push-worker-health',
+      runbookAnchor: 'runbook-expo-push-worker-health',
+      summary:
+        'The enabled Expo push worker stopped emitting sanitized heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushStuckOutboxAlarm',
+      metric: customMetric('PushStuckOutboxCount', { statistic: 'Maximum' }),
+      name: 'psd-eoc-push-stuck-production-outbox',
+      runbookAnchor: 'runbook-stuck-outbox',
+      summary:
+        'At least one staff outbox row remained unpublished and nonterminal for one minute.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushProviderLatencyAlarm',
+      metric: customMetric('OutboxToProviderLatency', {
+        statistic: 'p95',
+        unit: cloudwatch.Unit.MILLISECONDS,
+      }),
+      name: 'psd-eoc-push-outbox-to-provider-p95',
+      runbookAnchor: 'runbook-outbox-to-provider-latency',
+      summary: 'Push outbox-to-provider p95 exceeded the five-second SLO.',
+      threshold: 5_000,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushProviderIncompleteAlarm',
+      metric: customMetric('OutboxToProviderIncompleteCount', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-push-outbox-to-provider-incomplete',
+      runbookAnchor: 'runbook-outbox-to-provider-latency',
+      summary:
+        'One or more push queue items did not complete the provider handoff.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushReceiptPollFailureAlarm',
+      metric: customMetric('PushReceiptPollFailureCount', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-push-receipt-poll-failures',
+      runbookAnchor: 'runbook-expo-push-worker-health',
+      summary: 'The Expo receipt poller reported a bounded processing failure.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ] as const;
+  for (const definition of alarmDefinitions) {
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        definition.runbookAnchor,
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator: definition.comparisonOperator,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      metric: definition.metric,
+      threshold: definition.threshold,
+      treatMissingData: definition.treatMissingData,
+    });
+    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      props.pushWorkerCondition;
+  }
+}
+
+function configureEmailWorkerMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  const definitions = [
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailWorkerHeartbeatMetric',
+      logGroup: props.emailWorkerLogGroup,
+      metricName: 'EmailWorkerHeartbeat',
+      metricValue: '1',
+      pattern: '{ $.event = "email-worker-heartbeat" }',
+    },
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailProviderLatencyMetric',
+      logGroup: props.emailWorkerLogGroup,
+      metricName: 'EmailOutboxToProviderLatency',
+      metricValue: '$.durationMilliseconds',
+      pattern: '{ $.event = "email-worker-message-completed" }',
+    },
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailProviderIncompleteMetric',
+      logGroup: props.emailWorkerLogGroup,
+      metricName: 'EmailOutboxToProviderIncompleteCount',
+      metricValue: '$.count',
+      pattern:
+        '{ ($.event = "email-worker-message-failed") || ($.event = "email-worker-message-incomplete") }',
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackWorkerHeartbeatMetric',
+      logGroup: props.emailCallbackWorkerLogGroup,
+      metricName: 'EmailCallbackWorkerHeartbeat',
+      metricValue: '1',
+      pattern: '{ $.event = "email-callback-worker-heartbeat" }',
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackFailureMetric',
+      logGroup: props.emailCallbackWorkerLogGroup,
+      metricName: 'EmailCallbackFailureCount',
+      metricValue: '$.count',
+      pattern: '{ $.event = "email-callback-message-failed" }',
+    },
+  ] as const;
+  for (const definition of definitions) {
+    if (definition.condition === undefined || definition.logGroup === undefined)
+      continue;
+    const filter = new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: definition.logGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: definition.metricValue,
+      unit:
+        definition.metricName === 'EmailOutboxToProviderLatency'
+          ? cloudwatch.Unit.MILLISECONDS
+          : cloudwatch.Unit.COUNT,
+    });
+    (filter.node.defaultChild as logs.CfnMetricFilter).cfnOptions.condition =
+      definition.condition;
+  }
+
+  const alarms = [
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailWorkerHealthAlarm',
+      metric: customMetric('EmailWorkerHeartbeat', { statistic: 'Sum' }),
+      name: 'psd-eoc-email-worker-health',
+      summary: 'The enabled SES email worker stopped emitting heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailProviderIncompleteLogAlarm',
+      metric: customMetric('EmailOutboxToProviderIncompleteCount', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-email-provider-incomplete',
+      summary: 'One or more SES provider handoffs did not complete.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackWorkerHealthAlarm',
+      metric: customMetric('EmailCallbackWorkerHeartbeat', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-email-callback-worker-health',
+      summary: 'The durable SES callback consumer stopped emitting heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackFailureAlarm',
+      metric: customMetric('EmailCallbackFailureCount', { statistic: 'Sum' }),
+      name: 'psd-eoc-email-callback-failures',
+      summary: 'A signed SES callback could not reach verified persistence.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ] as const;
+  for (const definition of alarms) {
+    if (definition.condition === undefined) continue;
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        'runbook-email-dlq',
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator:
+        definition.treatMissingData === cloudwatch.TreatMissingData.BREACHING
+          ? cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD
+          : cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      metric: definition.metric,
+      threshold: definition.threshold,
+      treatMissingData: definition.treatMissingData,
+    });
+    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      definition.condition;
+  }
 }
 
 export interface MonitoringRuntimeParameters {
@@ -752,6 +1160,7 @@ function configureDashboard(
   });
   const queues = [
     ['delivery', props.delivery],
+    ['sms-receipt', props.smsReceipt],
     ...NOTIFICATION_CHANNELS.map(
       (channel) => [channel, props.channelQueues[channel]] as const,
     ),
@@ -1163,6 +1572,7 @@ function configureAlarms(
 
   const queues = [
     ['Delivery', 'delivery', props.delivery],
+    ['SmsReceipt', 'sms-receipt', props.smsReceipt],
     ...NOTIFICATION_CHANNELS.map(
       (channel) =>
         [
@@ -1204,6 +1614,22 @@ function configureAlarms(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
   }
+  emit({
+    tier: 'infrastructure',
+    evaluationPeriods: 1,
+    id: 'EmailCallbackDeadLetterQueueDepthAlarm',
+    metric:
+      props.emailCallbackDeadLetterQueue.metricApproximateNumberOfMessagesVisible(
+        { period: ONE_MINUTE, statistic: 'Maximum' },
+      ),
+    name: 'psd-eoc-email-callback-dlq-depth',
+    runbookAnchor: 'runbook-queue-age-and-dead-letter-queues',
+    summary:
+      'The retained SES callback dead-letter queue contains one or more signed events.',
+    threshold: 1,
+    topic: props.criticalAlarmTopic,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
   for (const channel of NOTIFICATION_CHANNELS) {
     const threshold = channel === 'push' ? 5_000 : 15_000;
     emit({
@@ -1409,8 +1835,6 @@ function publishDashboardOutputs(
  *   latency, and the monthly delivery test;
  * - Aurora replica lag, because the cluster runs a single writer with no
  *   reader, so `AuroraReplicaLagMaximum` never reports;
- * - per-channel outbox-to-provider latency, which the channel workers publish
- *   and no channel worker is deployed.
  *
  * Several of those treat missing data as breaching. Deploying them against a
  * metric nobody publishes would page the operations team every minute forever,
@@ -1442,6 +1866,9 @@ export function configureInfrastructureMonitoring(
     monthlyDeliveryTestDue,
   );
   configureAlarms(scope, props, metrics, false);
+  configurePushWorkerMonitoring(scope, props);
+  configureEmailWorkerMonitoring(scope, props);
+  configureSmsWorkerMonitoring(scope, props);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);
 }

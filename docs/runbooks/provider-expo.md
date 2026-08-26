@@ -7,16 +7,19 @@ Current provider and alarm state lives only in the
 [operational readiness register](../INTEGRATIONS.md). This runbook never
 authorizes connecting or testing a provider.
 
-**Source-defined monitoring alarms:**
+**Conditional monitoring alarms:**
 
 - `psd-eoc-push-outbox-to-provider-p95` fires when completed push handoff p95
   reaches 5 seconds; and
 - `psd-eoc-push-outbox-to-provider-incomplete` fires when at least one push
-  endpoint has not reached provider acceptance by the deterministic one-minute
-  cutoff.
+  work item fails before a completed handoff is recorded; and
+- `psd-eoc-push-stuck-production-outbox` fires when the enabled worker's
+  count-only sample finds a staff outbox row unpublished and nonterminal for
+  one minute, or when that sample stops reporting.
 
-The source definitions do not prove the alarms are deployed or authorize
-provider I/O.
+The stack creates these alarms only with the protected worker enablement
+condition, so no alarm can outlive its log publisher. Source definitions and a
+successful synthesis do not prove deployment or authorize provider I/O.
 
 ## Safety posture
 
@@ -44,6 +47,10 @@ provider I/O.
 5. Check `psd-eoc-push` age and `psd-eoc-push-dlq` depth. Use
    [alarm-sqs-age.md](alarm-sqs-age.md) or
    [alarm-dlq-push.md](alarm-dlq-push.md) when needed.
+   Use [alarm-push-worker-health.md](alarm-push-worker-health.md) when
+   heartbeats or receipt polling fail.
+   Use [alarm-outbox-stuck.md](alarm-outbox-stuck.md) when the conditional
+   push stuck-outbox alarm fires.
 6. Determine independently whether email is `live-verified` and healthy. The
    application may continue an already approved channel according to its
    canonical policy; operators must not manually copy recipients or message
@@ -55,6 +62,11 @@ provider I/O.
   using [rollback.md](rollback.md). Secret rotation follows
   [rotation-expo-token.md](rotation-expo-token.md) and needs product-owner
   approval before a live provider configuration change.
+- The fail-closed rollback is to set the protected worker enablement variable
+  to `false` and deploy through the normal OIDC workflow, which returns desired
+  count to zero. First establish a quiescence fence and reconcile retained and
+  in-flight attempt identities; stopping a consumer does not erase queue work
+  or make ambiguous provider calls safe to replay.
 - Confirm queue age decreases through the canonical worker, DLQ depth does not
   increase, attempt evidence remains append-only, and receipts advance state
   only when they provide the required proof.

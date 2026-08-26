@@ -175,6 +175,45 @@ export function deliveryTestBatch(): DispatchBatch {
   });
 }
 
+export function emailDeliveryTestBatch(): DispatchBatch {
+  const batch = deliveryTestBatch();
+  return DispatchBatchSchema.parse({
+    ...batch,
+    channel: 'email',
+    renderedMessage: {
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      classificationMarker: 'DRILL',
+      channel: 'email',
+      subject: '[DRILL] Live canary email test',
+      textBody: '[DRILL] LIVE CANARY — TRAINING ONLY.',
+    },
+    integrationStatus: {
+      ...batch.integrationStatus,
+      integrationId: 'ses-email',
+    },
+  });
+}
+
+export function emailDeliveryTestWorkItem(): WorkerAttemptWorkItem {
+  const batch = emailDeliveryTestBatch();
+  return Object.freeze({
+    batch,
+    attempt: ChannelAttemptSchema.parse({
+      ...attemptFor(batch),
+      channel: 'email',
+    }),
+    endpoint: EndpointSchema.parse({
+      id: IDS.endpoint,
+      status: 'active',
+      capturedAt: TIMES.created,
+      channel: 'email',
+      email: 'controlled-recipient@example.invalid',
+    }),
+  });
+}
+
 export function attemptFor(
   batch: DispatchBatch,
   options: Readonly<{ id?: string; number?: number }> = {},

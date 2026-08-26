@@ -532,6 +532,9 @@ function canonicalExecutionLookup(
 ): AttemptExecutionLookup {
   const missing = exactDataProperties(value, ['kind']);
   if (missing?.kind === 'missing') return Object.freeze({ kind: 'missing' });
+  if (missing?.kind === 'reclaimable') {
+    return Object.freeze({ kind: 'reclaimable' });
+  }
   if (missing?.kind === 'in-progress') {
     return Object.freeze({ kind: 'in-progress' });
   }

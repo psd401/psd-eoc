@@ -243,6 +243,7 @@ const ADMIN_MUTATION_IDS = new Set<RegisteredCapabilityId>([
   'create-group-source',
   'create-neighborhood-version',
   'set-channel-enabled',
+  'verify-email-integration',
   'update-facility',
   'update-group-source',
   'create-event-type-draft',

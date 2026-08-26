@@ -7,11 +7,11 @@ import { describe, expect, test } from 'bun:test';
  * The server image is assembled from named files, not from the repository.
  *
  * `psd-eoc.Dockerfile` copies `packages/server`, `packages/contracts/src`, and
- * then explicitly named files out of `workers/`. Importing another worker
- * module directly or transitively compiles everywhere except inside the image,
- * where the file simply is not there — and the failure surfaces as a
- * `next build` error during the deploy, after the image has already been
- * building for a minute.
+ * the exact transitive source closure of its worker entry points. Importing
+ * another worker module directly or transitively compiles everywhere except
+ * inside the image, where the file simply is not there — and the failure
+ * surfaces during deploy after the image has already been building for a
+ * minute.
  *
  * CI cannot catch this by building the server: it builds with the whole
  * repository checked out, so the import resolves. This checks the thing that
@@ -23,6 +23,12 @@ const DOCKERFILE = join(
   REPOSITORY_ROOT,
   'packages/server/container/psd-eoc.Dockerfile',
 );
+const WORKER_ENTRY_POINTS = [
+  join(REPOSITORY_ROOT, 'workers/email/callback-service.ts'),
+  join(REPOSITORY_ROOT, 'workers/email/service.ts'),
+  join(REPOSITORY_ROOT, 'workers/push/service.ts'),
+  join(REPOSITORY_ROOT, 'workers/sms/service.ts'),
+] as const;
 
 function dockerfileText(): string {
   return readFileSync(DOCKERFILE, 'utf8');
@@ -68,6 +74,10 @@ function importedWorkerModules(): readonly string[] {
   const relativePattern = /from\s+'(\.{1,2}\/[A-Za-z0-9._/-]+)'/gu;
   const modules = new Set<string>();
   const pending: string[] = [];
+  for (const entryPoint of WORKER_ENTRY_POINTS) {
+    modules.add(entryPoint);
+    pending.push(entryPoint);
+  }
   for (const file of sourceFiles(SERVER_ROOT)) {
     const contents = readFileSync(file, 'utf8');
     for (const match of contents.matchAll(directPattern)) {
@@ -137,7 +147,7 @@ describe('server image contents', () => {
     expect(dockerfile).not.toMatch(/psd401|338414773271/iu);
   });
 
-  test('every worker module the server imports is copied into the image', () => {
+  test('every reachable worker module is copied into the image', () => {
     const copied = copiedWorkerFiles();
     expect(copied.length).toBeGreaterThan(0);
 
@@ -147,7 +157,7 @@ describe('server image contents', () => {
     expect(missing).toEqual([]);
   });
 
-  test('the Dockerfile copies no worker file the server does not import', () => {
+  test('the Dockerfile copies no unreachable worker file', () => {
     // Kept tight on purpose: the image's surface is the reason this file can
     // be reasoned about at all, and an unused copy is how it starts widening.
     const imported = importedWorkerModules().map(
