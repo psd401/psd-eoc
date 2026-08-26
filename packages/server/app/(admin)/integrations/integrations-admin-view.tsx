@@ -167,8 +167,10 @@ function ChannelStateSection({
                           <option value="false">Disabled</option>
                           <option
                             disabled={
-                              configuration.integrationId ===
-                                SMS_INTEGRATION_ID ||
+                              (configuration.integrationId ===
+                                SMS_INTEGRATION_ID &&
+                                configuration.status.label !==
+                                  'live-verified') ||
                               configuration.status.label === 'blocked' ||
                               configuration.status.label ===
                                 'configured-unverified'

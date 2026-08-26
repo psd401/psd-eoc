@@ -81,6 +81,7 @@ export type AwsEumSmsDeliveryEventErrorCode =
   | 'EVENT_SCOPE_MISMATCH'
   | 'EVENT_TIME_INVALID'
   | 'ATTEMPT_NOT_FOUND'
+  | 'ATTEMPT_NOT_READY'
   | 'ATTEMPT_MISMATCH';
 
 /** Safe event failure which never reflects provider text or phone numbers. */
@@ -115,6 +116,7 @@ export interface ParsedAwsEumSmsDeliveryEvent {
   readonly occurredAt: string;
   readonly messageId: string;
   readonly attemptId: string | null;
+  readonly correlationToken: string | null;
   readonly status: string;
   readonly isFinal: boolean;
 }
@@ -145,6 +147,7 @@ export interface SmsDeliveryAttemptLookup {
   loadUnknownAttemptById(
     provider: typeof AWS_EUM_SMS_PROVIDER,
     attemptId: string,
+    correlationToken: string,
   ): Promise<ChannelAttempt | null>;
 }
 
@@ -261,21 +264,34 @@ function timestampFromEnvelope(value: unknown, now: Date): string {
   return validatedEventTime(new Date(parsed.data), now);
 }
 
-function contextAttemptId(
+function correlationContext(
   detail: Readonly<Record<string, unknown>>,
-): string | null {
+): Readonly<{ attemptId: string | null; correlationToken: string | null }> {
   const context = detail.context;
-  if (context === undefined) return null;
+  if (context === undefined) {
+    return Object.freeze({ attemptId: null, correlationToken: null });
+  }
   if (!isPlainRecord(context)) {
     throw new AwsEumSmsDeliveryEventError('INVALID_EVENT');
   }
-  const candidate = context.psdAttemptId;
-  if (candidate === undefined) return null;
-  const result = UuidSchema.safeParse(candidate);
-  if (!result.success) {
+  const attempt = UuidSchema.safeParse(context.psdAttemptId);
+  if (!attempt.success) {
     throw new AwsEumSmsDeliveryEventError('INVALID_EVENT');
   }
-  return result.data;
+  if (context.psdProviderClaimToken === undefined) {
+    return Object.freeze({
+      attemptId: attempt.data,
+      correlationToken: null,
+    });
+  }
+  const correlation = UuidSchema.safeParse(context.psdProviderClaimToken);
+  if (!correlation.success) {
+    throw new AwsEumSmsDeliveryEventError('INVALID_EVENT');
+  }
+  return Object.freeze({
+    attemptId: attempt.data,
+    correlationToken: correlation.data,
+  });
 }
 
 /**
@@ -323,11 +339,13 @@ export function parseAwsEumSmsDeliveryEvent(
           detail.eventTimestamp,
           parsedConfiguration.now,
         );
+  const context = correlationContext(detail);
   return Object.freeze({
     eventId: value.id as string,
     occurredAt,
     messageId: detail.messageId as string,
-    attemptId: contextAttemptId(detail),
+    attemptId: context.attemptId,
+    correlationToken: context.correlationToken,
     status:
       eventType === `TEXT_${status}` && RECOGNIZED_STATUSES.has(status)
         ? status
@@ -510,12 +528,19 @@ export class SmsDeliveryEventProcessor {
       );
     const attempt =
       correlatedAttempt ??
-      (await this.#attempts.loadUnknownAttemptById(
-        AWS_EUM_SMS_PROVIDER,
-        event.attemptId,
-      ));
+      (event.correlationToken === null
+        ? null
+        : await this.#attempts.loadUnknownAttemptById(
+            AWS_EUM_SMS_PROVIDER,
+            event.attemptId,
+            event.correlationToken,
+          ));
     if (attempt === null) {
-      throw new AwsEumSmsDeliveryEventError('ATTEMPT_NOT_FOUND');
+      throw new AwsEumSmsDeliveryEventError(
+        event.correlationToken === null
+          ? 'ATTEMPT_NOT_FOUND'
+          : 'ATTEMPT_NOT_READY',
+      );
     }
     if (attempt.channel !== 'sms' || event.attemptId !== attempt.id) {
       throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');

@@ -71,6 +71,10 @@ Repository/environment variables:
 - `GOOGLE_OAUTH_SECRET_ARN`
 - `INITIAL_ACCESS_GROUP_ID`
 - `INITIAL_ACCESS_GROUP_NAME`
+- `SMS_DESTINATION_COUNTRY_CODE`
+- `SMS_REGISTRATION_VERIFICATION_REFERENCE`
+- `SMS_RESOURCES_PROVISIONED`
+- `SMS_WORKER_ENABLED`
 - `STACK_NAME`
 <!-- docs-contract:workflow-vars:end -->
 
@@ -82,6 +86,9 @@ Environment secrets:
 - `INITIAL_MOBILE_TRANSITION_EMAIL_SHA256`
 - `OPERATIONS_ALARM_EMAIL`
 - `OPERATIONS_ALARM_SMS_NUMBER`
+- `SMS_HELP_MESSAGE`
+- `SMS_ORIGINATION_IDENTITY_ARN`
+- `SMS_STOP_MESSAGE`
 <!-- docs-contract:workflow-secrets:end -->
 
 The deploy workflow has one manual input:
@@ -106,6 +113,7 @@ The current synthesized stack contains exactly these parameters:
 - `BootstrapImageDigest`
 - `BootstrapSourceSha`
 - `BootstrapVersion`
+- `EnableAwsEumSmsWorker`
 - `EnableExpoPushWorker`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
@@ -117,15 +125,20 @@ The current synthesized stack contains exactly these parameters:
 - `OperationsTeamAlarmEmail`
 - `OperationsTeamAlarmSmsNumber`
 - `ProvisionApplication`
+- `ProvisionAwsEumSmsResources`
 - `RuntimeDatabaseIdleTimeoutSeconds`
+- `SmsDestinationCountryCode`
+- `SmsHelpMessage`
+- `SmsOriginationIdentityArn`
+- `SmsRegistrationVerificationReference`
+- `SmsStopMessage`
 - `SourceSha`
 <!-- docs-contract:template-parameters:end -->
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
-parameter and has a default. `EnableExpoPushWorker` and
-`ExpoCredentialVerificationReference` default to the safe, dark state when
-their protected workflow variables are absent. The workflow supplies the
-other 16 explicitly.
+parameter and has a default. Both channel workers and their evidence inputs
+default to a safe, dark or unconfigured state when protected workflow values
+are absent. The workflow supplies every application parameter explicitly.
 
 ### Parameters supplied by the workflow
 
@@ -134,6 +147,7 @@ other 16 explicitly.
 - `AppImageDigest`
 - `BootstrapImageDigest`
 - `BootstrapSourceSha`
+- `EnableAwsEumSmsWorker`
 - `EnableExpoPushWorker`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
@@ -145,7 +159,13 @@ other 16 explicitly.
 - `OperationsTeamAlarmEmail`
 - `OperationsTeamAlarmSmsNumber`
 - `ProvisionApplication`
+- `ProvisionAwsEumSmsResources`
 - `RuntimeDatabaseIdleTimeoutSeconds`
+- `SmsDestinationCountryCode`
+- `SmsHelpMessage`
+- `SmsOriginationIdentityArn`
+- `SmsRegistrationVerificationReference`
+- `SmsStopMessage`
 - `SourceSha`
 <!-- docs-contract:workflow-parameters:end -->
 
@@ -216,6 +236,40 @@ application on each approved device. The delivery-test target mode for this
 drill is `controlled-push-canary`, which permits exactly one current
 product-owner-approved push endpoint without requiring the unrelated email
 provider; ordinary delivery-test target sets still require push and email.
+
+## AWS End User Messaging SMS activation boundary
+
+The SMS work queue/DLQ, EventBridge-only receipt queue/DLQ, runtime bearer,
+task definition, service, and HTTPS-only network boundary are always
+reviewable. The worker may publish retries only to the work queue; it has no
+receipt-queue publish permission. `EnableAwsEumSmsWorker` defaults to
+false and resolves the service desired count to zero. Provider resources have
+a separate monotonic deployment switch: `ProvisionAwsEumSmsResources` may stay
+true while the worker is dark, so disabling a worker never attempts to delete
+the retained, deletion-protected carrier pool.
+
+Before provisioning those resources, retain carrier approval under
+`SMS_REGISTRATION_VERIFICATION_REFERENCE` and supply the approved origination
+ARN, destination country code, and carrier-reviewed HELP/STOP responses through
+the protected workflow configuration above. CloudFormation then creates the
+AWS-managed opt-out list, pool, protect configuration, configuration set,
+delivery-event bridge, and scheduled STOP reconciliation. Shared routes and
+self-managed opt-outs are disabled.
+
+Immediately before provider I/O, the server parses the E.164 destination and
+requires its country to equal `SMS_DESTINATION_COUNTRY_CODE`. This is the
+authoritative country boundary because AWS protect configurations default
+omitted countries to allow. The fixed five-minute lifetime includes time spent
+waiting in SQS and all retries; it is not restarted when the worker resumes.
+
+The carrier-registration evidence reference gates provider provisioning and
+worker readiness; it is not the live channel-change authorization. Separately,
+the application records `live-verified` with the canonical digest of the exact
+product-owner channel-change artifact. Only that authenticated human may consume
+the artifact and enable the channel while the deployed worker is ready. A real
+handset drill is still human-only. Use
+`controlled-sms-canary`, which accepts exactly one current, independently
+approved SMS endpoint; no automation starts the drill or sends a real message.
 
 ## Validate without a provider
 

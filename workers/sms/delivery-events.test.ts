@@ -30,6 +30,7 @@ const IDS = Object.freeze({
   attempt: '00000000-0000-4000-8000-000000000108',
   eventBridge: '00000000-0000-4000-8000-000000000109',
   evidence: '00000000-0000-4000-8000-000000000110',
+  correlation: '00000000-0000-4000-8000-000000000111',
 });
 
 const NOW = new Date('2026-08-11T18:00:00.000Z');
@@ -84,7 +85,10 @@ function deliveryEvent(
   const context =
     options.attemptId === null
       ? undefined
-      : { psdAttemptId: options.attemptId ?? IDS.attempt };
+      : {
+          psdAttemptId: options.attemptId ?? IDS.attempt,
+          psdProviderClaimToken: IDS.correlation,
+        };
   return {
     version: '0',
     id: IDS.eventBridge,
@@ -309,10 +313,12 @@ class MemoryLookup implements SmsDeliveryAttemptLookup {
   public loadUnknownAttemptById(
     provider: typeof AWS_EUM_SMS_PROVIDER,
     attemptId: string,
+    correlationToken: string,
   ): Promise<ChannelAttempt | null> {
     this.unknownAttemptCalls += 1;
     expect(provider).toBe(AWS_EUM_SMS_PROVIDER);
     expect(attemptId).toBe(IDS.attempt);
+    expect(correlationToken).toBe(IDS.correlation);
     return Promise.resolve(this.unknownAttemptValue);
   }
 }
@@ -403,7 +409,27 @@ describe('SMS delivery event processor', () => {
 
     await expect(
       processor.process(deliveryEvent('DELIVERED'), INVOCATION),
-    ).rejects.toEqual(expect.objectContaining({ code: 'ATTEMPT_NOT_FOUND' }));
+    ).rejects.toEqual(expect.objectContaining({ code: 'ATTEMPT_NOT_READY' }));
+  });
+
+  test('never uses the deterministic attempt id alone for unknown-send recovery', async () => {
+    const lookup = new MemoryLookup(null, attempt());
+    const processor = new SmsDeliveryEventProcessor({
+      configuration: CONFIGURATION,
+      attempts: lookup,
+      evidenceWriter: new MemoryWriter(),
+      authorizeEventBridgeInvocation: authorizeInvocation,
+    });
+    const value = deliveryEvent('DELIVERED') as {
+      detail: { context: Record<string, unknown> };
+    };
+    delete value.detail.context.psdProviderClaimToken;
+
+    await expect(processor.process(value, INVOCATION)).rejects.toMatchObject({
+      code: 'ATTEMPT_NOT_FOUND',
+    });
+    expect(lookup.providerReferenceCalls).toBe(1);
+    expect(lookup.unknownAttemptCalls).toBe(0);
   });
 
   test('appends non-final carrier filtering instead of dropping it', async () => {

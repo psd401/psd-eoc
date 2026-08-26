@@ -15,6 +15,7 @@ import {
   liveChannelChangeAuthorizationCommitment,
   liveChannelChangeConsequenceDigest,
   liveChannelChangeRequestDigest,
+  readSmsWorkerReadiness,
 } from './capabilities';
 
 const AT = '2026-08-10T12:00:00.000Z';
@@ -22,6 +23,10 @@ const USER_ID = '00000000-0000-4000-8000-000000002670';
 const SESSION_ID = '00000000-0000-4000-8000-000000002671';
 const STATUS_ID = '00000000-0000-4000-8000-000000002672';
 const ZERO_DIGEST = '0'.repeat(64);
+const SMS_READY = Object.freeze({
+  ready: true,
+  registrationVerificationReference: 'carrier-registration-case-279',
+});
 
 function status(
   integrationId: string,
@@ -84,7 +89,7 @@ function expectAdminError(
 }
 
 describe('integration channel administration boundary', () => {
-  test('keeps SMS dark even if persisted truth is accidentally permissive', () => {
+  test('keeps SMS dark until persisted truth is live-verified', () => {
     const error = expectAdminError(
       () =>
         assertChannelChangeAllowed(
@@ -94,7 +99,61 @@ describe('integration channel administration boundary', () => {
       409,
     );
 
-    expect(error.message).toContain('SMS remains disabled');
+    expect(error.message).toContain('independent live verification');
+    expect(() =>
+      assertChannelChangeAllowed(
+        command(
+          SMS_INTEGRATION_ID,
+          true,
+          authorization(SMS_INTEGRATION_ID, true),
+        ),
+        status(SMS_INTEGRATION_ID, 'live-verified'),
+        SMS_READY,
+      ),
+    ).not.toThrow();
+  });
+
+  test('requires deployed worker readiness without conflating carrier evidence with the live authorization', () => {
+    const input = command(
+      SMS_INTEGRATION_ID,
+      true,
+      authorization(SMS_INTEGRATION_ID, true),
+    );
+    const live = status(SMS_INTEGRATION_ID, 'live-verified');
+    for (const readiness of [
+      { ready: false, registrationVerificationReference: null },
+      { ready: true, registrationVerificationReference: null },
+      { ready: true, registrationVerificationReference: 'UNVERIFIED' },
+    ]) {
+      const error = expectAdminError(
+        () => assertChannelChangeAllowed(input, live, readiness),
+        409,
+      );
+      expect(error.message).toContain('worker deployment');
+    }
+
+    expect(live.authorizationReference).not.toBe(
+      SMS_READY.registrationVerificationReference,
+    );
+    expect(() =>
+      assertChannelChangeAllowed(input, live, SMS_READY),
+    ).not.toThrow();
+  });
+
+  test('reads readiness only from the deployed worker and bounded carrier-registration evidence', () => {
+    expect(
+      readSmsWorkerReadiness({
+        PSD_EOC_SMS_WORKER_READY: 'true',
+        PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE:
+          'carrier-registration-case-279',
+      }),
+    ).toEqual(SMS_READY);
+    expect(
+      readSmsWorkerReadiness({
+        PSD_EOC_SMS_WORKER_READY: 'true',
+        PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE: 'UNVERIFIED',
+      }),
+    ).toEqual({ ready: false, registrationVerificationReference: null });
   });
 
   test('rejects enabling blocked or configured-unverified integrations', () => {

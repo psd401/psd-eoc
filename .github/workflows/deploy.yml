@@ -30,6 +30,13 @@ env:
   GOOGLE_GROUPS_SECRET_ARN: ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
   EXPO_PUSH_WORKER_ENABLED: ${{ vars.EXPO_PUSH_WORKER_ENABLED || 'false' }}
   EXPO_CREDENTIAL_VERIFICATION_REFERENCE: ${{ vars.EXPO_CREDENTIAL_VERIFICATION_REFERENCE || 'UNVERIFIED' }}
+  SMS_WORKER_ENABLED: ${{ vars.SMS_WORKER_ENABLED || 'false' }}
+  SMS_RESOURCES_PROVISIONED: ${{ vars.SMS_RESOURCES_PROVISIONED || 'false' }}
+  SMS_REGISTRATION_VERIFICATION_REFERENCE: ${{ vars.SMS_REGISTRATION_VERIFICATION_REFERENCE || 'UNVERIFIED' }}
+  SMS_DESTINATION_COUNTRY_CODE: ${{ vars.SMS_DESTINATION_COUNTRY_CODE || 'UNCONFIGURED' }}
+  SMS_ORIGINATION_IDENTITY_ARN: ${{ secrets.SMS_ORIGINATION_IDENTITY_ARN || 'UNCONFIGURED' }}
+  SMS_HELP_MESSAGE: ${{ secrets.SMS_HELP_MESSAGE || 'UNCONFIGURED' }}
+  SMS_STOP_MESSAGE: ${{ secrets.SMS_STOP_MESSAGE || 'UNCONFIGURED' }}
   PSD_EOC_ENFORCE_DEPLOYMENT_TARGET: 'true'
 
 jobs:
@@ -130,6 +137,37 @@ jobs:
                 exit 1
               fi
             done
+          fi
+
+          if [[ "$SMS_WORKER_ENABLED" != 'false' && "$SMS_WORKER_ENABLED" != 'true' ]]; then
+            echo "::error::SMS_WORKER_ENABLED must be exactly true or false." >&2
+            exit 1
+          fi
+          if [[ "$SMS_RESOURCES_PROVISIONED" != 'false' && "$SMS_RESOURCES_PROVISIONED" != 'true' ]]; then
+            echo "::error::SMS_RESOURCES_PROVISIONED must be exactly true or false." >&2
+            exit 1
+          fi
+          if [[ "$SMS_WORKER_ENABLED" == 'true' && "$SMS_RESOURCES_PROVISIONED" != 'true' ]]; then
+            echo "::error::The SMS worker cannot run until its retained provider resources are provisioned." >&2
+            exit 1
+          fi
+          if [[ "$SMS_RESOURCES_PROVISIONED" == 'true' ]]; then
+            if [[ "$SMS_REGISTRATION_VERIFICATION_REFERENCE" == 'UNVERIFIED' || ! "$SMS_REGISTRATION_VERIFICATION_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$ ]]; then
+              echo "::error::Provisioned SMS resources require a bounded carrier-registration evidence reference." >&2
+              exit 1
+            fi
+            if [[ ! "$SMS_DESTINATION_COUNTRY_CODE" =~ ^[A-Z]{2}$ || ! "$SMS_ORIGINATION_IDENTITY_ARN" =~ ^arn:(aws|aws-cn|aws-us-gov):sms-voice:[a-z0-9-]+:[0-9]{12}:(phone-number|sender-id)/[A-Za-z0-9_./+-]+$ ]]; then
+              echo "::error::Provisioned SMS resources require an exact destination country and approved origination identity ARN." >&2
+              exit 1
+            fi
+            if [[ -z "$SMS_HELP_MESSAGE" || "$SMS_HELP_MESSAGE" == 'UNCONFIGURED' || ${#SMS_HELP_MESSAGE} -gt 160 || "$SMS_HELP_MESSAGE" =~ ^[[:space:]] || "$SMS_HELP_MESSAGE" =~ [[:space:]]$ ]]; then
+              echo "::error::SMS_HELP_MESSAGE must be a non-empty, trimmed carrier-reviewed message of at most 160 characters." >&2
+              exit 1
+            fi
+            if [[ -z "$SMS_STOP_MESSAGE" || "$SMS_STOP_MESSAGE" == 'UNCONFIGURED' || ${#SMS_STOP_MESSAGE} -gt 160 || "$SMS_STOP_MESSAGE" =~ ^[[:space:]] || "$SMS_STOP_MESSAGE" =~ [[:space:]]$ ]]; then
+              echo "::error::SMS_STOP_MESSAGE must be a non-empty, trimmed carrier-reviewed message of at most 160 characters." >&2
+              exit 1
+            fi
           fi
 
       - name: Log in to Amazon ECR
@@ -240,17 +278,37 @@ jobs:
             --stack-name "$STACK_NAME" \
             --query "Stacks[0].Parameters[?ParameterKey=='ExpoCredentialVerificationReference'].ParameterValue | [0]" \
             --output text 2>/dev/null || echo "UNVERIFIED")
+          previous_sms_enabled=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='EnableAwsEumSmsWorker'].ParameterValue | [0]" \
+            --output text 2>/dev/null || echo "false")
+          previous_sms_provisioned=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='ProvisionAwsEumSmsResources'].ParameterValue | [0]" \
+            --output text 2>/dev/null || echo "false")
           if [[ "$previous_expo_enabled" != 'true' ]]; then
             previous_expo_enabled='false'
           fi
           if [[ ! "$previous_expo_reference" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$ ]]; then
             previous_expo_reference='UNVERIFIED'
           fi
+          if [[ "$previous_sms_enabled" != 'true' ]]; then
+            previous_sms_enabled='false'
+          fi
+          if [[ "$previous_sms_provisioned" != 'true' ]]; then
+            previous_sms_provisioned='false'
+          fi
+          if [[ "$previous_sms_provisioned" == 'true' && "$SMS_RESOURCES_PROVISIONED" != 'true' ]]; then
+            echo "::error::SMS_RESOURCES_PROVISIONED is monotonic and cannot be changed from true to false" >&2
+            exit 1
+          fi
           {
             echo "previous=${current##*@}"
             echo "previous_source=$current_source"
             echo "previous_expo_enabled=$previous_expo_enabled"
             echo "previous_expo_reference=$previous_expo_reference"
+            echo "previous_sms_enabled=$previous_sms_enabled"
+            echo "previous_sms_provisioned=$previous_sms_provisioned"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Deploy"
@@ -291,6 +349,8 @@ jobs:
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.previous }}
           PREVIOUS_EXPO_ENABLED: ${{ steps.previous.outputs.previous_expo_enabled }}
           PREVIOUS_EXPO_REFERENCE: ${{ steps.previous.outputs.previous_expo_reference }}
+          PREVIOUS_SMS_ENABLED: ${{ steps.previous.outputs.previous_sms_enabled }}
+          PREVIOUS_SMS_PROVISIONED: ${{ steps.previous.outputs.previous_sms_provisioned }}
           PREVIOUS_SOURCE_SHA: ${{ steps.previous.outputs.previous_source }}
         run: |
           set -euo pipefail
@@ -310,12 +370,15 @@ jobs:
             --exclusively \
             --require-approval never \
             --no-notices \
+            --previous-parameters true \
             --outputs-file ../artifacts/stack-outputs.json \
             --parameters "$STACK_NAME:ProvisionApplication=true" \
             --parameters "$STACK_NAME:AppImageDigest=$app_digest" \
             --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
             --parameters "$STACK_NAME:EnableExpoPushWorker=$PREVIOUS_EXPO_ENABLED" \
             --parameters "$STACK_NAME:ExpoCredentialVerificationReference=$PREVIOUS_EXPO_REFERENCE" \
+            --parameters "$STACK_NAME:EnableAwsEumSmsWorker=$PREVIOUS_SMS_ENABLED" \
+            --parameters "$STACK_NAME:ProvisionAwsEumSmsResources=$PREVIOUS_SMS_PROVISIONED" \
             --parameters "$STACK_NAME:BootstrapImageDigest=$BOOTSTRAP_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$BOOTSTRAP_SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
@@ -483,6 +546,13 @@ jobs:
             --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
             --parameters "$STACK_NAME:EnableExpoPushWorker=$EXPO_PUSH_WORKER_ENABLED" \
             --parameters "$STACK_NAME:ExpoCredentialVerificationReference=$EXPO_CREDENTIAL_VERIFICATION_REFERENCE" \
+            --parameters "$STACK_NAME:EnableAwsEumSmsWorker=$SMS_WORKER_ENABLED" \
+            --parameters "$STACK_NAME:ProvisionAwsEumSmsResources=$SMS_RESOURCES_PROVISIONED" \
+            --parameters "$STACK_NAME:SmsRegistrationVerificationReference=$SMS_REGISTRATION_VERIFICATION_REFERENCE" \
+            --parameters "$STACK_NAME:SmsOriginationIdentityArn=$SMS_ORIGINATION_IDENTITY_ARN" \
+            --parameters "$STACK_NAME:SmsDestinationCountryCode=$SMS_DESTINATION_COUNTRY_CODE" \
+            --parameters "$STACK_NAME:SmsHelpMessage=$SMS_HELP_MESSAGE" \
+            --parameters "$STACK_NAME:SmsStopMessage=$SMS_STOP_MESSAGE" \
             --parameters "$STACK_NAME:BootstrapImageDigest=$BOOTSTRAP_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$BOOTSTRAP_SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \

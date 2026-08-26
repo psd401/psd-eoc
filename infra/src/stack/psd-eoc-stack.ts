@@ -30,6 +30,7 @@ import {
   aws_ses as ses,
   aws_sns as sns,
   aws_sqs as sqs,
+  aws_smsvoice as smsvoice,
 } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
@@ -59,6 +60,9 @@ import {
   PUSH_WORKER_LOG_GROUP_NAME,
   SMS_DEAD_LETTER_QUEUE_NAME,
   SMS_QUEUE_NAME,
+  SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME,
+  SMS_RECEIPT_QUEUE_NAME,
+  SMS_WORKER_LOG_GROUP_NAME,
   DEPLOYMENT_ENVIRONMENT,
   HEALTH_PATH,
   IMAGE_DIGEST_SENTINEL,
@@ -184,6 +188,87 @@ export class PsdEocStack extends Stack {
         description:
           'Token-free reference to retained APNs, FCM, EAS, and Expo credential verification evidence.',
         maxLength: 255,
+        type: 'String',
+      },
+    );
+    const enableAwsEumSmsWorker = new CfnParameter(
+      this,
+      'EnableAwsEumSmsWorker',
+      {
+        allowedValues: ['false', 'true'],
+        default: 'false',
+        description:
+          'Scale the isolated AWS End User Messaging SMS worker from zero only after carrier registration and live integration evidence are verified.',
+        type: 'String',
+      },
+    );
+    const provisionAwsEumSmsResources = new CfnParameter(
+      this,
+      'ProvisionAwsEumSmsResources',
+      {
+        allowedValues: ['false', 'true'],
+        default: 'false',
+        description:
+          'Create and retain the carrier-approved SMS pool, opt-out list, protect configuration, and configuration set. This may stay true while the worker is dark.',
+        type: 'String',
+      },
+    );
+    const smsRegistrationVerificationReference = new CfnParameter(
+      this,
+      'SmsRegistrationVerificationReference',
+      {
+        allowedPattern: '^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
+        constraintDescription:
+          'must be UNVERIFIED or a 16-255 character token-free evidence reference',
+        default: 'UNVERIFIED',
+        description:
+          'Token-free reference to retained carrier-registration approval evidence.',
+        maxLength: 255,
+        type: 'String',
+      },
+    );
+    const smsOriginationIdentityArn = new CfnParameter(
+      this,
+      'SmsOriginationIdentityArn',
+      {
+        allowedPattern: `^(UNCONFIGURED|arn:${partition}:sms-voice:${region}:${account}:(phone-number|sender-id)/[A-Za-z0-9_./+-]+)$`,
+        default: 'UNCONFIGURED',
+        description:
+          'Approved SMS origination phone-number or sender-id ARN from the completed carrier registration.',
+        noEcho: true,
+        type: 'String',
+      },
+    );
+    const smsHelpMessage = new CfnParameter(this, 'SmsHelpMessage', {
+      allowedPattern: '^(UNCONFIGURED|\\S(?:[\\s\\S]{0,158}\\S)?)$',
+      constraintDescription:
+        'must be UNCONFIGURED or a non-empty, trimmed message of at most 160 characters',
+      default: 'UNCONFIGURED',
+      description:
+        'Carrier-reviewed HELP response for the configured tenant. Required only when enabling the SMS worker.',
+      maxLength: 160,
+      noEcho: true,
+      type: 'String',
+    });
+    const smsStopMessage = new CfnParameter(this, 'SmsStopMessage', {
+      allowedPattern: '^(UNCONFIGURED|\\S(?:[\\s\\S]{0,158}\\S)?)$',
+      constraintDescription:
+        'must be UNCONFIGURED or a non-empty, trimmed message of at most 160 characters',
+      default: 'UNCONFIGURED',
+      description:
+        'Carrier-reviewed STOP response for the configured tenant. Required only when enabling the SMS worker.',
+      maxLength: 160,
+      noEcho: true,
+      type: 'String',
+    });
+    const smsDestinationCountryCode = new CfnParameter(
+      this,
+      'SmsDestinationCountryCode',
+      {
+        allowedPattern: '^(UNCONFIGURED|[A-Z]{2})$',
+        default: 'UNCONFIGURED',
+        description:
+          'ISO 3166-1 alpha-2 destination country reviewed for the SMS protect configuration.',
         type: 'String',
       },
     );
@@ -333,6 +418,26 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldRunAwsEumSmsWorker = new CfnCondition(
+      this,
+      'ShouldRunAwsEumSmsWorker',
+      {
+        expression: Fn.conditionEquals(
+          enableAwsEumSmsWorker.valueAsString,
+          'true',
+        ),
+      },
+    );
+    const shouldProvisionAwsEumSmsResources = new CfnCondition(
+      this,
+      'ShouldProvisionAwsEumSmsResources',
+      {
+        expression: Fn.conditionEquals(
+          provisionAwsEumSmsResources.valueAsString,
+          'true',
+        ),
+      },
+    );
     new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
       assertions: [
         {
@@ -357,6 +462,93 @@ export class PsdEocStack extends Stack {
       ],
       ruleCondition: Fn.conditionEquals(
         enableExpoPushWorker.valueAsString,
+        'true',
+      ),
+    });
+    new CfnRule(this, 'SmsWorkerRequiresLiveApplicationAndEvidence', {
+      assertions: [
+        {
+          assert: Fn.conditionAnd(
+            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
+            Fn.conditionEquals(
+              provisionAwsEumSmsResources.valueAsString,
+              'true',
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                smsRegistrationVerificationReference.valueAsString,
+                'UNVERIFIED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                smsOriginationIdentityArn.valueAsString,
+                'UNCONFIGURED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(smsHelpMessage.valueAsString, 'UNCONFIGURED'),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(smsStopMessage.valueAsString, 'UNCONFIGURED'),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                smsDestinationCountryCode.valueAsString,
+                'UNCONFIGURED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                appImageDigest.valueAsString,
+                IMAGE_DIGEST_SENTINEL,
+              ),
+            ),
+          ),
+          assertDescription:
+            'EnableAwsEumSmsWorker=true requires the live application, reviewed image, carrier approval evidence, an approved origination identity, and tenant-reviewed HELP/STOP messages.',
+        },
+      ],
+      ruleCondition: Fn.conditionEquals(
+        enableAwsEumSmsWorker.valueAsString,
+        'true',
+      ),
+    });
+    new CfnRule(this, 'SmsResourcesRequireCarrierEvidence', {
+      assertions: [
+        {
+          assert: Fn.conditionAnd(
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                smsRegistrationVerificationReference.valueAsString,
+                'UNVERIFIED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                smsOriginationIdentityArn.valueAsString,
+                'UNCONFIGURED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(smsHelpMessage.valueAsString, 'UNCONFIGURED'),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(smsStopMessage.valueAsString, 'UNCONFIGURED'),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                smsDestinationCountryCode.valueAsString,
+                'UNCONFIGURED',
+              ),
+            ),
+          ),
+          assertDescription:
+            'ProvisionAwsEumSmsResources=true requires retained carrier approval and all carrier-reviewed pool inputs.',
+        },
+      ],
+      ruleCondition: Fn.conditionEquals(
+        provisionAwsEumSmsResources.valueAsString,
         'true',
       ),
     });
@@ -608,6 +800,20 @@ export class PsdEocStack extends Stack {
         secretName: `${SECRET_PREFIX}/workers/expo-push-runtime-token`,
       },
     );
+    const smsRuntimeWorkerSecret = new secretsmanager.Secret(
+      this,
+      'SmsRuntimeWorkerSecret',
+      {
+        description:
+          'Generated bearer for SMS provider claims, immutable retries, current destination policy, and lifecycle reconciliation.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/workers/sms-runtime-token`,
+      },
+    );
     const expoAccessTokenSecret = new secretsmanager.Secret(
       this,
       'ExpoAccessTokenSecret',
@@ -804,6 +1010,11 @@ export class PsdEocStack extends Stack {
       [
         ['Delivery', DELIVERY_QUEUE_NAME, DELIVERY_DEAD_LETTER_QUEUE_NAME],
         ['Sms', SMS_QUEUE_NAME, SMS_DEAD_LETTER_QUEUE_NAME],
+        [
+          'SmsReceipt',
+          SMS_RECEIPT_QUEUE_NAME,
+          SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME,
+        ],
         ['Push', PUSH_QUEUE_NAME, PUSH_DEAD_LETTER_QUEUE_NAME],
       ] as const
     ).map(([id, queueName, deadLetterQueueName]) => {
@@ -838,10 +1049,109 @@ export class PsdEocStack extends Stack {
       return [id, { deadLetterQueue, queue }] as const;
     });
     const queuePairs = Object.fromEntries(channelQueuePairs) as Record<
-      'Delivery' | 'Sms' | 'Push',
+      'Delivery' | 'Sms' | 'SmsReceipt' | 'Push',
       { deadLetterQueue: sqs.Queue; queue: sqs.Queue }
     >;
     const deliveryQueue = queuePairs.Delivery.queue;
+
+    // Provider resources are synthesized now but created only when every
+    // carrier-evidence gate above is explicitly enabled. The existing queue,
+    // worker task, and runtime API remain reviewable while this condition is
+    // false, without creating an origination path.
+    const smsOptOutList = new smsvoice.CfnOptOutList(this, 'SmsOptOutList', {
+      optOutListName: 'psd-eoc-sms',
+    });
+    smsOptOutList.cfnOptions.condition = shouldProvisionAwsEumSmsResources;
+    smsOptOutList.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const smsProtectConfiguration = new smsvoice.CfnProtectConfiguration(
+      this,
+      'SmsProtectConfiguration',
+      {
+        countryRuleSet: {
+          sms: [
+            {
+              countryCode: smsDestinationCountryCode.valueAsString,
+              protectStatus: 'ALLOW',
+            },
+          ],
+        },
+        deletionProtectionEnabled: true,
+      },
+    );
+    smsProtectConfiguration.cfnOptions.condition =
+      shouldProvisionAwsEumSmsResources;
+    smsProtectConfiguration.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const smsPool = new smsvoice.CfnPool(this, 'SmsPool', {
+      deletionProtectionEnabled: true,
+      mandatoryKeywords: {
+        help: { message: smsHelpMessage.valueAsString },
+        stop: { message: smsStopMessage.valueAsString },
+      },
+      optOutListName: smsOptOutList.ref,
+      originationIdentities: [smsOriginationIdentityArn.valueAsString],
+      selfManagedOptOutsEnabled: false,
+      sharedRoutesEnabled: false,
+    });
+    smsPool.cfnOptions.condition = shouldProvisionAwsEumSmsResources;
+    smsPool.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    smsPool.addResourceDependency(smsOptOutList);
+    const smsConfigurationSet = new smsvoice.CfnConfigurationSet(
+      this,
+      'SmsConfigurationSet',
+      {
+        configurationSetName: 'psd-eoc-sms',
+        messageFeedbackEnabled: false,
+        protectConfigurationId:
+          smsProtectConfiguration.attrProtectConfigurationId,
+      },
+    );
+    smsConfigurationSet.cfnOptions.condition =
+      shouldProvisionAwsEumSmsResources;
+    smsConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    smsConfigurationSet.addResourceDependency(smsProtectConfiguration);
+
+    const smsDeliveryEventRule = new events.Rule(this, 'SmsDeliveryEventRule', {
+      description:
+        'Routes AWS End User Messaging delivery receipts to their retained queue.',
+      enabled: false,
+      eventPattern: {
+        source: ['aws.sms-voice'],
+        detailType: ['Text Message Delivery Status Updated'],
+      },
+      ruleName: 'psd-eoc-sms-delivery-events',
+    });
+    smsDeliveryEventRule.addTarget(
+      new eventTargets.SqsQueue(queuePairs.SmsReceipt.queue),
+    );
+    const smsDeliveryEventCfnRule = smsDeliveryEventRule.node
+      .defaultChild as events.CfnRule;
+    smsDeliveryEventCfnRule.state = Fn.conditionIf(
+      shouldRunAwsEumSmsWorker.logicalId,
+      'ENABLED',
+      'DISABLED',
+    ).toString();
+
+    const smsOptOutSchedule = new events.Rule(this, 'SmsOptOutSchedule', {
+      description:
+        'Reconciles the AWS-managed STOP list into append-only endpoint policy evidence.',
+      enabled: false,
+      ruleName: 'psd-eoc-sms-opt-out-reconciliation',
+      schedule: events.Schedule.rate(Duration.minutes(15)),
+    });
+    smsOptOutSchedule.addTarget(
+      new eventTargets.SqsQueue(queuePairs.Sms.queue, {
+        message: events.RuleTargetInput.fromObject({
+          kind: 'sms-opt-out-reconciliation',
+        }),
+      }),
+    );
+    const smsOptOutScheduleCfnRule = smsOptOutSchedule.node
+      .defaultChild as events.CfnRule;
+    smsOptOutScheduleCfnRule.state = Fn.conditionIf(
+      shouldRunAwsEumSmsWorker.logicalId,
+      'ENABLED',
+      'DISABLED',
+    ).toString();
 
     // Alarm routing. The operations key encrypts both topics so CloudWatch can
     // publish to them without the topics being world-writable, and the two
@@ -1364,6 +1674,229 @@ export class PsdEocStack extends Stack {
       0,
     ) as unknown as number;
 
+    // The SMS worker shares no database route and has no provider credentials.
+    // Its task role can call only the exact retained queue, pool, and opt-out
+    // list. Desired count and every provider opt-in remain one condition.
+    const smsWorkerLogGroup = new logs.LogGroup(this, 'SmsWorkerLogGroup', {
+      logGroupName: SMS_WORKER_LOG_GROUP_NAME,
+      removalPolicy: RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.TWO_WEEKS,
+    });
+    const smsWorkerSecurityGroup = new ec2.SecurityGroup(
+      this,
+      'SmsWorkerSecurityGroup',
+      {
+        allowAllOutbound: false,
+        description:
+          'HTTPS-only egress for the isolated AWS End User Messaging SMS worker; no database route.',
+        securityGroupName: 'psd-eoc-sms-worker',
+        vpc: network as unknown as ec2.IVpc,
+      },
+    );
+    smsWorkerSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS to the server and AWS APIs through NAT.',
+    );
+    const smsWorkerTaskExecutionRole = new iam.Role(
+      this,
+      'SmsWorkerTaskExecutionRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Pulls the reviewed image and injects only internal SMS worker bearers.',
+      },
+    );
+    const smsWorkerTaskRole = new iam.Role(this, 'SmsWorkerTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description:
+        'Consumes the SMS queue and can send only through the conditionally provisioned pool and inspect its exact opt-out list.',
+    });
+    queuePairs.Sms.queue.grantConsumeMessages(smsWorkerTaskRole);
+    queuePairs.Sms.queue.grantSendMessages(smsWorkerTaskRole);
+    queuePairs.SmsReceipt.queue.grantConsumeMessages(smsWorkerTaskRole);
+    smsWorkerTaskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ['sms-voice:SendTextMessage'],
+        resources: [
+          Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsPool.attrArn,
+            Arn.format(
+              {
+                account,
+                partition,
+                region,
+                resource: 'pool',
+                resourceName: 'UNCONFIGURED',
+                service: 'sms-voice',
+              },
+              this,
+            ),
+          ).toString(),
+        ],
+      }),
+    );
+    smsWorkerTaskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ['sms-voice:DescribeOptedOutNumbers'],
+        resources: [
+          Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsOptOutList.attrArn,
+            Arn.format(
+              {
+                account,
+                partition,
+                region,
+                resource: 'opt-out-list',
+                resourceName: 'UNCONFIGURED',
+                service: 'sms-voice',
+              },
+              this,
+            ),
+          ).toString(),
+        ],
+      }),
+    );
+    const smsWorkerTaskDefinition = new ecs.FargateTaskDefinition(
+      this,
+      'SmsWorkerTaskDefinition',
+      {
+        cpu: 256,
+        executionRole: smsWorkerTaskExecutionRole,
+        family: 'psd-eoc-aws-eum-sms-worker',
+        memoryLimitMiB: 512,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.X86_64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+        taskRole: smsWorkerTaskRole,
+      },
+    );
+    smsWorkerTaskDefinition.addVolume({ name: 'sms-worker-tmp' });
+    const smsWorkerContainer = smsWorkerTaskDefinition.addContainer(
+      'aws-eum-sms-worker',
+      {
+        command: ['bun', 'workers/sms/service.ts'],
+        environment: {
+          AWS_ACCOUNT_ID: account,
+          AWS_REGION: region,
+          NODE_ENV: 'production',
+          PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
+          PSD_EOC_SMS_CONFIGURATION_SET_NAME: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsConfigurationSet.ref,
+            'UNCONFIGURED',
+          ).toString(),
+          PSD_EOC_SMS_CONFIGURATION_STATUS: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            'verified',
+            'unconfigured',
+          ).toString(),
+          PSD_EOC_SMS_DELIVERY_EVENT_RULE_ARN: smsDeliveryEventRule.ruleArn,
+          PSD_EOC_SMS_MAX_PRICE: '0.05',
+          PSD_EOC_SMS_OPT_OUT_LIST_ARN: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsOptOutList.attrArn,
+            'UNCONFIGURED',
+          ).toString(),
+          PSD_EOC_SMS_OPT_OUT_LIST_NAME: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsOptOutList.ref,
+            'UNCONFIGURED',
+          ).toString(),
+          PSD_EOC_SMS_OPT_OUT_SCHEDULE_RULE_ARN: smsOptOutSchedule.ruleArn,
+          PSD_EOC_SMS_ORIGINATION_IDENTITY: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsPool.attrArn,
+            'UNCONFIGURED',
+          ).toString(),
+          PSD_EOC_SMS_PROTECT_CONFIGURATION_ID: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsProtectConfiguration.attrProtectConfigurationId,
+            'UNCONFIGURED',
+          ).toString(),
+          PSD_EOC_SMS_PROVIDER_AUTHORIZED: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            'true',
+            'false',
+          ).toString(),
+          PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE:
+            smsRegistrationVerificationReference.valueAsString,
+          PSD_EOC_SMS_RUNTIME_MODE: Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            'enabled',
+            'dark',
+          ).toString(),
+          PSD_EOC_SMS_TTL_SECONDS: '300',
+          SMS_QUEUE_ARN: queuePairs.Sms.queue.queueArn,
+          SMS_QUEUE_URL: queuePairs.Sms.queue.queueUrl,
+          SMS_RECEIPT_QUEUE_ARN: queuePairs.SmsReceipt.queue.queueArn,
+          SMS_RECEIPT_QUEUE_URL: queuePairs.SmsReceipt.queue.queueUrl,
+          SOURCE_SHA: sourceSha.valueAsString,
+          TMPDIR: '/tmp',
+        },
+        essential: true,
+        image: ecs.ContainerImage.fromRegistry(
+          Fn.join('', [
+            imageRepository.repositoryUri,
+            '@',
+            appImageDigest.valueAsString,
+          ]),
+        ),
+        logging: ecs.LogDrivers.awsLogs({
+          logGroup: smsWorkerLogGroup,
+          streamPrefix: 'aws-eum-sms-worker',
+        }),
+        readonlyRootFilesystem: true,
+        secrets: {
+          PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            attemptExecutionWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_DELIVERY_STATE_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            deliveryStateWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_SMS_RUNTIME_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            smsRuntimeWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+        },
+      },
+    );
+    smsWorkerContainer.addMountPoints({
+      containerPath: '/tmp',
+      readOnly: false,
+      sourceVolume: 'sms-worker-tmp',
+    });
+    imageRepository.grantPull(smsWorkerTaskExecutionRole);
+    for (const secret of [
+      attemptExecutionWorkerSecret,
+      deliveryStateWorkerSecret,
+      smsRuntimeWorkerSecret,
+    ]) {
+      secret.grantRead(smsWorkerTaskExecutionRole);
+    }
+    const smsWorkerService = new ecs.FargateService(this, 'SmsWorkerService', {
+      assignPublicIp: false,
+      cluster: bootstrapCluster as unknown as ecs.ICluster,
+      circuitBreaker: { rollback: true },
+      desiredCount: 0,
+      enableExecuteCommand: false,
+      maxHealthyPercent: 200,
+      minHealthyPercent: 100,
+      securityGroups: [smsWorkerSecurityGroup],
+      serviceName: 'psd-eoc-aws-eum-sms-worker',
+      taskDefinition: smsWorkerTaskDefinition,
+      vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
+    });
+    const smsWorkerCfnService = smsWorkerService.node
+      .defaultChild as ecs.CfnService;
+    smsWorkerCfnService.desiredCount = Fn.conditionIf(
+      shouldRunAwsEumSmsWorker.logicalId,
+      1,
+      0,
+    ) as unknown as number;
+
     const accessSyncTaskExecutionRole = new iam.Role(
       this,
       'AccessSyncTaskExecutionRole',
@@ -1528,6 +2061,7 @@ export class PsdEocStack extends Stack {
       attemptExecutionWorkerSecret.grantRead(runtimeRole),
       pushEndpointWorkerSecret.grantRead(runtimeRole),
       expoPushRuntimeWorkerSecret.grantRead(runtimeRole),
+      smsRuntimeWorkerSecret.grantRead(runtimeRole),
       pushRegistrationBuildAllowlistSecret.grantRead(runtimeRole),
       iam.Grant.addToPrincipal({
         actions: ['sqs:GetQueueAttributes'],
@@ -1647,6 +2181,10 @@ export class PsdEocStack extends Stack {
                   value: expoPushRuntimeWorkerSecret.secretArn,
                 },
                 {
+                  name: 'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
+                  value: smsRuntimeWorkerSecret.secretArn,
+                },
+                {
                   name: 'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST',
                   value: pushRegistrationBuildAllowlistSecret.secretArn,
                 },
@@ -1741,6 +2279,22 @@ export class PsdEocStack extends Stack {
                   value: SES_VERIFICATION_REFERENCE,
                 },
                 {
+                  name: 'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
+                  value: smsRegistrationVerificationReference.valueAsString,
+                },
+                {
+                  name: 'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',
+                  value: smsDestinationCountryCode.valueAsString,
+                },
+                {
+                  name: 'PSD_EOC_SMS_WORKER_READY',
+                  value: Fn.conditionIf(
+                    shouldRunAwsEumSmsWorker.logicalId,
+                    'true',
+                    'false',
+                  ).toString(),
+                },
+                {
                   name: 'RUNTIME_SECRET_ARN',
                   value: apiSaltSecret.secretArn,
                 },
@@ -1778,7 +2332,8 @@ export class PsdEocStack extends Stack {
 
     // Alarms. Until the canary and the metrics collector have the credentials
     // they need, only infrastructure publishers and metrics conditionally
-    // paired with the Expo worker are deployed; see infrastructure monitoring.
+    // paired with the Expo and SMS workers are deployed; see infrastructure
+    // monitoring.
     configureInfrastructureMonitoring(this, {
       applicationCondition: shouldProvisionApplication,
       appRunnerService,
@@ -1791,12 +2346,15 @@ export class PsdEocStack extends Stack {
       database,
       displayTimeZone: deploymentIdentity.displayTimeZone,
       delivery: queuePairs.Delivery,
+      smsReceipt: queuePairs.SmsReceipt,
       operationsAlarmTopic,
       operationsKey,
       monitoringRunbookBaseUrl,
       pushWorkerCondition: shouldRunExpoPushWorker,
       pushWorkerLogGroup,
       sesIdentityDomain,
+      smsWorkerCondition: shouldRunAwsEumSmsWorker,
+      smsWorkerLogGroup,
     });
 
     new CfnOutput(this, 'DeploymentAccount', {

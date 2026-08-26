@@ -107,6 +107,44 @@ function deliveryTestPreview(
   });
 }
 
+function smsDeliveryTestPreview(): DeliveryTestPreview {
+  const base = deliveryTestPreview();
+  const integrationStatus = {
+    ...base.activationPreview.channels[0].integrationStatus,
+    integrationId: 'aws-eum-sms',
+  };
+  const smsConsequence = {
+    channel: 'sms' as const,
+    endpointCount: 1,
+    renderedMessage: {
+      channel: 'sms' as const,
+      eventKind: 'drill' as const,
+      templateMode: 'drill' as const,
+      purpose: 'activation' as const,
+      classificationMarker: 'DRILL' as const,
+      body: '[DRILL] One approved SMS canary endpoint.',
+    },
+    integrationStatus,
+  };
+  const activationPreview = ActivationPreviewSchema.parse({
+    ...base.activationPreview,
+    recipientCount: 1,
+    channels: [smsConsequence],
+  });
+  return DeliveryTestPreviewSchema.parse({
+    ...base,
+    activationPreview,
+    channels: [
+      {
+        channel: 'sms',
+        endpointCount: 1,
+        integrationStatus,
+        credentialVerified: true,
+      },
+    ],
+  });
+}
+
 function boundResult(
   preview: DeliveryTestPreview,
   idempotencyKey: string,
@@ -192,6 +230,16 @@ describe('monthly delivery-test browser safety', () => {
     }
   });
 
+  test('allows a fresh live-verified singleton SMS preview to reach confirmation', () => {
+    const preview = smsDeliveryTestPreview();
+    expect(
+      canActivateDeliveryTest(
+        preview,
+        new Date(Date.parse(preview.createdAt) + 1_000),
+      ),
+    ).toBe(true);
+  });
+
   test('rendering the console never starts a request and hides target config from non-admin staff', () => {
     const originalFetch = globalThis.fetch;
     let requests = 0;
@@ -219,6 +267,25 @@ describe('monthly delivery-test browser safety', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test('offers an explicit singleton SMS canary mode only in the admin target editor', () => {
+    const markup = renderToStaticMarkup(
+      <DeliveryTestConsole
+        csrfCookieName="synthetic-csrf"
+        drillEventTypes={[EVENT_TYPE_ITEM]}
+        facilities={[
+          { id: IDS.facility, code: 'SYN', name: 'Synthetic Campus' },
+        ]}
+        showTargetConfiguration={true}
+      />,
+    );
+    expect(markup).toContain('Save target version');
+    expect(markup).toContain(
+      '<option value="controlled-sms-canary">One approved SMS endpoint</option>',
+    );
+    expect(markup).toContain('One approved push endpoint');
+    expect(markup).toContain('One approved email endpoint');
   });
 
   test('a timed-out activation is outcome-unknown and is never retried automatically', async () => {

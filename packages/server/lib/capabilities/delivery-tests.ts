@@ -427,6 +427,9 @@ export function deliveryTestTargetModeMatches(
   if ('mode' in input && input.mode === 'controlled-push-canary') {
     return endpoints.length === 1 && endpoints[0]?.channel === 'push';
   }
+  if ('mode' in input && input.mode === 'controlled-sms-canary') {
+    return endpoints.length === 1 && endpoints[0]?.channel === 'sms';
+  }
   const channels = new Set(endpoints.map((endpoint) => endpoint.channel));
   return endpoints.length >= 2 && channels.has('push') && channels.has('email');
 }
@@ -510,7 +513,10 @@ async function loadDeliveryTestTargetSetVersion(
       : endpointReferences.length === 1 &&
           endpointReferences[0]?.channel === 'push'
         ? ('controlled-push-canary' as const)
-        : null;
+        : endpointReferences.length === 1 &&
+            endpointReferences[0]?.channel === 'sms'
+          ? ('controlled-sms-canary' as const)
+          : null;
   return DeliveryTestTargetSetVersionSchema.parse({
     ...(controlledMode === null ? {} : { mode: controlledMode }),
     id: row.id,
@@ -1644,10 +1650,13 @@ async function deriveReportProjection(
       }),
     ];
   });
+  const controlledSmsCanary =
+    targetRows.length === 1 && targetRows[0]?.channel === 'sms';
   if (
-    channels.length < 2 ||
-    !channels.some((channel) => channel.channel === 'push') ||
-    !channels.some((channel) => channel.channel === 'email')
+    !controlledSmsCanary &&
+    (channels.length < 2 ||
+      !channels.some((channel) => channel.channel === 'push') ||
+      !channels.some((channel) => channel.channel === 'email'))
   ) {
     throw conflict('The delivery-test target channels are incomplete.');
   }
