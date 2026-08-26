@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  currentMarkdownFiles,
   currentDocumentationViolations,
   extractContractList,
   validateMarkdownLinks,
@@ -28,7 +29,9 @@ const retentionDocumentPaths = [
 
 function markdownFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (['.git', '.next', 'node_modules'].includes(entry.name)) return [];
+    if (['.git', '.next', '.terraform', 'node_modules'].includes(entry.name)) {
+      return [];
+    }
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return markdownFiles(path);
     return entry.isFile() && entry.name.endsWith('.md') ? [path] : [];
@@ -86,6 +89,19 @@ afterEach(() => {
 });
 
 describe('documentation contract', () => {
+  test('ignores generated tool documentation', () => {
+    const root = mkdtempSync(join(tmpdir(), 'psd-eoc-generated-docs-'));
+    temporaryDirectories.push(root);
+    mkdirSync(join(root, '.terraform', 'providers'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# Source\n');
+    writeFileSync(
+      join(root, '.terraform', 'providers', 'README.md'),
+      '# Generated provider documentation\n',
+    );
+
+    expect(currentMarkdownFiles(root)).toEqual([join(root, 'README.md')]);
+  });
+
   test('keeps the repository documentation synchronized', () => {
     expect(verifyDocumentation()).toEqual([]);
   });
