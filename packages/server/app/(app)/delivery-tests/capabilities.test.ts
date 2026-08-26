@@ -101,6 +101,11 @@ describe('controlled single-channel canary target modes', () => {
     endpointId: '10000000-0000-4000-8000-000000000004',
     channel: 'push' as const,
   });
+  const sms = Object.freeze({
+    recipientId: '10000000-0000-4000-8000-000000000005',
+    endpointId: '10000000-0000-4000-8000-000000000006',
+    channel: 'sms' as const,
+  });
 
   test('requires the discriminated mode to resolve to exactly one email endpoint', () => {
     expect(
@@ -134,6 +139,21 @@ describe('controlled single-channel canary target modes', () => {
       deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [
         email,
         push,
+      ]),
+    ).toBe(false);
+  });
+
+  test('requires the SMS mode to resolve to exactly one SMS endpoint', () => {
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-sms-canary' }, [sms]),
+    ).toBe(true);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-sms-canary' }, [push]),
+    ).toBe(false);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-sms-canary' }, [
+        email,
+        sms,
       ]),
     ).toBe(false);
   });

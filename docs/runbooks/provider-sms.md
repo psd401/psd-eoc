@@ -8,16 +8,17 @@ Current provider and alarm state lives only in the
 number allocation never authorize sending; see
 [sms-registration.md](sms-registration.md).
 
-**Source-defined monitoring alarms:**
+**Source-defined conditional monitoring alarms:**
 
+- `psd-eoc-sms-worker-health` fires after two consecutive 20-minute periods
+  without the enabled worker's sanitized heartbeat;
 - `psd-eoc-sms-outbox-to-provider-p95` fires when completed SMS handoff p95
-  reaches 15 seconds; and
-- `psd-eoc-sms-outbox-to-provider-incomplete` fires when at least one SMS
-  endpoint has not reached provider acceptance by the deterministic one-minute
-  cutoff.
+  reaches 15 seconds for two consecutive periods; and
+- `psd-eoc-sms-worker-message-failures` fires when the worker reports a bounded
+  work, receipt, or opt-out processing failure.
 
-The source definitions do not prove the alarms are deployed or authorize
-provider I/O.
+The filters and alarms are created only when the SMS worker is enabled. Their
+source definitions do not prove they are deployed or authorize provider I/O.
 
 ## Safety posture
 
@@ -31,11 +32,17 @@ provider I/O.
   outcomes stay `unknown` and are not retried.
 - SMS copy must remain length-safe and explicitly distinguish real incidents
   from drills.
+- `ProvisionAwsEumSmsResources` and `EnableAwsEumSmsWorker` are separate on
+  purpose. Leave the retained provider resources provisioned when darkening the
+  worker; do not force deletion of a carrier pool as an outage response.
 
 ## Respond
 
 1. Confirm the protected account/region, exact deployed worker/configuration
-   revision, SMS truth label, and `psd-eoc-sms` queue/DLQ state.
+   revision, `ProvisionAwsEumSmsResources`, `EnableAwsEumSmsWorker`, SMS truth
+   label, `psd-eoc-sms` work queue/DLQ state, and the separate
+   `psd-eoc-sms-receipts` queue/DLQ state. The worker role can consume but
+   cannot publish to the receipt queue; EventBridge is its only writer.
 2. If routable staff work reached the provider boundary while SMS was blocked
    or unverified, classify **SEV-0**, preserve evidence, and follow
    [rollback.md](rollback.md). Do not send or replay it.
@@ -60,11 +67,26 @@ provider I/O.
 - Any provider, registration, number, opt-out, credential, or worker change
   needs product-owner approval and an explicit rollback point.
 - Confirm the adapter remains fail closed at every non-`live-verified` state,
-  no work retained across a service pause can be released without
-  reconciliation, and queue/DLQ state is stable.
+  initial and retry work older than the fixed five-minute total lifetime is
+  discarded without provider I/O, and queue/DLQ state is stable.
 - Do not send a production SMS to test recovery. A future approved synthetic
   test still needs verified credentials/registration, exact opt-in targets,
   product-owner authorization, and authenticated-human confirmation.
+- Use `controlled-sms-canary` for that bounded proof. It resolves exactly one
+  independently approved current SMS endpoint; it does not authorize an agent,
+  workflow, or operator console to initiate the drill.
+
+### Recover the approved handset after the STOP proof
+
+The production worker intentionally has no generic endpoint re-enable route.
+Do not clear the append-only STOP fact or treat an unauthenticated START claim
+as evidence. After the handset owner sends `START` or `UNSTOP`, a human operator
+must verify in the protected AWS account that the exact number is absent from
+the managed opt-out list. Then run the ordinary roster sync, approve the SMS
+endpoint from the new immutable snapshot as a new controlled target-set
+version, and retire the old target-set version. If any of those facts cannot be
+verified, leave the endpoint suppressed and use a different independently
+approved canary for later tests.
 
 Record the go-live disposition in the readiness register: either SMS has
 independently verified end-to-end evidence or it is explicitly dark with no

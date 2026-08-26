@@ -706,6 +706,56 @@ function activationPreview(
   });
 }
 
+function controlledSmsActivationPreview(): ActivationPreview {
+  return ActivationPreviewSchema.parse({
+    id: IDS.activationPreview,
+    facilityId: IDS.facility,
+    kind: 'drill',
+    templateMode: 'drill',
+    eventTypeVersion: {
+      id: IDS.eventTypeVersion,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: IDS.rosterSnapshot,
+    rosterPopulation: 'staff',
+    recipientCount: 1,
+    channels: [
+      {
+        channel: 'sms',
+        endpointCount: 1,
+        renderedMessage: {
+          channel: 'sms',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          body: '[DRILL] One approved SMS canary endpoint.',
+        },
+        integrationStatus: {
+          integrationId: 'aws-eum-sms',
+          label: 'live-verified',
+          verifiedAt: TIMES.previewCreated,
+          verifiedByUserId: IDS.user,
+          authorizationReference: 'controlled-sms-canary-verification',
+          reasonCode: null,
+          observedAt: TIMES.previewCreated,
+        },
+      },
+    ],
+    sendReadiness: 'ready',
+    blockingReasonCodes: [],
+    activeEventIds: [],
+    deliveryTest: {
+      purpose: 'monthly-live-delivery-test',
+      targetSet: { id: uuid(19), version: 1 },
+      endpointReferenceDigest: 'c'.repeat(64),
+    },
+    consequenceDigest: 'd'.repeat(64),
+    createdAt: TIMES.previewCreated,
+    expiresAt: TIMES.previewExpires,
+  });
+}
+
 function lifecyclePreview(
   event: Event,
   purpose: 'all-clear' | 'reactivation',
@@ -803,6 +853,7 @@ function seedActivation(
     integrationStatusIds: {
       push: uuid(100),
       email: uuid(101),
+      sms: uuid(104),
     },
     currentActiveEventIds: preview.activeEventIds,
   });
@@ -1043,6 +1094,60 @@ describe('event lifecycle capabilities', () => {
         facilityId: IDS.facility,
       }),
     ]);
+  });
+
+  test('persists a confirmed controlled SMS preview as one intent and provider-free outbox record', async () => {
+    const store = new MemoryEventCapabilityStore();
+    const preview = controlledSmsActivationPreview();
+    const confirmationId = uuid(243);
+    seedActivation(store, preview);
+    store.seedConfirmation(
+      issuedConfirmation({
+        id: confirmationId,
+        capabilityId: 'start-event',
+        actionIds: ['send-real-notification'],
+        consequenceDigest: preview.consequenceDigest,
+        issuedAt: TIMES.previewCreated,
+        expiresAt: TIMES.activation,
+      }),
+    );
+
+    const result = await executeEventCapability(
+      'start-event',
+      {
+        source: 'activation-preview',
+        activationPreviewId: preview.id,
+        activeEventDecision: {
+          decision: 'start-new',
+          activeEventIdsSeen: [],
+        },
+      },
+      humanMutationInvocation({
+        requestId: uuid(244),
+        idempotencyKey: 'controlled-sms-canary-start-0001',
+        serverTime: TIMES.activation,
+        confirmationId,
+      }),
+      store,
+    );
+
+    expect(store.getConfirmation(confirmationId)).toMatchObject({
+      status: 'consumed',
+    });
+    expect(result.notificationIntent).toMatchObject({
+      deliveryTest: preview.deliveryTest,
+      channels: [{ channel: 'sms', endpointCount: 1 }],
+    });
+    expect(store.notificationIntents).toHaveLength(1);
+    expect(store.outboxRecords).toHaveLength(1);
+    expect(store.outboxRecords[0]).toMatchObject({
+      status: 'pending',
+      attempts: 0,
+      message: {
+        deliveryTest: preview.deliveryTest,
+        channels: [{ channel: 'sms', endpointCount: 1 }],
+      },
+    });
   });
 
   test('rolls back every staged activation record when durable persistence fails', async () => {

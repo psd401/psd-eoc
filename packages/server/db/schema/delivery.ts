@@ -476,17 +476,30 @@ export const outbox = pgTable(
       'outbox_channel_plan_shape',
       sql`case
         when jsonb_typeof(${table.channels}) = 'array' then
-          jsonb_array_length(${table.channels}) between 2 and 3
-          and jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
-          )) = 1
-          and jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
-          )) = 1
-          and jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-          )) <= 1
-          and jsonb_array_length(jsonb_path_query_array(
+          (
+            (
+              jsonb_array_length(${table.channels}) between 2 and 3
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && @.integrationStatus.integrationId == "expo-push")'
+              )) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
+              )) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+              )) <= 1
+            ) or (
+              ${table.eventKind} = 'drill'
+              and ${table.templateMode} = 'drill'
+              and ${table.purpose} = 'activation'
+              and ${table.rosterPopulation} = 'staff'
+              and jsonb_typeof(${table.message} -> 'deliveryTest') is not distinct from 'object'
+              and jsonb_array_length(${table.channels}) = 1
+              and jsonb_array_length(jsonb_path_query_array(
+                ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
+              )) = 1
+            )
+          ) and jsonb_array_length(jsonb_path_query_array(
             ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
           )) = jsonb_array_length(${table.channels})
         else false
@@ -985,6 +998,37 @@ export const expoPushProviderIo = pgTable(
   ],
 );
 
+/**
+ * Irreversible permit for one AWS End User Messaging SMS provider call.
+ *
+ * An unfinished row is intentionally permanent uncertainty. A worker may die
+ * after AWS accepted the message but before it stores the response, and a
+ * replacement worker must never turn that gap into a duplicate alert.
+ */
+export const smsProviderIo = pgTable(
+  'sms_provider_io',
+  {
+    attemptId: uuid('attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    workFingerprint: digest('work_fingerprint').notNull(),
+    claimToken: uuid('claim_token').defaultRandom().notNull(),
+    completion: jsonb('completion'),
+    claimedAt: occurredAt('claimed_at').defaultNow().notNull(),
+    completedAt: occurredAt('completed_at'),
+  },
+  (table) => [
+    check(
+      'sms_provider_io_completion_pairing',
+      sql`(${table.completion} is null) = (${table.completedAt} is null)`,
+    ),
+    check(
+      'sms_provider_io_completion_object',
+      sql`${table.completion} is null or jsonb_typeof(${table.completion}) = 'object'`,
+    ),
+  ],
+);
+
 /** Durable receipt polling state; targets contain no push token. */
 export const expoPushReceiptPolls = pgTable(
   'expo_push_receipt_polls',
@@ -1085,6 +1129,40 @@ export const expoPushRetrySchedules = pgTable(
       'expo_push_retry_schedules_receipt_reason',
       sql`${table.receiptId} is null
         or ${table.reasonCode} = 'EXPO_MESSAGE_RATE_EXCEEDED'`,
+    ),
+  ],
+);
+
+/** Idempotent, destination-free schedule for one immutable SMS retry. */
+export const smsRetrySchedules = pgTable(
+  'sms_retry_schedules',
+  {
+    sourceAttemptId: uuid('source_attempt_id')
+      .primaryKey()
+      .references(() => channelAttempts.id, { onDelete: 'restrict' }),
+    sourceFingerprint: digest('source_fingerprint').notNull(),
+    nextAttemptId: uuid('next_attempt_id').defaultRandom().notNull(),
+    nextAttemptNumber: integer('next_attempt_number').notNull(),
+    delayMilliseconds: integer('delay_milliseconds').notNull(),
+    retryAt: occurredAt('retry_at').notNull(),
+    expiresAt: occurredAt('expires_at').notNull(),
+    reasonCode: auditCode('reason_code').notNull(),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    unique('sms_retry_schedules_next_attempt_uq').on(table.nextAttemptId),
+    index('sms_retry_schedules_retry_at_idx').on(table.retryAt),
+    check(
+      'sms_retry_schedules_attempt_positive',
+      sql`${table.nextAttemptNumber} between 2 and 10`,
+    ),
+    check(
+      'sms_retry_schedules_delay',
+      sql`${table.delayMilliseconds} between 1 and 3600000`,
+    ),
+    check(
+      'sms_retry_schedules_window',
+      sql`${table.retryAt} < ${table.expiresAt}`,
     ),
   ],
 );
@@ -1341,7 +1419,15 @@ export const deliveryTestReports = pgTable(
     check(
       'delivery_test_reports_channels_shape',
       sql`jsonb_typeof(${table.channels}) is not distinct from 'array'
-        and jsonb_array_length(${table.channels}) between 2 and 3`,
+        and (
+          jsonb_array_length(${table.channels}) between 2 and 3
+          or (
+            jsonb_array_length(${table.channels}) = 1
+            and jsonb_array_length(jsonb_path_query_array(
+              ${table.channels}, '$[*] ? (@.channel == "sms")'
+            )) = 1
+          )
+        )`,
     ),
     check(
       'delivery_test_reports_status_reason_truth',

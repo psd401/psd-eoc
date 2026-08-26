@@ -47,7 +47,8 @@ interface TargetDraft {
   readonly mode:
     | 'multi-channel'
     | 'controlled-email-canary'
-    | 'controlled-push-canary';
+    | 'controlled-push-canary'
+    | 'controlled-sms-canary';
   readonly previousVersionId: string;
   readonly previousVersionNumber: string;
   readonly facilityId: string;
@@ -623,12 +624,25 @@ export function DeliveryTestConsole({
                 Target mode
                 <select
                   value={targetDraft.mode}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const mode = event.currentTarget
+                      .value as TargetDraft['mode'];
                     setTargetDraft({
                       ...targetDraft,
-                      mode: event.currentTarget.value as TargetDraft['mode'],
-                    })
-                  }
+                      mode,
+                    });
+                    if (mode !== 'multi-channel') {
+                      setEligibilityDraft({
+                        ...eligibilityDraft,
+                        channel:
+                          mode === 'controlled-push-canary'
+                            ? 'push'
+                            : mode === 'controlled-email-canary'
+                              ? 'email'
+                              : 'sms',
+                      });
+                    }
+                  }}
                 >
                   <option value="multi-channel">Push and email</option>
                   <option value="controlled-push-canary">
@@ -636,6 +650,9 @@ export function DeliveryTestConsole({
                   </option>
                   <option value="controlled-email-canary">
                     One approved email endpoint
+                  </option>
+                  <option value="controlled-sms-canary">
+                    One approved SMS endpoint
                   </option>
                 </select>
               </label>
@@ -704,6 +721,7 @@ export function DeliveryTestConsole({
               <label>
                 Channel
                 <select
+                  disabled={targetDraft.mode !== 'multi-channel'}
                   value={eligibilityDraft.channel}
                   onChange={(event) =>
                     setEligibilityDraft({
@@ -720,6 +738,14 @@ export function DeliveryTestConsole({
                   <option value="sms">SMS</option>
                 </select>
               </label>
+              {targetDraft.mode === 'controlled-sms-canary' ? (
+                <p className="delivery-test-field-note">
+                  SMS approval proves only the selected endpoint is eligible.
+                  Provider acceptance is not handset delivery. A STOP reply is
+                  append-only and keeps this snapshot endpoint suppressed until
+                  the verified recovery procedure creates a new target version.
+                </p>
+              ) : null}
               <label>
                 Decision
                 <select

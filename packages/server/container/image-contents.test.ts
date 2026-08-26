@@ -25,6 +25,7 @@ const DOCKERFILE = join(
 );
 const WORKER_ENTRY_POINTS = [
   join(REPOSITORY_ROOT, 'workers/push/service.ts'),
+  join(REPOSITORY_ROOT, 'workers/sms/service.ts'),
 ] as const;
 
 function dockerfileText(): string {

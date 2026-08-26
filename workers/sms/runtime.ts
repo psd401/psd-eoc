@@ -20,6 +20,7 @@ import {
   AwsEumSmsAdapter,
   type AwsEumSmsAdapterOptions,
   type AwsEumSmsLiveAuthorizer,
+  type AwsEumSmsProviderAuthorizer,
 } from './aws-eum-adapter';
 import {
   createAwsEumSingleAttemptClient,
@@ -103,6 +104,8 @@ export type SmsRuntimeMode =
       state: 'enabled';
       authorizeLiveProvider: LiveProviderAuthorizer;
       authorizeLiveSend: AwsEumSmsLiveAuthorizer;
+      /** Fresh endpoint/integration truth checked immediately before AWS I/O. */
+      authorizeProviderSend: AwsEumSmsProviderAuthorizer;
     }>;
 
 export interface AwsEumSmsRuntimeOptions {
@@ -110,7 +113,7 @@ export interface AwsEumSmsRuntimeOptions {
   readonly awsClient: AwsEumSingleAttemptClientConfig;
   readonly adapter: Omit<
     AwsEumSmsAdapterOptions,
-    'client' | 'featureEnabled' | 'authorizeLiveSend'
+    'client' | 'featureEnabled' | 'authorizeLiveSend' | 'authorizeProviderSend'
   >;
   readonly executionStore: AttemptExecutionStore;
   readonly evidenceWriter: AttemptEvidenceWriter;
@@ -295,7 +298,8 @@ export class AwsEumSmsRuntime {
     if (
       configuredMode.state === 'enabled' &&
       (typeof configuredMode.authorizeLiveProvider !== 'function' ||
-        typeof configuredMode.authorizeLiveSend !== 'function')
+        typeof configuredMode.authorizeLiveSend !== 'function' ||
+        typeof configuredMode.authorizeProviderSend !== 'function')
     ) {
       throw new AwsEumSmsRuntimeError('INVALID_CONFIGURATION');
     }
@@ -306,6 +310,7 @@ export class AwsEumSmsRuntime {
             state: 'enabled',
             authorizeLiveProvider: configuredMode.authorizeLiveProvider,
             authorizeLiveSend: configuredMode.authorizeLiveSend,
+            authorizeProviderSend: configuredMode.authorizeProviderSend,
           });
     let optOutList: Readonly<AwsEumOptOutListIdentity>;
     try {
@@ -322,7 +327,10 @@ export class AwsEumSmsRuntime {
       client,
       featureEnabled: mode.state === 'enabled',
       ...(mode.state === 'enabled'
-        ? { authorizeLiveSend: mode.authorizeLiveSend }
+        ? {
+            authorizeLiveSend: mode.authorizeLiveSend,
+            authorizeProviderSend: mode.authorizeProviderSend,
+          }
         : {}),
     });
     this.#attemptProcessor = new WorkerAttemptProcessor({
@@ -330,7 +338,11 @@ export class AwsEumSmsRuntime {
       executionStore: options.executionStore,
       evidenceWriter: options.evidenceWriter,
       ...(mode.state === 'enabled'
-        ? { authorizeLiveProvider: mode.authorizeLiveProvider }
+        ? {
+            authorizeLiveProvider: mode.authorizeLiveProvider,
+            authorizeProviderSend: async (workItem) =>
+              (await mode.authorizeProviderSend(workItem)).authorized,
+          }
         : {}),
     });
     this.#deliveryProcessor = new SmsDeliveryEventProcessor({

@@ -270,7 +270,7 @@ function addChannelPlanIssues(
   }
   const controlledSingleCanary =
     names.length === 1 &&
-    (names[0] === 'email' || names[0] === 'push') &&
+    (names[0] === 'email' || names[0] === 'push' || names[0] === 'sms') &&
     value.channels[0]?.endpointCount === 1;
   if (controlledSingleCanary && value.deliveryTest == null) {
     context.addIssue({
@@ -349,10 +349,25 @@ const ControlledPushCanaryNotificationPlanSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryNotificationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary plan must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 const NotificationChannelPlanSchema = z.union([
   MultiChannelNotificationPlanSchema,
   ControlledEmailCanaryNotificationPlanSchema,
   ControlledPushCanaryNotificationPlanSchema,
+  ControlledSmsCanaryNotificationPlanSchema,
 ]);
 
 function addNotificationAuthorizationIssues(
@@ -1081,6 +1096,20 @@ const ControlledPushCanaryDispatchBatchListSchema = z
   })
   .readonly();
 
+const ControlledSmsCanaryDispatchBatchListSchema = z
+  .tuple([DispatchBatchSchema])
+  .superRefine(([batch], context) => {
+    if (batch.channel !== 'sms' || batch.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary dispatch must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const DispatchOutboxResultSchema = z
   .object({
     facilityId: FacilityIdSchema,
@@ -1089,6 +1118,7 @@ export const DispatchOutboxResultSchema = z
       MultiChannelDispatchBatchListSchema,
       ControlledEmailCanaryDispatchBatchListSchema,
       ControlledPushCanaryDispatchBatchListSchema,
+      ControlledSmsCanaryDispatchBatchListSchema,
     ]),
   })
   .strict()
