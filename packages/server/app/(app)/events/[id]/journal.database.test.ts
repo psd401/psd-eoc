@@ -1995,55 +1995,59 @@ describeWithDatabase('event journal database guarantees', () => {
         createdAt: identityCreatedAt,
       });
     }
-    await fixtureDatabase.insert(rosterSnapshots).values({
-      id: staffRosterSnapshotId,
-      version: staffRosterSnapshotVersion,
-      population: 'staff',
-      complete: true,
-      sourceConfigurationId: staffRosterConfigurationId,
-      sourceConfigurationVersion: staffRosterConfigurationVersion,
-      syncStartedAt: identityCreatedAt,
-      capturedAt: fixtureTime,
-    });
-    await fixtureDatabase.insert(rosterSnapshotFacilities).values({
-      rosterSnapshotId: staffRosterSnapshotId,
-      facilityId: ids.northFacilityId,
-    });
-    await fixtureDatabase.insert(rosterRecipients).values({
-      id: staffRecipientId,
-      rosterSnapshotId: staffRosterSnapshotId,
-      population: 'staff',
-      googleSubject: `synthetic-staff-target-${suffix}`,
-      displayName: 'Synthetic Staff Notification Target',
-    });
-    await fixtureDatabase.insert(rosterEndpoints).values([
-      {
-        id: randomUUID(),
-        rosterSnapshotId: staffRosterSnapshotId,
-        recipientId: staffRecipientId,
+    // A published roster snapshot and all of its children are one immutable
+    // fact. Build them in the same transaction, as the production sync does.
+    await fixtureDatabase.transaction(async (snapshotTransaction) => {
+      await snapshotTransaction.insert(rosterSnapshots).values({
+        id: staffRosterSnapshotId,
+        version: staffRosterSnapshotVersion,
         population: 'staff',
-        channel: 'push',
-        status: 'active',
+        complete: true,
+        sourceConfigurationId: staffRosterConfigurationId,
+        sourceConfigurationVersion: staffRosterConfigurationVersion,
+        syncStartedAt: identityCreatedAt,
         capturedAt: fixtureTime,
-        platform: 'ios',
-        token: `synthetic-unroutable:issue77-${suffix}`,
-        email: null,
-        phoneNumber: null,
-      },
-      {
-        id: randomUUID(),
+      });
+      await snapshotTransaction.insert(rosterSnapshotFacilities).values({
         rosterSnapshotId: staffRosterSnapshotId,
-        recipientId: staffRecipientId,
+        facilityId: ids.northFacilityId,
+      });
+      await snapshotTransaction.insert(rosterRecipients).values({
+        id: staffRecipientId,
+        rosterSnapshotId: staffRosterSnapshotId,
         population: 'staff',
-        channel: 'email',
-        status: 'active',
-        capturedAt: fixtureTime,
-        platform: null,
-        token: null,
-        email: `issue77-${suffix}@example.invalid`,
-        phoneNumber: null,
-      },
-    ]);
+        googleSubject: `synthetic-staff-target-${suffix}`,
+        displayName: 'Synthetic Staff Notification Target',
+      });
+      await snapshotTransaction.insert(rosterEndpoints).values([
+        {
+          id: randomUUID(),
+          rosterSnapshotId: staffRosterSnapshotId,
+          recipientId: staffRecipientId,
+          population: 'staff',
+          channel: 'push',
+          status: 'active',
+          capturedAt: fixtureTime,
+          platform: 'ios',
+          token: `synthetic-unroutable:issue77-${suffix}`,
+          email: null,
+          phoneNumber: null,
+        },
+        {
+          id: randomUUID(),
+          rosterSnapshotId: staffRosterSnapshotId,
+          recipientId: staffRecipientId,
+          population: 'staff',
+          channel: 'email',
+          status: 'active',
+          capturedAt: fixtureTime,
+          platform: null,
+          token: null,
+          email: `issue77-${suffix}@example.invalid`,
+          phoneNumber: null,
+        },
+      ]);
+    });
 
     const integrationIds = ['expo-push', 'ses-email'] as const;
     const originalConfigurations = await fixtureDatabase
