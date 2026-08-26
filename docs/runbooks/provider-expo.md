@@ -62,9 +62,9 @@ successful synthesis do not prove deployment or authorize provider I/O.
   using [rollback.md](rollback.md). Secret rotation follows
   [rotation-expo-token.md](rotation-expo-token.md) and needs product-owner
   approval before a live provider configuration change.
-- The fail-closed rollback is to set the protected worker enablement variable
-  to `false` and deploy through the normal OIDC workflow, which returns desired
-  count to zero. First establish a quiescence fence and reconcile retained and
+- The fail-closed rollback is direct `cdk deploy` with
+  `EnableExpoPushWorker=false`, which returns desired count to zero. First
+  establish a quiescence fence and reconcile retained and
   in-flight attempt identities; stopping a consumer does not erase queue work
   or make ambiguous provider calls safe to replay.
 - Confirm queue age decreases through the canonical worker, DLQ depth does not

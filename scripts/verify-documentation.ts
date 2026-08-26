@@ -1005,44 +1005,6 @@ function verifyContracts(repositoryRoot: string): DocumentationError[] {
     'CDK context names',
   );
 
-  const workflow = readFileSync(
-    join(repositoryRoot, '.github', 'workflows', 'deploy.yml'),
-    'utf8',
-  );
-  const captured = (pattern: RegExp): string[] =>
-    [...workflow.matchAll(pattern)]
-      .map((match) => match[1])
-      .filter((value): value is string => value !== undefined);
-  compareNames(
-    errors,
-    extractContractList(configuration, 'workflow-vars'),
-    captured(/\$\{\{\s*vars\.([A-Z0-9_]+)/gu),
-    'deploy workflow variable names',
-  );
-  compareNames(
-    errors,
-    extractContractList(configuration, 'workflow-secrets'),
-    captured(/\$\{\{\s*secrets\.([A-Z0-9_]+)(?:\s*\|\|[^}]*)?\s*\}\}/gu),
-    'deploy workflow secret names',
-  );
-  const dispatch = workflow.slice(
-    workflow.indexOf('  workflow_dispatch:'),
-    workflow.indexOf('\npermissions:'),
-  );
-  compareNames(
-    errors,
-    extractContractList(configuration, 'workflow-inputs'),
-    [...dispatch.matchAll(/^ {6}([a-z][a-z0-9_]+):\s*$/gmu)]
-      .map((match) => match[1])
-      .filter((value): value is string => value !== undefined),
-    'deploy workflow input names',
-  );
-  compareNames(
-    errors,
-    extractContractList(configuration, 'workflow-parameters'),
-    captured(/--parameters\s+"\$STACK_NAME:([A-Za-z0-9]+)=/gu),
-    'deploy workflow CloudFormation parameter names',
-  );
   return errors;
 }
 

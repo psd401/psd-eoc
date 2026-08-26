@@ -2594,20 +2594,9 @@ export class PsdEocStack extends Stack {
     googleGroupsSecret.grantRead(accessSyncTaskExecutionRole);
 
     // Membership carries a freshness bound: sign-in refuses a group whose
-    // membership has not been read inside MEMBERSHIP_FRESHNESS_MS, so that a
-    // neglected deployment fails closed instead of running forever on a stale
-    // answer. That bound is only safe if something actually refreshes it.
-    //
-    // Until now that something was a GitHub Actions workflow, and it declared
-    // an environment gated on a named human reviewer. Every scheduled run
-    // parked waiting for an approval a cron trigger cannot give and was
-    // cancelled when the next one queued behind it. Membership aged toward the
-    // bound with nothing refreshing it, which turned a safety property into the
-    // outage it exists to prevent.
-    //
-    // EventBridge runs the same task, on the same interval, with no human in
-    // the loop. The interval stays well inside the freshness bound so a single
-    // failed run — or several — never denies anyone.
+    // membership has not been read inside MEMBERSHIP_FRESHNESS_MS. EventBridge
+    // refreshes it well inside that bound so several failed runs can occur
+    // before sign-in fails closed.
     const accessSyncSchedule = new events.Rule(this, 'AccessSyncSchedule', {
       description:
         'Refreshes access-group membership from Google Cloud Identity so sign-in keeps working; reads only, and publishes one complete snapshot or none.',

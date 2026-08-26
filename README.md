@@ -63,7 +63,7 @@ bun run test:db:stop
 - [Architecture and contributing](docs/ARCHITECTURE.md) — package ownership,
   capability execution, data rules, and contributor workflow
 - [Configuration and deployment](docs/CONFIGURATION.md) — tenant manifest,
-  environment, workflow, and CloudFormation parameter index
+  runtime environment and direct CloudFormation parameter index
 - [Operational readiness](docs/INTEGRATIONS.md) — the only current register of
   deployment, provider, DNS, monitoring, and mobile readiness
 - [Operations runbooks](docs/runbooks/README.md) — durable response and

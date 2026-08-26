@@ -1,14 +1,13 @@
 # Configuration and deployment index
 
-This is the current index of portable tenant configuration and protected
-deployment inputs. `infra/cdk.json` is the checked-in tenant manifest for this
+This is the current index of portable tenant configuration and direct CDK
+deployment parameters. `infra/cdk.json` is the checked-in tenant manifest for this
 deployment. `infra/bin/synthesize-example.ts` replaces its identity with a
 reserved second-district fixture to prove the stack is portable without cloud
 credentials or provider calls.
 
-The documentation contract compares the marked lists below with the manifest
-and `.github/workflows/deploy.yml`; changing a key in code without updating this
-index fails `bun run verify:docs`.
+The documentation contract compares the marked lists below with the manifest;
+changing a key in code without updating this index fails `bun run verify:docs`.
 
 ## Tenant manifest: CDK context
 
@@ -53,60 +52,13 @@ names are:
 - `PSD_EOC_PRIVACY_CONTACT_URL`
 - `TEST_DATABASE_URL`
 
-## Protected GitHub deployment configuration
+## Direct CDK deployment boundary
 
-Repository/environment variables:
-
-<!-- docs-contract:workflow-vars:start -->
-
-- `APP_PUBLIC_ORIGIN`
-- `APP_RUNNER_SERVICE_ARN`
-- `AWS_ACCOUNT_ID`
-- `AWS_DEPLOY_ROLE_ARN`
-- `AWS_REGION`
-- `ECR_REPOSITORY`
-- `DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE`
-- `DIRECT_PUSH_ENABLED`
-- `EMAIL_WORKER_ENABLED`
-- `EXPO_CREDENTIAL_VERIFICATION_REFERENCE`
-- `EXPO_PUSH_WORKER_ENABLED`
-- `GOOGLE_GROUPS_SECRET_ARN`
-- `GOOGLE_OAUTH_SECRET_ARN`
-- `INITIAL_ACCESS_GROUP_ID`
-- `INITIAL_ACCESS_GROUP_NAME`
-- `PUSH_PROVIDER_CUTOVER`
-- `SES_CREDENTIAL_VERIFICATION_REFERENCE`
-- `SMS_DESTINATION_COUNTRY_CODE`
-- `SMS_REGISTRATION_VERIFICATION_REFERENCE`
-- `SMS_RESOURCES_PROVISIONED`
-- `SMS_WORKER_ENABLED`
-- `STACK_NAME`
-<!-- docs-contract:workflow-vars:end -->
-
-Environment secrets:
-
-<!-- docs-contract:workflow-secrets:start -->
-
-- `INITIAL_ACCESS_GROUP_EMAIL`
-- `INITIAL_MOBILE_TRANSITION_EMAIL_SHA256`
-- `OPERATIONS_ALARM_EMAIL`
-- `OPERATIONS_ALARM_SMS_NUMBER`
-- `SMS_HELP_MESSAGE`
-- `SMS_ORIGINATION_IDENTITY_ARN`
-- `SMS_STOP_MESSAGE`
-<!-- docs-contract:workflow-secrets:end -->
-
-The deploy workflow has one manual input:
-
-<!-- docs-contract:workflow-inputs:start -->
-
-- `rollback_image_digest`
-<!-- docs-contract:workflow-inputs:end -->
-
-Empty `rollback_image_digest` builds and deploys the selected commit. A value
-must be an existing immutable `sha256:` image digest. Rollback still uses the
-current commit's bootstrap image so forward-only migrations never run from an
-old application image.
+The repository has no deployment workflow and no GitHub deployment
+environment, variables, secrets, or OIDC role. An operator authenticates to
+AWS locally with short-lived credentials and supplies deployment values
+directly to `cdk deploy`. Sensitive values remain in AWS Secrets Manager or the
+operator's local environment and are never committed.
 
 ## Synthesized CloudFormation parameters
 
@@ -147,49 +99,15 @@ The current synthesized stack contains exactly these parameters:
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
 parameter and has a default. Push and SMS workers, direct-provider enablement,
-and their evidence inputs default to safe dark or unconfigured states when
-protected workflow values are absent. The workflow supplies every application
-parameter explicitly.
-
-### Parameters supplied by the workflow
-
-<!-- docs-contract:workflow-parameters:start -->
-
-- `AppImageDigest`
-- `BootstrapImageDigest`
-- `BootstrapSourceSha`
-- `DirectPushCredentialVerificationReference`
-- `EnableAwsEumSmsWorker`
-- `EnableDirectPush`
-- `EnableEmailWorker`
-- `EnableExpoPushWorker`
-- `ExpoCredentialVerificationReference`
-- `GoogleGroupsSecretArn`
-- `GoogleOauthSecretArn`
-- `InitialAccessGroupEmail`
-- `InitialAccessGroupId`
-- `InitialAccessGroupName`
-- `InitialMobileTransitionEmailSha256`
-- `OperationsTeamAlarmEmail`
-- `OperationsTeamAlarmSmsNumber`
-- `ProvisionApplication`
-- `ProvisionAwsEumSmsResources`
-- `PushProviderCutover`
-- `RuntimeDatabaseIdleTimeoutSeconds`
-- `SesCredentialVerificationReference`
-- `SmsDestinationCountryCode`
-- `SmsHelpMessage`
-- `SmsOriginationIdentityArn`
-- `SmsRegistrationVerificationReference`
-- `SmsStopMessage`
-- `SourceSha`
-<!-- docs-contract:workflow-parameters:end -->
+and their evidence inputs default to safe, dark, or unconfigured states when
+optional values are absent. Parameters without defaults must be supplied
+directly to `cdk deploy`.
 
 The source also defines three canary-only parameters inside the full monitoring
 composition: `MonitoringCanaryCredentialSecretArn`,
 `MonitoringCanaryFacilityId`, and `MonitoringCanaryEventTypeVersionId`. The
 current stack calls `configureInfrastructureMonitoring`, not the full canary
-composition, so the deploy workflow does not supply them.
+composition, so they are not current stack parameters.
 
 ## Expo push activation boundary
 
@@ -359,8 +277,8 @@ the retained, deletion-protected carrier pool.
 
 Before provisioning those resources, retain carrier approval under
 `SMS_REGISTRATION_VERIFICATION_REFERENCE` and supply the approved origination
-ARN, destination country code, and carrier-reviewed HELP/STOP responses through
-the protected workflow configuration above. CloudFormation then creates the
+ARN, destination country code, and carrier-reviewed HELP/STOP responses as
+direct CDK parameters. CloudFormation then creates the
 AWS-managed opt-out list, pool, protect configuration, configuration set,
 delivery-event bridge, and scheduled STOP reconciliation. Shared routes and
 self-managed opt-outs are disabled.
@@ -393,12 +311,15 @@ Google, a notification provider, DNS, or a live recipient.
 
 ## Deploy
 
-Production deploys use the GitHub Actions `Deploy` workflow and OIDC. Select a
-commit and run the workflow; leave `rollback_image_digest` empty for a normal
-deploy. The workflow validates protected configuration, builds an immutable
-image, stages and runs the current bootstrap/migrations, then updates the
-application and verifies its digest and health. There are no static AWS keys
-and no supported manual `cdk deploy` path.
+From `infra`, use a locally authenticated AWS session and run:
+
+```sh
+cdk deploy PsdEoc
+```
+
+Supply required and changed values from the parameter list above with CDK's
+`--parameters` option. No GitHub repository configuration participates in the
+deployment.
 
 Current deployed and provider state belongs only in
 [the readiness register](INTEGRATIONS.md), not in this index.

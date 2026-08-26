@@ -62,8 +62,7 @@ create a temporary public endpoint.
 ## Execute the isolated restore
 
 The repository has no automation for an isolated point-in-time restore, so use
-these AWS Console steps. Application deployments continue to use the supported
-GitHub Actions/OIDC workflow.
+these AWS Console steps. Application deployments use only direct `cdk deploy`.
 
 1. Record the approved restore start time in UTC. This starts the measured RTO.
 2. In RDS, choose the exact source cluster and **Restore to point in time**.
