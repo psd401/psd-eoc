@@ -199,6 +199,21 @@ describe('documentation contract', () => {
     expect(validateRecordsRetentionDocumentation(root)).toEqual([]);
   });
 
+  test('accepts explicit resolved prose with reviewed evidence', () => {
+    const root = retentionDocumentationFixture(
+      'psd-eoc-retention-resolved-',
+      (path, contents) =>
+        path === 'docs/INTEGRATIONS.md'
+          ? reviewedRetentionEvidence(contents, '2026-08-25').replace(
+              '<!-- psd-eoc:records-retention-review-status:end -->',
+              'No classifications remain unresolved.\n\n<!-- psd-eoc:records-retention-review-status:end -->',
+            )
+          : contents,
+    );
+
+    expect(validateRecordsRetentionDocumentation(root)).toEqual([]);
+  });
+
   test('rejects duplicate, invalid, future, or inconsistent review evidence', () => {
     const cases = [
       {
@@ -324,11 +339,11 @@ describe('documentation contract', () => {
             ? contents
                 .replace(
                   'official sources were rechecked on 2026-08-26',
-                  'official sources were rechecked on 1900-01-01',
+                  'official sources were rechecked on 2026-08-25',
                 )
                 .replace(
                   'Official sources last rechecked: `2026-08-26`.',
-                  'Official sources last rechecked: `1900-01-01`.',
+                  'Official sources last rechecked: `2026-08-25`.',
                 )
             : contents,
         message:

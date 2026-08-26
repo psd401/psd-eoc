@@ -44,6 +44,20 @@ function containsConflictingDispositionAuthorization(
     });
 }
 
+function containsUnresolvedReviewClaim(contents: string): boolean {
+  return contents.split(/[.!?;]|\r?\n\s*\r?\n/u).some((clause) => {
+    if (/\b(?:not reviewed|not completed)\b/iu.test(clause)) return true;
+    return [
+      ...clause.matchAll(/\b(?:pending|unresolved|incomplete)\b/giu),
+    ].some((match) => {
+      const prefix = clause.slice(0, match.index ?? 0);
+      return !/(?:\bno(?:[ \t\r\n]+[a-z-]+){0,6}|\b(?:none|nothing)(?:[ \t\r\n]+[a-z-]+){0,4}|\bnot)[ \t\r\n]*$/iu.test(
+        prefix,
+      );
+    });
+  });
+}
+
 export function currentDocumentationViolations(
   repositoryPath: string,
   contents: string,
@@ -504,7 +518,7 @@ const RECORDS_RETENTION_CANDIDATES = Object.freeze([
   ],
 ]);
 
-const RECORDS_RETENTION_EVIDENCE_INTRODUCED_ON = '2026-08-25';
+const MINIMUM_RECORDS_RETENTION_SOURCE_CHECK_DATE = '2026-08-26';
 const NEWEST_RECORDS_RETENTION_SCHEDULE_EFFECTIVE_ON = '2026-06-03';
 
 function recordsRetentionError(
@@ -651,7 +665,6 @@ export function validateRecordsRetentionDocumentation(
   const retentionReview = reviewSection ?? '';
   const normalizedArchitecture = normalizedDocumentationText(retentionGuidance);
   const normalizedIntegrations = normalizedDocumentationText(retentionReview);
-  const normalizedReviewLower = normalizedIntegrations.toLowerCase();
 
   for (const contract of [
     'records-retention-classes',
@@ -894,10 +907,9 @@ export function validateRecordsRetentionDocumentation(
   const pendingEvidence = normalizedIntegrations.includes(
     'No completed records-officer review or ambiguity guidance has been supplied',
   );
-  const unresolvedReviewedEvidence =
-    /\b(?:pending|unresolved|not reviewed|not completed|incomplete)\b/u.test(
-      normalizedReviewLower,
-    );
+  const unresolvedReviewedEvidence = containsUnresolvedReviewClaim(
+    normalizedIntegrations,
+  );
   if (
     !reviewEvidenceIsHonest ||
     (status === 'pending' && !pendingEvidence) ||
@@ -914,7 +926,7 @@ export function validateRecordsRetentionDocumentation(
   }
   if (
     !isRealIsoDate(sourceCheckDate) ||
-    sourceCheckDate < RECORDS_RETENTION_EVIDENCE_INTRODUCED_ON ||
+    sourceCheckDate < MINIMUM_RECORDS_RETENTION_SOURCE_CHECK_DATE ||
     sourceCheckDate > validationDateIso ||
     uniqueCapture(
       retentionReview,
