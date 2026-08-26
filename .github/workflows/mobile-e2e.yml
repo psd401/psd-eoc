@@ -141,6 +141,9 @@ jobs:
             -PreactNativeArchitectures=x86_64 \
             -PreactNativeDevServerPort=8081
           test -f android/app/build/outputs/apk/debug/app-debug.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+            "$RUNNER_TEMP/psd-eoc-mobile-e2e.apk"
+          rm -rf -- android
 
       - name: Create an Android 35 emulator
         run: |
@@ -219,7 +222,7 @@ jobs:
       - name: Install the synthetic Android development client
         run: |
           set -euo pipefail
-          android_apk="$GITHUB_WORKSPACE/packages/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          android_apk="$RUNNER_TEMP/psd-eoc-mobile-e2e.apk"
           test -f "$android_apk"
           adb install -r "$android_apk"
 
