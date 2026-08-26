@@ -39,8 +39,8 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('ships app/runtime 1.0.4 as embedded-only with no OTA routing', () => {
-    expect(appConfig.expo.version).toBe('1.0.4');
+  test('ships app/runtime 1.0.5 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.5');
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
       enabled: false,
@@ -106,6 +106,78 @@ describe('mobile distribution configuration', () => {
       safetyPathStoreBuildRequiresNewAppVersion: true,
       storeSubmissionRequiresHumanApproval: true,
     });
+  });
+
+  test('documents the exact current store profiles and evidence boundaries', () => {
+    const release = repositoryText('docs/runbooks/release.md');
+    const appStore = repositoryText('docs/runbooks/appstore-setup.md');
+    const rollback = repositoryText('docs/runbooks/rollback.md');
+    const compact = `${release} ${appStore}`.replace(/\s+/gu, ' ');
+    const compactRollback = rollback.replace(/\s+/gu, ' ');
+
+    for (const expected of [
+      'EAS `production` build profile',
+      'EAS `production` submit profile',
+      'EAS `internal` submit profile',
+      '`alpha` track and `draft` status',
+      'artifact upload',
+      'provider processing',
+      'private-group exposure',
+      'physical installation',
+      'in-app launch/readback',
+      'push registration',
+      'provider handoff',
+      'human receipt',
+    ]) {
+      expect(compact).toContain(expected);
+    }
+    expect(release).toContain('The current app/runtime is 1.0.5');
+    expect(compactRollback).toContain(
+      'The current mobile profiles are embedded-only',
+    );
+    expect(rollback).toContain(
+      'Do not publish, republish, check for, download, or route an OTA update',
+    );
+    expect(rollback).not.toContain('An OTA rollback may republish');
+  });
+
+  test('connects one configured public privacy policy to the mobile app', () => {
+    const policy = repositoryText(
+      'packages/server/app/(public)/privacy/page.tsx',
+    );
+    const policyLayout = repositoryText(
+      'packages/server/app/(public)/layout.tsx',
+    );
+    const deployment = repositoryText(
+      'packages/server/lib/config/deployment.ts',
+    );
+    const mobileClient = repositoryText(
+      'packages/mobile/src/lib/auth/auth-api-client.ts',
+    );
+    const signIn = repositoryText('packages/mobile/src/app/(auth)/sign-in.tsx');
+    const stack = repositoryText('infra/src/stack/psd-eoc-stack.ts');
+
+    expect(policyLayout).toContain('<html lang="en">');
+    expect(policy).toContain('privacyContactUrl()');
+    expect(policy).toContain('Student data is outside the scope');
+    expect(policy).toContain('Device and notification data');
+    expect(policy).toContain('work notification email address or phone number');
+    expect(policy).toContain('authorized staff who have not signed in');
+    expect(policy).toContain('staff attribution');
+    expect(policy).toContain('Service providers');
+    expect(policy).toContain('notification title and body');
+    expect(policy).toContain('event and facility routing identifiers');
+    expect(policy).toContain('Retention and deletion');
+    expect(deployment).toContain('PSD_EOC_PRIVACY_CONTACT_URL');
+    expect(mobileClient).toContain(
+      '`${parseAuthApiBaseUrl(value, allowLoopbackHttp)}/privacy`',
+    );
+    expect(signIn).toContain('privacyPolicyUrl(');
+    expect(signIn).toContain('accessibilityRole="link"');
+    expect(stack).toContain('PSD_EOC_PRIVACY_CONTACT_URL');
+    expect(`${policy}\n${mobileClient}\n${signIn}`).not.toContain(
+      'eoc.psd401.net',
+    );
   });
 
   test('stages Android closed-test submissions as unreleased drafts', () => {
@@ -355,7 +427,7 @@ describe('mobile distribution configuration', () => {
     }
     expect(readme).not.toContain('`ota-preview`:');
     expect(readme).toContain(
-      'Remote updates are disabled for app/runtime 1.0.4',
+      'Remote updates are disabled for app/runtime 1.0.5',
     );
     expect(compactReadme).toContain(
       'Ordinary `preview` must never be used for production-environment OTA verification',
@@ -415,17 +487,31 @@ describe('mobile distribution configuration', () => {
     const update = rowFor('EAS Update');
 
     expect(build).toContain('| `configured-unverified`');
-    expect(build).toContain('Signed iOS and Android artifacts were produced');
+    expect(build).toContain('artifacts were produced for iOS build 10');
+    expect(build).toContain('1.0.5 store build is yet retained');
     expect(update).toContain('| `blocked`');
     expect(update).toContain('Remote updates are disabled');
-    expect(rowFor('EAS Submit')).toContain('| `blocked`');
+    expect(rowFor('EAS Submit')).toContain('| `live-verified`');
 
     const apple = rowFor('TestFlight device installation');
     const play = rowFor('Google Play device installation');
     expect(apple).toContain('| `live-verified`');
-    expect(play).toContain('| `live-verified`');
-    expect(apple).toContain('exact build identity remains unknown');
-    expect(play).toContain('exact rollout/build identity remains unknown');
+    expect(play).toContain('| `configured-unverified`');
+    expect(apple).toContain('1.0.4/build 10');
+    expect(apple).toContain(
+      'exact physical-device launch/readback is not retained',
+    );
+    expect(play).toContain('1.0.4/code 4');
+    expect(play).toContain('durable group-based Closed test is not yet active');
+    expect(rowFor('Public mobile privacy policy')).toContain(
+      '| `configured-unverified`',
+    );
+    expect(rowFor('Play app content and store record')).toContain(
+      '| `blocked`',
+    );
+    expect(rowFor('Play app content and store record')).toContain(
+      '0/11 setup tasks complete',
+    );
 
     expect(rows.filter((line) => line.includes('| EAS Build'))).toHaveLength(1);
     expect(rows.filter((line) => line.includes('| EAS Update'))).toHaveLength(
@@ -478,6 +564,9 @@ describe('mobile distribution configuration', () => {
       expect(compactGuide).toContain(
         'complete these no-notification-send checks',
       );
+      expect(compactGuide).toContain('open **Release diagnostics**');
+      expect(compactGuide).toContain('**Native build version**');
+      expect(compactGuide).toContain('**Identity available**');
       expect(guide).toContain(
         '## Optional separately authorized synthetic push check',
       );
@@ -517,6 +606,7 @@ describe('mobile distribution configuration', () => {
         guide.indexOf('## Optional separately authorized synthetic push check'),
       );
     }
+    expect(guides.join('\n')).not.toContain('Peninsula School District');
     expect(guides[0]).toContain('Time Sensitive Notifications');
     expect(guides[0]).toContain('does **not** have');
     expect(guides[1]).toContain('PSD EOC incident and drill alerts');

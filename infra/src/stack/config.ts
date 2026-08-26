@@ -1,4 +1,5 @@
 import { OrganizationNameSchema } from '@psd-eoc/contracts';
+import { isIP } from 'node:net';
 
 /**
  * The deployed CloudFormation stack's name.
@@ -123,6 +124,7 @@ export interface DeploymentIdentity {
   readonly hostedDomain: string;
   readonly iosBundleId: string;
   readonly organizationName: string;
+  readonly privacyContactUrl: string;
 }
 
 /**
@@ -256,6 +258,28 @@ export function readDeploymentIdentity(node: {
       'CDK context psdEoc:displayTimeZone must be a valid IANA time zone.',
     );
   }
+  const privacyContactUrl = read(
+    'psdEoc:privacyContactUrl',
+    /^https:\/\/[^\s?#]+$/u,
+  );
+  const parsedPrivacyContactUrl = new URL(privacyContactUrl);
+  const privacyContactHostname = parsedPrivacyContactUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/gu, '');
+  if (
+    parsedPrivacyContactUrl.username.length > 0 ||
+    parsedPrivacyContactUrl.password.length > 0 ||
+    isIP(privacyContactHostname) !== 0 ||
+    privacyContactHostname === 'localhost' ||
+    privacyContactHostname.endsWith('.localhost') ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/u.test(
+      privacyContactHostname,
+    )
+  ) {
+    throw new Error(
+      'CDK context psdEoc:privacyContactUrl must use a public hostname and contain no credentials.',
+    );
+  }
   return Object.freeze({
     applicationOrigin: read(
       'psdEoc:applicationOrigin',
@@ -271,6 +295,7 @@ export function readDeploymentIdentity(node: {
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
     ),
     organizationName: organizationName.data,
+    privacyContactUrl,
   });
 }
 

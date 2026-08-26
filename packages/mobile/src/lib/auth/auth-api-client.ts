@@ -60,6 +60,14 @@ export function parseAuthApiBaseUrl(
   return parsed.origin;
 }
 
+/** Public policy served by the same tenant-configured origin as mobile auth. */
+export function privacyPolicyUrl(
+  value: string | undefined,
+  allowLoopbackHttp: boolean,
+): string {
+  return `${parseAuthApiBaseUrl(value, allowLoopbackHttp)}/privacy`;
+}
+
 interface Schema<Output> {
   parse(value: unknown): Output;
 }

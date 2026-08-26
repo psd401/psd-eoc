@@ -5,9 +5,9 @@
 > references are guidance, not provider screenshots or install proof. Install
 > only when your district technology team supplies an approved invitation.
 
-PSD EOC is distributed privately to approved Peninsula School District staff
-through Apple TestFlight. Installing the app does not start an incident, run a
-drill, or notify anyone.
+PSD EOC is distributed privately to approved district staff through Apple
+TestFlight. Installing the app does not start an incident, run a drill, or
+notify anyone.
 
 > **Before you begin:** You need an approved TestFlight invitation from
 > District Technology, your district staff sign-in, a device passcode, and
@@ -27,14 +27,13 @@ drill, or notify anyone.
 1. Install **TestFlight** from Apple's App Store if it is not already on your
    device.
 2. Open the PSD EOC invitation sent through the approved district channel.
-3. Confirm that the invitation says **PSD EOC** and comes from Peninsula School
-   District's approved Apple account. If either is wrong, stop and contact
-   District Technology.
+3. Confirm that the invitation says **PSD EOC** and comes from your district's
+   approved Apple account. If either is wrong, stop and contact District
+   Technology.
 4. Tap **View in TestFlight**, **Accept**, then **Install**. Apple's wording can
    vary slightly.
 5. Only after District Technology gives the separate registration confirmation
-   above, open **PSD EOC** and sign in with your approved staff account for the
-   configured hosted domain
+   above, open **PSD EOC** and sign in with your approved district staff
    account. Otherwise stop after **Install**.
 6. After that confirmation, follow the app's prompt to enroll this device and
    enable Face ID, Touch ID, or the device's secure unlock. PSD EOC does not
@@ -87,7 +86,10 @@ above, complete these no-notification-send checks:
 2. Close PSD EOC, lock the device, unlock it normally, and reopen the app.
    Confirm the app requires the expected Face ID, Touch ID, or device-secure
    unlock instead of asking for a PSD EOC PIN.
-3. In TestFlight, record the PSD EOC version and build number. Compare them with
+3. In TestFlight, record the PSD EOC version and build number. In PSD EOC, open
+   **Release diagnostics** and record **Application version** and **Native build
+   version**. Require **Identity available**, **Disabled — embedded store bundle
+   only**, and **Embedded in this installed binary**. Both sources must match
    the exact version and build announced by District Technology. Stop if they
    differ or no approved identity was announced.
 4. Recheck the notification and Focus settings above. Record pass/fail for the
