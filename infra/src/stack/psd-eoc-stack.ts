@@ -430,7 +430,7 @@ export class PsdEocStack extends Stack {
     const network = new ec2.Vpc(this, 'DatabaseNetwork', {
       availabilityZones: [`${region}a`, `${region}b`],
       ipAddresses: ec2.IpAddresses.cidr('10.43.0.0/24'),
-      natGateways: 1,
+      natGateways: failureDrill ? 0 : 1,
       // Nothing in this stack uses the VPC default security group. Avoid the
       // CDK custom-resource Lambda that would otherwise mutate it; the Aurora
       // writer receives its own ingress-free security group below.
@@ -441,21 +441,68 @@ export class PsdEocStack extends Stack {
           name: 'Database',
           subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
         },
+        ...(failureDrill
+          ? []
+          : [
+              {
+                cidrMask: 28,
+                name: 'Public',
+                subnetType: ec2.SubnetType.PUBLIC,
+              },
+            ]),
         {
-          cidrMask: 28,
-          name: 'Public',
-          subnetType: ec2.SubnetType.PUBLIC,
-        },
-        {
-          cidrMask: 28,
+          cidrMask: failureDrill ? 27 : 28,
           name: APPLICATION_SUBNET_GROUP_NAME,
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          subnetType: failureDrill
+            ? ec2.SubnetType.PRIVATE_ISOLATED
+            : ec2.SubnetType.PRIVATE_WITH_EGRESS,
         },
       ],
     });
     const applicationSubnets = network.selectSubnets({
       subnetGroupName: APPLICATION_SUBNET_GROUP_NAME,
     });
+    if (failureDrill) {
+      const endpointSecurityGroup = new ec2.SecurityGroup(
+        this,
+        'FailureDrillEndpointSecurityGroup',
+        {
+          allowAllOutbound: false,
+          description:
+            'Accepts HTTPS only inside the disposable drill VPC for private AWS service endpoints.',
+          vpc: network as unknown as ec2.IVpc,
+        },
+      );
+      endpointSecurityGroup.addIngressRule(
+        ec2.Peer.ipv4(network.vpcCidrBlock),
+        ec2.Port.tcp(443),
+        'Private HTTPS from synthetic application and worker subnets only.',
+      );
+      network.addGatewayEndpoint('FailureDrillS3Endpoint', {
+        service: ec2.GatewayVpcEndpointAwsService.S3,
+        subnets: [{ subnetGroupName: APPLICATION_SUBNET_GROUP_NAME }],
+      });
+      for (const [id, service] of [
+        ['CloudWatchLogs', ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS],
+        [
+          'CloudWatchMonitoring',
+          ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_MONITORING,
+        ],
+        ['EcrApi', ec2.InterfaceVpcEndpointAwsService.ECR],
+        ['EcrDocker', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
+        ['Ecs', ec2.InterfaceVpcEndpointAwsService.ECS],
+        ['Rds', ec2.InterfaceVpcEndpointAwsService.RDS],
+        ['SecretsManager', ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER],
+        ['Sqs', ec2.InterfaceVpcEndpointAwsService.SQS],
+      ] as const) {
+        network.addInterfaceEndpoint(`FailureDrill${id}Endpoint`, {
+          privateDnsEnabled: true,
+          securityGroups: [endpointSecurityGroup],
+          service,
+          subnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
+        });
+      }
+    }
 
     const databaseEngine = rds.DatabaseClusterEngine.auroraPostgres({
       version: rds.AuroraPostgresEngineVersion.VER_16_13,
@@ -664,7 +711,9 @@ export class PsdEocStack extends Stack {
     applicationSecurityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
-      'HTTPS through the NAT gateway for Google OAuth and AWS task dependencies.',
+      failureDrill
+        ? 'HTTPS to private AWS service endpoints; the subnet has no internet route.'
+        : 'HTTPS through the NAT gateway for Google OAuth and AWS task dependencies.',
     );
     databaseSecurityGroup.addIngressRule(
       applicationSecurityGroup,
@@ -1088,7 +1137,9 @@ export class PsdEocStack extends Stack {
     appRunnerConnectorSecurityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
-      'HTTPS through the NAT gateway for Google OAuth and AWS dependencies.',
+      failureDrill
+        ? 'HTTPS to private AWS service endpoints; the subnet has no internet route.'
+        : 'HTTPS through the NAT gateway for Google OAuth and AWS dependencies.',
     );
     databaseSecurityGroup.addIngressRule(
       appRunnerConnectorSecurityGroup,

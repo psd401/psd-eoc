@@ -15,7 +15,9 @@ The drill stack is non-production by construction. It uses only
 separate queues and secrets, a separate ECR repository, separate App Runner
 service DNS, and a two-instance disposable Aurora cluster. It imports no Google
 or notification-provider credential and creates no SES configuration. Its
-CloudWatch alarms have no notification actions.
+CloudWatch alarms have no notification actions. Its VPC has no Internet
+Gateway, Elastic IP, or NAT gateway; synthetic application and worker traffic
+reaches only the required AWS control planes through private VPC endpoints.
 
 ## One-time account boundary
 

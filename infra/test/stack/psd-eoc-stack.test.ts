@@ -2173,6 +2173,40 @@ describe('isolated failure-drill deployment profile', () => {
     );
   });
 
+  it('uses a NAT-free private endpoint network without consuming an Elastic IP', () => {
+    drillTemplate.resourceCountIs('AWS::EC2::NatGateway', 0);
+    drillTemplate.resourceCountIs('AWS::EC2::EIP', 0);
+    drillTemplate.resourceCountIs('AWS::EC2::InternetGateway', 0);
+    drillTemplate.resourceCountIs('AWS::EC2::Subnet', 4);
+    drillTemplate.resourceCountIs('AWS::EC2::VPCEndpoint', 9);
+
+    const endpoints = Object.values(
+      drillTemplate.findResources('AWS::EC2::VPCEndpoint'),
+    ).map((resource) => properties(asRecord(resource)));
+    expect(
+      endpoints.filter((endpoint) => endpoint.VpcEndpointType === 'Interface'),
+    ).toHaveLength(8);
+    expect(
+      endpoints.filter((endpoint) => endpoint.VpcEndpointType === 'Gateway'),
+    ).toHaveLength(1);
+    const endpointServices = JSON.stringify(
+      endpoints.map((endpoint) => endpoint.ServiceName),
+    );
+    for (const service of [
+      'ecr.api',
+      'ecr.dkr',
+      'ecs',
+      'logs',
+      'monitoring',
+      'rds',
+      'secretsmanager',
+      'sqs',
+      's3',
+    ]) {
+      expect(endpointServices).toContain(service);
+    }
+  });
+
   it('scopes worker fault authority and mock side effects to this run', () => {
     const queues = Object.values(
       drillTemplate.findResources('AWS::SQS::Queue'),
