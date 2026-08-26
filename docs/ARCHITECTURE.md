@@ -104,19 +104,10 @@ district. The repository defines the content inventory and safety boundary
 below. Each deploying district owns the authoritative classification in its
 district-controlled operations record, reviewed by its records officer.
 
-The following official sources were rechecked on 2026-08-25:
-
-- [Local Government Common Records Retention Schedule (CORE)](https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF):
-  version 5.0, approved and effective October 2, 2024.
-- [Public Schools (K-12) Records Retention Schedule](https://www.sos.wa.gov/sites/default/files/2026-06/Public-Schools-%28K-12%29-Records-Retention-Schedule.PDF):
-  version 9.1, approved and effective June 3, 2026.
-- [Washington State Archives school and ESD schedule index](https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records):
-  identifies those two versions as the current schedules used together.
-
-CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions. They are future
-change inputs only until the Local Records Committee approves them and the
-official index replaces the current versions. Do not commit schedule PDFs to
-the repository.
+Current schedule sources, versions, effective dates, candidate series, and the
+source-check date live in the
+[records-retention review](INTEGRATIONS.md#records-retention-review). They are
+dated evidence, not architectural constants.
 
 ### Product record-class inventory
 
@@ -180,20 +171,9 @@ Notification documentation inherits its actual operational context; it is not
 assigned a stand-alone blanket classification. A mixed-content event can
 require more than one series or a documented controlling classification.
 
-These current schedule entries are candidates for records-officer review, not
-repository-owned classifications:
-
-| Content and context                                                                                 | Candidate series    | Current minimum/action                                                                                                                                               | Source designation |
-| --------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| Emergency-drill or occupational-safety-program administration                                       | `GS2017-016 Rev. 0` | Retain for 3 years after the end of the calendar year and until no longer needed for agency business, then destroy; non-archival.                                    | OPR                |
-| Routine/minor emergency response with minimal assistance or disruption                              | `GS2012-025 Rev. 1` | Retain for 6 years after the matter is resolved or recovery is complete, then destroy; non-archival.                                                                 | OPR                |
-| Uncommon/major response, including emergency-operations-center activities and communications        | `GS50-18-29 Rev. 2` | Retain for 6 years after the matter is resolved or recovery is complete, then transfer to Washington State Archives for appraisal and selective retention; archival. | OPR                |
-| Security incidents or data/privacy breaches, including investigation and notification documentation | `GS2010-008 Rev. 2` | Retain for 6 years after the matter is resolved, then destroy; non-archival.                                                                                         | OFM                |
-| School safety plans, only if the product actually owns that content                                 | `SD2011-153 Rev. 1` | Retain for 6 years after obsolete or superseded, then destroy; non-archival.                                                                                         | OPR                |
-
-The product does not own a school-safety-plan record class. Do not assign
-`SD2011-153` unless a future inventory proves that a deployment actually stores
-the plans themselves.
+The product does not own a school-safety-plan record class. Do not assign a
+school-safety-plan series unless a future inventory proves that a deployment
+actually stores the plans themselves.
 
 ### Controlled mapping and disposition boundary
 

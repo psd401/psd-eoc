@@ -252,16 +252,38 @@ describe('documentation contract', () => {
         file: 'docs/INTEGRATIONS.md',
       },
       {
+        name: 'future-review-date',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents
+                .replace(
+                  'Controlled mapping review status: `pending`.',
+                  'Controlled mapping review status: `reviewed`.',
+                )
+                .replace(
+                  'Controlled mapping review date: `not completed`.',
+                  'Controlled mapping review date: `9999-12-31`.',
+                )
+                .replace(
+                  /No completed records-officer review or ambiguity\s+guidance has been supplied for this aggregate status\./u,
+                  'Records-officer review and ambiguity guidance have been supplied for this aggregate status.',
+                )
+            : contents,
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
         name: 'source-date-drift',
         transform: (path: string, contents: string): string =>
-          path === 'docs/ARCHITECTURE.md'
+          path === 'docs/INTEGRATIONS.md'
             ? contents.replace(
-                'official sources were rechecked on 2026-08-25',
-                'official sources were rechecked on 2026-08-26',
+                'official sources were rechecked on 2026-08-25:',
+                'official sources were rechecked on 2026-08-24:',
               )
             : contents,
         message:
-          'records-retention official-source dates are invalid, future-dated, duplicated, or inconsistent',
+          'records-retention official-source date is invalid, future-dated, duplicated, or inconsistent',
         file: 'docs/INTEGRATIONS.md',
       },
       {
@@ -277,7 +299,7 @@ describe('documentation contract', () => {
               'Official sources last rechecked: `9999-12-31`.',
             ),
         message:
-          'records-retention official-source dates are invalid, future-dated, duplicated, or inconsistent',
+          'records-retention official-source date is invalid, future-dated, duplicated, or inconsistent',
         file: 'docs/INTEGRATIONS.md',
       },
     ];
@@ -301,17 +323,17 @@ describe('documentation contract', () => {
       {
         name: 'candidate',
         transform: (path: string, contents: string): string =>
-          path === 'docs/ARCHITECTURE.md'
+          path === 'docs/INTEGRATIONS.md'
             ? contents.replace('GS2017-016 Rev. 0', 'missing candidate')
             : contents,
         message:
-          'records-retention guidance is missing required statement: GS2017-016 Rev. 0',
-        file: 'docs/ARCHITECTURE.md',
+          'records-retention review is missing required current evidence: GS2017-016 Rev. 0',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
         name: 'source',
         transform: (path: string, contents: string): string =>
-          path === 'docs/ARCHITECTURE.md'
+          path === 'docs/INTEGRATIONS.md'
             ? contents.replace(
                 'local-government-common-records-retention-schedule-CORE.PDF',
                 'missing-CORE.PDF',
@@ -319,7 +341,7 @@ describe('documentation contract', () => {
             : contents,
         message:
           'records-retention guidance is missing official source: https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF',
-        file: 'docs/ARCHITECTURE.md',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
         name: 'override',
@@ -337,15 +359,15 @@ describe('documentation contract', () => {
       {
         name: 'draft-current',
         transform: (path: string, contents: string): string =>
-          path === 'docs/ARCHITECTURE.md'
+          path === 'docs/INTEGRATIONS.md'
             ? contents.replace(
                 'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
                 'CORE v5.1 and K-12 v9.2 are current',
               )
             : contents,
         message:
-          'records-retention guidance is missing required statement: CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
-        file: 'docs/ARCHITECTURE.md',
+          'records-retention review is missing required current evidence: CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
         name: 'policy',
@@ -356,8 +378,7 @@ describe('documentation contract', () => {
                 '`automated-disposition: enabled`',
               )
             : contents,
-        message:
-          'records-retention policy differs: documented=automated-disposition: enabled,deletion: prohibited,down-migrations: prohibited,lifecycle-rules: prohibited,purge: prohibited,record-retention: all,retention-timers: prohibited actual=automated-disposition: prohibited,deletion: prohibited,down-migrations: prohibited,lifecycle-rules: prohibited,purge: prohibited,record-retention: all,retention-timers: prohibited',
+        message: 'records-retention policy differs from the required contract',
         file: 'docs/ARCHITECTURE.md',
       },
       {
@@ -373,23 +394,6 @@ describe('documentation contract', () => {
           'go-live procedure is missing the retention boundary: blocks any later disposition design',
         file: 'docs/runbooks/go-live.md',
       },
-      ...[
-        'Administrators may purge all retained event records at any time.',
-        'Deletion is permitted after export.',
-        'Operators can dispose of audit records.',
-      ].map((authorization, index) => ({
-        name: `authorization-${String(index)}`,
-        transform: (path: string, contents: string): string =>
-          path === 'docs/ARCHITECTURE.md'
-            ? contents.replace(
-                '<!-- psd-eoc:records-retention:end -->',
-                `${authorization}\n\n<!-- psd-eoc:records-retention:end -->`,
-              )
-            : contents,
-        message:
-          'records-retention guidance contains conflicting disposition authorization',
-        file: 'docs/ARCHITECTURE.md',
-      })),
     ];
 
     for (const scenario of cases) {
@@ -406,7 +410,7 @@ describe('documentation contract', () => {
     }
   });
 
-  test('rejects phase, tenant, and duplicate readiness claims from current docs', () => {
+  test('rejects unsafe and duplicated claims from current docs', () => {
     expect(
       currentDocumentationViolations(
         'docs/runbooks/provider.md',
@@ -447,5 +451,25 @@ describe('documentation contract', () => {
     ).toEqual([
       'current documentation bypasses the pinned synthetic database commands',
     ]);
+    expect(
+      currentDocumentationViolations(
+        'docs/ARCHITECTURE.md',
+        'CORE v5.0 and GS2017-016 Rev. 0 are current.',
+      ),
+    ).toEqual(['current documentation duplicates volatile retention evidence']);
+    for (const authorization of [
+      'Administrators may purge all retained event records at any time.',
+      'Deletion is permitted after export.',
+      'Operators can dispose of audit records.',
+    ]) {
+      expect(
+        currentDocumentationViolations(
+          'docs/runbooks/records.md',
+          authorization,
+        ),
+      ).toEqual([
+        'current documentation contains conflicting disposition authorization',
+      ]);
+    }
   });
 });

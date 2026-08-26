@@ -45,6 +45,16 @@ export function currentDocumentationViolations(
     );
   }
   if (
+    repositoryPath !== 'docs/INTEGRATIONS.md' &&
+    /(?:local-government-common-records-retention-schedule-CORE\.PDF|Public-Schools-%28K-12%29-Records-Retention-Schedule\.PDF|\bCORE v5\.0\b|\bK-12 v9\.1\b|\b(?:GS2017-016|GS2012-025|GS50-18-29|GS2010-008|SD2011-153) Rev\.)/iu.test(
+      contents,
+    )
+  ) {
+    violations.push(
+      'current documentation duplicates volatile retention evidence',
+    );
+  }
+  if (
     repositoryPath.startsWith('docs/runbooks/') &&
     /(?:#\d+\s+owns\b|under\s+(?:issue\s+)?#\d+\b|Issue\s+#\d+\s+(?:owns|retired)\b)/u.test(
       contents,
@@ -71,6 +81,16 @@ export function currentDocumentationViolations(
   ) {
     violations.push(
       'current documentation bypasses the pinned synthetic database commands',
+    );
+  }
+  if (
+    [
+      /\b(?:may|can|will|must|should|(?:is|are)[ \t\r\n]+(?:allowed|authorized|permitted)[ \t\r\n]+to)[ \t\r\n]+(?!not\b)(?:[a-z-]+[ \t\r\n]+){0,6}(?:delete|purge|dispose|destroy|enable[ \t\r\n]+(?:a[ \t\r\n]+)?(?:lifecycle[ \t\r\n]+rule|retention[ \t\r\n]+timer)|run[ \t\r\n]+(?:a[ \t\r\n]+)?down[ \t\r\n]+migration)\b/iu,
+      /\b(?:deletion|purging|purge|disposition|destruction|lifecycle[ \t\r\n]+rules?|retention[ \t\r\n]+timers?|down[ \t\r\n]+migrations?)\b(?:[ \t\r\n]+[a-z-]+){0,6}[ \t\r\n]+(?:is|are|becomes|remains)?(?:[ \t\r\n]+)?(?:enabled|allowed|authorized|permitted|required)\b/iu,
+    ].some((pattern) => pattern.test(contents))
+  ) {
+    violations.push(
+      'current documentation contains conflicting disposition authorization',
     );
   }
   return violations;
@@ -605,18 +625,19 @@ export function validateRecordsRetentionDocumentation(
       recordsRetentionError(
         architectureFile,
         architecture,
-        `records-retention policy differs: documented=${documentedPolicy.join(',')} actual=${RECORDS_RETENTION_POLICY.join(',')}`,
+        'records-retention policy differs from the required contract',
       ),
     );
   }
 
   for (const sourceUrl of RECORDS_RETENTION_SOURCE_URLS) {
-    if (!retentionGuidance.includes(sourceUrl)) {
+    if (!retentionReview.includes(sourceUrl)) {
       errors.push(
         recordsRetentionError(
-          architectureFile,
-          architecture,
+          integrationsFile,
+          integrations,
           `records-retention guidance is missing official source: ${sourceUrl}`,
+          reviewStart,
         ),
       );
     }
@@ -631,33 +652,28 @@ export function validateRecordsRetentionDocumentation(
       /Public Schools \(K-12\)[\s\S]{0,240}version 9\.1[\s\S]{0,160}approved and effective June 3, 2026/iu,
     ],
   ] as const) {
-    if (!pattern.test(retentionGuidance)) {
+    if (!pattern.test(retentionReview)) {
       errors.push(
         recordsRetentionError(
-          architectureFile,
-          architecture,
+          integrationsFile,
+          integrations,
           `records-retention guidance is missing ${description}`,
+          reviewStart,
         ),
       );
     }
   }
 
   for (const required of [
-    'GS2017-016 Rev. 0',
-    'GS2012-025 Rev. 1',
-    'GS50-18-29 Rev. 2',
-    'GS2010-008 Rev. 2',
-    'SD2011-153 Rev. 1',
     'routine/minor',
     'uncommon/major',
-    'notification documentation',
+    'Notification documentation',
     'mixed-content',
     'The product does not own a school-safety-plan record class',
     'reasonably anticipated litigation',
     'active public-records request',
     'archival appraisal',
     'district-controlled operations record',
-    'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
   ]) {
     if (!normalizedArchitecture.includes(required)) {
       errors.push(
@@ -670,11 +686,26 @@ export function validateRecordsRetentionDocumentation(
     }
   }
 
-  const architectureSourceCheckDate = uniqueBoundedCapture(
-    architecture,
-    retentionGuidance,
-    /official sources were rechecked on (\d{4}-\d{2}-\d{2}):/giu,
-  );
+  for (const required of [
+    'GS2017-016 Rev. 0',
+    'GS2012-025 Rev. 1',
+    'GS50-18-29 Rev. 2',
+    'GS2010-008 Rev. 2',
+    'SD2011-153 Rev. 1',
+    'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
+  ]) {
+    if (!normalizedIntegrations.includes(required)) {
+      errors.push(
+        recordsRetentionError(
+          integrationsFile,
+          integrations,
+          `records-retention review is missing required current evidence: ${required}`,
+          reviewStart,
+        ),
+      );
+    }
+  }
+
   const status = uniqueBoundedCapture(
     integrations,
     retentionReview,
@@ -724,17 +755,18 @@ export function validateRecordsRetentionDocumentation(
     );
   }
   if (
-    !isRealIsoDate(architectureSourceCheckDate) ||
     !isRealIsoDate(sourceCheckDate) ||
-    architectureSourceCheckDate > validationDateIso ||
     sourceCheckDate > validationDateIso ||
-    architectureSourceCheckDate !== sourceCheckDate
+    uniqueCapture(
+      retentionReview,
+      /official sources were rechecked on (\d{4}-\d{2}-\d{2}):/giu,
+    ) !== sourceCheckDate
   ) {
     errors.push(
       recordsRetentionError(
         integrationsFile,
         integrations,
-        'records-retention official-source dates are invalid, future-dated, duplicated, or inconsistent',
+        'records-retention official-source date is invalid, future-dated, duplicated, or inconsistent',
         reviewStart,
       ),
     );
@@ -748,22 +780,6 @@ export function validateRecordsRetentionDocumentation(
         reviewStart,
       ),
     );
-  }
-
-  const normalizedRetentionDocuments = `${normalizedArchitecture} ${normalizedIntegrations} ${normalizedGoLive}`;
-  for (const unauthorizedDisposition of [
-    /\b(?:may|can|will|must|should|(?:is|are) (?:allowed|authorized|permitted) to) (?!not\b)(?:[a-z-]+ ){0,6}(?:delete|purge|dispose|destroy|enable (?:a )?(?:lifecycle rule|retention timer)|run (?:a )?down migration)\b/iu,
-    /\b(?:deletion|purging|purge|disposition|destruction|lifecycle rules?|retention timers?|down migrations?)\b(?: [a-z-]+){0,6} (?:is|are|becomes|remains)? ?(?:enabled|allowed|authorized|permitted|required)\b/iu,
-  ]) {
-    if (unauthorizedDisposition.test(normalizedRetentionDocuments)) {
-      errors.push(
-        recordsRetentionError(
-          architectureFile,
-          architecture,
-          'records-retention guidance contains conflicting disposition authorization',
-        ),
-      );
-    }
   }
 
   for (const required of [
