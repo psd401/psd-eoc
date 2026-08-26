@@ -156,8 +156,12 @@ export class ExpoPushRuntime {
     workItem: WorkerAttemptWorkItem,
     result: Extract<WorkerAttemptProcessResult, { kind: 'retry' }>,
   ): Promise<ExpoPushRetryScheduleResult> {
+    // Evidence writes are idempotent and return the original fact on replay.
+    // Anchor the schedule to that durable time so a crash after the database
+    // commit but before SQS acknowledgement can republish the same row instead
+    // of conflicting with a newly computed absolute timestamp.
     const retryAt = new Date(
-      this.#clock() + result.delayMilliseconds,
+      Date.parse(result.outcomeEvidence.recordedAt) + result.delayMilliseconds,
     ).toISOString();
     const scheduled = await this.#state.scheduleRetry({
       sourceAttempt: workItem.attempt,

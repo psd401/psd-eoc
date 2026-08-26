@@ -20,7 +20,7 @@ than rewriting an earlier observation.
 | Synthetic presentation/tap route | Source defines provider-free iOS and Android `mobile-push-deep-link` flows with registration disabled and unmistakable `[DRILL]` copy. Deterministic tests execute foreground, background, killed-launch, locked-session, replay-fencing, registration-revocation, and classification-confusion behavior. An iOS simulator smoke passed locally; retained two-platform CI screenshots remain pending. |
 
 Provider-free verification on 2026-08-26 UTC: `bun run
-test:e2e:issue-278` passed 201 worker, PostgreSQL, mobile-lifecycle, policy, and
+test:e2e:issue-278` passed 202 worker, PostgreSQL, mobile-lifecycle, policy, and
 route assertions plus one mocked-provider Terraform plan. This is source and
 synthetic proof only; final CI and both native platform artifacts remain
 pending.

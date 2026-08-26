@@ -25,7 +25,7 @@ function completedResult() {
       diagnosticDigest: null,
     },
     attemptedEvidence: {},
-    outcomeEvidence: {},
+    outcomeEvidence: { recordedAt: new Date(NOW).toISOString() },
   };
 }
 
@@ -37,6 +37,11 @@ function runtimeFixture(
     ) => Promise<{ items: readonly unknown[]; nextCursor: number | null }>;
     resolveRetry?: (attemptId: string) => Promise<unknown>;
     scheduleRetry?: (request: unknown) => Promise<unknown>;
+    publishAttemptReference?: (
+      attemptId: string,
+      delaySeconds: number,
+    ) => Promise<void>;
+    clock?: () => number;
   }> = {},
 ) {
   const processed: unknown[] = [];
@@ -79,7 +84,10 @@ function runtimeFixture(
   const queue = {
     publishAttemptReference(attemptId: string, delaySeconds: number) {
       published.push({ attemptId, delaySeconds });
-      return Promise.resolve();
+      return (
+        options.publishAttemptReference?.(attemptId, delaySeconds) ??
+        Promise.resolve()
+      );
     },
   };
   const receipts = {
@@ -94,7 +102,7 @@ function runtimeFixture(
       state,
       queue,
       receipts,
-      clock: () => NOW,
+      clock: options.clock ?? (() => NOW),
     }),
   };
 }
@@ -161,6 +169,67 @@ describe('Expo push SQS runtime', () => {
     expect(JSON.stringify(fixture.published)).not.toContain(
       'ExponentPushToken',
     );
+  });
+
+  test('republishes a durable retry after a publication crash without moving its absolute schedule', async () => {
+    let now = NOW;
+    let persistedRequest: string | undefined;
+    let publicationCount = 0;
+    const fixture = runtimeFixture({
+      clock: () => now,
+      process: () =>
+        Promise.resolve({
+          ...completedResult(),
+          kind: 'retry',
+          delayMilliseconds: 30_000,
+          nextAttemptNumber: 2,
+          reasonCode: 'EXPO_HTTP_RATE_LIMITED',
+        }),
+      scheduleRetry: (request) => {
+        const serialized = JSON.stringify(request);
+        if (persistedRequest !== undefined && persistedRequest !== serialized) {
+          return Promise.reject(new Error('RETRY_CONFLICT'));
+        }
+        persistedRequest = serialized;
+        return Promise.resolve({
+          kind: 'scheduled',
+          attemptId: IDS.secondAttempt,
+          retryAt: (request as { retryAt: string }).retryAt,
+        });
+      },
+      publishAttemptReference: () => {
+        publicationCount += 1;
+        return publicationCount === 1
+          ? Promise.reject(new Error('ambiguous SQS publication'))
+          : Promise.resolve();
+      },
+    });
+    const body = JSON.stringify(syntheticBatch());
+
+    await expect(
+      fixture.runtime.processQueueMessage(body, TIMES.created),
+    ).rejects.toEqual(expect.objectContaining({ code: 'ATTEMPT_FAILED' }));
+    now += 5 * 60_000;
+    await expect(
+      fixture.runtime.processQueueMessage(body, TIMES.created),
+    ).resolves.toEqual({
+      kind: 'completed',
+      outboxCreatedAt: TIMES.created,
+      acceptedCount: 0,
+      incompleteCount: 1,
+    });
+
+    expect(fixture.scheduled).toHaveLength(2);
+    expect(fixture.scheduled[1]).toEqual(fixture.scheduled[0]);
+    expect(fixture.scheduled[0]).toEqual(
+      expect.objectContaining({
+        retryAt: new Date(NOW + 30_000).toISOString(),
+      }),
+    );
+    expect(fixture.published).toEqual([
+      { attemptId: IDS.secondAttempt, delaySeconds: 30 },
+      { attemptId: IDS.secondAttempt, delaySeconds: 0 },
+    ]);
   });
 
   test('does not resolve retry work early and drops expired or ineligible refs', async () => {
