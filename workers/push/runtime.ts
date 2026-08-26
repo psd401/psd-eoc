@@ -9,7 +9,7 @@ import {
 } from '../shared/attempt';
 import { parseWorkerBatchMessage } from '../shared/batch-message';
 import type { WorkerAttemptProcessResult } from '../shared/processor';
-import type { ExpoPushWorker } from './worker';
+import type { PushAttemptWorker } from './direct-worker';
 import type {
   ExpoReceiptLifecycle,
   ExpoReceiptResendRequest,
@@ -118,7 +118,7 @@ export class ExpoReceiptQueueResendScheduler
 }
 
 export interface ExpoPushRuntimeOptions {
-  readonly worker: ExpoPushWorker;
+  readonly worker: PushAttemptWorker;
   readonly receipts: ExpoReceiptLifecycle;
   readonly state: ExpoPushRuntimeClient;
   readonly queue: ExpoPushRetryPublisher;
@@ -130,7 +130,7 @@ export interface ExpoPushRuntimeOptions {
  * domain. Queue bodies for retries contain only an opaque attempt UUID.
  */
 export class ExpoPushRuntime {
-  readonly #worker: ExpoPushWorker;
+  readonly #worker: PushAttemptWorker;
   readonly #receipts: ExpoReceiptLifecycle;
   readonly #state: ExpoPushRuntimeClient;
   readonly #queue: ExpoPushRetryPublisher;

@@ -511,14 +511,15 @@ export const ChannelConsequencePreviewSchema = z
         path: ['renderedMessage', 'channel'],
       });
     }
-    const integrationByChannel = {
-      push: 'expo-push',
-      email: 'ses-email',
-      sms: 'aws-eum-sms',
+    const integrationsByChannel = {
+      push: ['expo-push', 'mobile-push'],
+      email: ['ses-email'],
+      sms: ['aws-eum-sms'],
     } as const;
     if (
-      preview.integrationStatus.integrationId !==
-      integrationByChannel[preview.channel]
+      !(integrationsByChannel[preview.channel] as readonly string[]).includes(
+        preview.integrationStatus.integrationId,
+      )
     ) {
       context.addIssue({
         code: 'custom',

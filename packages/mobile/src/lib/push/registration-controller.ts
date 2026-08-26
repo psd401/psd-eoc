@@ -5,6 +5,7 @@ import {
   type NativePushBuildIdentity,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
+  type PushServiceEnvironment,
   type RegisterPushTokenInput,
   type UnregisterPushTokenInput,
 } from '@psd-eoc/contracts';
@@ -26,10 +27,14 @@ export interface PushNativePort {
   getPermissionStatus(): Promise<PushPermissionStatus>;
   requestPermission(): Promise<PushPermissionStatus>;
   getDevicePushToken(): Promise<NativePushToken>;
+  getServiceEnvironment(
+    platform: NativePushPlatform,
+  ): Promise<PushServiceEnvironment>;
   getExpoPushToken(
     input: Readonly<{
       projectId: string;
       devicePushToken: NativePushToken;
+      serviceEnvironment: PushServiceEnvironment;
       signal: AbortSignal;
     }>,
   ): Promise<string>;
@@ -418,24 +423,35 @@ export class PushRegistrationController {
     this.providerRequestAbortController?.abort();
     this.providerRequestAbortController = providerRequest;
     try {
+      const serviceEnvironment =
+        await this.dependencies.native.getServiceEnvironment(session.platform);
       const expoToken = await this.dependencies.native.getExpoPushToken({
         projectId,
         devicePushToken: nativeToken,
+        serviceEnvironment,
         signal: providerRequest.signal,
       });
       if (!this.isCurrent(generation, session)) return;
-      const input = RegisterPushTokenInputSchema.parse({
+      const nativeProvider = session.platform === 'ios' ? 'apns' : 'fcm';
+      const generationInput = RegisterPushTokenInputSchema.parse({
         deviceEnrollmentId: session.deviceEnrollmentId,
         platform: session.platform,
-        provider: 'expo',
+        provider: nativeProvider,
+        serviceEnvironment,
         build,
-        token: expoToken,
+        token: nativeToken.data,
+        expoFallbackToken: expoToken,
       });
-      const receipt = await session.register(input);
+      // A failed or uncertain mutation must make the next disabled/denied
+      // reconciliation retry cleanup instead of trusting an older marker.
+      this.unregisteredSessionId = null;
+      const nativeReceipt = await session.register(generationInput);
       if (!this.isCurrent(generation, session)) return;
       if (
-        receipt.deviceEnrollmentId !== session.deviceEnrollmentId ||
-        receipt.platform !== session.platform
+        nativeReceipt.deviceEnrollmentId !== session.deviceEnrollmentId ||
+        nativeReceipt.platform !== session.platform ||
+        nativeReceipt.provider !== nativeProvider ||
+        nativeReceipt.serviceEnvironment !== serviceEnvironment
       ) {
         this.failCurrent(
           generation,
@@ -444,7 +460,6 @@ export class PushRegistrationController {
         );
         return;
       }
-      this.unregisteredSessionId = null;
       this.update({
         phase: 'registered',
         platform: session.platform,

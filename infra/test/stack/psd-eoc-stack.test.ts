@@ -532,6 +532,32 @@ describe('deployment boundary', () => {
         asRecord(rules.BootstrapRequiresReviewedSource).Assertions,
       ),
     ).toContain('0'.repeat(40));
+    const directCutoverRule = asRecord(rules.DirectCutoverRequiresDirectPush);
+    expect(directCutoverRule.RuleCondition).toEqual({
+      'Fn::Or': [
+        {
+          'Fn::Equals': [
+            { Ref: 'PushProviderCutover' },
+            '{"version":1,"ios":"direct","android":"expo"}',
+          ],
+        },
+        {
+          'Fn::Equals': [
+            { Ref: 'PushProviderCutover' },
+            '{"version":1,"ios":"expo","android":"direct"}',
+          ],
+        },
+        {
+          'Fn::Equals': [
+            { Ref: 'PushProviderCutover' },
+            '{"version":1,"ios":"direct","android":"direct"}',
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(directCutoverRule.Assertions)).toContain(
+      'EnableDirectPush',
+    );
 
     const conditions = asRecord(synthesized.Conditions);
     expect(conditions.ShouldProvisionApplication).toEqual({
@@ -586,10 +612,10 @@ describe('minimal isolated resource shape', () => {
     // Thirteen queues: health, source/dead-letter pairs for delivery, email,
     // SMS work, SMS receipts, and push, plus the SES callback source/DLQ pair.
     template.resourceCountIs('AWS::SQS::Queue', 13);
-    // Fourteen: the live application and bootstrap credentials, six exact
-    // internal worker-route bearers, a deny-by-default build allowlist, and the
-    // protected Expo credential placeholder.
-    template.resourceCountIs('AWS::SecretsManager::Secret', 14);
+    // Sixteen retained secrets include the live application and bootstrap
+    // credentials, six exact internal worker-route bearers, the build
+    // allowlist, and protected Expo, APNs, and FCM credential placeholders.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 16);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
@@ -831,7 +857,9 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/database/application',
         '/psd-eoc/google-oidc-cookie-secret',
         '/psd-eoc/mobile/push-build-allowlist',
+        '/psd-eoc/providers/apns-direct',
         '/psd-eoc/providers/expo-access-token',
+        '/psd-eoc/providers/fcm-direct',
         '/psd-eoc/workers/attempt-execution-token',
         '/psd-eoc/workers/delivery-state-token',
         '/psd-eoc/workers/email-runtime-token',
@@ -846,7 +874,9 @@ describe('minimal isolated resource shape', () => {
       '/psd-eoc/database/application',
       '/psd-eoc/google-oidc-cookie-secret',
       '/psd-eoc/mobile/push-build-allowlist',
+      '/psd-eoc/providers/apns-direct',
       '/psd-eoc/providers/expo-access-token',
+      '/psd-eoc/providers/fcm-direct',
       '/psd-eoc/workers/attempt-execution-token',
       '/psd-eoc/workers/delivery-state-token',
       '/psd-eoc/workers/email-runtime-token',
@@ -869,6 +899,24 @@ describe('minimal isolated resource shape', () => {
     expect(asRecord(expoProviderSecret.GenerateSecretString)).toMatchObject({
       GenerateStringKey: 'accessToken',
       SecretStringTemplate: JSON.stringify({ status: 'UNCONFIGURED' }),
+    });
+    expect(
+      asRecord(
+        properties(byName.get('/psd-eoc/providers/apns-direct') ?? {})
+          .GenerateSecretString,
+      ),
+    ).toMatchObject({
+      GenerateStringKey: 'privateKey',
+      SecretStringTemplate: expect.stringContaining('UNCONFIGURED'),
+    });
+    expect(
+      asRecord(
+        properties(byName.get('/psd-eoc/providers/fcm-direct') ?? {})
+          .GenerateSecretString,
+      ),
+    ).toMatchObject({
+      GenerateStringKey: 'privateKey',
+      SecretStringTemplate: expect.stringContaining('UNCONFIGURED'),
     });
 
     const identity = byName.get('/psd-eoc/bootstrap/approved-identity');
@@ -1069,11 +1117,13 @@ describe('App Runner runtime safety boundary', () => {
         'DELIVERY_QUEUE_URL',
         'NODE_ENV',
         'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
+        'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_DISPLAY_TIME_ZONE',
         'PSD_EOC_EMAIL_WORKER_ENABLED',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
         'PSD_EOC_ORGANIZATION_NAME',
+        'PSD_EOC_PUSH_PROVIDER_CUTOVER',
         'PSD_EOC_PRIVACY_CONTACT_URL',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_SES_SNS_TOPIC_ARN',
@@ -1109,6 +1159,12 @@ describe('App Runner runtime safety boundary', () => {
       'https://www.example.invalid/contact',
     );
     expect(variables.get('PSD_EOC_DISPLAY_TIME_ZONE')).toBe('America/New_York');
+    expect(variables.get('PSD_EOC_PUSH_PROVIDER_CUTOVER')).toEqual({
+      Ref: 'PushProviderCutover',
+    });
+    expect(
+      variables.get('PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'DirectPushCredentialVerificationReference' });
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
     expect(variables.get('PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('OperationsAlarmTopic'),
@@ -1220,6 +1276,15 @@ describe('App Runner runtime safety boundary', () => {
     expect(environment.get('PSD_EOC_EXPO_PUSH_PROVIDER_AUTHORIZED')).toEqual({
       'Fn::If': ['ShouldRunExpoPushWorker', 'true', 'false'],
     });
+    expect(environment.get('PSD_EOC_DIRECT_PUSH_PROVIDER_AUTHORIZED')).toEqual({
+      'Fn::If': ['ShouldAuthorizeDirectPush', 'true', 'false'],
+    });
+    expect(environment.get('PSD_EOC_PUSH_PROVIDER_CUTOVER')).toEqual({
+      Ref: 'PushProviderCutover',
+    });
+    expect(
+      environment.get('PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'DirectPushCredentialVerificationReference' });
 
     const injectedSecrets = new Map(
       asArray(container.Secrets).map((item) => {
@@ -1229,7 +1294,18 @@ describe('App Runner runtime safety boundary', () => {
     );
     expect([...injectedSecrets.keys()].sort()).toEqual(
       [
+        'APNS_CREDENTIAL_STATUS',
+        'APNS_ENVIRONMENT',
+        'APNS_KEY_ID',
+        'APNS_PRIVATE_KEY',
+        'APNS_TEAM_ID',
+        'APNS_TOPIC',
         'EXPO_ACCESS_TOKEN',
+        'FCM_CLIENT_EMAIL',
+        'FCM_CREDENTIAL_STATUS',
+        'FCM_ENVIRONMENT',
+        'FCM_PRIVATE_KEY',
+        'FCM_PROJECT_ID',
         'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
         'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
         'PSD_EOC_EXPO_CREDENTIAL_STATUS',
@@ -1252,7 +1328,7 @@ describe('App Runner runtime safety boundary', () => {
     ).toContain('status');
 
     const taskRole = roleLogicalIdForDescription(
-      'Consumes and retries only the Expo push queue',
+      'Consumes and retries only the mobile push queue',
     );
     const taskStatements = inlineStatementsForRole(taskRole);
     expect([...new Set(allAllowedActions(taskStatements))].sort()).toEqual(
@@ -1271,17 +1347,20 @@ describe('App Runner runtime safety boundary', () => {
     expect(JSON.stringify(taskStatements)).not.toContain('SmsQueue');
 
     const executionRole = roleLogicalIdForDescription(
-      'injects only Expo push worker credentials',
+      'injects only mobile push worker credentials',
     );
     const executionStatements = inlineStatementsForRole(executionRole);
-    const secretStatement = executionStatements.find((statement) =>
+    const secretStatements = executionStatements.filter((statement) =>
       asStringArray(statement.Action).includes('secretsmanager:GetSecretValue'),
     );
-    expect(JSON.stringify(secretStatement?.Resource)).toContain(
-      'ExpoAccessTokenSecret',
+    const secretResources = JSON.stringify(
+      secretStatements.map((statement) => statement.Resource),
     );
-    expect(JSON.stringify(secretStatement?.Resource)).not.toContain('Database');
-    expect(JSON.stringify(secretStatement?.Resource)).not.toContain('Google');
+    expect(secretResources).toContain('ExpoAccessTokenSecret');
+    expect(secretResources).toContain('ApnsDirectCredentialSecret');
+    expect(secretResources).toContain('FcmDirectCredentialSecret');
+    expect(secretResources).not.toContain('Database');
+    expect(secretResources).not.toContain('Google');
   });
 
   it('keeps SMS dark until carrier resources, evidence, and live enablement agree', () => {

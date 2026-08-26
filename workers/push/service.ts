@@ -6,13 +6,33 @@ import {
   SQSClient,
   type SQSClientConfig,
 } from '@aws-sdk/client-sqs';
-import { ExpoPushAttemptReferenceMessageSchema } from '@psd-eoc/contracts';
+import {
+  ExpoPushAttemptReferenceMessageSchema,
+  IntegrationVerificationReferenceSchema,
+  PushProviderCutoverSchema,
+  type PushProviderCutover,
+} from '@psd-eoc/contracts';
 
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { LedgeredExpoPushAdapter } from './adapter';
+import { ApnsJwtCredential } from './apns-credentials';
+import { ApnsPushTransport } from './apns-transport';
+import { LedgeredDirectPushAdapter } from './direct-adapter';
+import {
+  DirectPushWorker,
+  PushProviderRouter,
+  type PushAttemptWorker,
+} from './direct-worker';
 import { createProductionPushEndpointEligibilityClient } from './eligibility';
+import { FcmOAuthCredential } from './fcm-credentials';
+import { FcmPushTransport } from './fcm-transport';
 import { PushEndpointInvalidationClient } from './invalidation';
+import {
+  createApnsJwtSigner,
+  createFcmServiceAccountTokenSource,
+  NodeApnsHttp2Client,
+} from './provider-clients';
 import { ExpoReceiptLifecycle } from './receipt-lifecycle';
 import {
   ExpoPushRuntime,
@@ -51,6 +71,25 @@ export interface ExpoPushServiceConfiguration {
   readonly endpointWorkerToken: string;
   readonly pushRuntimeToken: string;
   readonly verificationReference: string;
+  readonly cutover: PushProviderCutover;
+  readonly direct: DirectPushServiceConfiguration | null;
+}
+
+export interface DirectPushServiceConfiguration {
+  readonly verificationReference: string;
+  readonly apns: Readonly<{
+    environment: 'development' | 'production';
+    keyId: string;
+    privateKey: string;
+    teamId: string;
+    topic: string;
+  }>;
+  readonly fcm: Readonly<{
+    clientEmail: string;
+    environment: 'development' | 'production';
+    privateKey: string;
+    projectId: string;
+  }>;
 }
 
 export type ExpoPushServiceErrorCode =
@@ -94,6 +133,31 @@ function token(
   return value;
 }
 
+function privateKey(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string {
+  const value = environment[name];
+  const normalized = value?.endsWith('\n') ? value.slice(0, -1) : value;
+  const containsUnsafeControl = Array.from(value ?? '').some((character) => {
+    const code = character.charCodeAt(0);
+    return (code < 32 && code !== 10) || code === 127;
+  });
+  if (
+    value === undefined ||
+    normalized === undefined ||
+    value.length < 100 ||
+    value.length > 16_384 ||
+    normalized.trim() !== normalized ||
+    containsUnsafeControl ||
+    !normalized.startsWith('-----BEGIN PRIVATE KEY-----\n') ||
+    !normalized.endsWith('\n-----END PRIVATE KEY-----')
+  ) {
+    throw new ExpoPushServiceError('INVALID_CONFIGURATION');
+  }
+  return normalized;
+}
+
 function origin(value: string): string {
   try {
     const url = new URL(value);
@@ -132,6 +196,42 @@ function queueUrl(value: string): string {
   }
 }
 
+function serviceEnvironment(value: string): 'development' | 'production' {
+  if (value !== 'development' && value !== 'production') {
+    throw new ExpoPushServiceError('INVALID_CONFIGURATION');
+  }
+  return value;
+}
+
+function verificationReference(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+  provider: 'expo' | 'direct',
+): string {
+  const reference = required(environment, name, 255);
+  if (
+    reference === 'UNVERIFIED' ||
+    (provider === 'direct'
+      ? !IntegrationVerificationReferenceSchema.safeParse(reference).success
+      : !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(reference))
+  ) {
+    throw new ExpoPushServiceError('FEATURE_DISABLED');
+  }
+  return reference;
+}
+
+function pushProviderCutover(value: string): PushProviderCutover {
+  try {
+    const parsed = PushProviderCutoverSchema.safeParse(JSON.parse(value));
+    if (!parsed.success || JSON.stringify(parsed.data) !== value) {
+      throw new TypeError();
+    }
+    return parsed.data;
+  } catch {
+    throw new ExpoPushServiceError('INVALID_CONFIGURATION');
+  }
+}
+
 /** Runtime mode and provider authorization must both be exact opt-ins. */
 export function readExpoPushServiceConfiguration(
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -143,16 +243,57 @@ export function readExpoPushServiceConfiguration(
   ) {
     throw new ExpoPushServiceError('FEATURE_DISABLED');
   }
-  const verificationReference = required(
+  const expoVerificationReference = verificationReference(
     environment,
     'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
-    255,
+    'expo',
   );
-  if (
-    verificationReference === 'UNVERIFIED' ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(verificationReference)
-  ) {
+  const cutover = pushProviderCutover(
+    required(environment, 'PSD_EOC_PUSH_PROVIDER_CUTOVER', 1_024),
+  );
+  const directSelected =
+    cutover.ios === 'direct' || cutover.android === 'direct';
+  const directAuthorized =
+    environment.PSD_EOC_DIRECT_PUSH_PROVIDER_AUTHORIZED === 'true';
+  if (directSelected && !directAuthorized) {
     throw new ExpoPushServiceError('FEATURE_DISABLED');
+  }
+  let direct: DirectPushServiceConfiguration | null = null;
+  if (directAuthorized) {
+    if (
+      environment.APNS_CREDENTIAL_STATUS !== 'verified' ||
+      environment.FCM_CREDENTIAL_STATUS !== 'verified'
+    ) {
+      throw new ExpoPushServiceError('FEATURE_DISABLED');
+    }
+    const apnsTopic = required(environment, 'APNS_TOPIC', 255);
+    if (apnsTopic !== required(environment, 'PSD_EOC_IOS_BUNDLE_ID', 255)) {
+      throw new ExpoPushServiceError('INVALID_CONFIGURATION');
+    }
+    direct = Object.freeze({
+      verificationReference: verificationReference(
+        environment,
+        'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
+        'direct',
+      ),
+      apns: Object.freeze({
+        environment: serviceEnvironment(
+          required(environment, 'APNS_ENVIRONMENT', 32),
+        ),
+        keyId: required(environment, 'APNS_KEY_ID', 10),
+        privateKey: privateKey(environment, 'APNS_PRIVATE_KEY'),
+        teamId: required(environment, 'APNS_TEAM_ID', 10),
+        topic: apnsTopic,
+      }),
+      fcm: Object.freeze({
+        clientEmail: required(environment, 'FCM_CLIENT_EMAIL', 320),
+        environment: serviceEnvironment(
+          required(environment, 'FCM_ENVIRONMENT', 32),
+        ),
+        privateKey: privateKey(environment, 'FCM_PRIVATE_KEY'),
+        projectId: required(environment, 'FCM_PROJECT_ID', 64),
+      }),
+    });
   }
   return Object.freeze({
     queueUrl: queueUrl(required(environment, 'PUSH_QUEUE_URL', 2_048)),
@@ -176,7 +317,9 @@ export function readExpoPushServiceConfiguration(
       environment,
       'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
     ),
-    verificationReference,
+    verificationReference: expoVerificationReference,
+    cutover,
+    direct,
   });
 }
 
@@ -264,21 +407,90 @@ function buildRuntime(
     endpointInvalidator: invalidator,
     resendScheduler: new ExpoReceiptQueueResendScheduler(state, queue),
   });
-  const worker = new ExpoPushWorker({
-    adapter: new LedgeredExpoPushAdapter({
-      transport,
-      sendLedger: state,
+  const executionStore = new AttemptExecutionClient({
+    serviceOrigin: configuration.serviceOrigin,
+    bearerToken: configuration.attemptExecutionToken,
+  });
+  const expoWorker = (
+    integrationId: 'expo-push' | 'mobile-push',
+  ): ExpoPushWorker =>
+    new ExpoPushWorker({
+      adapter: new LedgeredExpoPushAdapter({
+        transport,
+        sendLedger: state,
+        endpointEligibility: eligibility,
+        integrationId,
+      }),
+      executionStore,
+      evidenceWriter: writer,
+      endpointInvalidator: invalidator,
+      receiptScheduler: receipts,
       endpointEligibility: eligibility,
-    }),
-    executionStore: new AttemptExecutionClient({
-      serviceOrigin: configuration.serviceOrigin,
-      bearerToken: configuration.attemptExecutionToken,
-    }),
-    evidenceWriter: writer,
-    endpointInvalidator: invalidator,
-    receiptScheduler: receipts,
-    endpointEligibility: eligibility,
-    authorizeLiveProvider: () => true,
+      authorizeLiveProvider: () => true,
+    });
+  const disabledDirectWorker: PushAttemptWorker = Object.freeze({
+    process: () => Promise.reject(new ExpoPushServiceError('FEATURE_DISABLED')),
+  });
+  let apnsWorker = disabledDirectWorker;
+  let fcmWorker = disabledDirectWorker;
+  if (configuration.direct !== null) {
+    const apnsTransport = new ApnsPushTransport({
+      topic: configuration.direct.apns.topic,
+      environment: configuration.direct.apns.environment,
+      credential: new ApnsJwtCredential({
+        teamId: configuration.direct.apns.teamId,
+        keyId: configuration.direct.apns.keyId,
+        privateKey: configuration.direct.apns.privateKey,
+        signer: createApnsJwtSigner(),
+      }),
+      client: new NodeApnsHttp2Client(),
+      authorizeLiveTransport: () => true,
+    });
+    const fcmCredential = new FcmOAuthCredential({
+      projectId: configuration.direct.fcm.projectId,
+      tokenSource: createFcmServiceAccountTokenSource({
+        clientEmail: configuration.direct.fcm.clientEmail,
+        privateKey: configuration.direct.fcm.privateKey,
+      }),
+    });
+    const fcmTransport = new FcmPushTransport({
+      projectId: configuration.direct.fcm.projectId,
+      serviceEnvironment: configuration.direct.fcm.environment,
+      credential: fcmCredential,
+      authorizeLiveTransport: () => true,
+    });
+    apnsWorker = new DirectPushWorker({
+      adapter: new LedgeredDirectPushAdapter({
+        transport: apnsTransport,
+        sendLedger: state,
+        endpointEligibility: eligibility,
+        authorizeLiveTransport: () => true,
+      }),
+      executionStore,
+      evidenceWriter: writer,
+      endpointInvalidator: invalidator,
+      endpointEligibility: eligibility,
+      authorizeLiveProvider: () => true,
+    });
+    fcmWorker = new DirectPushWorker({
+      adapter: new LedgeredDirectPushAdapter({
+        transport: fcmTransport,
+        sendLedger: state,
+        endpointEligibility: eligibility,
+        authorizeLiveTransport: () => true,
+      }),
+      executionStore,
+      evidenceWriter: writer,
+      endpointInvalidator: invalidator,
+      endpointEligibility: eligibility,
+      authorizeLiveProvider: () => true,
+    });
+  }
+  const worker = new PushProviderRouter({
+    legacyExpo: expoWorker('expo-push'),
+    expo: expoWorker('mobile-push'),
+    apns: apnsWorker,
+    fcm: fcmWorker,
   });
   return new ExpoPushRuntime({ worker, receipts, state, queue });
 }

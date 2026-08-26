@@ -451,6 +451,75 @@ async function channelSnapshot(
 
 async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
   await seedDatabase(database, {
+    async insertRosterEndpoints(transaction) {
+      await transaction.execute(sql`
+        insert into roster_endpoints (
+          id, roster_snapshot_id, recipient_id, population, channel, status,
+          captured_at, platform, token, email, phone_number
+        ) values
+          ('00000000-0000-4000-8000-000000000060'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000050'::uuid,
+           'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+           'ios', 'synthetic-unroutable:north-one', null, null),
+          ('00000000-0000-4000-8000-000000000061'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000050'::uuid,
+           'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, 'north-one@example.invalid', null),
+          ('00000000-0000-4000-8000-000000000062'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000050'::uuid,
+           'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, null, '+12025550101'),
+          ('00000000-0000-4000-8000-000000000063'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000051'::uuid,
+           'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+           'android', 'synthetic-unroutable:north-two', null, null),
+          ('00000000-0000-4000-8000-000000000064'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000051'::uuid,
+           'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, 'north-two@example.invalid', null),
+          ('00000000-0000-4000-8000-000000000065'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000051'::uuid,
+           'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, null, '+12025550102'),
+          ('00000000-0000-4000-8000-000000000066'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000052'::uuid,
+           'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+           'ios', 'synthetic-unroutable:south-one', null, null),
+          ('00000000-0000-4000-8000-000000000067'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000052'::uuid,
+           'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, 'south-one@example.invalid', null),
+          ('00000000-0000-4000-8000-000000000068'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000052'::uuid,
+           'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, null, '+12025550103'),
+          ('00000000-0000-4000-8000-000000000069'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000053'::uuid,
+           'synthetic', 'push', 'active', '2026-08-06T12:00:00.000Z',
+           'android', 'synthetic-unroutable:south-two', null, null),
+          ('00000000-0000-4000-8000-000000000070'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000053'::uuid,
+           'synthetic', 'email', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, 'south-two@example.invalid', null),
+          ('00000000-0000-4000-8000-000000000071'::uuid,
+           '00000000-0000-4000-8000-000000000041'::uuid,
+           '00000000-0000-4000-8000-000000000053'::uuid,
+           'synthetic', 'sms', 'active', '2026-08-06T12:00:00.000Z',
+           null, null, null, '+12025550104')
+        on conflict do nothing
+      `);
+    },
     // The group sources the seed would write, with the columns this schema
     // actually has. Drizzle emits every column of a table it inserts into, so
     // seeding them through the current schema fails against a database held at

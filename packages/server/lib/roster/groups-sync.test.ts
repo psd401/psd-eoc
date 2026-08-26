@@ -1504,6 +1504,8 @@ describe('adapter, authorization, and configuration boundaries', () => {
             {
               id: pushEndpointId,
               platform: 'ios',
+              provider: 'expo',
+              serviceEnvironment: 'production',
               token: 'synthetic-unroutable-push-token',
             },
           ],

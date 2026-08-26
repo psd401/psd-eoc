@@ -46,6 +46,7 @@ export async function POST(request: Request): Promise<Response> {
       'integrationId',
       'enabled',
       'authorization',
+      'verificationReference',
     ]);
     const intent = form.required('intent');
     if (intent === 'verify-email-integration') {
@@ -67,6 +68,8 @@ export async function POST(request: Request): Promise<Response> {
       integrationId: form.required('integrationId'),
       enabled: parseEnabled(form.required('enabled')),
       authorization: parseAuthorization(form.optional('authorization')),
+      verificationReference:
+        form.optional('verificationReference') ?? undefined,
     });
     await executeSetChannelEnabledCapability({
       authenticated,

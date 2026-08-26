@@ -245,6 +245,8 @@ export function endpointFor(batch: DispatchBatch): Endpoint {
     capturedAt: TIMES.created,
     channel: 'push',
     platform: 'ios',
+    provider: 'expo',
+    serviceEnvironment: 'production',
     token:
       batch.rosterPopulation === 'synthetic'
         ? 'synthetic-unroutable:push-device-1'

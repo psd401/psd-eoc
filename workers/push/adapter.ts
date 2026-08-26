@@ -152,6 +152,8 @@ export class LedgeredExpoPushAdapterError extends ProviderDispatchError {
 export interface LedgeredExpoPushAdapterOptions {
   readonly transport: ExpoPushTransport;
   readonly sendLedger: DurableExpoSendLedger;
+  /** Legacy batches retain expo-push; new provider-neutral work uses mobile-push. */
+  readonly integrationId?: 'expo-push' | 'mobile-push';
   /** Final authoritative endpoint check at the provider-I/O boundary. */
   readonly endpointEligibility: PushEndpointEligibilityChecker;
   /** Small bounded coalescing window after irreversible per-attempt claims. */
@@ -525,7 +527,7 @@ export class LedgeredExpoPushAdapter
   implements AttemptIdempotentProviderAdapter
 {
   public readonly channel = 'push' as const;
-  public readonly integrationId = 'expo-push' as const;
+  public readonly integrationId: 'expo-push' | 'mobile-push';
   public readonly truthLabel = 'live-verified' as const;
   public readonly provider = EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
@@ -568,6 +570,7 @@ export class LedgeredExpoPushAdapter
       throw new TypeError('Expo endpoint eligibility checker is invalid.');
     }
     this.#transport = options.transport;
+    this.integrationId = options.integrationId ?? 'expo-push';
     this.#ledger = options.sendLedger;
     this.#endpointEligibility = endpointEligibility;
     this.#batchWindowMilliseconds = batchWindowMilliseconds(
