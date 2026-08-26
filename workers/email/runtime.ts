@@ -72,7 +72,6 @@ function enabledModeIsComplete(
     mode.sendLedger.durability === 'durable' &&
     typeof mode.sendLedger.claim === 'function' &&
     typeof mode.sendLedger.complete === 'function' &&
-    typeof mode.sendLedger.release === 'function' &&
     mode.executionStore !== null &&
     typeof mode.executionStore === 'object' &&
     typeof mode.executionStore.lookup === 'function' &&

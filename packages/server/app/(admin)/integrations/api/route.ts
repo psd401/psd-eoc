@@ -1,4 +1,7 @@
-import { SetChannelEnabledInputSchema } from '@psd-eoc/contracts';
+import {
+  SetChannelEnabledInputSchema,
+  VerifyEmailIntegrationInputSchema,
+} from '@psd-eoc/contracts';
 
 import {
   AdminFormError,
@@ -8,7 +11,10 @@ import {
   parseIdempotencyKey,
   readAdminForm,
 } from '../../facilities/admin-request';
-import { executeSetChannelEnabledCapability } from '../capabilities';
+import {
+  executeSetChannelEnabledCapability,
+  executeVerifyEmailIntegrationCapability,
+} from '../capabilities';
 
 export const dynamic = 'force-dynamic';
 
@@ -41,7 +47,18 @@ export async function POST(request: Request): Promise<Response> {
       'enabled',
       'authorization',
     ]);
-    if (form.required('intent') !== 'set-channel-enabled') {
+    const intent = form.required('intent');
+    if (intent === 'verify-email-integration') {
+      await executeVerifyEmailIntegrationCapability({
+        authenticated,
+        command: VerifyEmailIntegrationInputSchema.parse({
+          integrationId: form.required('integrationId'),
+        }),
+        metadata: { idempotencyKey: parseIdempotencyKey(form) },
+      });
+      return adminSuccessRedirect(request, '/integrations', 'email-verified');
+    }
+    if (intent !== 'set-channel-enabled') {
       throw new AdminFormError(
         'The integration administration action is invalid.',
       );

@@ -40,6 +40,8 @@
     "test:e2e:issue-32": "bun packages/server/e2e/run.ts",
     "test:e2e:issue-32:update-evidence": "PSD_EOC_E2E_SERVER_MODE=production PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:issue-278": "bun scripts/verify-issue-278.ts",
+    "test:e2e:issue-277": "bun packages/server/e2e/run.ts",
+    "test:e2e:issue-277:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:issue-279": "bun scripts/verify-issue-279.ts && bun packages/server/e2e/run.ts",
     "test:e2e:issue-279:update-evidence": "bun scripts/verify-issue-279.ts && PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:mobile": "bun run test:e2e:mobile:ios && bun run test:e2e:mobile:android",
