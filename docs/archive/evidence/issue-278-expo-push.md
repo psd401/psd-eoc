@@ -115,6 +115,7 @@ worker, queue/DLQ, protected secret boundaries, and alarms in dark mode with
 the worker disabled. This remains deployment-topology proof only. It does not
 prove a credentialed provider handoff, a physical-device presentation or tap,
 or human receipt, and it does not authorize an automated notification.
+
 ## Superseding isolated-provider credential readback — 2026-08-26 UTC
 
 At `2026-08-26T20:54:03Z`, the dedicated Firebase project
@@ -145,6 +146,36 @@ project provisioning and token-free EAS credential assignment only. It does
 not prove an exact native build, Expo ticket, final receipt, device
 presentation, app tap, or human observation, and it authorizes no automated
 notification.
+
+## Direct-CDK dark runtime readback — 2026-08-26 UTC
+
+At `2026-08-26T23:02:27Z`, the protected production stack `PsdEoc` reached
+`UPDATE_COMPLETE` after one locally authenticated direct CDK command built and
+published the application asset, ran the native bootstrap, and completed the
+App Runner cutover. CloudFormation reported deployed source
+`a9ca6b8a75ef750db532696da12e46821a0983ad`; the application and bootstrap
+outputs both resolved to immutable digest
+`sha256:07118c896134fca7cf568313d2d4af4ccc59253fc1a16060ccfd81017882369c`.
+No GitHub environment, OIDC role, repository secret, or deployment workflow
+participated.
+
+The post-deployment push boundary remained dark and quiescent:
+
+- `EnableExpoPushWorker=false` and
+  `ExpoCredentialVerificationReference=UNVERIFIED`;
+- ECS service `psd-eoc-expo-push-worker` was active at desired/running/pending
+  `0/0/0` on task definition revision 5;
+- both `psd-eoc-push` and `psd-eoc-push-dlq` reported zero visible, in-flight,
+  and delayed messages; and
+- the protected Expo secret had only the exact `accessToken` and `status` keys,
+  with `status=UNCONFIGURED`. No token value was read or retained.
+
+Evidence reference: `issue-278-direct-cdk-dark-runtime-2026-08-26T230227Z`.
+This proves the direct-CDK deployment path, bootstrap, immutable runtime
+identity, deployed dark worker topology, and post-deployment quiescence only.
+It does not prove a credentialed Expo handoff, ticket, receipt, device
+presentation, app tap, physical installation, or human observation, and it
+authorizes no automated notification.
 
 ## Exact native builds and private distribution — 2026-08-26 UTC
 
