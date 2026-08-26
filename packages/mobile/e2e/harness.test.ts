@@ -180,6 +180,13 @@ describe('issue-32 mobile E2E harness', () => {
     expect(workflow).toContain('-PreactNativeArchitectures=x86_64');
     expect(workflow).toContain('--no-daemon');
     expect(workflow).not.toContain('--build-cache');
+    expect(workflow).toContain(
+      'cp android/app/build/outputs/apk/debug/app-debug.apk',
+    );
+    expect(workflow).toContain('rm -rf -- android');
+    expect(workflow).toContain(
+      'android_apk="$RUNNER_TEMP/psd-eoc-mobile-e2e.apk"',
+    );
     expect(workflow).toContain('adb install -r "$android_apk"');
     expect(workflow).toContain("PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD: 'true'");
     expect(workflow.indexOf('app:assembleDebug')).toBeLessThan(
