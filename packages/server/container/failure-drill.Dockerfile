@@ -28,6 +28,7 @@ COPY packages/server packages/server
 COPY workers/email/aws-arn.ts workers/email/ses-events.ts workers/email/sns-signature.ts workers/email/
 COPY scripts/ops/failure-drills/drill-session-route.ts packages/server/app/api/failure-drills/session/route.ts
 COPY scripts/ops/failure-drills/drill-callback-route.ts packages/server/app/api/failure-drills/callback/route.ts
+COPY scripts/ops/failure-drills/drill-callback-boundary.ts packages/server/app/api/failure-drills/callback/drill-callback-boundary.ts
 
 RUN bun run --cwd packages/server build
 

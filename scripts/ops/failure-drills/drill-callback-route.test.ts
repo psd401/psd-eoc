@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   authorizeSyntheticCallbackRequest,
   createSyntheticCallbackRequest,
-} from './drill-callback-route';
+} from './drill-callback-boundary';
+import * as callbackRoute from './drill-callback-route';
 
 const ENVIRONMENT = {
   AWS_ACCOUNT_ID: '111111111111',
@@ -35,6 +36,10 @@ afterEach(() => {
 });
 
 describe('deployed synthetic callback route', () => {
+  test('exports only fields accepted by a Next.js route module', () => {
+    expect(Object.keys(callbackRoute).sort()).toEqual(['POST', 'dynamic']);
+  });
+
   test('uses one validated drill account for SNS and SES correlation', async () => {
     const outer = new Request(
       `${ENVIRONMENT.GOOGLE_OIDC_APPLICATION_ORIGIN}/api/failure-drills/callback`,
