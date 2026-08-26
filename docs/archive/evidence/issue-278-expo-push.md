@@ -115,7 +115,6 @@ worker, queue/DLQ, protected secret boundaries, and alarms in dark mode with
 the worker disabled. This remains deployment-topology proof only. It does not
 prove a credentialed provider handoff, a physical-device presentation or tap,
 or human receipt, and it does not authorize an automated notification.
-
 ## Superseding isolated-provider credential readback — 2026-08-26 UTC
 
 At `2026-08-26T20:54:03Z`, the dedicated Firebase project
