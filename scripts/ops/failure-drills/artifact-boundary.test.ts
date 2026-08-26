@@ -22,6 +22,7 @@ const failureDrillRunner = new URL(
   './failure-drill-runner.ts',
   import.meta.url,
 );
+const remoteFailureDrillE2e = new URL('./remote-e2e.ts', import.meta.url);
 const productionBuild = new URL(
   '../../../packages/server/.next/server',
   import.meta.url,
@@ -53,6 +54,7 @@ test('production artifact structurally excludes every failure-drill control', as
     'failure-drills/session',
     'failure-drills/callback',
     'drill-session-route',
+    'drill-session-boundary',
     'PSD_EOC_FAILURE_DRILL',
   ]) {
     expect(production).not.toContain(forbidden);
@@ -70,6 +72,7 @@ if (process.env.PSD_EOC_VERIFY_BUILT_PRODUCTION === 'true') {
       'failure-drill-runner',
       'deployed-mock-worker',
       'drill-session-route',
+      'drill-session-boundary',
       'drill-callback-route',
       'PSD_EOC_FAILURE_DRILL',
       '@aws-sdk/client-cloudwatch',
@@ -96,6 +99,9 @@ test('the separate synthetic artifact adds the runner and operator route at buil
     'packages/server/app/api/failure-drills/session/route.ts',
   );
   expect(drill).toContain(
+    'packages/server/app/api/failure-drills/session/drill-session-boundary.ts',
+  );
+  expect(drill).toContain(
     'packages/server/app/api/failure-drills/callback/route.ts',
   );
   expect(drill).toContain(
@@ -105,10 +111,11 @@ test('the separate synthetic artifact adds the runner and operator route at buil
 });
 
 test('the drill workflow uses a fresh exact stack and receives no live secret namespace', async () => {
-  const [drill, deploy, runner] = await Promise.all([
+  const [drill, deploy, runner, remoteE2e] = await Promise.all([
     readFile(drillWorkflow, 'utf8'),
     readFile(deployWorkflow, 'utf8'),
     readFile(failureDrillRunner, 'utf8'),
+    readFile(remoteFailureDrillE2e, 'utf8'),
   ]);
   expect(drill).toContain('environment: failure-drill');
   expect(drill).toContain('aws cloudformation describe-stacks');
@@ -149,11 +156,25 @@ test('the drill workflow uses a fresh exact stack and receives no live secret na
   expect(orchestrator).toContain('assignPublicIp=ENABLED');
   expect(orchestrator).not.toContain('BootstrapPrivateSubnetIds');
   expect(orchestrator).not.toContain('assignPublicIp=DISABLED');
+  expect(orchestrator).toContain('manifest=$(jq -cer');
+  expect(orchestrator).toContain(
+    '> artifacts/failure-drill/manifest-pending-cleanup.json',
+  );
+  expect(orchestrator).not.toMatch(
+    /' artifacts\/failure-drill\/drill-log-messages\.json \\\s*\n\s*> artifacts\/failure-drill\/manifest-pending-cleanup\.json/u,
+  );
   expect(runner).toMatch(
     /assignPublicIp: 'DISABLED',[\s\S]*?subnets: requiredEnvironment\(\s*'PSD_EOC_FAILURE_DRILL_SUBNET_IDS'/u,
   );
   expect(runner).not.toContain("assignPublicIp: 'ENABLED'");
+  expect(runner.match(/Origin: applicationOrigin,/gu)).toHaveLength(2);
+  expect(remoteE2e).toContain(
+    'headers: { Authorization: `Bearer ${operatorToken}`, Origin: baseUrl }',
+  );
   expect(drill).toContain('cleanup-observation.json');
+  const finalizer = workflowStep(drill, 'Finalize cleanup evidence');
+  expect(finalizer).toContain('if [[ -s "$input" ]]');
+  expect(finalizer).not.toContain('if [[ -f "$input" ]]');
   expect(drill).toContain(
     'bun ../scripts/ops/failure-drills/finalize-evidence.ts',
   );

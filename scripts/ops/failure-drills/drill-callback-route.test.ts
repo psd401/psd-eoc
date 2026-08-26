@@ -46,6 +46,7 @@ describe('deployed synthetic callback route', () => {
       {
         headers: {
           Authorization: `Bearer ${ENVIRONMENT.PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN}`,
+          Origin: ENVIRONMENT.GOOGLE_OIDC_APPLICATION_ORIGIN,
         },
       },
     );
@@ -87,9 +88,45 @@ describe('deployed synthetic callback route', () => {
           {
             headers: {
               Authorization: `Bearer ${ENVIRONMENT.PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN}`,
+              Origin: ENVIRONMENT.GOOGLE_OIDC_APPLICATION_ORIGIN,
             },
           },
         ),
+      ),
+    ).toThrow('boundary is unavailable');
+  });
+
+  test('accepts the exact configured origin behind an internal proxy URL', () => {
+    expect(
+      authorizeSyntheticCallbackRequest(
+        new Request('http://169.254.172.2:3000/api/failure-drills/callback', {
+          headers: {
+            Authorization: `Bearer ${ENVIRONMENT.PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN}`,
+            Origin: ENVIRONMENT.GOOGLE_OIDC_APPLICATION_ORIGIN,
+          },
+        }),
+      ).origin,
+    ).toBe(ENVIRONMENT.GOOGLE_OIDC_APPLICATION_ORIGIN);
+  });
+
+  test('fails closed without the exact explicit origin', () => {
+    expect(() =>
+      authorizeSyntheticCallbackRequest(
+        new Request('http://169.254.172.2:3000/api/failure-drills/callback', {
+          headers: {
+            Authorization: `Bearer ${ENVIRONMENT.PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN}`,
+          },
+        }),
+      ),
+    ).toThrow('boundary is unavailable');
+    expect(() =>
+      authorizeSyntheticCallbackRequest(
+        new Request('http://169.254.172.2:3000/api/failure-drills/callback', {
+          headers: {
+            Authorization: `Bearer ${ENVIRONMENT.PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN}`,
+            Origin: 'https://example.invalid',
+          },
+        }),
       ),
     ).toThrow('boundary is unavailable');
   });

@@ -55,7 +55,7 @@ async function axeViolations(page: Page): Promise<readonly unknown[]> {
 
 const api = await request.newContext({ baseURL: baseUrl });
 const sessionResponse = await api.post('/api/failure-drills/session', {
-  headers: { Authorization: `Bearer ${operatorToken}` },
+  headers: { Authorization: `Bearer ${operatorToken}`, Origin: baseUrl },
 });
 if (sessionResponse.status() !== 201) {
   throw new Error(

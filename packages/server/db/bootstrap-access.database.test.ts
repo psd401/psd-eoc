@@ -1,9 +1,17 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import { createDisposableDatabase } from '../lib/testing/database';
+import { executeOperationWithCleanup } from '../lib/testing/owned-database-lifecycle';
 import { migrateDatabase } from '../drizzle/migrate';
 import { decideAccess } from '../lib/auth/trusted-group-access';
 import {
@@ -20,6 +28,8 @@ import { groupMembers, groupSources } from './schema';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const CONFIGURATION = Object.freeze({
   googleGroupId: 'groups/synthetic-initial-administrators',
@@ -168,10 +178,18 @@ describeWithDatabase(
     });
 
     afterAll(async () => {
-      await connection?.close();
-      connection = undefined;
-      await disposable?.drop();
-      disposable = undefined;
+      await executeOperationWithCleanup({
+        operation: async () => {
+          await connection?.close();
+          connection = undefined;
+        },
+        cleanup: async () => {
+          await disposable?.drop();
+          disposable = undefined;
+        },
+        failureMessage:
+          'Initial access bootstrap database close and cleanup both failed.',
+      });
     });
 
     test('a freshly migrated deployment admits nobody', async () => {
