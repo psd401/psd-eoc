@@ -1,6 +1,6 @@
 name: Deploy
 
-run-name: deploy ${{ inputs.rollback_image_digest || github.sha }}
+run-name: ${{ inputs.failure_drill_run_id && format('synthetic failure drill {0}', inputs.failure_drill_run_id) || format('deploy {0}', inputs.rollback_image_digest || github.sha) }}
 
 on:
   push:
@@ -9,6 +9,10 @@ on:
     inputs:
       rollback_image_digest:
         description: Previously deployed image digest to roll back to. Leave empty to build and deploy this commit.
+        required: false
+        type: string
+      failure_drill_run_id:
+        description: Run only the isolated synthetic failure drill with this lowercase identifier.
         required: false
         type: string
 
@@ -33,7 +37,7 @@ env:
 jobs:
   deploy:
     name: Build and deploy
-    if: github.repository == 'psd401/psd-eoc'
+    if: github.repository == 'psd401/psd-eoc' && inputs.failure_drill_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
@@ -497,3 +501,10 @@ jobs:
           echo "::error::$APP_PUBLIC_ORIGIN/api/health did not return 200" >&2
           echo "Roll back with: gh workflow run deploy.yml -f rollback_image_digest=${{ steps.previous.outputs.previous }}" >&2
           exit 1
+
+  failure-drill:
+    name: Run the isolated synthetic failure drill
+    if: inputs.failure_drill_run_id != ''
+    uses: ./.github/workflows/failure-drill.yml
+    with:
+      run_id: ${{ inputs.failure_drill_run_id }}

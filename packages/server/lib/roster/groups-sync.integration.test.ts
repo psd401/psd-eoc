@@ -7,7 +7,7 @@ import {
   test,
 } from 'bun:test';
 import type { GroupSource, RosterPopulation } from '@psd-eoc/contracts';
-import { sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -17,7 +17,22 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import { seedDatabase } from '../../db/seed';
+import {
+  channelConfigurations,
+  integrationStatuses,
+  userRoles,
+  users,
+} from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
+import type { TrustedCapabilityInvocation } from '../capabilities/engine';
+import {
+  createDrizzleEventCapabilityStore,
+  executeEventCapability,
+} from '../capabilities/events';
+import {
+  createDrizzleStartFlowCapabilityStore,
+  executeStartFlowCapability,
+} from '../capabilities/start';
 import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
@@ -66,6 +81,13 @@ interface DatabaseCleanupLatch {
 const DATABASE_NAME_PATTERN = /^psd_eoc_i88_roster_[a-f0-9]{32}_test$/u;
 
 const SYNC_TIME = '2026-08-08T16:00:00.000Z';
+const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
+const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
+const DRILL_HUMAN_ACTOR = Object.freeze({
+  kind: 'human' as const,
+  userId: randomUUID(),
+  sessionId: randomUUID(),
+});
 const CONFIGURATION = Object.freeze({
   id: '00000000-0000-4000-8000-000000000040',
   version: 1,
@@ -325,6 +347,20 @@ function syncContext(label: string): RosterSyncCapabilityContext {
   });
 }
 
+function drillHumanInvocation(
+  mutation: TrustedCapabilityInvocation['mutation'],
+): TrustedCapabilityInvocation {
+  return {
+    actor: DRILL_HUMAN_ACTOR,
+    connectivityEpochId: randomUUID(),
+    mutation,
+    requestId: randomUUID(),
+    scope: { facilityScope: { kind: 'district' } },
+    serverTime: new Date(),
+    source: 'web',
+  };
+}
+
 function dependencies(
   database: PostgresDatabase,
   adapter: RosterGroupsAdapter,
@@ -355,6 +391,106 @@ async function latestSyntheticSnapshot(
     throw new Error('The seeded synthetic roster snapshot is missing.');
   }
   return Object.freeze(row);
+}
+
+async function appendReadySyntheticSnapshotFixture(
+  database: PostgresDatabase,
+): Promise<Readonly<{ id: string; version: number }>> {
+  const sourceRows = await database.execute<{ id: string }>(sql`
+    select snapshot.id::text as id
+    from roster_snapshots as snapshot
+    where snapshot.population = 'synthetic'::roster_population
+      and exists (
+        select 1 from roster_endpoints as endpoint
+        where endpoint.roster_snapshot_id = snapshot.id
+          and endpoint.channel = 'push'::notification_channel
+          and endpoint.status = 'active'::endpoint_status
+      )
+      and exists (
+        select 1 from roster_endpoints as endpoint
+        where endpoint.roster_snapshot_id = snapshot.id
+          and endpoint.channel = 'email'::notification_channel
+          and endpoint.status = 'active'::endpoint_status
+      )
+    order by snapshot.version
+    limit 1
+  `);
+  const sourceSnapshotId = sourceRows[0]?.id;
+  if (sourceSnapshotId === undefined) {
+    throw new Error(
+      'The synthetic seed is missing a complete push-and-email snapshot.',
+    );
+  }
+  const fixture = Object.freeze({
+    id: randomUUID(),
+    version: (await latestSyntheticSnapshot(database)).version + 1,
+  });
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into roster_snapshots (
+        id, version, population, complete,
+        source_configuration_id, source_configuration_version,
+        sync_started_at, captured_at
+      )
+      select
+        ${fixture.id}::uuid, ${fixture.version}, population, complete,
+        source_configuration_id, source_configuration_version,
+        ${SYNC_TIME}::timestamptz, ${SYNC_TIME}::timestamptz
+      from roster_snapshots
+      where id = ${sourceSnapshotId}::uuid
+    `);
+    await transaction.execute(sql`
+      insert into roster_snapshot_facilities (roster_snapshot_id, facility_id)
+      select ${fixture.id}::uuid, facility_id
+      from roster_snapshot_facilities
+      where roster_snapshot_id = ${sourceSnapshotId}::uuid
+    `);
+    await transaction.execute(sql`
+      insert into roster_snapshot_sources (
+        roster_snapshot_id, population, group_source_id,
+        group_source_kind, group_purpose, completion_kind
+      )
+      select
+        ${fixture.id}::uuid, population, group_source_id,
+        group_source_kind, group_purpose, completion_kind
+      from roster_snapshot_sources
+      where roster_snapshot_id = ${sourceSnapshotId}::uuid
+    `);
+    await transaction.execute(sql`
+      insert into roster_recipients (
+        id, roster_snapshot_id, population, google_subject,
+        staff_email, display_name
+      )
+      select
+        id, ${fixture.id}::uuid, population, google_subject,
+        staff_email, display_name
+      from roster_recipients
+      where roster_snapshot_id = ${sourceSnapshotId}::uuid
+    `);
+    await transaction.execute(sql`
+      insert into roster_recipient_group_sources (
+        roster_snapshot_id, recipient_id, population,
+        group_source_id, group_source_kind, group_purpose
+      )
+      select
+        ${fixture.id}::uuid, recipient_id, population,
+        group_source_id, group_source_kind, group_purpose
+      from roster_recipient_group_sources
+      where roster_snapshot_id = ${sourceSnapshotId}::uuid
+    `);
+    await transaction.execute(sql`
+      insert into roster_endpoints (
+        id, roster_snapshot_id, recipient_id, population, channel,
+        status, captured_at, platform, token, email, phone_number
+      )
+      select
+        id, ${fixture.id}::uuid, recipient_id, population, channel,
+        status, ${SYNC_TIME}::timestamptz, platform, token, email, phone_number
+      from roster_endpoints
+      where roster_snapshot_id = ${sourceSnapshotId}::uuid
+    `);
+  });
+  return fixture;
 }
 
 async function syntheticSnapshotCount(
@@ -777,9 +913,9 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     });
   });
 
-  test('records a partial provider failure without replacing the latest snapshot', async () => {
+  test('records a partial provider failure then activates from the retained last-good snapshot', async () => {
     const database = databaseConnection().db;
-    const latestBefore = await latestSyntheticSnapshot(database);
+    const latestBefore = await appendReadySyntheticSnapshotFixture(database);
     const snapshotCountBefore = await syntheticSnapshotCount(database);
     const completeAdapter = createCompleteAdapter();
     const partialAdapter: RosterGroupsAdapter = Object.freeze({
@@ -866,6 +1002,148 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
         occurredAt: SYNC_TIME,
       },
     ]);
+
+    const integrationIds = ['expo-push', 'ses-email'] as const;
+    const originalConfigurations = await database
+      .select()
+      .from(channelConfigurations)
+      .where(inArray(channelConfigurations.integrationId, integrationIds));
+    if (originalConfigurations.length !== integrationIds.length) {
+      throw new Error(
+        'The synthetic seed is missing push/email channel configurations.',
+      );
+    }
+    const statusTime = new Date();
+    const mockedStatuses = integrationIds.map((integrationId) => ({
+      id: randomUUID(),
+      integrationId,
+    }));
+    await database.insert(integrationStatuses).values(
+      mockedStatuses.map((status) => ({
+        id: status.id,
+        integrationId: status.integrationId,
+        label: 'mocked' as const,
+        verifiedAt: null,
+        verifiedByUserId: null,
+        authorizationReference: null,
+        reasonCode: null,
+        observedAt: statusTime,
+      })),
+    );
+    for (const status of mockedStatuses) {
+      await database
+        .update(channelConfigurations)
+        .set({
+          changedAt: statusTime,
+          enabled: true,
+          statusId: status.id,
+          statusLabel: 'mocked',
+        })
+        .where(eq(channelConfigurations.integrationId, status.integrationId));
+    }
+    await database.insert(users).values({
+      id: DRILL_HUMAN_ACTOR.userId,
+      googleSubject: `synthetic-roster-drill-${DRILL_HUMAN_ACTOR.userId}`,
+      email: `roster-drill-${DRILL_HUMAN_ACTOR.userId}@example.invalid`,
+      displayName: 'Synthetic Roster Drill Operator',
+      facilityScopeKind: 'district',
+      createdAt: new Date(),
+      disabledAt: null,
+    });
+    await database.insert(userRoles).values({
+      userId: DRILL_HUMAN_ACTOR.userId,
+      role: 'admin',
+    });
+    try {
+      const preview = await executeStartFlowCapability(
+        'create-activation-preview',
+        {
+          eventTypeVersion: {
+            id: SYNTHETIC_DRILL_VERSION_ID,
+            templateMode: 'drill',
+          },
+          facilityId: SYNTHETIC_FACILITY_ID,
+          kind: 'drill',
+          rosterPopulation: 'synthetic',
+          templateMode: 'drill',
+        },
+        drillHumanInvocation(null),
+        createDrizzleStartFlowCapabilityStore(database),
+      );
+      expect(preview.rosterSnapshotId).toBe(latestBefore.id);
+      expect(preview.rosterPopulation).toBe('synthetic');
+      expect(preview.templateMode).toBe('drill');
+      const started = await executeEventCapability(
+        'start-event',
+        {
+          activationPreviewId: preview.id,
+          activeEventDecision: {
+            activeEventIdsSeen: preview.activeEventIds,
+            decision: 'start-new',
+          },
+          source: 'activation-preview',
+        },
+        drillHumanInvocation({
+          humanConfirmationId: null,
+          idempotencyKey: `failure-drill-roster-activation:${randomUUID()}`,
+          transport: {
+            csrfVerified: true,
+            interaction: 'explicit-user-submit',
+            kind: 'web-interactive',
+            method: 'POST',
+          },
+        }),
+        createDrizzleEventCapabilityStore(database),
+      );
+      expect(started.event).toMatchObject({
+        kind: 'drill',
+        rosterSnapshotId: latestBefore.id,
+        rosterPopulation: 'synthetic',
+        status: 'active',
+        templateMode: 'drill',
+      });
+      expect(started.notificationIntent).toMatchObject({
+        rosterSnapshotId: latestBefore.id,
+        rosterPopulation: 'synthetic',
+        templateMode: 'drill',
+      });
+      if (
+        process.env.PSD_EOC_FAILURE_DRILL_CAPTURE_SCENARIO ===
+        'roster-sync-failure-during-activation'
+      ) {
+        console.log(
+          JSON.stringify({
+            kind: 'failure-drill-focused-result',
+            scenarioId: 'roster-sync-failure-during-activation',
+            expectedSideEffects: [],
+            observedSideEffects: [],
+            facts: {
+              activatedEventId: started.event.id,
+              partialSyncResultId: result.id,
+              retainedRosterSnapshotId: latestBefore.id,
+              retainedRosterSnapshotVersion: latestBefore.version,
+            },
+          }),
+        );
+      }
+    } finally {
+      for (const configuration of originalConfigurations) {
+        await database
+          .update(channelConfigurations)
+          .set({
+            changedAt: configuration.changedAt,
+            enabled: configuration.enabled,
+            statusId: configuration.statusId,
+            statusLabel: configuration.statusLabel,
+          })
+          .where(
+            eq(
+              channelConfigurations.integrationId,
+              configuration.integrationId,
+            ),
+          );
+      }
+    }
   });
 
   test('rejects a delayed older source configuration after a newer version publishes', async () => {

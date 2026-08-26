@@ -2033,3 +2033,290 @@ describe('configured-unverified provider readiness boundary', () => {
     }
   });
 });
+
+describe('isolated failure-drill deployment profile', () => {
+  const runId = 'issue-31-a1b2c3d4';
+  const drillPrefix = `psd-eoc-drill-${runId}`;
+  const syntheticTenantContext: Readonly<Record<string, unknown>> = {
+    'psdEoc:applicationOrigin': `https://${runId}.example.invalid`,
+    'psdEoc:displayTimeZone': 'America/New_York',
+    'psdEoc:facilities': [
+      { code: 'SYNTHETIC', name: 'Synthetic Failure Drill Campus' },
+    ],
+    'psdEoc:hostedDomain': 'example.invalid',
+    'psdEoc:iosBundleId': 'invalid.example.failure-drill',
+    'psdEoc:neighborhoods': [],
+    'psdEoc:organizationName': 'Synthetic Failure Drill District',
+    'psdEoc:syntheticGroups': [
+      {
+        displayName: 'Synthetic failure-drill staff',
+        facilityCode: 'SYNTHETIC',
+        members: ['operator@example.invalid'],
+      },
+    ],
+  };
+  const drillApp = new App();
+  const drillStack = new PsdEocStack(drillApp, 'FailureDrillVerification', {
+    deploymentProfile: { kind: 'failure-drill', runId },
+    failureDrillContext: {
+      tryGetContext: (key) => syntheticTenantContext[key],
+    },
+    deploymentTarget: {
+      ...currentDeploymentTarget,
+      monitoringRunbookBaseUrl:
+        'https://operations.example.invalid/failure-drills',
+      sesFromAddress: 'alerts@example.invalid',
+      sesIdentityDomain: 'example.invalid',
+    },
+    env: { account: AWS_ACCOUNT, region: AWS_REGION },
+    stackName: `FailureDrill-${runId}`,
+  });
+  const drillTemplate = Template.fromStack(drillStack);
+  const drillJson = asRecord(drillTemplate.toJSON());
+  const drillResources = asRecord(drillJson.Resources);
+  const serializedDrill = JSON.stringify(drillJson);
+
+  it('keeps the production template structurally free of drill controls', () => {
+    const serializedProduction = JSON.stringify(synthesized);
+    for (const forbidden of [
+      'FailureDrillRunId',
+      'FailureDrillOperatorToken',
+      'PSD_EOC_FAILURE_DRILL',
+      '/api/failure-drills/',
+      'failure-drill-runner.ts',
+    ]) {
+      expect(serializedProduction).not.toContain(forbidden);
+    }
+  });
+
+  it('uses disjoint synthetic resource identities and no provider authority', () => {
+    expect(serializedDrill).toContain(drillPrefix);
+    for (const productionIdentity of [
+      DATABASE_IDENTIFIER,
+      HEALTH_QUEUE_NAME,
+      EMAIL_QUEUE_NAME,
+      EMAIL_DEAD_LETTER_QUEUE_NAME,
+      SERVER_REPOSITORY_NAME,
+      SES_CONFIGURATION_SET_NAME,
+      SES_EVENT_TOPIC_NAME,
+    ]) {
+      expect(serializedDrill).not.toContain(`"${productionIdentity}"`);
+    }
+    for (const providerAction of [
+      'ses:SendEmail',
+      'ses:SendRawEmail',
+      'sms-voice:SendTextMessage',
+      'mobiletargeting:SendMessages',
+    ]) {
+      expect(serializedDrill).not.toContain(providerAction);
+    }
+    expect(
+      Object.values(drillResources).some(
+        (resource) => asRecord(resource).Type === 'AWS::SES::ConfigurationSet',
+      ),
+    ).toBe(false);
+  });
+
+  it('deploys one exact mock-only drill runtime with disposable state', () => {
+    const parameters = asRecord(drillJson.Parameters);
+    expect(Object.keys(parameters)).toContain('FailureDrillOperatorToken');
+    expect(Object.keys(parameters)).toContain('FailureDrillApplicationOrigin');
+    expect(Object.keys(parameters)).not.toContain('GoogleOauthSecretArn');
+    expect(Object.keys(parameters)).not.toContain('GoogleGroupsSecretArn');
+    expect(Object.keys(parameters)).not.toContain('OperationsTeamAlarmEmail');
+    expect(Object.keys(parameters)).not.toContain(
+      'OperationsTeamAlarmSmsNumber',
+    );
+
+    const taskDefinitions = Object.values(
+      drillTemplate.findResources('AWS::ECS::TaskDefinition'),
+    ).map((resource) => asRecord(resource));
+    const drillTask = taskDefinitions.find((resource) =>
+      JSON.stringify(resource).includes('failure-drill-runner.ts'),
+    );
+    expect(drillTask).toBeDefined();
+    expect(JSON.stringify(drillTask)).toContain(
+      'PSD_EOC_FAILURE_DRILL_PROVIDER_MODE',
+    );
+    expect(JSON.stringify(drillTask)).toContain('mocked');
+    expect(JSON.stringify(drillTask)).toContain(
+      'PSD_EOC_FAILURE_DRILL_ROSTER_POPULATION',
+    );
+    expect(JSON.stringify(drillTask)).toContain('synthetic');
+
+    const database = Object.values(
+      drillTemplate.findResources('AWS::RDS::DBCluster'),
+    ).map(asRecord);
+    expect(database).toHaveLength(1);
+    expect(database[0]?.DeletionPolicy).toBe('Delete');
+    expect(
+      properties(database[0] as SynthesizedResource).DeletionProtection,
+    ).toBe(false);
+    expect(
+      Object.values(drillTemplate.findResources('AWS::RDS::DBInstance')),
+    ).toHaveLength(2);
+    const alarms = Object.values(
+      drillTemplate.findResources('AWS::CloudWatch::Alarm'),
+    ).map((resource) => properties(asRecord(resource)));
+    expect(alarms).toHaveLength(6);
+    expect(alarms.every((alarm) => alarm.ActionsEnabled === false)).toBe(true);
+    expect(alarms.every((alarm) => alarm.AlarmActions === undefined)).toBe(
+      true,
+    );
+    const dashboards = Object.values(
+      drillTemplate.findResources('AWS::CloudWatch::Dashboard'),
+    ).map((resource) => properties(asRecord(resource)));
+    expect(dashboards).toHaveLength(1);
+    expect(JSON.stringify(dashboards[0])).toContain(drillPrefix);
+    expect(JSON.stringify(dashboards[0])).toContain(
+      'Synthetic dead-letter queue reconciliation',
+    );
+  });
+
+  it('scopes worker fault authority and mock side effects to this run', () => {
+    const queues = Object.values(
+      drillTemplate.findResources('AWS::SQS::Queue'),
+    ).map((resource) => properties(asRecord(resource)));
+    const mockProvider = queues.find(
+      (queue) => queue.QueueName === `${drillPrefix}-mock-provider.fifo`,
+    );
+    expect(mockProvider).toBeDefined();
+    expect(mockProvider?.FifoQueue).toBe(true);
+    expect(mockProvider?.ContentBasedDeduplication).toBe(false);
+
+    const taskDefinitions = Object.values(
+      drillTemplate.findResources('AWS::ECS::TaskDefinition'),
+    ).map((resource) => asRecord(resource));
+    const workerTask = taskDefinitions.find((resource) =>
+      JSON.stringify(resource).includes('deployed-mock-worker.ts'),
+    );
+    expect(workerTask).toBeDefined();
+    const workerSerialized = JSON.stringify(workerTask);
+    expect(workerSerialized).toContain('failure-drill-worker');
+    expect(workerSerialized).toContain('DATABASE_PASSWORD');
+    expect(workerSerialized).toContain('DATABASE_USERNAME');
+    expect(workerSerialized).not.toContain('DATABASE_ADMIN');
+    expect(workerSerialized).not.toContain(
+      'PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN',
+    );
+
+    const policyEntries = Object.entries(
+      drillTemplate.findResources('AWS::IAM::Policy'),
+    );
+    const statements = policyEntries.flatMap(([, resource]) =>
+      asArray(
+        asRecord(properties(asRecord(resource)).PolicyDocument).Statement,
+      ).map(asRecord),
+    );
+    const roleEntries = Object.entries(
+      drillTemplate.findResources('AWS::IAM::Role'),
+    );
+    const roleId = (description: string) => {
+      const role = roleEntries.find(([, resource]) =>
+        String(properties(asRecord(resource)).Description).includes(
+          description,
+        ),
+      );
+      if (role === undefined) throw new Error(`Missing drill ${description}.`);
+      return role[0];
+    };
+    const statementsForRole = (logicalId: string) =>
+      policyEntries
+        .filter(([, resource]) =>
+          JSON.stringify(properties(asRecord(resource)).Roles).includes(
+            logicalId,
+          ),
+        )
+        .flatMap(([, resource]) =>
+          asArray(
+            asRecord(properties(asRecord(resource)).PolicyDocument).Statement,
+          ).map(asRecord),
+        );
+    const workerRoleId = roleId('Writes only one-run mock-provider FIFO');
+    const workerStatements = statementsForRole(workerRoleId);
+    expect(allAllowedActions(workerStatements)).toEqual(['sqs:SendMessage']);
+    expect(JSON.stringify(workerStatements)).toContain(
+      'FailureDrillMockProviderQueue',
+    );
+    for (const forbidden of ['ecs:', 'iam:', 'rds:', 'secretsmanager:']) {
+      expect(
+        allAllowedActions(workerStatements).some((action) =>
+          action.startsWith(forbidden),
+        ),
+      ).toBe(false);
+    }
+
+    const orchestratorRoleId = roleId(
+      'Fault authority restricted to this disposable synthetic stack',
+    );
+    const orchestratorStatements = statementsForRole(orchestratorRoleId);
+    const orchestratorRunTask = orchestratorStatements.find((statement) =>
+      asStringArray(statement.Action).includes('ecs:RunTask'),
+    );
+    expect(JSON.stringify(orchestratorRunTask?.Resource)).toContain(
+      'FailureDrillWorkerTaskDefinition',
+    );
+    const orchestratorPassRole = orchestratorStatements.find((statement) =>
+      asStringArray(statement.Action).includes('iam:PassRole'),
+    );
+    const passTargets = JSON.stringify(orchestratorPassRole?.Resource);
+    expect(passTargets).toContain('FailureDrillWorkerTaskExecutionRole');
+    expect(passTargets).toContain('FailureDrillWorkerTaskRole');
+    expect(passTargets).not.toContain(`"${orchestratorRoleId}"`);
+
+    const statementsFor = (action: string) =>
+      statements.filter((statement) =>
+        asStringArray(statement.Action).includes(action),
+      );
+    const runTask = statementsFor('ecs:RunTask');
+    expect(runTask.length).toBeGreaterThan(0);
+    expect(
+      runTask.every(
+        (statement) =>
+          statement.Resource !== '*' &&
+          /task-definition|TaskDefinition/u.test(
+            JSON.stringify(statement.Resource),
+          ),
+      ),
+    ).toBe(true);
+    expect(
+      runTask.every((statement) =>
+        JSON.stringify(statement.Condition).includes('BootstrapEcsCluster'),
+      ),
+    ).toBe(true);
+    const observeTasks = statementsFor('ecs:DescribeTasks');
+    expect(observeTasks.length).toBeGreaterThan(0);
+    expect(
+      observeTasks.every(
+        (statement) =>
+          statement.Resource !== '*' &&
+          JSON.stringify(statement.Resource).includes(
+            `${drillPrefix}-cluster/*`,
+          ),
+      ),
+    ).toBe(true);
+    const listTasks = statementsFor('ecs:ListTasks');
+    expect(listTasks).toHaveLength(1);
+    expect(listTasks[0]?.Resource).toBe('*');
+    expect(JSON.stringify(listTasks[0]?.Condition)).toContain(
+      'BootstrapEcsCluster',
+    );
+  });
+
+  it('labels the App Runner boundary synthetic and keeps its origin disjoint', () => {
+    const services = Object.values(
+      drillTemplate.findResources('AWS::AppRunner::Service'),
+    ).map(asRecord);
+    expect(services).toHaveLength(1);
+    const service = services[0] as SynthesizedResource;
+    const serviceProperties = properties(service);
+    expect(serviceProperties.ServiceName).toBe(drillPrefix);
+    const runtime = JSON.stringify(serviceProperties.SourceConfiguration);
+    expect(runtime).toContain('AWS_ACCOUNT_ID');
+    expect(runtime).toContain('FailureDrillApplicationOrigin');
+    expect(runtime).toContain('PSD_EOC_FAILURE_DRILL_DEPLOYMENT_CLASS');
+    expect(runtime).toContain('non-production');
+    expect(runtime).toContain('PSD_EOC_FAILURE_DRILL_PROVIDER_MODE');
+    expect(runtime).toContain('mocked');
+  });
+});

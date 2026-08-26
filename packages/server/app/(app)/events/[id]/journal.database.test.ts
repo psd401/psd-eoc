@@ -10,6 +10,8 @@ import {
 } from 'bun:test';
 import {
   ActivationPreviewSchema,
+  ChannelAttemptSchema,
+  DispatchBatchSchema,
   EventTransitionSchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
   IntegrationStatusSchema,
@@ -19,6 +21,10 @@ import {
 } from '@psd-eoc/contracts';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 
+import {
+  createDrizzleDeliveryEvidenceStore,
+  type AttemptEvidenceInput,
+} from '../../../../app/api/internal/delivery-state/runtime';
 import {
   createDatabaseClient,
   type Database,
@@ -81,6 +87,10 @@ import {
 import { buildPhotoChecksumExportQuery } from '../../../../lib/media/repository';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
 import { requireSyntheticTestDatabaseUrl } from '../../../../lib/testing/database';
+import {
+  createDrizzleReconciliationStore,
+  executeReconcileDeliveryAttempts,
+} from '../../../../lib/notify/reconcile';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -191,6 +201,11 @@ async function insertSyntheticAdminSession(
     createdAt: identityCreatedAt,
     expiresAt: new Date(fixtureTime.getTime() + 24 * 60 * 60_000),
     revokedAt: null,
+  });
+  await database.insert(connectivityEpochs).values({
+    id: randomUUID(),
+    sessionId: ADMIN_ACTOR.sessionId,
+    establishedAt: fixtureTime,
   });
 }
 
@@ -1259,7 +1274,7 @@ describeWithDatabase('event journal database guarantees', () => {
     );
   });
 
-  test('records synthetic all-clear send and close as distinct append-only lifecycle facts', async () => {
+  test('records synthetic all-clear, delayed callback recovery, and close as append-only facts', async () => {
     const ids = syntheticFixtureIds();
     const rollbackFixture = new Error(
       'Rollback the isolated drill/synthetic lifecycle fixture.',
@@ -1466,6 +1481,141 @@ describeWithDatabase('event journal database guarantees', () => {
           eventKind: 'test',
           templateMode: 'drill',
         });
+        const activationIntent = started.notificationIntent;
+        if (activationIntent === null) {
+          throw new Error(
+            'Synthetic activation omitted its notification intent.',
+          );
+        }
+        const pushPlan = activationIntent.channels.find(
+          (channel) => channel.channel === 'push',
+        );
+        const [[activationOutbox], [pushChannelRow], [pushEndpoint]] =
+          await Promise.all([
+            transaction
+              .select({ id: outbox.id })
+              .from(outbox)
+              .where(eq(outbox.intentId, activationIntent.id))
+              .limit(1),
+            transaction
+              .select({
+                integrationStatusId:
+                  notificationIntentChannels.integrationStatusId,
+              })
+              .from(notificationIntentChannels)
+              .where(
+                and(
+                  eq(notificationIntentChannels.intentId, activationIntent.id),
+                  eq(notificationIntentChannels.channel, 'push'),
+                ),
+              )
+              .limit(1),
+            transaction
+              .select({
+                id: rosterEndpoints.id,
+                recipientId: rosterEndpoints.recipientId,
+              })
+              .from(rosterEndpoints)
+              .where(
+                and(
+                  eq(
+                    rosterEndpoints.rosterSnapshotId,
+                    activationIntent.rosterSnapshotId,
+                  ),
+                  eq(rosterEndpoints.channel, 'push'),
+                ),
+              )
+              .orderBy(asc(rosterEndpoints.id))
+              .limit(1),
+          ]);
+        if (
+          pushPlan === undefined ||
+          activationOutbox === undefined ||
+          pushChannelRow === undefined ||
+          pushEndpoint === undefined
+        ) {
+          throw new Error(
+            'The synthetic activation omitted its durable push attempt anchors.',
+          );
+        }
+        const activationBatch = DispatchBatchSchema.parse({
+          id: randomUUID(),
+          intentId: activationIntent.id,
+          eventId,
+          facilityId: started.event.facilityId,
+          eventKind: activationIntent.eventKind,
+          templateMode: activationIntent.templateMode,
+          purpose: activationIntent.purpose,
+          eventTypeVersion: activationIntent.eventTypeVersion,
+          rosterSnapshotId: activationIntent.rosterSnapshotId,
+          rosterPopulation: activationIntent.rosterPopulation,
+          requestId: activationIntent.requestId,
+          authorization: activationIntent.authorization,
+          channel: pushPlan.channel,
+          renderedMessage: pushPlan.renderedMessage,
+          integrationStatus: pushPlan.integrationStatus,
+          sequence: 1,
+          endpointCount: pushPlan.endpointCount,
+          createdAt: activationIntent.createdAt,
+        });
+        await transaction.insert(dispatchBatches).values({
+          id: activationBatch.id,
+          outboxId: activationOutbox.id,
+          intentId: activationBatch.intentId,
+          eventId: activationBatch.eventId,
+          eventKind: activationBatch.eventKind,
+          templateMode: activationBatch.templateMode,
+          purpose: activationBatch.purpose,
+          eventTypeVersionId: activationBatch.eventTypeVersion.id,
+          rosterSnapshotId: activationBatch.rosterSnapshotId,
+          rosterPopulation: activationBatch.rosterPopulation,
+          requestId: activationBatch.requestId,
+          authorization: activationBatch.authorization,
+          channel: activationBatch.channel,
+          renderedMessage: activationBatch.renderedMessage,
+          integrationStatusId: pushChannelRow.integrationStatusId,
+          integrationId: activationBatch.integrationStatus.integrationId,
+          integrationLabel: activationBatch.integrationStatus.label,
+          sequence: activationBatch.sequence,
+          endpointCount: activationBatch.endpointCount,
+          createdAt: new Date(activationBatch.createdAt),
+        });
+        const activationAttempt = ChannelAttemptSchema.parse({
+          id: randomUUID(),
+          batchId: activationBatch.id,
+          intentId: activationBatch.intentId,
+          eventId: activationBatch.eventId,
+          eventKind: activationBatch.eventKind,
+          templateMode: activationBatch.templateMode,
+          purpose: activationBatch.purpose,
+          eventTypeVersion: activationBatch.eventTypeVersion,
+          rosterSnapshotId: activationBatch.rosterSnapshotId,
+          rosterPopulation: activationBatch.rosterPopulation,
+          recipientId: pushEndpoint.recipientId,
+          endpointId: pushEndpoint.id,
+          channel: activationBatch.channel,
+          attemptNumber: 1,
+          attemptedAt: new Date().toISOString(),
+        });
+        const evidenceStore = createDrizzleDeliveryEvidenceStore(
+          transactionalDatabase,
+        );
+        const attemptedInput: AttemptEvidenceInput = {
+          subject: {
+            kind: 'attempt',
+            attemptId: activationAttempt.id,
+          },
+          state: 'attempted',
+          provider: null,
+          providerReference: null,
+          proof: null,
+          reasonCode: null,
+          diagnosticDigest: null,
+        };
+        const attemptedEvidence = await evidenceStore.recordAttemptEvidence({
+          attempt: activationAttempt,
+          evidence: attemptedInput,
+        });
 
         const previewIdempotencyKey = `issue77-preview-${randomUUID()}`;
         const previewInvocation = humanMutationInvocation(
@@ -1629,6 +1779,73 @@ describeWithDatabase('event journal database guarantees', () => {
         );
         expect(allClearReplay).toEqual(allClear);
 
+        const journalBeforeDelayedCallback = await transaction
+          .select({ id: journalEntries.id })
+          .from(journalEntries)
+          .where(eq(journalEntries.eventId, eventId));
+        const acceptedInput: AttemptEvidenceInput = {
+          subject: {
+            kind: 'attempt',
+            attemptId: activationAttempt.id,
+          },
+          state: 'provider-accepted',
+          provider: 'mock-expo',
+          providerReference: `synthetic-delayed-callback:${activationAttempt.id}`,
+          proof: null,
+          reasonCode: null,
+          diagnosticDigest: null,
+        };
+        const acceptedEvidence = await evidenceStore.recordAttemptEvidence({
+          attempt: activationAttempt,
+          evidence: acceptedInput,
+        });
+        await Bun.sleep(1_100);
+        const reconciliation = await executeReconcileDeliveryAttempts(
+          { intentId: activationIntent.id, limit: 10 },
+          {
+            store: createDrizzleReconciliationStore(transactionalDatabase, {
+              staleAfterMilliseconds: 1_000,
+            }),
+            requestId: randomUUID(),
+            idempotencyKey: `failure-drill-delayed-reconciliation:${activationAttempt.id}`,
+          },
+        );
+        expect(reconciliation.examinedAttemptCount).toBe(1);
+        expect(reconciliation.appendedEvidence).toHaveLength(1);
+        expect(reconciliation.appendedEvidence[0]).toMatchObject({
+          subject: {
+            kind: 'attempt',
+            attemptId: activationAttempt.id,
+          },
+          sequence: 3,
+          previousEvidenceId: acceptedEvidence.id,
+          state: 'unknown',
+          provider: 'mock-expo',
+        });
+        const journalAfterDelayedCallback = await transaction
+          .select({ id: journalEntries.id })
+          .from(journalEntries)
+          .where(eq(journalEntries.eventId, eventId));
+        expect(journalAfterDelayedCallback).toEqual(
+          journalBeforeDelayedCallback,
+        );
+        const [eventAfterDelayedCallback] = await transaction
+          .select({
+            status: events.status,
+            kind: events.kind,
+            templateMode: events.templateMode,
+            rosterPopulation: events.rosterPopulation,
+          })
+          .from(events)
+          .where(eq(events.id, eventId))
+          .limit(1);
+        expect(eventAfterDelayedCallback).toEqual({
+          status: 'all-clear',
+          kind: 'test',
+          templateMode: 'drill',
+          rosterPopulation: 'synthetic',
+        });
+
         const closeInput = { eventId };
         const closeIdempotencyKey = `issue16-close-${randomUUID()}`;
         const closed = await executeEventCapability(
@@ -1769,6 +1986,32 @@ describeWithDatabase('event journal database guarantees', () => {
         expect(
           eventOutboxPurposes.map(({ purpose }) => purpose).sort(),
         ).toEqual(['activation', 'all-clear']);
+        if (
+          process.env.PSD_EOC_FAILURE_DRILL_CAPTURE_SCENARIO ===
+          'delayed-callback-after-all-clear'
+        ) {
+          const identity = `attempt:${activationAttempt.id}:endpoint:${activationAttempt.endpointId}`;
+          console.log(
+            JSON.stringify({
+              kind: 'failure-drill-focused-result',
+              scenarioId: 'delayed-callback-after-all-clear',
+              expectedSideEffects: [identity],
+              observedSideEffects: [identity],
+              facts: {
+                acceptedEvidenceId: acceptedEvidence.id,
+                allClearTransitionId: allClear.transition.id,
+                eventId,
+                journalCardinalityAfterCallback:
+                  journalAfterDelayedCallback.length,
+                journalCardinalityBeforeCallback:
+                  journalBeforeDelayedCallback.length,
+                reconciliationEvidenceId:
+                  reconciliation.appendedEvidence[0]?.id,
+                attemptedEvidenceId: attemptedEvidence.id,
+              },
+            }),
+          );
+        }
       } finally {
         for (const configuration of originalConfigurations) {
           await transaction
@@ -1785,7 +2028,12 @@ describeWithDatabase('event journal database guarantees', () => {
             );
         }
       }
-      throw rollbackFixture;
+      if (
+        process.env.PSD_EOC_FAILURE_DRILL_CAPTURE_SCENARIO !==
+        'delayed-callback-after-all-clear'
+      ) {
+        throw rollbackFixture;
+      }
     });
     await transactionResult.catch((error: unknown) => {
       if (error !== rollbackFixture) {

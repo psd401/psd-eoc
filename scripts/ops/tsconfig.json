@@ -4,6 +4,6 @@
     "lib": ["ES2022", "DOM"],
     "types": ["bun"]
   },
-  "include": ["*.ts"],
+  "include": ["*.ts", "failure-drills/**/*.ts"],
   "exclude": ["node_modules", "appstore", "sms-registration"]
 }

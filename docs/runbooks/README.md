@@ -31,6 +31,7 @@ EOC is not a 911 service.
 - [Go-live procedure](go-live.md)
 - [Mobile release and rollback](release.md)
 - [Backup inspection and isolated restore](backup-restore.md)
+- [Synthetic failure-recovery drill](failure-recovery-drill.md)
 
 ## Alarm response
 

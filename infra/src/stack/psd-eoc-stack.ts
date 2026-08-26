@@ -40,38 +40,26 @@ import {
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
 } from '../config';
-import { configureInfrastructureMonitoring } from '../monitoring';
 import {
-  DATABASE_NAME,
+  configureFailureDrillMonitoring,
+  configureInfrastructureMonitoring,
+} from '../monitoring';
+import {
   DATABASE_PORT,
   DATABASE_SSL_ROOT_CERT,
-  BOOTSTRAP_LOG_GROUP_NAME,
-  DATABASE_IDENTIFIER,
-  DATA_CLASSIFICATION,
-  EMAIL_DEAD_LETTER_QUEUE_NAME,
-  EMAIL_QUEUE_NAME,
-  DELIVERY_DEAD_LETTER_QUEUE_NAME,
   DELIVERY_QUEUE_MAX_RECEIVES,
-  DELIVERY_QUEUE_NAME,
-  EMAIL_WORKER_LOG_GROUP_NAME,
-  PUSH_DEAD_LETTER_QUEUE_NAME,
-  PUSH_QUEUE_NAME,
-  SMS_DEAD_LETTER_QUEUE_NAME,
-  SMS_QUEUE_NAME,
-  DEPLOYMENT_ENVIRONMENT,
   HEALTH_PATH,
   IMAGE_DIGEST_SENTINEL,
-  HEALTH_QUEUE_NAME,
-  SERVER_REPOSITORY_NAME,
+  PRODUCTION_DEPLOYMENT_PROFILE,
   SES_VERIFICATION_REFERENCE,
   readDeploymentIdentity,
   readFacilityContext,
-  readSyntheticGroupContext,
   readNeighborhoodContext,
+  readSyntheticGroupContext,
+  stackResourceConfiguration,
 } from './config';
-import type { DeploymentTarget } from './config';
+import type { DeploymentProfile, DeploymentTarget } from './config';
 
-const SECRET_PREFIX = '/psd-eoc';
 const APP_RUNNER_PORT = '3000';
 const APPLICATION_SUBNET_GROUP_NAME = 'Application';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
@@ -81,6 +69,15 @@ const EMAIL_QUEUE_MAX_RECEIVES = 5;
 export interface PsdEocStackProps extends StackProps {
   /** Cloud/provider identity read from deployment configuration. */
   readonly deploymentTarget: DeploymentTarget;
+  /** Synth-time profile. Production remains the default for compatibility. */
+  readonly deploymentProfile?: DeploymentProfile;
+  /**
+   * Tenant configuration for a disposable drill. This deliberately bypasses
+   * CDK CLI context, which can contain the production tenant's values.
+   */
+  readonly failureDrillContext?: {
+    tryGetContext(key: string): unknown;
+  };
 }
 
 function secretJsonKeyArn(secret: secretsmanager.Secret, key: string): string {
@@ -108,7 +105,25 @@ function ecsSecretJsonKey(
 export class PsdEocStack extends Stack {
   public constructor(scope: Construct, id: string, props: PsdEocStackProps) {
     super(scope, id, props);
-    const deploymentIdentity = readDeploymentIdentity(this.node);
+    const deploymentProfile =
+      props.deploymentProfile ?? PRODUCTION_DEPLOYMENT_PROFILE;
+    const failureDrill = deploymentProfile.kind === 'failure-drill';
+    if (failureDrill !== (props.failureDrillContext !== undefined)) {
+      throw new Error(
+        failureDrill
+          ? 'A failure-drill stack requires an explicit synthetic tenant context.'
+          : 'A synthetic tenant context may only be used by a failure-drill stack.',
+      );
+    }
+    const deploymentContext = props.failureDrillContext ?? this.node;
+    const resourceConfiguration = stackResourceConfiguration(deploymentProfile);
+    const stateRemovalPolicy = failureDrill
+      ? RemovalPolicy.DESTROY
+      : RemovalPolicy.RETAIN;
+    const deploymentIdentity = readDeploymentIdentity(deploymentContext);
+    const facilityContext = readFacilityContext(deploymentContext);
+    const neighborhoodContext = readNeighborhoodContext(deploymentContext);
+    const syntheticGroupContext = readSyntheticGroupContext(deploymentContext);
     const {
       account,
       accountAlias,
@@ -137,11 +152,23 @@ export class PsdEocStack extends Stack {
       );
     }
 
-    Tags.of(this).add('Application', 'PSD EOC Live Pilot');
-    Tags.of(this).add('DataClassification', DATA_CLASSIFICATION);
-    Tags.of(this).add('Environment', DEPLOYMENT_ENVIRONMENT);
-    Tags.of(this).add('DataScope', 'staff-minimized');
-    Tags.of(this).add('ExpectedAwsAccountAlias', accountAlias);
+    Tags.of(this).add('Application', resourceConfiguration.applicationLabel);
+    Tags.of(this).add(
+      'DataClassification',
+      resourceConfiguration.dataClassification,
+    );
+    Tags.of(this).add('Environment', resourceConfiguration.environmentName);
+    Tags.of(this).add(
+      'DataScope',
+      failureDrill ? 'synthetic-only' : 'staff-minimized',
+    );
+    if (failureDrill) {
+      Tags.of(this).add('FailureDrillRunId', deploymentProfile.runId);
+      Tags.of(this).add('ProviderMode', 'mocked');
+    }
+    if (!failureDrill) {
+      Tags.of(this).add('ExpectedAwsAccountAlias', accountAlias);
+    }
     Tags.of(this).add('ManagedBy', 'AWS CDK');
 
     const provisionApplication = new CfnParameter(
@@ -203,41 +230,37 @@ export class PsdEocStack extends Stack {
         'Reviewed candidate source commit represented by BootstrapImageDigest.',
       type: 'String',
     });
-    const googleOauthSecretArn = new CfnParameter(
-      this,
-      'GoogleOauthSecretArn',
-      {
-        // Pinned to the exact path the secret occupies.
-        //
-        // This was briefly widened to allow any depth of segment under
-        // /psd-eoc/, because the secret then lived at
-        // /psd-eoc/exploration-smoke/google-oauth and the stack rename would
-        // otherwise have invalidated an ARN that had not moved. The secret has
-        // since been copied to /psd-eoc/google-oauth, so the widening buys
-        // nothing and only enlarges the set of ARNs CI will accept without
-        // question. A wrong path should fail the deploy, not pass validation.
-        allowedPattern: `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
-        constraintDescription:
-          'Use the complete ARN of the reviewed production Google OAuth secret in the approved account and region.',
-        description:
-          'Complete ARN of the independently reviewed Google OAuth configuration. Google OIDC is the only live integration.',
-        noEcho: true,
-        type: 'String',
-      },
-    );
-    const googleGroupsSecretArn = new CfnParameter(
-      this,
-      'GoogleGroupsSecretArn',
-      {
-        allowedPattern: `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
-        constraintDescription:
-          'Use the complete ARN of the reviewed /psd-eoc/google-groups secret in the approved account and region.',
-        description:
-          'Complete ARN of the Cloud Identity roster-reader credential. The complete ARN is required: importing this secret by name yields an ARN without the generated suffix, which the read grant can never match.',
-        noEcho: true,
-        type: 'String',
-      },
-    );
+    const googleOauthSecretArn = failureDrill
+      ? undefined
+      : new CfnParameter(this, 'GoogleOauthSecretArn', {
+          // Pinned to the exact path the secret occupies.
+          //
+          // This was briefly widened to allow any depth of segment under
+          // /psd-eoc/, because the secret then lived at
+          // /psd-eoc/exploration-smoke/google-oauth and the stack rename would
+          // otherwise have invalidated an ARN that had not moved. The secret has
+          // since been copied to /psd-eoc/google-oauth, so the widening buys
+          // nothing and only enlarges the set of ARNs CI will accept without
+          // question. A wrong path should fail the deploy, not pass validation.
+          allowedPattern: `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
+          constraintDescription:
+            'Use the complete ARN of the reviewed production Google OAuth secret in the approved account and region.',
+          description:
+            'Complete ARN of the independently reviewed Google OAuth configuration. Google OIDC is the only live integration.',
+          noEcho: true,
+          type: 'String',
+        });
+    const googleGroupsSecretArn = failureDrill
+      ? undefined
+      : new CfnParameter(this, 'GoogleGroupsSecretArn', {
+          allowedPattern: `^arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+          constraintDescription:
+            'Use the complete ARN of the reviewed /psd-eoc/google-groups secret in the approved account and region.',
+          description:
+            'Complete ARN of the Cloud Identity roster-reader credential. The complete ARN is required: importing this secret by name yields an ARN without the generated suffix, which the read grant can never match.',
+          noEcho: true,
+          type: 'String',
+        });
     // The first trusted group. Without it a rebuilt deployment admits nobody,
     // because the page that configures access groups sits behind sign-in. Empty
     // by default so an already-configured district passes nothing; supplying
@@ -289,6 +312,39 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    const failureDrillOperatorToken = failureDrill
+      ? new CfnParameter(this, 'FailureDrillOperatorToken', {
+          allowedPattern: '^[A-Za-z0-9_-]{43,128}$',
+          constraintDescription:
+            'Use an ephemeral high-entropy base64url token generated for this exact drill run.',
+          description:
+            'One-run credential for issuing a synthetic browser session inside the failure-drill artifact.',
+          maxLength: 128,
+          minLength: 43,
+          noEcho: true,
+          type: 'String',
+        })
+      : undefined;
+    const failureDrillApplicationOrigin = failureDrill
+      ? new CfnParameter(this, 'FailureDrillApplicationOrigin', {
+          allowedPattern: `^https://(?:${deploymentProfile.runId}\\.example\\.invalid|[a-z0-9][a-z0-9-]{0,62}\\.${region}\\.awsapprunner\\.com)$`,
+          constraintDescription:
+            "Use this run's inert bootstrap origin or the exact regional App Runner origin created by this stack.",
+          description:
+            'Two-phase drill origin. The workflow replaces the inert bootstrap value with the exact generated App Runner URL before any operator route is usable.',
+          type: 'String',
+        })
+      : undefined;
+    const failureDrillOperatorRoleName = failureDrill
+      ? new CfnParameter(this, 'FailureDrillOperatorRoleName', {
+          allowedPattern: '^[A-Za-z0-9+=,.@_-]{1,64}$',
+          constraintDescription:
+            'Use the exact pre-existing GitHub OIDC deployment role name.',
+          description:
+            'Role that receives one-stack ECS execution and evidence-read authority until cleanup.',
+          type: 'String',
+        })
+      : undefined;
     const shouldProvisionApplication = new CfnCondition(
       this,
       'ShouldProvisionApplication',
@@ -357,15 +413,17 @@ export class PsdEocStack extends Stack {
 
     const imageRepository = new ecr.Repository(this, 'ImageRepository', {
       encryption: ecr.RepositoryEncryption.AES_256,
-      emptyOnDelete: false,
+      emptyOnDelete: failureDrill,
       imageScanOnPush: true,
       imageTagMutability: ecr.TagMutability.IMMUTABLE,
-      removalPolicy: RemovalPolicy.RETAIN,
-      repositoryName: SERVER_REPOSITORY_NAME,
+      removalPolicy: stateRemovalPolicy,
+      repositoryName: resourceConfiguration.imageRepositoryName,
     });
     imageRepository.addLifecycleRule({
-      description: 'Bound superseded live-pilot image retention.',
-      maxImageCount: 10,
+      description: failureDrill
+        ? 'Remove superseded one-run drill artifacts.'
+        : 'Bound superseded live-pilot image retention.',
+      maxImageCount: failureDrill ? 2 : 10,
       rulePriority: 1,
     });
 
@@ -424,8 +482,8 @@ export class PsdEocStack extends Stack {
           passwordLength: 64,
           secretStringTemplate: JSON.stringify({ username: 'psd_eoc_admin' }),
         },
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/database/admin`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/database/admin`,
       },
     );
     const databaseApplicationSecret = new secretsmanager.Secret(
@@ -442,8 +500,8 @@ export class PsdEocStack extends Stack {
             username: 'psd_eoc_application',
           }),
         },
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/database/application`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/database/application`,
       },
     );
     const googleOidcCookieSecret = new secretsmanager.Secret(
@@ -469,8 +527,8 @@ export class PsdEocStack extends Stack {
           excludePunctuation: true,
           passwordLength: 44,
         },
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/google-oidc-cookie-secret`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/google-oidc-cookie-secret`,
       },
     );
     const apiSaltSecret = new secretsmanager.Secret(this, 'ApiSaltSecret', {
@@ -480,8 +538,8 @@ export class PsdEocStack extends Stack {
         excludePunctuation: true,
         passwordLength: 64,
       },
-      removalPolicy: RemovalPolicy.RETAIN,
-      secretName: `${SECRET_PREFIX}/api-salt`,
+      removalPolicy: stateRemovalPolicy,
+      secretName: `${resourceConfiguration.secretPrefix}/api-salt`,
     });
     // Credentials for the two internal worker routes. Both routes have existed
     // and refused every request, because nothing ever provisioned the bearer
@@ -501,8 +559,8 @@ export class PsdEocStack extends Stack {
           excludePunctuation: true,
           passwordLength: 64,
         },
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/workers/delivery-state-token`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/workers/delivery-state-token`,
       },
     );
     const attemptExecutionWorkerSecret = new secretsmanager.Secret(
@@ -515,8 +573,8 @@ export class PsdEocStack extends Stack {
           excludePunctuation: true,
           passwordLength: 64,
         },
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/workers/attempt-execution-token`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/workers/attempt-execution-token`,
       },
     );
 
@@ -526,8 +584,8 @@ export class PsdEocStack extends Stack {
       {
         description:
           'Bootstrap identity material supplied through NoEcho deployment parameters. Holds only the initial mobile transition digest; the approved-staff identity it also carried fed the access fixture, which is gone.',
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/bootstrap/approved-identity`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/bootstrap/approved-identity`,
         secretObjectValue: {
           initialMobileTransitionEmailSha256: SecretValue.unsafePlainText(
             initialMobileTransitionEmailSha256.valueAsString,
@@ -541,8 +599,8 @@ export class PsdEocStack extends Stack {
       {
         description:
           'First-run access-group email supplied through a NoEcho deployment parameter and readable only by the bootstrap task execution role.',
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/bootstrap/initial-access-group`,
+        removalPolicy: stateRemovalPolicy,
+        secretName: `${resourceConfiguration.secretPrefix}/bootstrap/initial-access-group`,
         secretObjectValue: {
           email: SecretValue.unsafePlainText(
             initialAccessGroupEmail.valueAsString,
@@ -550,6 +608,17 @@ export class PsdEocStack extends Stack {
         },
       },
     );
+    const failureDrillOperatorSecret = failureDrill
+      ? new secretsmanager.Secret(this, 'FailureDrillOperatorSecret', {
+          description:
+            'Ephemeral one-run credential for synthetic failure-drill browser setup.',
+          removalPolicy: stateRemovalPolicy,
+          secretName: `${resourceConfiguration.secretPrefix}/operator-token`,
+          secretStringValue: SecretValue.unsafePlainText(
+            failureDrillOperatorToken!.valueAsString,
+          ),
+        })
+      : undefined;
 
     const databaseSecurityGroup = new ec2.SecurityGroup(
       this,
@@ -583,7 +652,7 @@ export class PsdEocStack extends Stack {
         // the task path, psd-eoc-apprunner is the service path.
         description:
           'Native PostgreSQL and HTTPS egress only for App Runner and one-off bootstrap tasks.',
-        securityGroupName: 'psd-eoc-application',
+        securityGroupName: resourceConfiguration.applicationSecurityGroupName,
         vpc: network as unknown as ec2.IVpc,
       },
     );
@@ -604,23 +673,31 @@ export class PsdEocStack extends Stack {
     );
 
     const database = new rds.DatabaseCluster(this, 'Database', {
-      backup: {
-        retention: Duration.days(14),
-      },
-      clusterIdentifier: DATABASE_IDENTIFIER,
+      backup: { retention: Duration.days(failureDrill ? 1 : 14) },
+      clusterIdentifier: resourceConfiguration.databaseIdentifier,
       copyTagsToSnapshot: true,
       credentials: rds.Credentials.fromSecret(
         databaseAdminSecret as unknown as secretsmanager.ISecret,
       ),
-      defaultDatabaseName: DATABASE_NAME,
-      deletionProtection: true,
+      defaultDatabaseName: resourceConfiguration.databaseName,
+      deletionProtection: !failureDrill,
       enableDataApi: false,
       engine: databaseEngine,
       parameterGroup: databaseParameterGroup,
-      readers: [],
+      readers: failureDrill
+        ? [
+            rds.ClusterInstance.serverlessV2('FailureDrillReader', {
+              autoMinorVersionUpgrade: true,
+              availabilityZone: `${region}b`,
+              enablePerformanceInsights: false,
+              publiclyAccessible: false,
+              scaleWithWriter: true,
+            }),
+          ]
+        : [],
       // Retain staff-minimized access and append-only event truth. Any future
       // retirement is a separately reviewed human data-lifecycle decision.
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: stateRemovalPolicy,
       securityGroups: [databaseSecurityGroup],
       serverlessV2MaxCapacity: 1,
       serverlessV2MinCapacity: 0.5,
@@ -640,8 +717,8 @@ export class PsdEocStack extends Stack {
     const healthQueue = new sqs.Queue(this, 'HealthQueue', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
-      queueName: HEALTH_QUEUE_NAME,
-      removalPolicy: RemovalPolicy.RETAIN,
+      queueName: resourceConfiguration.healthQueueName,
+      removalPolicy: stateRemovalPolicy,
       retentionPeriod: Duration.days(1),
       visibilityTimeout: Duration.seconds(30),
     });
@@ -650,19 +727,19 @@ export class PsdEocStack extends Stack {
       this,
       'EmailRedriveSourceQueue',
       this.formatArn({
-        resource: EMAIL_QUEUE_NAME,
+        resource: resourceConfiguration.emailQueueName,
         service: 'sqs',
       }),
     );
     const emailDeadLetterQueue = new sqs.Queue(this, 'EmailDeadLetterQueue', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
-      queueName: EMAIL_DEAD_LETTER_QUEUE_NAME,
+      queueName: resourceConfiguration.emailDeadLetterQueueName,
       redriveAllowPolicy: {
         redrivePermission: sqs.RedrivePermission.BY_QUEUE,
         sourceQueues: [emailSourceQueueIdentity],
       },
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: stateRemovalPolicy,
       retentionPeriod: Duration.days(14),
     });
     const emailQueue = new sqs.Queue(this, 'EmailQueue', {
@@ -672,20 +749,44 @@ export class PsdEocStack extends Stack {
       },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
-      queueName: EMAIL_QUEUE_NAME,
-      removalPolicy: RemovalPolicy.RETAIN,
+      queueName: resourceConfiguration.emailQueueName,
+      removalPolicy: stateRemovalPolicy,
       retentionPeriod: Duration.days(4),
       visibilityTimeout: Duration.seconds(60),
     });
+    const failureDrillMockProviderQueue = failureDrill
+      ? new sqs.Queue(this, 'FailureDrillMockProviderQueue', {
+          contentBasedDeduplication: false,
+          encryption: sqs.QueueEncryption.SQS_MANAGED,
+          enforceSSL: true,
+          fifo: true,
+          queueName: `${resourceConfiguration.prefix}-mock-provider.fifo`,
+          removalPolicy: stateRemovalPolicy,
+          retentionPeriod: Duration.days(1),
+          visibilityTimeout: Duration.seconds(60),
+        })
+      : undefined;
     // One queue pair per channel, plus the delivery queue an authorized
     // notification batch lands on before it is split across channels. Email's
     // pair predates these and is defined above; the rest are built the same way
     // so the alarms, runbooks, and redrive permissions line up across channels.
     const channelQueuePairs = (
       [
-        ['Delivery', DELIVERY_QUEUE_NAME, DELIVERY_DEAD_LETTER_QUEUE_NAME],
-        ['Sms', SMS_QUEUE_NAME, SMS_DEAD_LETTER_QUEUE_NAME],
-        ['Push', PUSH_QUEUE_NAME, PUSH_DEAD_LETTER_QUEUE_NAME],
+        [
+          'Delivery',
+          resourceConfiguration.deliveryQueueName,
+          resourceConfiguration.deliveryDeadLetterQueueName,
+        ],
+        [
+          'Sms',
+          resourceConfiguration.smsQueueName,
+          resourceConfiguration.smsDeadLetterQueueName,
+        ],
+        [
+          'Push',
+          resourceConfiguration.pushQueueName,
+          resourceConfiguration.pushDeadLetterQueueName,
+        ],
       ] as const
     ).map(([id, queueName, deadLetterQueueName]) => {
       const redriveSource = sqs.Queue.fromQueueArn(
@@ -701,7 +802,7 @@ export class PsdEocStack extends Stack {
           redrivePermission: sqs.RedrivePermission.BY_QUEUE,
           sourceQueues: [redriveSource],
         },
-        removalPolicy: RemovalPolicy.RETAIN,
+        removalPolicy: stateRemovalPolicy,
         retentionPeriod: Duration.days(14),
       });
       const queue = new sqs.Queue(this, `${id}Queue`, {
@@ -712,7 +813,7 @@ export class PsdEocStack extends Stack {
         encryption: sqs.QueueEncryption.SQS_MANAGED,
         enforceSSL: true,
         queueName,
-        removalPolicy: RemovalPolicy.RETAIN,
+        removalPolicy: stateRemovalPolicy,
         retentionPeriod: Duration.days(4),
         visibilityTimeout: Duration.seconds(60),
       });
@@ -730,7 +831,7 @@ export class PsdEocStack extends Stack {
     const operationsKey = new kms.Key(this, 'OperationsKey', {
       description: 'Encrypts PSD EOC operational alarm notifications.',
       enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: stateRemovalPolicy,
     });
     // Deliberately not encrypted, unlike the log groups this key still covers.
     //
@@ -750,12 +851,12 @@ export class PsdEocStack extends Stack {
     // that it still works when other things are broken. Publishing is still
     // restricted by each topic's access policy.
     const operationsAlarmTopic = new sns.Topic(this, 'OperationsAlarmTopic', {
-      displayName: 'PSD EOC operations',
-      topicName: 'psd-eoc-operations-alarms',
+      displayName: `${resourceConfiguration.applicationLabel} operations`,
+      topicName: resourceConfiguration.operationsAlarmTopicName,
     });
     const criticalAlarmTopic = new sns.Topic(this, 'CriticalAlarmTopic', {
-      displayName: 'PSD EOC critical',
-      topicName: 'psd-eoc-critical-alarms',
+      displayName: `${resourceConfiguration.applicationLabel} critical`,
+      topicName: resourceConfiguration.criticalAlarmTopicName,
     });
 
     // The delivery queue's consumer. It moves each authorized batch to the
@@ -765,8 +866,8 @@ export class PsdEocStack extends Stack {
       this,
       'DeliveryRouterLogGroup',
       {
-        logGroupName: '/psd-eoc/workers/delivery-router',
-        removalPolicy: RemovalPolicy.RETAIN,
+        logGroupName: resourceConfiguration.deliveryRouterLogGroupName,
+        removalPolicy: stateRemovalPolicy,
         retention: logs.RetentionDays.TWO_WEEKS,
       },
     );
@@ -781,7 +882,7 @@ export class PsdEocStack extends Stack {
         PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
         SMS_QUEUE_URL: queuePairs.Sms.queue.queueUrl,
       },
-      functionName: 'psd-eoc-delivery-router',
+      functionName: resourceConfiguration.deliveryRouterFunctionName,
       handler: 'index.handler',
       logGroup: deliveryRouterLogGroup,
       memorySize: 256,
@@ -807,8 +908,8 @@ export class PsdEocStack extends Stack {
     );
 
     const emailWorkerLogGroup = new logs.LogGroup(this, 'EmailWorkerLogGroup', {
-      logGroupName: EMAIL_WORKER_LOG_GROUP_NAME,
-      removalPolicy: RemovalPolicy.RETAIN,
+      logGroupName: resourceConfiguration.emailWorkerLogGroupName,
+      removalPolicy: stateRemovalPolicy,
       retention: logs.RetentionDays.TWO_WEEKS,
     });
     const emailWorkerRole = new iam.Role(this, 'EmailWorkerRole', {
@@ -828,89 +929,132 @@ export class PsdEocStack extends Stack {
       resourceArns: [emailQueue.queueArn],
     });
 
-    const emailConfigurationSetArn = Arn.format(
-      {
-        account,
-        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-        partition,
-        region,
-        resource: 'configuration-set',
-        resourceName: SES_CONFIGURATION_SET_NAME,
-        service: 'ses',
-      },
-      this,
-    );
-    const emailEventsKey = new kms.Key(this, 'EmailEventsKey', {
-      description:
-        'Encrypts configured-unverified SES event evidence for the live pilot.',
-      enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN,
-    });
-    emailEventsKey.addToResourcePolicy(
-      new iam.PolicyStatement({
-        actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
-        conditions: {
-          StringEquals: {
-            'AWS:SourceAccount': account,
-            'AWS:SourceArn': emailConfigurationSetArn,
+    let emailConfigurationSet: ses.CfnConfigurationSet | undefined;
+    let emailEventsKey: kms.Key | undefined;
+    let emailEventsTopic: sns.Topic | undefined;
+    if (!failureDrill) {
+      const emailConfigurationSetArn = Arn.format(
+        {
+          account,
+          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          partition,
+          region,
+          resource: 'configuration-set',
+          resourceName: SES_CONFIGURATION_SET_NAME,
+          service: 'ses',
+        },
+        this,
+      );
+      emailEventsKey = new kms.Key(this, 'EmailEventsKey', {
+        description:
+          'Encrypts configured-unverified SES event evidence for the live pilot.',
+        enableKeyRotation: true,
+        removalPolicy: RemovalPolicy.RETAIN,
+      });
+      emailEventsKey.addToResourcePolicy(
+        new iam.PolicyStatement({
+          actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+          conditions: {
+            StringEquals: {
+              'AWS:SourceAccount': account,
+              'AWS:SourceArn': emailConfigurationSetArn,
+            },
+          },
+          principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+          resources: ['*'],
+          sid: 'AllowSesEmailEventEncryption',
+        }),
+      );
+      emailConfigurationSet = new ses.CfnConfigurationSet(
+        this,
+        'EmailConfigurationSet',
+        {
+          name: SES_CONFIGURATION_SET_NAME,
+          reputationOptions: {
+            reputationMetricsEnabled: true,
+          },
+          sendingOptions: {
+            sendingEnabled: false,
           },
         },
-        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
-        resources: ['*'],
-        sid: 'AllowSesEmailEventEncryption',
-      }),
-    );
-    const emailConfigurationSet = new ses.CfnConfigurationSet(
-      this,
-      'EmailConfigurationSet',
-      {
-        name: SES_CONFIGURATION_SET_NAME,
-        reputationOptions: {
-          reputationMetricsEnabled: true,
-        },
-        sendingOptions: {
-          sendingEnabled: false,
-        },
-      },
-    );
-    emailConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    const emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
-      displayName: 'PSD EOC live-pilot SES event evidence',
-      enforceSSL: true,
-      masterKey: emailEventsKey,
-      topicName: SES_EVENT_TOPIC_NAME,
-    });
-    emailEventsTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    emailEventsTopic.addToResourcePolicy(
-      new iam.PolicyStatement({
-        actions: ['sns:Publish'],
-        conditions: {
-          StringEquals: {
-            'AWS:SourceAccount': account,
-            'AWS:SourceArn': emailConfigurationSetArn,
+      );
+      emailConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
+        displayName: 'PSD EOC live-pilot SES event evidence',
+        enforceSSL: true,
+        masterKey: emailEventsKey,
+        topicName: SES_EVENT_TOPIC_NAME,
+      });
+      emailEventsTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      emailEventsTopic.addToResourcePolicy(
+        new iam.PolicyStatement({
+          actions: ['sns:Publish'],
+          conditions: {
+            StringEquals: {
+              'AWS:SourceAccount': account,
+              'AWS:SourceArn': emailConfigurationSetArn,
+            },
           },
-        },
-        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
-        resources: [emailEventsTopic.topicArn],
-        sid: 'AllowSesConfigurationSetEvents',
-      }),
-    );
+          principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+          resources: [emailEventsTopic.topicArn],
+          sid: 'AllowSesConfigurationSetEvents',
+        }),
+      );
+    }
 
-    const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
-      this,
-      'GoogleOauthSecret',
-      googleOauthSecretArn.valueAsString,
-    );
+    const googleOauthSecret = (failureDrill
+      ? new secretsmanager.Secret(this, 'GoogleOauthSecret', {
+          description:
+            'Generated unroutable OAuth fixture for this synthetic drill only.',
+          generateSecretString: {
+            excludePunctuation: true,
+            generateStringKey: 'clientSecret',
+            passwordLength: 64,
+            secretStringTemplate: JSON.stringify({
+              clientId: '100000000000-syntheticweb.apps.googleusercontent.com',
+              iosBundleId: deploymentIdentity.iosBundleId,
+              iosClientId:
+                '100000000000-syntheticios.apps.googleusercontent.com',
+              webClientId:
+                '100000000000-syntheticweb.apps.googleusercontent.com',
+            }),
+          },
+          removalPolicy: stateRemovalPolicy,
+          secretName: `${resourceConfiguration.secretPrefix}/google-oauth-mock`,
+        })
+      : secretsmanager.Secret.fromSecretCompleteArn(
+          this,
+          'GoogleOauthSecret',
+          googleOauthSecretArn!.valueAsString,
+        )) as unknown as secretsmanager.ISecret;
+    const googleGroupsSecret = (failureDrill
+      ? new secretsmanager.Secret(this, 'GoogleGroupsSecret', {
+          description:
+            'Generated inert roster fixture marker for this synthetic drill only.',
+          generateSecretString: {
+            excludePunctuation: true,
+            generateStringKey: 'privateKey',
+            passwordLength: 64,
+            secretStringTemplate: JSON.stringify({
+              clientEmail: 'roster@example.invalid',
+              delegatedAdminEmail: 'operator@example.invalid',
+              groupEmails: ['staff@example.invalid'],
+              mode: 'mocked',
+            }),
+          },
+          removalPolicy: stateRemovalPolicy,
+          secretName: `${resourceConfiguration.secretPrefix}/google-groups-mock`,
+        })
+      : secretsmanager.Secret.fromSecretCompleteArn(
+          this,
+          'GoogleGroupsSecret',
+          googleGroupsSecretArn!.valueAsString,
+        )) as unknown as secretsmanager.ISecret;
     // Import by complete ARN, never by name. fromSecretNameV2 yields a
     // secretArn without the generated six-character suffix; the ECS secret
     // reference then requests that suffix-less ARN while grantRead authorizes
     // `<arn>-??????`. The two can never match, and the task fails to start
     // with a ResourceInitializationError that names no cause. See issue #271.
-    const googleGroupsSecret = secretsmanager.Secret.fromSecretCompleteArn(
-      this,
-      'GoogleGroupsSecret',
-      googleGroupsSecretArn.valueAsString,
-    );
     // The connector gets its own security group rather than sharing the one the
     // bootstrap tasks use.
     //
@@ -932,7 +1076,7 @@ export class PsdEocStack extends Stack {
         allowAllOutbound: false,
         description:
           'Native PostgreSQL and HTTPS egress for the App Runner service.',
-        securityGroupName: 'psd-eoc-apprunner',
+        securityGroupName: resourceConfiguration.appRunnerSecurityGroupName,
         vpc: network as unknown as ec2.IVpc,
       },
     );
@@ -961,29 +1105,35 @@ export class PsdEocStack extends Stack {
         // the original, so a connector being replaced collides with its own
         // name. Renaming it alongside the dedicated security group breaks that,
         // and 'psd-eoc-apprunner' says what it actually connects.
-        vpcConnectorName: 'psd-eoc-apprunner',
+        vpcConnectorName: resourceConfiguration.appRunnerVpcConnectorName,
       },
     );
     // Editable at last: the connector's replacement no longer collides with the
     // live one now that it carries its own security group.
-    Tags.of(appRunnerVpcConnector).add('Application', 'PSD EOC', {
-      priority: 300,
-    });
+    Tags.of(appRunnerVpcConnector).add(
+      'Application',
+      failureDrill ? resourceConfiguration.applicationLabel : 'PSD EOC',
+      {
+        priority: 300,
+      },
+    );
     Tags.of(appRunnerVpcConnector).add('DataClassification', 'synthetic-only', {
       priority: 300,
     });
-    Tags.of(appRunnerVpcConnector).add('Environment', 'production', {
-      priority: 300,
-    });
+    Tags.of(appRunnerVpcConnector).add(
+      'Environment',
+      failureDrill ? resourceConfiguration.environmentName : 'production',
+      { priority: 300 },
+    );
     Tags.of(appRunnerVpcConnector).remove('DataScope', { priority: 300 });
 
     const bootstrapLogGroup = new logs.LogGroup(this, 'BootstrapLogGroup', {
-      logGroupName: BOOTSTRAP_LOG_GROUP_NAME,
-      removalPolicy: RemovalPolicy.RETAIN,
+      logGroupName: resourceConfiguration.bootstrapLogGroupName,
+      removalPolicy: stateRemovalPolicy,
       retention: logs.RetentionDays.TWO_WEEKS,
     });
     const bootstrapCluster = new ecs.Cluster(this, 'BootstrapEcsCluster', {
-      clusterName: 'psd-eoc-bootstrap',
+      clusterName: resourceConfiguration.bootstrapClusterName,
       containerInsightsV2: ecs.ContainerInsights.DISABLED,
       vpc: network as unknown as ec2.IVpc,
     });
@@ -1007,7 +1157,7 @@ export class PsdEocStack extends Stack {
       {
         cpu: 256,
         executionRole: bootstrapTaskExecutionRole,
-        family: 'psd-eoc-bootstrap',
+        family: resourceConfiguration.bootstrapFamily,
         memoryLimitMiB: 512,
         runtimePlatform: {
           cpuArchitecture: ecs.CpuArchitecture.X86_64,
@@ -1028,13 +1178,13 @@ export class PsdEocStack extends Stack {
           DATABASE_HOST: database.clusterEndpoint.hostname,
           DATABASE_IDLE_TIMEOUT_SECONDS: '20',
           DATABASE_MAX_CONNECTIONS: '1',
-          DATABASE_NAME: DATABASE_NAME,
+          DATABASE_NAME: resourceConfiguration.databaseName,
           DATABASE_PORT: String(DATABASE_PORT),
           DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
-          PSD_EOC_FACILITIES: readFacilityContext(this.node),
-          PSD_EOC_NEIGHBORHOODS: readNeighborhoodContext(this.node),
-          PSD_EOC_SYNTHETIC_GROUPS: readSyntheticGroupContext(this.node),
+          PSD_EOC_FACILITIES: facilityContext,
+          PSD_EOC_NEIGHBORHOODS: neighborhoodContext,
+          PSD_EOC_SYNTHETIC_GROUPS: syntheticGroupContext,
           PSD_EOC_INITIAL_ACCESS_GROUP_ID: initialAccessGroupId.valueAsString,
           PSD_EOC_INITIAL_ACCESS_GROUP_NAME:
             initialAccessGroupName.valueAsString,
@@ -1108,7 +1258,7 @@ export class PsdEocStack extends Stack {
       {
         cpu: 256,
         executionRole: accessSyncTaskExecutionRole,
-        family: 'psd-eoc-access-sync',
+        family: resourceConfiguration.accessSyncFamily,
         memoryLimitMiB: 512,
         runtimePlatform: {
           cpuArchitecture: ecs.CpuArchitecture.X86_64,
@@ -1132,7 +1282,7 @@ export class PsdEocStack extends Stack {
           DATABASE_HOST: database.clusterEndpoint.hostname,
           DATABASE_IDLE_TIMEOUT_SECONDS: '20',
           DATABASE_MAX_CONNECTIONS: '1',
-          DATABASE_NAME: DATABASE_NAME,
+          DATABASE_NAME: resourceConfiguration.databaseName,
           DATABASE_PORT: String(DATABASE_PORT),
           DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
@@ -1204,8 +1354,8 @@ export class PsdEocStack extends Stack {
     const accessSyncSchedule = new events.Rule(this, 'AccessSyncSchedule', {
       description:
         'Refreshes access-group membership from Google Cloud Identity so sign-in keeps working; reads only, and publishes one complete snapshot or none.',
-      enabled: true,
-      ruleName: 'psd-eoc-access-membership-sync-every-two-hours',
+      enabled: !failureDrill,
+      ruleName: resourceConfiguration.accessSyncRuleName,
       schedule: events.Schedule.expression('cron(0 */2 * * ? *)'),
     });
     accessSyncSchedule.addTarget(
@@ -1230,6 +1380,407 @@ export class PsdEocStack extends Stack {
       }),
     );
 
+    let failureDrillTaskDefinition: ecs.FargateTaskDefinition | undefined;
+    let failureDrillLogGroup: logs.LogGroup | undefined;
+    if (failureDrill) {
+      failureDrillLogGroup = new logs.LogGroup(this, 'FailureDrillLogGroup', {
+        logGroupName: resourceConfiguration.failureDrillLogGroupName,
+        removalPolicy: stateRemovalPolicy,
+        retention: logs.RetentionDays.ONE_WEEK,
+      });
+      const failureDrillTaskExecutionRole = new iam.Role(
+        this,
+        'FailureDrillTaskExecutionRole',
+        {
+          assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+          description:
+            'Pulls the one-run drill artifact, injects synthetic-stack credentials, and writes evidence logs.',
+        },
+      );
+      const failureDrillTaskRole = new iam.Role(this, 'FailureDrillTaskRole', {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Fault authority restricted to this disposable synthetic stack.',
+      });
+      const failureDrillWorkerTaskExecutionRole = new iam.Role(
+        this,
+        'FailureDrillWorkerTaskExecutionRole',
+        {
+          assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+          description:
+            'Pulls the one-run drill artifact and injects only the application database credential for a mock worker.',
+        },
+      );
+      const failureDrillWorkerTaskRole = new iam.Role(
+        this,
+        'FailureDrillWorkerTaskRole',
+        {
+          assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+          description:
+            'Writes only one-run mock-provider FIFO evidence; has no fault-orchestration authority.',
+        },
+      );
+      const failureDrillWorkerTaskDefinition = new ecs.FargateTaskDefinition(
+        this,
+        'FailureDrillWorkerTaskDefinition',
+        {
+          cpu: 256,
+          executionRole: failureDrillWorkerTaskExecutionRole,
+          family: resourceConfiguration.failureDrillWorkerFamily,
+          memoryLimitMiB: 512,
+          runtimePlatform: {
+            cpuArchitecture: ecs.CpuArchitecture.X86_64,
+            operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+          },
+          taskRole: failureDrillWorkerTaskRole,
+        },
+      );
+      failureDrillWorkerTaskDefinition.addVolume({
+        name: 'failure-drill-worker-tmp',
+      });
+      const failureDrillWorkerContainer =
+        failureDrillWorkerTaskDefinition.addContainer('failure-drill-worker', {
+          command: [
+            'bun',
+            'scripts/ops/failure-drills/deployed-mock-worker.ts',
+          ],
+          environment: {
+            AWS_REGION: region,
+            DATABASE_DRIVER: 'postgres',
+            DATABASE_HOST: database.clusterEndpoint.hostname,
+            DATABASE_NAME: resourceConfiguration.databaseName,
+            DATABASE_PORT: String(DATABASE_PORT),
+            DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
+            GOOGLE_OIDC_HOSTED_DOMAIN: deploymentIdentity.hostedDomain,
+            PSD_EOC_FAILURE_DRILL_DEPLOYMENT_CLASS: 'non-production',
+            PSD_EOC_FAILURE_DRILL_MOCK_PROVIDER_QUEUE_URL:
+              failureDrillMockProviderQueue!.queueUrl,
+            PSD_EOC_FAILURE_DRILL_PROVIDER_MODE: 'mocked',
+            PSD_EOC_FAILURE_DRILL_ROSTER_POPULATION: 'synthetic',
+            PSD_EOC_FAILURE_DRILL_RUN_ID: deploymentProfile.runId,
+            TMPDIR: '/tmp',
+          },
+          essential: true,
+          image: ecs.ContainerImage.fromRegistry(
+            Fn.join('', [
+              imageRepository.repositoryUri,
+              '@',
+              appImageDigest.valueAsString,
+            ]),
+          ),
+          logging: ecs.LogDrivers.awsLogs({
+            logGroup: failureDrillLogGroup,
+            streamPrefix: 'worker',
+          }),
+          readonlyRootFilesystem: true,
+          secrets: {
+            DATABASE_PASSWORD: ecsSecretJsonKey(
+              databaseApplicationSecret,
+              'password',
+            ),
+            DATABASE_USERNAME: ecsSecretJsonKey(
+              databaseApplicationSecret,
+              'username',
+            ),
+          },
+        });
+      failureDrillWorkerContainer.addMountPoints({
+        containerPath: '/tmp',
+        readOnly: false,
+        sourceVolume: 'failure-drill-worker-tmp',
+      });
+      failureDrillTaskDefinition = new ecs.FargateTaskDefinition(
+        this,
+        'FailureDrillTaskDefinition',
+        {
+          cpu: 512,
+          executionRole: failureDrillTaskExecutionRole,
+          family: resourceConfiguration.failureDrillFamily,
+          memoryLimitMiB: 1024,
+          runtimePlatform: {
+            cpuArchitecture: ecs.CpuArchitecture.X86_64,
+            operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+          },
+          taskRole: failureDrillTaskRole,
+        },
+      );
+      failureDrillTaskDefinition.addVolume({ name: 'failure-drill-tmp' });
+      const failureDrillContainer = failureDrillTaskDefinition.addContainer(
+        'failure-drill-runner',
+        {
+          command: [
+            'bun',
+            'scripts/ops/failure-drills/failure-drill-runner.ts',
+          ],
+          environment: {
+            AWS_ACCOUNT_ID: account,
+            AWS_REGION: region,
+            DATABASE_DRIVER: 'postgres',
+            DATABASE_HOST: database.clusterEndpoint.hostname,
+            DATABASE_NAME: resourceConfiguration.databaseName,
+            DATABASE_PORT: String(DATABASE_PORT),
+            DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
+            DELIVERY_DEAD_LETTER_QUEUE_URL:
+              queuePairs.Delivery.deadLetterQueue.queueUrl,
+            DELIVERY_QUEUE_URL: deliveryQueue.queueUrl,
+            EMAIL_DEAD_LETTER_QUEUE_URL: emailDeadLetterQueue.queueUrl,
+            EMAIL_QUEUE_URL: emailQueue.queueUrl,
+            GOOGLE_OIDC_APPLICATION_ORIGIN:
+              failureDrillApplicationOrigin!.valueAsString,
+            GOOGLE_OIDC_HOSTED_DOMAIN: deploymentIdentity.hostedDomain,
+            PSD_EOC_FAILURE_DRILL_APP_ORIGIN:
+              failureDrillApplicationOrigin!.valueAsString,
+            PSD_EOC_FAILURE_DRILL_CLUSTER_ARN: bootstrapCluster.clusterArn,
+            PSD_EOC_FAILURE_DRILL_CLUSTER_IDENTIFIER:
+              resourceConfiguration.databaseIdentifier,
+            PSD_EOC_FAILURE_DRILL_DEPLOYMENT_CLASS: 'non-production',
+            PSD_EOC_FAILURE_DRILL_IMAGE_DIGEST: appImageDigest.valueAsString,
+            PSD_EOC_FAILURE_DRILL_PROVIDER_MODE: 'mocked',
+            PSD_EOC_FAILURE_DRILL_ROSTER_POPULATION: 'synthetic',
+            PSD_EOC_FAILURE_DRILL_RUN_ID: deploymentProfile.runId,
+            PSD_EOC_FAILURE_DRILL_SECURITY_GROUP_ID:
+              applicationSecurityGroup.securityGroupId,
+            PSD_EOC_FAILURE_DRILL_STACK_ID: this.stackId,
+            PSD_EOC_FAILURE_DRILL_STACK_NAME: this.stackName,
+            PSD_EOC_FAILURE_DRILL_SUBNET_IDS: Fn.join(
+              ',',
+              applicationSubnets.subnetIds,
+            ),
+            PSD_EOC_FAILURE_DRILL_MOCK_PROVIDER_QUEUE_URL:
+              failureDrillMockProviderQueue!.queueUrl,
+            PSD_EOC_FAILURE_DRILL_WORKER_TASK_DEFINITION:
+              failureDrillWorkerTaskDefinition.taskDefinitionArn,
+            PUSH_DEAD_LETTER_QUEUE_URL:
+              queuePairs.Push.deadLetterQueue.queueUrl,
+            PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
+            SMS_DEAD_LETTER_QUEUE_URL: queuePairs.Sms.deadLetterQueue.queueUrl,
+            SMS_QUEUE_URL: queuePairs.Sms.queue.queueUrl,
+            SOURCE_SHA: sourceSha.valueAsString,
+            TMPDIR: '/tmp',
+          },
+          essential: true,
+          image: ecs.ContainerImage.fromRegistry(
+            Fn.join('', [
+              imageRepository.repositoryUri,
+              '@',
+              appImageDigest.valueAsString,
+            ]),
+          ),
+          logging: ecs.LogDrivers.awsLogs({
+            logGroup: failureDrillLogGroup,
+            streamPrefix: 'runner',
+          }),
+          readonlyRootFilesystem: true,
+          secrets: {
+            DATABASE_ADMIN_PASSWORD: ecsSecretJsonKey(
+              databaseAdminSecret,
+              'password',
+            ),
+            DATABASE_ADMIN_USERNAME: ecsSecretJsonKey(
+              databaseAdminSecret,
+              'username',
+            ),
+            DATABASE_PASSWORD: ecsSecretJsonKey(
+              databaseApplicationSecret,
+              'password',
+            ),
+            DATABASE_USERNAME: ecsSecretJsonKey(
+              databaseApplicationSecret,
+              'username',
+            ),
+            PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN: ecs.Secret.fromSecretsManager(
+              failureDrillOperatorSecret! as unknown as secretsmanager.ISecret,
+            ),
+          },
+        },
+      );
+      failureDrillContainer.addMountPoints({
+        containerPath: '/tmp',
+        readOnly: false,
+        sourceVolume: 'failure-drill-tmp',
+      });
+      imageRepository.grantPull(failureDrillTaskExecutionRole);
+      imageRepository.grantPull(failureDrillWorkerTaskExecutionRole);
+      databaseAdminSecret.grantRead(failureDrillTaskExecutionRole);
+      databaseApplicationSecret.grantRead(failureDrillTaskExecutionRole);
+      databaseApplicationSecret.grantRead(failureDrillWorkerTaskExecutionRole);
+      failureDrillOperatorSecret!.grantRead(failureDrillTaskExecutionRole);
+      iam.Grant.addToPrincipal({
+        actions: ['sqs:SendMessage'],
+        grantee: failureDrillWorkerTaskRole,
+        resourceArns: [failureDrillMockProviderQueue!.queueArn],
+      });
+      iam.Grant.addToPrincipal({
+        actions: [
+          'sqs:DeleteMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:ReceiveMessage',
+          'sqs:StartMessageMoveTask',
+        ],
+        grantee: failureDrillTaskRole,
+        resourceArns: [emailDeadLetterQueue.queueArn],
+      });
+      iam.Grant.addToPrincipal({
+        actions: [
+          'sqs:DeleteMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:ReceiveMessage',
+          'sqs:SendMessage',
+        ],
+        grantee: failureDrillTaskRole,
+        resourceArns: [emailQueue.queueArn],
+      });
+      iam.Grant.addToPrincipal({
+        actions: [
+          'sqs:DeleteMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:ReceiveMessage',
+        ],
+        grantee: failureDrillTaskRole,
+        resourceArns: [failureDrillMockProviderQueue!.queueArn],
+      });
+      iam.Grant.addToPrincipal({
+        actions: ['rds:FailoverDBCluster'],
+        grantee: failureDrillTaskRole,
+        resourceArns: [database.clusterArn],
+      });
+      failureDrillTaskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['rds:DescribeDBClusters'],
+          resources: ['*'],
+          sid: 'DescribeAuroraForExactSyntheticFailover',
+        }),
+      );
+      failureDrillTaskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['cloudwatch:DescribeAlarms'],
+          resources: ['*'],
+          sid: 'ReadSyntheticAlarmState',
+        }),
+      );
+      failureDrillTaskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['ecs:RunTask'],
+          resources: [failureDrillWorkerTaskDefinition.taskDefinitionArn],
+          conditions: {
+            ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+          },
+          sid: 'RunExactSyntheticWorkerTasks',
+        }),
+      );
+      const failureDrillTaskArn = Arn.format(
+        {
+          account,
+          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          partition,
+          region,
+          resource: 'task',
+          resourceName: `${resourceConfiguration.bootstrapClusterName}/*`,
+          service: 'ecs',
+        },
+        this,
+      );
+      failureDrillTaskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['ecs:DescribeTasks'],
+          resources: [failureDrillTaskArn],
+          conditions: {
+            ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+          },
+          sid: 'ObserveExactSyntheticWorkerTasks',
+        }),
+      );
+      failureDrillTaskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['iam:PassRole'],
+          conditions: {
+            StringEquals: {
+              'iam:PassedToService': 'ecs-tasks.amazonaws.com',
+            },
+          },
+          resources: [
+            failureDrillWorkerTaskExecutionRole.roleArn,
+            failureDrillWorkerTaskRole.roleArn,
+          ],
+          sid: 'PassExactSyntheticWorkerRoles',
+        }),
+      );
+      const operatorRole = iam.Role.fromRoleName(
+        this,
+        'FailureDrillOperatorRole',
+        failureDrillOperatorRoleName!.valueAsString,
+      );
+      const operatorPolicy = new iam.Policy(
+        this,
+        'FailureDrillOperatorPolicy',
+        {
+          policyName: `${resourceConfiguration.prefix}-operator`,
+          roles: [operatorRole],
+          statements: [
+            new iam.PolicyStatement({
+              actions: [
+                'ecr:BatchCheckLayerAvailability',
+                'ecr:BatchGetImage',
+                'ecr:CompleteLayerUpload',
+                'ecr:DescribeImages',
+                'ecr:DescribeRepositories',
+                'ecr:InitiateLayerUpload',
+                'ecr:PutImage',
+                'ecr:UploadLayerPart',
+              ],
+              resources: [imageRepository.repositoryArn],
+            }),
+            new iam.PolicyStatement({
+              actions: ['ecs:RunTask'],
+              conditions: {
+                ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+              },
+              resources: [
+                bootstrapTaskDefinition.taskDefinitionArn,
+                failureDrillTaskDefinition.taskDefinitionArn,
+              ],
+            }),
+            new iam.PolicyStatement({
+              actions: ['ecs:ListTasks'],
+              conditions: {
+                ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+              },
+              resources: ['*'],
+            }),
+            new iam.PolicyStatement({
+              actions: ['ecs:DescribeTasks', 'ecs:StopTask'],
+              conditions: {
+                ArnEquals: { 'ecs:cluster': bootstrapCluster.clusterArn },
+              },
+              resources: [failureDrillTaskArn],
+            }),
+            new iam.PolicyStatement({
+              actions: ['iam:PassRole'],
+              conditions: {
+                StringEquals: {
+                  'iam:PassedToService': 'ecs-tasks.amazonaws.com',
+                },
+              },
+              resources: [
+                bootstrapTaskExecutionRole.roleArn,
+                bootstrapTaskRole.roleArn,
+                failureDrillTaskExecutionRole.roleArn,
+                failureDrillTaskRole.roleArn,
+              ],
+            }),
+            new iam.PolicyStatement({
+              actions: ['logs:FilterLogEvents', 'logs:GetLogEvents'],
+              resources: [
+                `${bootstrapLogGroup.logGroupArn}:*`,
+                `${failureDrillLogGroup.logGroupArn}:*`,
+              ],
+            }),
+          ],
+        },
+      );
+      operatorPolicy.node.addDependency(failureDrillTaskDefinition);
+    }
+
     const imageAccessRole = new iam.Role(this, 'AppRunnerImageAccessRole', {
       assumedBy: new iam.ServicePrincipal('build.apprunner.amazonaws.com'),
       description:
@@ -1250,6 +1801,9 @@ export class PsdEocStack extends Stack {
       apiSaltSecret.grantRead(runtimeRole),
       deliveryStateWorkerSecret.grantRead(runtimeRole),
       attemptExecutionWorkerSecret.grantRead(runtimeRole),
+      ...(failureDrillOperatorSecret
+        ? [failureDrillOperatorSecret.grantRead(runtimeRole)]
+        : []),
       iam.Grant.addToPrincipal({
         actions: ['sqs:GetQueueAttributes'],
         grantee: runtimeRole,
@@ -1282,7 +1836,8 @@ export class PsdEocStack extends Stack {
       this,
       'AppRunnerScaling',
       {
-        autoScalingConfigurationName: 'psd-eoc-single',
+        autoScalingConfigurationName:
+          resourceConfiguration.appRunnerScalingName,
         maxConcurrency: 10,
         maxSize: 1,
         minSize: 1,
@@ -1315,7 +1870,7 @@ export class PsdEocStack extends Stack {
             vpcConnectorArn: appRunnerVpcConnector.attrVpcConnectorArn,
           },
         },
-        serviceName: 'psd-eoc',
+        serviceName: resourceConfiguration.appRunnerServiceName,
         sourceConfiguration: {
           authenticationConfiguration: {
             accessRoleArn: imageAccessRole.roleArn,
@@ -1366,6 +1921,14 @@ export class PsdEocStack extends Stack {
                     'initialMobileTransitionEmailSha256',
                   ),
                 },
+                ...(failureDrillOperatorSecret
+                  ? [
+                      {
+                        name: 'PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN',
+                        value: failureDrillOperatorSecret.secretArn,
+                      },
+                    ]
+                  : []),
               ],
               runtimeEnvironmentVariables: [
                 {
@@ -1375,7 +1938,9 @@ export class PsdEocStack extends Stack {
                 // Who this deployment serves, from cdk.json context.
                 {
                   name: 'GOOGLE_OIDC_APPLICATION_ORIGIN',
-                  value: deploymentIdentity.applicationOrigin,
+                  value:
+                    failureDrillApplicationOrigin?.valueAsString ??
+                    deploymentIdentity.applicationOrigin,
                 },
                 {
                   name: 'GOOGLE_OIDC_HOSTED_DOMAIN',
@@ -1407,7 +1972,7 @@ export class PsdEocStack extends Stack {
                 },
                 {
                   name: 'DATABASE_NAME',
-                  value: DATABASE_NAME,
+                  value: resourceConfiguration.databaseName,
                 },
                 {
                   name: 'DATABASE_SSL_ROOT_CERT',
@@ -1453,6 +2018,30 @@ export class PsdEocStack extends Stack {
                   name: 'SOURCE_SHA',
                   value: sourceSha.valueAsString,
                 },
+                ...(failureDrill
+                  ? [
+                      {
+                        name: 'AWS_ACCOUNT_ID',
+                        value: account,
+                      },
+                      {
+                        name: 'PSD_EOC_FAILURE_DRILL_DEPLOYMENT_CLASS',
+                        value: 'non-production',
+                      },
+                      {
+                        name: 'PSD_EOC_FAILURE_DRILL_PROVIDER_MODE',
+                        value: 'mocked',
+                      },
+                      {
+                        name: 'PSD_EOC_FAILURE_DRILL_ROSTER_POPULATION',
+                        value: 'synthetic',
+                      },
+                      {
+                        name: 'PSD_EOC_FAILURE_DRILL_RUN_ID',
+                        value: deploymentProfile.runId,
+                      },
+                    ]
+                  : []),
               ],
             },
             imageIdentifier: Fn.join('', [
@@ -1468,15 +2057,19 @@ export class PsdEocStack extends Stack {
     appRunnerService.cfnOptions.condition = shouldProvisionApplication;
     // Same constraint as the VPC connector above: App Runner replaces the
     // service when its tags change, so this was retired in the same outage.
-    Tags.of(appRunnerService).add('Application', 'PSD EOC', {
-      priority: 300,
-    });
+    Tags.of(appRunnerService).add(
+      'Application',
+      failureDrill ? resourceConfiguration.applicationLabel : 'PSD EOC',
+      { priority: 300 },
+    );
     Tags.of(appRunnerService).add('DataClassification', 'synthetic-only', {
       priority: 300,
     });
-    Tags.of(appRunnerService).add('Environment', 'production', {
-      priority: 300,
-    });
+    Tags.of(appRunnerService).add(
+      'Environment',
+      failureDrill ? resourceConfiguration.environmentName : 'production',
+      { priority: 300 },
+    );
     Tags.of(appRunnerService).remove('DataScope', { priority: 300 });
     imagePullGrant.applyBefore(appRunnerService);
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
@@ -1484,23 +2077,38 @@ export class PsdEocStack extends Stack {
     // Alarms. Until the canary and the metrics collector have the credentials
     // they need, only the tier with a real publisher is deployed; see
     // `configureInfrastructureMonitoring`.
-    configureInfrastructureMonitoring(this, {
-      applicationCondition: shouldProvisionApplication,
-      appRunnerService,
-      channelQueues: {
-        email: { deadLetterQueue: emailDeadLetterQueue, queue: emailQueue },
-        push: queuePairs.Push,
-        sms: queuePairs.Sms,
-      },
-      criticalAlarmTopic,
-      database,
-      displayTimeZone: deploymentIdentity.displayTimeZone,
-      delivery: queuePairs.Delivery,
-      operationsAlarmTopic,
-      operationsKey,
-      monitoringRunbookBaseUrl,
-      sesIdentityDomain,
-    });
+    if (!failureDrill) {
+      configureInfrastructureMonitoring(this, {
+        applicationCondition: shouldProvisionApplication,
+        appRunnerService,
+        channelQueues: {
+          email: { deadLetterQueue: emailDeadLetterQueue, queue: emailQueue },
+          push: queuePairs.Push,
+          sms: queuePairs.Sms,
+        },
+        criticalAlarmTopic,
+        database,
+        displayTimeZone: deploymentIdentity.displayTimeZone,
+        delivery: queuePairs.Delivery,
+        operationsAlarmTopic,
+        operationsKey,
+        monitoringRunbookBaseUrl,
+        sesIdentityDomain,
+      });
+    } else {
+      configureFailureDrillMonitoring(this, {
+        applicationCondition: shouldProvisionApplication,
+        appRunnerService,
+        database,
+        deadLetterQueues: [
+          queuePairs.Delivery.deadLetterQueue,
+          emailDeadLetterQueue,
+          queuePairs.Push.deadLetterQueue,
+          queuePairs.Sms.deadLetterQueue,
+        ],
+        namePrefix: resourceConfiguration.prefix,
+      });
+    }
 
     new CfnOutput(this, 'DeploymentAccount', {
       value: account,
@@ -1508,14 +2116,16 @@ export class PsdEocStack extends Stack {
     new CfnOutput(this, 'DeploymentRegion', {
       value: region,
     });
-    new CfnOutput(this, 'ExpectedAwsAccountAlias', {
-      value: accountAlias,
-    });
+    if (!failureDrill) {
+      new CfnOutput(this, 'ExpectedAwsAccountAlias', {
+        value: accountAlias,
+      });
+    }
     new CfnOutput(this, 'EnvironmentName', {
-      value: DEPLOYMENT_ENVIRONMENT,
+      value: resourceConfiguration.environmentName,
     });
     new CfnOutput(this, 'DataClassification', {
-      value: DATA_CLASSIFICATION,
+      value: resourceConfiguration.dataClassification,
     });
     new CfnOutput(this, 'ImageRepositoryArn', {
       value: imageRepository.repositoryArn,
@@ -1539,7 +2149,7 @@ export class PsdEocStack extends Stack {
       value: database.clusterArn,
     });
     new CfnOutput(this, 'DatabaseName', {
-      value: DATABASE_NAME,
+      value: resourceConfiguration.databaseName,
     });
     new CfnOutput(this, 'DatabaseAdminSecretArn', {
       value: databaseAdminSecret.secretArn,
@@ -1604,47 +2214,49 @@ export class PsdEocStack extends Stack {
     new CfnOutput(this, 'EmailWorkerLogGroupName', {
       value: emailWorkerLogGroup.logGroupName,
     });
-    new CfnOutput(this, 'SesIdentityArn', {
-      value: Arn.format(
-        {
-          account,
-          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          partition,
-          region,
-          resource: 'identity',
-          resourceName: sesIdentityDomain,
-          service: 'ses',
-        },
-        this,
-      ),
-    });
-    new CfnOutput(this, 'SesIdentityDomain', {
-      value: sesIdentityDomain,
-    });
-    new CfnOutput(this, 'SesFromAddress', {
-      value: sesFromAddress,
-    });
-    new CfnOutput(this, 'SesConfigurationSetName', {
-      value: emailConfigurationSet.ref,
-    });
-    new CfnOutput(this, 'SesEmailEventsTopicArn', {
-      value: emailEventsTopic.topicArn,
-    });
-    new CfnOutput(this, 'SesEmailEventsKeyArn', {
-      value: emailEventsKey.keyArn,
-    });
-    new CfnOutput(this, 'SesEmailEventDestinationName', {
-      value: SES_EVENT_DESTINATION_NAME,
-    });
-    new CfnOutput(this, 'SesEmailEventDestinationManagement', {
-      value: 'external-readback',
-    });
-    new CfnOutput(this, 'SesIntegrationTruth', {
-      value: 'configured-unverified',
-    });
-    new CfnOutput(this, 'EmailChannelState', {
-      value: 'disabled',
-    });
+    if (!failureDrill) {
+      new CfnOutput(this, 'SesIdentityArn', {
+        value: Arn.format(
+          {
+            account,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+            partition,
+            region,
+            resource: 'identity',
+            resourceName: sesIdentityDomain,
+            service: 'ses',
+          },
+          this,
+        ),
+      });
+      new CfnOutput(this, 'SesIdentityDomain', {
+        value: sesIdentityDomain,
+      });
+      new CfnOutput(this, 'SesFromAddress', {
+        value: sesFromAddress,
+      });
+      new CfnOutput(this, 'SesConfigurationSetName', {
+        value: emailConfigurationSet!.ref,
+      });
+      new CfnOutput(this, 'SesEmailEventsTopicArn', {
+        value: emailEventsTopic!.topicArn,
+      });
+      new CfnOutput(this, 'SesEmailEventsKeyArn', {
+        value: emailEventsKey!.keyArn,
+      });
+      new CfnOutput(this, 'SesEmailEventDestinationName', {
+        value: SES_EVENT_DESTINATION_NAME,
+      });
+      new CfnOutput(this, 'SesEmailEventDestinationManagement', {
+        value: 'external-readback',
+      });
+      new CfnOutput(this, 'SesIntegrationTruth', {
+        value: 'configured-unverified',
+      });
+      new CfnOutput(this, 'EmailChannelState', {
+        value: 'disabled',
+      });
+    }
     new CfnOutput(this, 'RuntimeRoleArn', {
       value: runtimeRole.roleArn,
     });
@@ -1663,5 +2275,20 @@ export class PsdEocStack extends Stack {
       condition: shouldProvisionApplication,
       value: `https://${appRunnerService.attrServiceUrl}${HEALTH_PATH}`,
     });
+    if (failureDrill) {
+      new CfnOutput(this, 'FailureDrillRunId', {
+        value: deploymentProfile.runId,
+      });
+      new CfnOutput(this, 'FailureDrillTaskDefinitionArn', {
+        value: failureDrillTaskDefinition!.taskDefinitionArn,
+      });
+      new CfnOutput(this, 'FailureDrillLogGroupName', {
+        value: failureDrillLogGroup!.logGroupName,
+      });
+      new CfnOutput(this, 'FailureDrillProviderMode', { value: 'mocked' });
+      new CfnOutput(this, 'FailureDrillRosterPopulation', {
+        value: 'synthetic',
+      });
+    }
   }
 }
