@@ -599,7 +599,9 @@ export const rosterEndpoints = pgTable(
       sql`(
         ${table.channel} = 'push'
         and ${table.platform} is not null
+        and ${table.provider} is not null
         and ${table.provider} in ('expo', 'apns', 'fcm')
+        and ${table.serviceEnvironment} is not null
         and ${table.serviceEnvironment} in ('development', 'production')
         and (
           ${table.provider} = 'expo'

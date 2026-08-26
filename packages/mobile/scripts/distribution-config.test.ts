@@ -503,14 +503,18 @@ describe('mobile distribution configuration', () => {
     );
     expect(play).toContain('1.0.5/code 5');
     expect(play).toContain('durable group-based Closed test is not yet active');
-    expect(rowFor('Public mobile privacy policy')).toContain(
-      '| `configured-unverified`',
-    );
+    const privacy = rowFor('Public mobile privacy policy');
+    expect(privacy).toContain('| `live-verified`');
+    expect(privacy).toContain("configured production origin's `/privacy`");
+    expect(privacy).toContain('returned HTTP 200');
     expect(rowFor('Play app content and store record')).toContain(
       '| `blocked`',
     );
     expect(rowFor('Play app content and store record')).toContain(
-      '6/11 setup tasks complete',
+      '8/11 setup tasks complete',
+    );
+    expect(rowFor('Play app content and store record')).toContain(
+      'Data Safety is fully answered and saved as a draft',
     );
 
     expect(rows.filter((line) => line.includes('| EAS Build'))).toHaveLength(1);

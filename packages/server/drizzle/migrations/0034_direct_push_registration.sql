@@ -93,7 +93,9 @@ ON CONFLICT ("integration_id") DO NOTHING;--> statement-breakpoint
 ALTER TABLE "roster_endpoints" ADD CONSTRAINT "roster_endpoints_valid_variant" CHECK ((
         "roster_endpoints"."channel" = 'push'
         and "roster_endpoints"."platform" is not null
+        and "roster_endpoints"."provider" is not null
         and "roster_endpoints"."provider" in ('expo', 'apns', 'fcm')
+        and "roster_endpoints"."service_environment" is not null
         and "roster_endpoints"."service_environment" in ('development', 'production')
         and (
           "roster_endpoints"."provider" = 'expo'

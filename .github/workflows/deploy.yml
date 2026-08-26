@@ -28,6 +28,8 @@ env:
   APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
   GOOGLE_OAUTH_SECRET_ARN: ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
   GOOGLE_GROUPS_SECRET_ARN: ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
+  EMAIL_WORKER_ENABLED: ${{ vars.EMAIL_WORKER_ENABLED || 'false' }}
+  SES_CREDENTIAL_VERIFICATION_REFERENCE: ${{ vars.SES_CREDENTIAL_VERIFICATION_REFERENCE || 'UNVERIFIED' }}
   EXPO_PUSH_WORKER_ENABLED: ${{ vars.EXPO_PUSH_WORKER_ENABLED || 'false' }}
   EXPO_CREDENTIAL_VERIFICATION_REFERENCE: ${{ vars.EXPO_CREDENTIAL_VERIFICATION_REFERENCE || 'UNVERIFIED' }}
   DIRECT_PUSH_ENABLED: ${{ vars.DIRECT_PUSH_ENABLED || 'false' }}
@@ -90,6 +92,7 @@ jobs:
           INITIAL_ACCESS_GROUP_EMAIL: ${{ secrets.INITIAL_ACCESS_GROUP_EMAIL }}
           INITIAL_ACCESS_GROUP_ID: ${{ vars.INITIAL_ACCESS_GROUP_ID }}
           INITIAL_ACCESS_GROUP_NAME: ${{ vars.INITIAL_ACCESS_GROUP_NAME }}
+          ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}
           REQUIRED_SECRETS: >-
             ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
             ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
@@ -197,6 +200,17 @@ jobs:
             fi
             if [[ -z "$SMS_STOP_MESSAGE" || "$SMS_STOP_MESSAGE" == 'UNCONFIGURED' || ${#SMS_STOP_MESSAGE} -gt 160 || "$SMS_STOP_MESSAGE" =~ ^[[:space:]] || "$SMS_STOP_MESSAGE" =~ [[:space:]]$ ]]; then
               echo "::error::SMS_STOP_MESSAGE must be a non-empty, trimmed carrier-reviewed message of at most 160 characters." >&2
+              exit 1
+            fi
+          fi
+
+          if [[ -z "$ROLLBACK_IMAGE_DIGEST" ]]; then
+            if [[ "$EMAIL_WORKER_ENABLED" != 'false' && "$EMAIL_WORKER_ENABLED" != 'true' ]]; then
+              echo "::error::EMAIL_WORKER_ENABLED must be exactly true or false." >&2
+              exit 1
+            fi
+            if [[ "$EMAIL_WORKER_ENABLED" == 'true' && ( "$SES_CREDENTIAL_VERIFICATION_REFERENCE" == 'UNVERIFIED' || ! "$SES_CREDENTIAL_VERIFICATION_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$ ) ]]; then
+              echo "::error::Enabled email requires a bounded retained SES/callback verification reference." >&2
               exit 1
             fi
           fi
@@ -329,6 +343,14 @@ jobs:
             --stack-name "$STACK_NAME" \
             --query "Stacks[0].Parameters[?ParameterKey=='ProvisionAwsEumSmsResources'].ParameterValue | [0]" \
             --output text 2>/dev/null || echo "false")
+          previous_email_enabled=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='EnableEmailWorker'].ParameterValue | [0]" \
+            --output text 2>/dev/null || echo "false")
+          previous_ses_reference=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='SesCredentialVerificationReference'].ParameterValue | [0]" \
+            --output text 2>/dev/null || echo "UNVERIFIED")
           if [[ "$previous_expo_enabled" != 'true' ]]; then
             previous_expo_enabled='false'
           fi
@@ -350,6 +372,12 @@ jobs:
           if [[ "$previous_sms_provisioned" != 'true' ]]; then
             previous_sms_provisioned='false'
           fi
+          if [[ "$previous_email_enabled" != 'true' ]]; then
+            previous_email_enabled='false'
+          fi
+          if [[ "$previous_ses_reference" != 'UNVERIFIED' && ! "$previous_ses_reference" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$ ]]; then
+            previous_ses_reference='UNVERIFIED'
+          fi
           if [[ "$previous_sms_provisioned" == 'true' && "$SMS_RESOURCES_PROVISIONED" != 'true' ]]; then
             echo "::error::SMS_RESOURCES_PROVISIONED is monotonic and cannot be changed from true to false" >&2
             exit 1
@@ -364,6 +392,8 @@ jobs:
             echo "previous_push_cutover=$previous_push_cutover"
             echo "previous_sms_enabled=$previous_sms_enabled"
             echo "previous_sms_provisioned=$previous_sms_provisioned"
+            echo "previous_email_enabled=$previous_email_enabled"
+            echo "previous_ses_reference=$previous_ses_reference"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Deploy"
@@ -407,9 +437,12 @@ jobs:
           PREVIOUS_DIRECT_ENABLED: ${{ steps.previous.outputs.previous_direct_enabled }}
           PREVIOUS_DIRECT_REFERENCE: ${{ steps.previous.outputs.previous_direct_reference }}
           PREVIOUS_PUSH_CUTOVER: ${{ steps.previous.outputs.previous_push_cutover }}
+          PREVIOUS_EMAIL_ENABLED: ${{ steps.previous.outputs.previous_email_enabled }}
+          PREVIOUS_SES_REFERENCE: ${{ steps.previous.outputs.previous_ses_reference }}
           PREVIOUS_SMS_ENABLED: ${{ steps.previous.outputs.previous_sms_enabled }}
           PREVIOUS_SMS_PROVISIONED: ${{ steps.previous.outputs.previous_sms_provisioned }}
           PREVIOUS_SOURCE_SHA: ${{ steps.previous.outputs.previous_source }}
+          ROLLBACK_DIGEST: ${{ inputs.rollback_image_digest }}
         run: |
           set -euo pipefail
           # Keep the application on what it is serving now. On a stack with no
@@ -420,6 +453,12 @@ jobs:
           if [[ ! "$app_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
             app_digest="$IMAGE_DIGEST"
             app_source_sha="$TARGET_SOURCE_SHA"
+          fi
+          staged_email_enabled="$PREVIOUS_EMAIL_ENABLED"
+          staged_ses_reference="$PREVIOUS_SES_REFERENCE"
+          if [[ -n "${ROLLBACK_DIGEST:-}" ]]; then
+            staged_email_enabled='false'
+            staged_ses_reference='UNVERIFIED'
           fi
           mkdir -p ../artifacts
           bunx --bun cdk \
@@ -440,6 +479,8 @@ jobs:
             --parameters "$STACK_NAME:PushProviderCutover=$PREVIOUS_PUSH_CUTOVER" \
             --parameters "$STACK_NAME:EnableAwsEumSmsWorker=$PREVIOUS_SMS_ENABLED" \
             --parameters "$STACK_NAME:ProvisionAwsEumSmsResources=$PREVIOUS_SMS_PROVISIONED" \
+            --parameters "$STACK_NAME:EnableEmailWorker=$staged_email_enabled" \
+            --parameters "$STACK_NAME:SesCredentialVerificationReference=$staged_ses_reference" \
             --parameters "$STACK_NAME:BootstrapImageDigest=$BOOTSTRAP_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$BOOTSTRAP_SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
@@ -594,8 +635,15 @@ jobs:
           BOOTSTRAP_DIGEST: ${{ steps.target.outputs.bootstrap_digest }}
           BOOTSTRAP_SOURCE_SHA: ${{ github.sha }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
+          ROLLBACK_DIGEST: ${{ inputs.rollback_image_digest }}
         run: |
           set -euo pipefail
+          target_email_enabled="$EMAIL_WORKER_ENABLED"
+          target_ses_reference="$SES_CREDENTIAL_VERIFICATION_REFERENCE"
+          if [[ -n "${ROLLBACK_DIGEST:-}" ]]; then
+            target_email_enabled='false'
+            target_ses_reference='UNVERIFIED'
+          fi
           bunx --bun cdk \
             --app "bun bin/psd-eoc.ts" \
             deploy "$STACK_NAME" \
@@ -617,6 +665,8 @@ jobs:
             --parameters "$STACK_NAME:SmsDestinationCountryCode=$SMS_DESTINATION_COUNTRY_CODE" \
             --parameters "$STACK_NAME:SmsHelpMessage=$SMS_HELP_MESSAGE" \
             --parameters "$STACK_NAME:SmsStopMessage=$SMS_STOP_MESSAGE" \
+            --parameters "$STACK_NAME:EnableEmailWorker=$target_email_enabled" \
+            --parameters "$STACK_NAME:SesCredentialVerificationReference=$target_ses_reference" \
             --parameters "$STACK_NAME:BootstrapImageDigest=$BOOTSTRAP_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$BOOTSTRAP_SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \

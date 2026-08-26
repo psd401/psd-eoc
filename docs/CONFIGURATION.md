@@ -67,6 +67,7 @@ Repository/environment variables:
 - `ECR_REPOSITORY`
 - `DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE`
 - `DIRECT_PUSH_ENABLED`
+- `EMAIL_WORKER_ENABLED`
 - `EXPO_CREDENTIAL_VERIFICATION_REFERENCE`
 - `EXPO_PUSH_WORKER_ENABLED`
 - `GOOGLE_GROUPS_SECRET_ARN`
@@ -74,6 +75,7 @@ Repository/environment variables:
 - `INITIAL_ACCESS_GROUP_ID`
 - `INITIAL_ACCESS_GROUP_NAME`
 - `PUSH_PROVIDER_CUTOVER`
+- `SES_CREDENTIAL_VERIFICATION_REFERENCE`
 - `SMS_DESTINATION_COUNTRY_CODE`
 - `SMS_REGISTRATION_VERIFICATION_REFERENCE`
 - `SMS_RESOURCES_PROVISIONED`
@@ -119,6 +121,7 @@ The current synthesized stack contains exactly these parameters:
 - `DirectPushCredentialVerificationReference`
 - `EnableAwsEumSmsWorker`
 - `EnableDirectPush`
+- `EnableEmailWorker`
 - `EnableExpoPushWorker`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
@@ -133,6 +136,7 @@ The current synthesized stack contains exactly these parameters:
 - `ProvisionAwsEumSmsResources`
 - `PushProviderCutover`
 - `RuntimeDatabaseIdleTimeoutSeconds`
+- `SesCredentialVerificationReference`
 - `SmsDestinationCountryCode`
 - `SmsHelpMessage`
 - `SmsOriginationIdentityArn`
@@ -157,6 +161,7 @@ parameter explicitly.
 - `DirectPushCredentialVerificationReference`
 - `EnableAwsEumSmsWorker`
 - `EnableDirectPush`
+- `EnableEmailWorker`
 - `EnableExpoPushWorker`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
@@ -171,6 +176,7 @@ parameter explicitly.
 - `ProvisionAwsEumSmsResources`
 - `PushProviderCutover`
 - `RuntimeDatabaseIdleTimeoutSeconds`
+- `SesCredentialVerificationReference`
 - `SmsDestinationCountryCode`
 - `SmsHelpMessage`
 - `SmsOriginationIdentityArn`
@@ -303,6 +309,42 @@ history available for at least seven calendar days after both platform
 cutovers and until three bounded synthetic runs per platform have no
 unexplained `unknown` outcome. Never automatically replay an ambiguous direct
 attempt, and never send two copies to one endpoint to collect comparison data.
+
+## SES email activation boundary
+
+The stack enables the retained SES configuration set and connects its encrypted
+SNS event topic to a retained SQS callback queue. A separately permissioned
+consumer forwards each unmodified envelope to the application's signature-
+verifying, idempotent callback and deletes it only after durable acceptance.
+That consumer has no SES authority and follows the application independently
+of send enablement. The email send task definition and service always exist for
+review, but desired count is zero unless `EMAIL_WORKER_ENABLED` is exactly
+`true` and `SES_CREDENTIAL_VERIFICATION_REFERENCE` is a bounded, non-secret
+reference to retained sender, production-access, callback, and suppression
+evidence.
+
+After deployment, an authenticated administrator uses “Verify and enable
+email” on the integrations page. That one action appends the `live-verified`
+observation bound to the deployment reference and enables the channel; it does
+not send a message. All provider I/O remains behind the existing one-recipient
+DRILL preview and the authenticated human activation action. The worker
+rechecks that exact endpoint and channel state immediately before SES.
+
+Before changing `EMAIL_WORKER_ENABLED` from its default `false`, inspect the
+retained email queue and append-only attempt/evidence state by sanitized ID. Do
+not purge, replay, redrive, or inspect email send-queue message bodies. An
+ambiguous SES call retains its irreversible provider-I/O claim and must be
+reconciled rather than resent. A permanent bounce or complaint suppresses the
+canonical address across later roster snapshots before any future retry. Both
+SQS consumers retry at most five receives before their retained DLQs. After the
+callback cause is fixed, its signed, idempotent messages may be redriven only
+to the callback source queue; this never invokes SES. The DLQ alarms are the
+forced-failure signals.
+
+The first physical delivery proof is still a human acceptance step in the
+running application: one exact recipient, DRILL copy visible in the preview and
+message, and evidence read as queued → provider accepted → delivered or
+bounced.
 
 ## AWS End User Messaging SMS activation boundary
 

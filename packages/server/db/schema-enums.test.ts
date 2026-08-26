@@ -136,6 +136,49 @@ function strings(values: readonly string[]): string[] {
   return [...values];
 }
 
+function declaredEnumValues(source: string, enumName: string): string[] {
+  const expression = new RegExp(
+    `CREATE TYPE "public"\\."${enumName}" AS ENUM\\(([^;]+)\\);`,
+    'gu',
+  );
+  const declarations = [...source.matchAll(expression)];
+  expect(declarations).toHaveLength(1);
+  const declaration = declarations[0]?.[1] ?? '';
+  return [...declaration.matchAll(/'([^']+)'/gu)].map((match) => {
+    const value = match[1];
+    if (value === undefined) throw new Error(`Invalid ${enumName} value.`);
+    return value;
+  });
+}
+
+function applyEnumAdditions(
+  values: string[],
+  source: string,
+  enumName: string,
+): void {
+  const expression = new RegExp(
+    `ALTER TYPE "public"\\."${enumName}" ADD VALUE(?: IF NOT EXISTS)? '([^']+)'(?: (BEFORE|AFTER) '([^']+)')?;`,
+    'gu',
+  );
+  for (const match of source.matchAll(expression)) {
+    const value = match[1];
+    if (value === undefined || values.includes(value)) continue;
+    const placement = match[2];
+    const anchor = match[3];
+    if (placement === undefined || anchor === undefined) {
+      values.push(value);
+      continue;
+    }
+    const anchorIndex = values.indexOf(anchor);
+    if (anchorIndex === -1) {
+      throw new Error(
+        `Migration adds ${value} ${placement} missing ${enumName} value ${anchor}.`,
+      );
+    }
+    values.splice(anchorIndex + (placement === 'AFTER' ? 1 : 0), 0, value);
+  }
+}
+
 describe('database enum ownership', () => {
   test('registers every PostgreSQL enum through the contract-derived helper', () => {
     const registered = listContractDerivedDatabaseEnums();
@@ -181,28 +224,37 @@ describe('database enum ownership', () => {
     }
   });
 
-  test('the latest capability retirement migration matches derived IDs', () => {
-    const migration = readFileSync(
-      new URL(
-        '../drizzle/migrations/0030_retire_audience_configurations.sql',
-        import.meta.url,
+  test('the forward capability migration chain matches derived IDs', () => {
+    const retirementTag = '0030_retire_audience_configurations';
+    const journal = JSON.parse(
+      readFileSync(
+        new URL('../drizzle/migrations/meta/_journal.json', import.meta.url),
+        'utf8',
       ),
+    ) as MigrationJournal;
+    const retirementIndex = journal.entries.findIndex(
+      ({ tag }) => tag === retirementTag,
+    );
+    expect(retirementIndex).not.toBe(-1);
+    const retirementMigration = readFileSync(
+      new URL(`../drizzle/migrations/${retirementTag}.sql`, import.meta.url),
       'utf8',
     );
     for (const databaseEnum of [
       agentCapabilityGrantEnum,
       mutationCapabilityEnum,
     ]) {
-      const expression = new RegExp(
-        `CREATE TYPE "public"\\."${databaseEnum.enumName}" AS ENUM\\(([^;]+)\\);`,
-        'gu',
+      const values = declaredEnumValues(
+        retirementMigration,
+        databaseEnum.enumName,
       );
-      const declarations = [...migration.matchAll(expression)];
-      expect(declarations).toHaveLength(1);
-      const declaration = declarations[0]?.[1] ?? '';
-      const values = [...declaration.matchAll(/'([^']+)'/gu)].map(
-        (match) => match[1],
-      );
+      for (const { tag } of journal.entries.slice(retirementIndex + 1)) {
+        const migration = readFileSync(
+          new URL(`../drizzle/migrations/${tag}.sql`, import.meta.url),
+          'utf8',
+        );
+        applyEnumAdditions(values, migration, databaseEnum.enumName);
+      }
       expect(values).toEqual(strings(databaseEnum.enumValues));
     }
   });

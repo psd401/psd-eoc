@@ -24,6 +24,8 @@ const DOCKERFILE = join(
   'packages/server/container/psd-eoc.Dockerfile',
 );
 const WORKER_ENTRY_POINTS = [
+  join(REPOSITORY_ROOT, 'workers/email/callback-service.ts'),
+  join(REPOSITORY_ROOT, 'workers/email/service.ts'),
   join(REPOSITORY_ROOT, 'workers/push/service.ts'),
   join(REPOSITORY_ROOT, 'workers/sms/service.ts'),
 ] as const;

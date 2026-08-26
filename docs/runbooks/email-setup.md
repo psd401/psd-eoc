@@ -27,11 +27,29 @@ region, sender domain, secret references, and deployment inputs come from
 3. Apply infrastructure only through the supported GitHub Actions/OIDC path in
    [CONFIGURATION.md](../CONFIGURATION.md). Do not create parallel identities,
    zones, configuration sets, or manual send permissions.
-4. A provider-connected synthetic test requires a separately verified
+4. Keep `EMAIL_WORKER_ENABLED=false` and the SES verification reference at
+   `UNVERIFIED` until sender, production access, signed callback, suppression,
+   queue/DLQ, and alarm evidence is retained. Then set the protected deployment
+   inputs together and deploy the reviewed image. The encrypted SNS topic feeds
+   a retained callback queue; its separately permissioned consumer uses the
+   current callback-compatible image and has no provider-send authority.
+5. In the running application, an authenticated administrator selects
+   **Verify and enable email**. This appends integration truth bound to the
+   deployed reference and enables the database channel; it does not send.
+6. Prove the email queue DLQ, callback DLQ, and both worker-health alarms with
+   synthetic failures in an isolated environment. Do not copy, inspect, purge,
+   or redrive email-send payloads. A callback message may be redriven only to
+   its callback source queue after the cause is fixed; server signature and
+   idempotency checks remain mandatory.
+7. A provider-connected delivery test requires a separately verified
    unroutable/test target and an authenticated human acting in the app after
    the product owner's current-session approval. Never use a roster, incident
    template, real message, or arbitrary console send.
-5. Preserve bounded provider results and append-only delivery evidence. Update
+8. The first real one-recipient DRILL proof is a human acceptance step after
+   deployment. Verify the exact preview count and DRILL rendering before the
+   human submit, then retain queued → provider accepted → delivered or bounced
+   evidence. Automation never performs this send.
+9. Preserve bounded provider results and append-only delivery evidence. Update
    the readiness register only for the exact boundary proved.
 
 The dated tenant-specific inventory, setup fields, and historical command

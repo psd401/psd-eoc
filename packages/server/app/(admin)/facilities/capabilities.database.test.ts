@@ -51,6 +51,7 @@ import {
   SMS_INTEGRATION_ID,
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
+  executeVerifyEmailIntegrationCapability,
   liveChannelChangeAuthorizationCommitment,
   liveChannelChangeConsequenceDigest,
   liveChannelChangeRequestDigest,
@@ -4429,6 +4430,152 @@ describeWithDatabase('facilities administrator database flow', () => {
         outcome: 'success',
         requestId,
       })),
+    );
+  });
+
+  test('binds SES verification to the enabled deployment and never re-enables a disabled channel', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    await persistAdministratorIdentity(
+      database,
+      authenticated,
+      `email-${randomUUID()}`,
+    );
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const verificationReference = `ses-deployment-${randomUUID()}`;
+    const rotatedVerificationReference = `ses-deployment-${randomUUID()}`;
+    const refusedVerificationReference = `ses-deployment-${randomUUID()}`;
+    const verificationIdempotencyKey = `verify-email-enabled-${randomUUID()}`;
+    const configuredAt = new Date();
+    await database.insert(integrationStatuses).values({
+      integrationId: 'ses-email',
+      label: 'configured-unverified',
+      verifiedAt: null,
+      verifiedByUserId: null,
+      authorizationReference: null,
+      reasonCode: null,
+      observedAt: configuredAt,
+    });
+
+    await expect(
+      executeVerifyEmailIntegrationCapability({
+        authenticated,
+        store,
+        command: { integrationId: 'ses-email' },
+        metadata: {
+          idempotencyKey: `verify-email-disabled-${randomUUID()}`,
+          requestId: randomUUID(),
+          now: new Date(configuredAt.getTime() + 1_000),
+        },
+        verificationReference,
+        emailWorkerEnabled: false,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ status: 403, code: 'FORBIDDEN' }),
+    );
+
+    const verified = await executeVerifyEmailIntegrationCapability({
+      authenticated,
+      store,
+      command: { integrationId: 'ses-email' },
+      metadata: {
+        idempotencyKey: verificationIdempotencyKey,
+        requestId: randomUUID(),
+        now: new Date(configuredAt.getTime() + 2_000),
+      },
+      verificationReference,
+      emailWorkerEnabled: true,
+    });
+    expect(verified).toMatchObject({
+      integrationId: 'ses-email',
+      enabled: true,
+      status: {
+        label: 'live-verified',
+        authorizationReference: verificationReference,
+      },
+    });
+
+    await expect(
+      executeVerifyEmailIntegrationCapability({
+        authenticated,
+        store,
+        command: { integrationId: 'ses-email' },
+        metadata: {
+          idempotencyKey: verificationIdempotencyKey,
+          requestId: randomUUID(),
+          now: new Date(configuredAt.getTime() + 2_500),
+        },
+        verificationReference: rotatedVerificationReference,
+        emailWorkerEnabled: true,
+      }),
+    ).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_CONFLICT',
+      reasonCode: 'IDEMPOTENCY_REQUEST_MISMATCH',
+      status: 409,
+    });
+
+    const rotated = await executeVerifyEmailIntegrationCapability({
+      authenticated,
+      store,
+      command: { integrationId: 'ses-email' },
+      metadata: {
+        idempotencyKey: `verify-email-rotated-${randomUUID()}`,
+        requestId: randomUUID(),
+        now: new Date(configuredAt.getTime() + 3_000),
+      },
+      verificationReference: rotatedVerificationReference,
+      emailWorkerEnabled: true,
+    });
+    expect(rotated).toMatchObject({
+      integrationId: 'ses-email',
+      enabled: true,
+      status: {
+        label: 'live-verified',
+        authorizationReference: rotatedVerificationReference,
+      },
+    });
+    const retainedVerificationReferences = await database
+      .select({
+        authorizationReference: integrationStatuses.authorizationReference,
+      })
+      .from(integrationStatuses)
+      .where(
+        and(
+          eq(integrationStatuses.integrationId, 'ses-email'),
+          inArray(integrationStatuses.authorizationReference, [
+            verificationReference,
+            rotatedVerificationReference,
+          ]),
+        ),
+      );
+    expect(
+      retainedVerificationReferences
+        .map(({ authorizationReference }) => authorizationReference)
+        .sort(),
+    ).toEqual([verificationReference, rotatedVerificationReference].sort());
+
+    await database
+      .update(channelConfigurations)
+      .set({
+        enabled: false,
+        changedAt: new Date(configuredAt.getTime() + 4_000),
+      })
+      .where(eq(channelConfigurations.integrationId, 'ses-email'));
+    await expect(
+      executeVerifyEmailIntegrationCapability({
+        authenticated,
+        store,
+        command: { integrationId: 'ses-email' },
+        metadata: {
+          idempotencyKey: `verify-email-no-reenable-${randomUUID()}`,
+          requestId: randomUUID(),
+          now: new Date(configuredAt.getTime() + 5_000),
+        },
+        verificationReference: refusedVerificationReference,
+        emailWorkerEnabled: true,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ status: 409, code: 'CONFLICT' }),
     );
   });
 });

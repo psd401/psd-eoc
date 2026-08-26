@@ -220,6 +220,47 @@ function evidenceRow(
   };
 }
 
+function deliveredEvidenceRow(
+  attempt: ChannelAttempt,
+  overrides: Readonly<{
+    provider?: string;
+    providerReference?: string;
+  }> = {},
+): typeof deliveryEvidence.$inferSelect {
+  const provider = overrides.provider ?? 'synthetic-test-provider';
+  return {
+    ...evidenceRow(attempt),
+    sequence: 3,
+    previousEvidenceId: IDS.priorEvidence,
+    state: 'delivered',
+    recordedAt: new Date(COMMITTED_AT),
+    provider,
+    providerReference:
+      overrides.providerReference ?? 'synthetic-acceptance-reference',
+    proof: {
+      kind: 'provider-delivery-receipt',
+      provider,
+      receiptId: 'synthetic-delivery-receipt',
+      deliveredAt: COMMITTED_AT,
+    },
+  };
+}
+
+function providerAcceptedEvidenceRow(
+  attempt: ChannelAttempt,
+  provider = 'synthetic-test-provider',
+): typeof deliveryEvidence.$inferSelect {
+  return {
+    ...evidenceRow(attempt),
+    sequence: 2,
+    previousEvidenceId: IDS.priorEvidence,
+    state: 'provider-accepted',
+    recordedAt: new Date(COMMITTED_AT),
+    provider,
+    providerReference: 'synthetic-acceptance-reference',
+  };
+}
+
 function deliveryTestIntent(
   overrides: Partial<IntentDeliveryTestRow> = {},
 ): IntentDeliveryTestRow {
@@ -263,12 +304,13 @@ function fakeDatabase(options: FakeDatabaseOptions) {
       from: (table: unknown) => {
         selectedTables.push(table);
         const rows = rowsFor(table);
+        const orderedRows = Object.assign(Promise.resolve(rows), {
+          limit: async () => rows,
+        });
         return {
           where: () => ({
             limit: async () => rows,
-            orderBy: () => ({
-              limit: async () => rows,
-            }),
+            orderBy: () => orderedRows,
           }),
         };
       },
@@ -455,6 +497,134 @@ describe('delivery-state delivery-test provenance', () => {
       status: 503,
     });
     expect(fixture.insertedTables).toHaveLength(0);
+  });
+});
+
+describe('delivery-state terminal evidence subsumption', () => {
+  test('preserves stronger matching-provider truth for late weaker writes', async () => {
+    const attempt = attemptWith(DELIVERY_TEST);
+    const existingAttempt = attemptRow(attempt);
+    const terminal = deliveredEvidenceRow(attempt);
+
+    for (const evidence of [
+      providerAcceptedEvidence(attempt),
+      unknownEvidence(attempt),
+    ]) {
+      const fixture = fakeDatabase({
+        intent: deliveryTestIntent(),
+        existingAttempt,
+        firstEvidence: terminal,
+      });
+      const store = createDrizzleDeliveryEvidenceStore(fixture.database);
+
+      await expect(
+        store.recordAttemptEvidence({ attempt, evidence }),
+      ).resolves.toMatchObject({
+        id: terminal.id,
+        state: 'delivered',
+        providerReference: terminal.providerReference,
+      });
+      expect(fixture.insertedTables).toHaveLength(0);
+    }
+
+    const accepted = providerAcceptedEvidenceRow(attempt);
+    const acceptedFixture = fakeDatabase({
+      intent: deliveryTestIntent(),
+      existingAttempt,
+      firstEvidence: accepted,
+    });
+    const acceptedStore = createDrizzleDeliveryEvidenceStore(
+      acceptedFixture.database,
+    );
+
+    await expect(
+      acceptedStore.recordAttemptEvidence({
+        attempt,
+        evidence: unknownEvidence(attempt),
+      }),
+    ).resolves.toMatchObject({
+      id: accepted.id,
+      state: 'provider-accepted',
+      providerReference: accepted.providerReference,
+    });
+    expect(acceptedFixture.insertedTables).toHaveLength(0);
+  });
+
+  test('rejects stronger evidence from a different provider lineage', async () => {
+    const attempt = attemptWith(DELIVERY_TEST);
+    const existingAttempt = attemptRow(attempt);
+
+    for (const mismatchedTerminal of [
+      deliveredEvidenceRow(attempt, {
+        providerReference: 'different-provider-reference',
+      }),
+      deliveredEvidenceRow(attempt, { provider: 'different-provider' }),
+    ]) {
+      const mismatchFixture = fakeDatabase({
+        intent: deliveryTestIntent(),
+        existingAttempt,
+        firstEvidence: mismatchedTerminal,
+      });
+      const mismatchStore = createDrizzleDeliveryEvidenceStore(
+        mismatchFixture.database,
+      );
+      const error = await deliveryStateError(
+        mismatchStore.recordAttemptEvidence({
+          attempt,
+          evidence: providerAcceptedEvidence(attempt),
+        }),
+      );
+
+      expect(error).toMatchObject({
+        code: 'INVALID_DELIVERY_TRANSITION',
+        status: 409,
+      });
+      expect(mismatchFixture.insertedTables).toHaveLength(0);
+    }
+
+    const mismatchedUnknownFixture = fakeDatabase({
+      intent: deliveryTestIntent(),
+      existingAttempt,
+      firstEvidence: deliveredEvidenceRow(attempt, {
+        provider: 'different-provider',
+      }),
+    });
+    const mismatchedUnknownStore = createDrizzleDeliveryEvidenceStore(
+      mismatchedUnknownFixture.database,
+    );
+    const error = await deliveryStateError(
+      mismatchedUnknownStore.recordAttemptEvidence({
+        attempt,
+        evidence: unknownEvidence(attempt),
+      }),
+    );
+
+    expect(error).toMatchObject({
+      code: 'INVALID_DELIVERY_TRANSITION',
+      status: 409,
+    });
+    expect(mismatchedUnknownFixture.insertedTables).toHaveLength(0);
+
+    const mismatchedAcceptedFixture = fakeDatabase({
+      intent: deliveryTestIntent(),
+      existingAttempt,
+      firstEvidence: providerAcceptedEvidenceRow(attempt, 'different-provider'),
+    });
+    const mismatchedAcceptedStore = createDrizzleDeliveryEvidenceStore(
+      mismatchedAcceptedFixture.database,
+    );
+    const acceptedError = await deliveryStateError(
+      mismatchedAcceptedStore.recordAttemptEvidence({
+        attempt,
+        evidence: unknownEvidence(attempt),
+      }),
+    );
+
+    expect(acceptedError).toMatchObject({
+      code: 'INVALID_DELIVERY_TRANSITION',
+      status: 409,
+    });
+    expect(mismatchedAcceptedFixture.insertedTables).toHaveLength(0);
   });
 });
 

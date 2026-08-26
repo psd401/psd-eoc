@@ -37,8 +37,16 @@ COPY workers/shared/processor.ts workers/shared/processor.ts
 COPY workers/shared/retry.ts workers/shared/retry.ts
 COPY workers/shared/index.ts workers/shared/index.ts
 COPY workers/email/aws-arn.ts workers/email/aws-arn.ts
+COPY workers/email/aws-client.ts workers/email/aws-client.ts
+COPY workers/email/callback-service.ts workers/email/callback-service.ts
+COPY workers/email/email-message.ts workers/email/email-message.ts
+COPY workers/email/queue-runtime.ts workers/email/queue-runtime.ts
+COPY workers/email/runtime.ts workers/email/runtime.ts
+COPY workers/email/ses-adapter.ts workers/email/ses-adapter.ts
 COPY workers/email/ses-events.ts workers/email/ses-events.ts
+COPY workers/email/service.ts workers/email/service.ts
 COPY workers/email/sns-signature.ts workers/email/sns-signature.ts
+COPY workers/email/state-client.ts workers/email/state-client.ts
 COPY workers/push/adapter.ts workers/push/adapter.ts
 COPY workers/push/apns-credentials.ts workers/push/apns-credentials.ts
 COPY workers/push/apns-transport.ts workers/push/apns-transport.ts

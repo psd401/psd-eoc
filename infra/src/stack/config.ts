@@ -30,7 +30,12 @@ export const SERVER_REPOSITORY_NAME = 'psd-eoc/server';
 export const HEALTH_QUEUE_NAME = 'psd-eoc-health';
 export const EMAIL_QUEUE_NAME = 'psd-eoc-email';
 export const EMAIL_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-email-dlq';
+export const EMAIL_CALLBACK_QUEUE_NAME = 'psd-eoc-email-callback';
+export const EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME =
+  'psd-eoc-email-callback-dlq';
 export const EMAIL_WORKER_LOG_GROUP_NAME = '/psd-eoc/workers/email';
+export const EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME =
+  '/psd-eoc/workers/email-callback';
 
 /**
  * The notification delivery queues.

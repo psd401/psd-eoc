@@ -257,6 +257,16 @@ export type SetChannelEnabledInput = z.infer<
   typeof SetChannelEnabledInputSchema
 >;
 
+/** Human-admin action that binds configured SES evidence to live truth. */
+export const VerifyEmailIntegrationInputSchema = z
+  .object({ integrationId: z.literal('ses-email') })
+  .strict()
+  .readonly();
+
+export type VerifyEmailIntegrationInput = z.infer<
+  typeof VerifyEmailIntegrationInputSchema
+>;
+
 /**
  * Owns the non-secret channel configuration returned after an authorized
  * administrative change. Truth status is repeated so enabled never implies
