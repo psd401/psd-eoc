@@ -13,6 +13,45 @@ export interface CleanupObservation {
   readonly remainingResources: readonly string[];
 }
 
+export type CleanupReadbackClassification = 'absent' | 'present';
+
+export function classifyAppRunnerCleanupReadback(
+  status: number,
+  readback: string,
+): CleanupReadbackClassification {
+  if (!Number.isInteger(status) || status < 0 || typeof readback !== 'string') {
+    throw new Error('App Runner cleanup readback input is invalid.');
+  }
+  if (status !== 0) {
+    if (/An error occurred \(ResourceNotFoundException\)/u.test(readback)) {
+      return 'absent';
+    }
+    throw new Error('App Runner cleanup readback failed unexpectedly.');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readback);
+  } catch {
+    throw new Error('App Runner cleanup readback returned invalid JSON.');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('App Runner cleanup readback is malformed.');
+  }
+  const service = (parsed as Readonly<Record<string, unknown>>).Service;
+  if (
+    typeof service !== 'object' ||
+    service === null ||
+    Array.isArray(service)
+  ) {
+    throw new Error('App Runner cleanup readback is missing its service.');
+  }
+  const serviceStatus = (service as Readonly<Record<string, unknown>>).Status;
+  if (typeof serviceStatus !== 'string' || serviceStatus.length === 0) {
+    throw new Error('App Runner cleanup readback is missing its status.');
+  }
+  return serviceStatus === 'DELETED' ? 'absent' : 'present';
+}
+
 export function parseCleanupObservation(
   value: unknown,
   expectedStackName: string,
@@ -42,6 +81,17 @@ export function parseCleanupObservation(
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'classify-apprunner-readback') {
+    const status = Number(process.argv[3]);
+    const readback = process.argv[4];
+    if (readback === undefined || process.argv.length !== 5) {
+      throw new Error(
+        'Usage: bun finalize-evidence.ts classify-apprunner-readback STATUS READBACK',
+      );
+    }
+    console.log(classifyAppRunnerCleanupReadback(status, readback));
+    return;
+  }
   const input = process.argv[2];
   const cleanupInput = process.argv[3];
   const output = process.argv[4];

@@ -18,6 +18,10 @@ const deployWorkflow = new URL(
   '../../../.github/workflows/deploy.yml',
   import.meta.url,
 );
+const failureDrillRunner = new URL(
+  './failure-drill-runner.ts',
+  import.meta.url,
+);
 const productionBuild = new URL(
   '../../../packages/server/.next/server',
   import.meta.url,
@@ -32,6 +36,14 @@ async function emittedFiles(root: string): Promise<string[]> {
     }),
   );
   return files.flat();
+}
+
+function workflowStep(contents: string, name: string): string {
+  const marker = `      - name: ${name}\n`;
+  const start = contents.indexOf(marker);
+  if (start === -1) throw new Error(`Workflow step not found: ${name}`);
+  const next = contents.indexOf('\n      - name:', start + marker.length);
+  return contents.slice(start, next === -1 ? undefined : next);
 }
 
 test('production artifact structurally excludes every failure-drill control', async () => {
@@ -93,9 +105,10 @@ test('the separate synthetic artifact adds the runner and operator route at buil
 });
 
 test('the drill workflow uses a fresh exact stack and receives no live secret namespace', async () => {
-  const [drill, deploy] = await Promise.all([
+  const [drill, deploy, runner] = await Promise.all([
     readFile(drillWorkflow, 'utf8'),
     readFile(deployWorkflow, 'utf8'),
+    readFile(failureDrillRunner, 'utf8'),
   ]);
   expect(drill).toContain('environment: failure-drill');
   expect(drill).toContain('aws cloudformation describe-stacks');
@@ -112,7 +125,25 @@ test('the drill workflow uses a fresh exact stack and receives no live secret na
   expect(drill).toContain('aws cloudformation list-stack-resources');
   expect(drill).toContain('checkedResources:[],remainingResources:[]');
   expect(drill).toContain('aws ecs stop-task');
+  const bootstrap = workflowStep(drill, 'Run native database bootstrap');
+  expect(bootstrap).toContain('BootstrapPrivateSubnetIds');
+  expect(bootstrap).toContain('assignPublicIp=DISABLED');
+  expect(bootstrap).not.toContain('FailureDrillRunnerPublicSubnetIds');
+  expect(bootstrap).not.toContain('assignPublicIp=ENABLED');
+  const orchestrator = workflowStep(drill, 'Run all eight failure scenarios');
+  expect(orchestrator).toContain('FailureDrillRunnerPublicSubnetIds');
+  expect(orchestrator).toContain('assignPublicIp=ENABLED');
+  expect(orchestrator).not.toContain('BootstrapPrivateSubnetIds');
+  expect(orchestrator).not.toContain('assignPublicIp=DISABLED');
+  expect(runner).toMatch(
+    /assignPublicIp: 'DISABLED',[\s\S]*?subnets: requiredEnvironment\(\s*'PSD_EOC_FAILURE_DRILL_SUBNET_IDS'/u,
+  );
+  expect(runner).not.toContain("assignPublicIp: 'ENABLED'");
   expect(drill).toContain('cleanup-observation.json');
+  expect(drill).toContain(
+    'bun ../scripts/ops/failure-drills/finalize-evidence.ts',
+  );
+  expect(drill).toContain('classify-apprunner-readback');
   for (const readback of [
     'describe-db-clusters',
     'describe-db-instances',

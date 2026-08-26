@@ -62,6 +62,7 @@ import type { DeploymentProfile, DeploymentTarget } from './config';
 
 const APP_RUNNER_PORT = '3000';
 const APPLICATION_SUBNET_GROUP_NAME = 'Application';
+const FAILURE_DRILL_RUNNER_SUBNET_GROUP_NAME = 'FailureDrillRunner';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
 const ACCESS_SYNC_CONTAINER_NAME = 'access-membership-sync';
 const EMAIL_QUEUE_MAX_RECEIVES = 5;
@@ -441,15 +442,13 @@ export class PsdEocStack extends Stack {
           name: 'Database',
           subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
         },
-        ...(failureDrill
-          ? []
-          : [
-              {
-                cidrMask: 28,
-                name: 'Public',
-                subnetType: ec2.SubnetType.PUBLIC,
-              },
-            ]),
+        {
+          cidrMask: 28,
+          name: failureDrill
+            ? FAILURE_DRILL_RUNNER_SUBNET_GROUP_NAME
+            : 'Public',
+          subnetType: ec2.SubnetType.PUBLIC,
+        },
         {
           cidrMask: failureDrill ? 27 : 28,
           name: APPLICATION_SUBNET_GROUP_NAME,
@@ -462,6 +461,11 @@ export class PsdEocStack extends Stack {
     const applicationSubnets = network.selectSubnets({
       subnetGroupName: APPLICATION_SUBNET_GROUP_NAME,
     });
+    const failureDrillRunnerSubnets = failureDrill
+      ? network.selectSubnets({
+          subnetGroupName: FAILURE_DRILL_RUNNER_SUBNET_GROUP_NAME,
+        })
+      : undefined;
     if (failureDrill) {
       const endpointSecurityGroup = new ec2.SecurityGroup(
         this,
@@ -712,7 +716,7 @@ export class PsdEocStack extends Stack {
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
       failureDrill
-        ? 'HTTPS to private AWS service endpoints; the subnet has no internet route.'
+        ? 'HTTPS to private AWS endpoints and the synthetic App Runner origin.'
         : 'HTTPS through the NAT gateway for Google OAuth and AWS task dependencies.',
     );
     databaseSecurityGroup.addIngressRule(
@@ -2332,6 +2336,9 @@ export class PsdEocStack extends Stack {
       });
       new CfnOutput(this, 'FailureDrillTaskDefinitionArn', {
         value: failureDrillTaskDefinition!.taskDefinitionArn,
+      });
+      new CfnOutput(this, 'FailureDrillRunnerPublicSubnetIds', {
+        value: Fn.join(',', failureDrillRunnerSubnets!.subnetIds),
       });
       new CfnOutput(this, 'FailureDrillLogGroupName', {
         value: failureDrillLogGroup!.logGroupName,

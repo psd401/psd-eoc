@@ -2173,12 +2173,42 @@ describe('isolated failure-drill deployment profile', () => {
     );
   });
 
-  it('uses a NAT-free private endpoint network without consuming an Elastic IP', () => {
+  it('uses a NAT-free endpoint network with public egress only for the orchestrator', () => {
     drillTemplate.resourceCountIs('AWS::EC2::NatGateway', 0);
     drillTemplate.resourceCountIs('AWS::EC2::EIP', 0);
-    drillTemplate.resourceCountIs('AWS::EC2::InternetGateway', 0);
-    drillTemplate.resourceCountIs('AWS::EC2::Subnet', 4);
+    drillTemplate.resourceCountIs('AWS::EC2::InternetGateway', 1);
+    drillTemplate.resourceCountIs('AWS::EC2::Subnet', 6);
     drillTemplate.resourceCountIs('AWS::EC2::VPCEndpoint', 9);
+
+    const outputs = asRecord(drillJson.Outputs);
+    expect(outputs.FailureDrillRunnerPublicSubnetIds).toBeDefined();
+    expect(JSON.stringify(outputs.FailureDrillRunnerPublicSubnetIds)).toContain(
+      'FailureDrillRunner',
+    );
+
+    const drillTask = Object.values(
+      drillTemplate.findResources('AWS::ECS::TaskDefinition'),
+    )
+      .map((resource) => asRecord(resource))
+      .find((resource) =>
+        JSON.stringify(resource).includes('failure-drill-runner.ts'),
+      );
+    expect(drillTask).toBeDefined();
+    const runnerContainer = asArray(
+      properties(drillTask as SynthesizedResource).ContainerDefinitions,
+    )
+      .map(asRecord)
+      .find((container) =>
+        JSON.stringify(container.Command).includes('failure-drill-runner.ts'),
+      );
+    expect(runnerContainer).toBeDefined();
+    const subnetEnvironment = asArray(runnerContainer?.Environment)
+      .map(asRecord)
+      .find((entry) => entry.Name === 'PSD_EOC_FAILURE_DRILL_SUBNET_IDS');
+    expect(subnetEnvironment).toBeDefined();
+    const workerSubnets = JSON.stringify(subnetEnvironment?.Value);
+    expect(workerSubnets).toContain('DatabaseNetworkApplicationSubnet');
+    expect(workerSubnets).not.toContain('FailureDrillRunner');
 
     const endpoints = Object.values(
       drillTemplate.findResources('AWS::EC2::VPCEndpoint'),
