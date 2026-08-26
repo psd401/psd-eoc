@@ -1332,6 +1332,19 @@ describe('App Runner runtime safety boundary', () => {
   });
 
   it('keeps the dark push worker on exact queue and credential boundaries', () => {
+    const securityGroups = resourceEntries('AWS::EC2::SecurityGroup').filter(
+      ([, resource]) =>
+        properties(resource).GroupName === 'psd-eoc-push-worker',
+    );
+    expect(securityGroups).toHaveLength(1);
+    const pushSecurityGroup = securityGroups[0];
+    if (pushSecurityGroup === undefined) {
+      throw new Error('Missing push worker security group.');
+    }
+    expect(properties(pushSecurityGroup[1]).GroupDescription).toBe(
+      'HTTPS-only egress for the isolated Expo push worker; no database route.',
+    );
+
     const task = properties(taskDefinitionByFamily('psd-eoc-expo-push-worker'));
     const containers = asArray(task.ContainerDefinitions).map(asRecord);
     expect(containers).toHaveLength(1);
