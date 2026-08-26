@@ -1,0 +1,553 @@
+name: Synthetic failure-recovery drill
+
+run-name: synthetic failure drill ${{ inputs.run_id || github.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Optional lowercase run identifier. Leave empty to use this workflow run.
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      run_id:
+        description: Lowercase identifier for the isolated drill run.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: psd-eoc-synthetic-failure-drill
+  cancel-in-progress: false
+
+jobs:
+  failure-drill:
+    name: Deploy, prove recovery, and clean up
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: failure-drill
+    env:
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Assume the reviewed deployment role
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Pin the synthetic boundary
+        shell: bash
+        env:
+          REQUESTED_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          actual_account=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual_account" != "$AWS_ACCOUNT_ID" ]]; then
+            echo "::error::OIDC resolved account $actual_account, not the configured drill account." >&2
+            exit 1
+          fi
+          account_alias=$(aws iam list-account-aliases --query 'AccountAliases[0]' --output text)
+          if [[ -z "$account_alias" || "$account_alias" == "None" ]]; then
+            echo "::error::The drill account must have an independently readable alias." >&2
+            exit 1
+          fi
+          run_id=${REQUESTED_RUN_ID:-issue-31-${GITHUB_RUN_ID}}
+          if [[ ! "$run_id" =~ ^[a-z0-9][a-z0-9-]{7,23}$ ]]; then
+            echo "::error::run_id must be 8-24 lowercase letters, digits, or hyphens." >&2
+            exit 1
+          fi
+          stack_name="PsdEocFailureDrill-$run_id"
+          set +e
+          stack_lookup=$(aws cloudformation describe-stacks \
+            --stack-name "$stack_name" --output json 2>&1)
+          stack_lookup_status=$?
+          set -e
+          if [[ "$stack_lookup_status" == "0" ]]; then
+            echo "::error::The exact drill stack $stack_name already exists. Choose a fresh run_id." >&2
+            exit 1
+          fi
+          if [[ "$stack_lookup" != *"(ValidationError)"* || "$stack_lookup" != *"does not exist"* ]]; then
+            echo "::error::Could not prove that $stack_name is absent before deployment." >&2
+            exit 1
+          fi
+          operator_role_name=${AWS_DEPLOY_ROLE_ARN##*/}
+          operator_token=$(openssl rand -base64 48 | tr '+/' '_-' | tr -d '=\n')
+          echo "::add-mask::$operator_token"
+          {
+            echo "AWS_ACCOUNT_ALIAS=$account_alias"
+            echo "FAILURE_DRILL_RUN_ID=$run_id"
+            echo "FAILURE_DRILL_STACK_NAME=$stack_name"
+            echo "FAILURE_DRILL_OPERATOR_ROLE_NAME=$operator_role_name"
+            echo "FAILURE_DRILL_OPERATOR_TOKEN=$operator_token"
+          } >> "$GITHUB_ENV"
+          mkdir -p artifacts/failure-drill
+          {
+            echo "### Synthetic failure-recovery drill"
+            echo ""
+            echo "| Boundary | Value |"
+            echo "|---|---|"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| Run ID | \`$run_id\` |"
+            echo "| Deployment class | non-production |"
+            echo "| Provider mode | mocked |"
+            echo "| Roster population | synthetic |"
+            echo "| Recipient domain | example.invalid |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy the disposable foundation
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          sentinel="sha256:$(printf '1%.0s' {1..64})"
+          mobile_digest=$(printf 'f%.0s' {1..64})
+          application_origin="https://$FAILURE_DRILL_RUN_ID.example.invalid"
+          bunx --bun cdk \
+            --app "bun bin/failure-drill.ts" \
+            deploy "$FAILURE_DRILL_STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --outputs-file ../artifacts/failure-drill/stack-outputs.json \
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=false" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$sentinel" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$sentinel" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
+
+      - name: Log in to the isolated ECR repository
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and publish separate production and drill artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/failure-drill/stack-outputs.json
+          repository_uri=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".ImageRepositoryUri" "$outputs")
+          repository_name=${repository_uri#*/}
+          production_tag="$repository_uri:production-$GITHUB_SHA"
+          drill_tag="$repository_uri:drill-$GITHUB_SHA"
+
+          docker build --platform linux/amd64 \
+            --file packages/server/container/psd-eoc.Dockerfile \
+            --build-arg "SOURCE_REPOSITORY_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --build-arg "SOURCE_SHA=$GITHUB_SHA" \
+            --tag "$production_tag" .
+          docker push "$production_tag"
+
+          docker build --platform linux/amd64 \
+            --file packages/server/container/failure-drill.Dockerfile \
+            --build-arg "SOURCE_REPOSITORY_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --build-arg "SOURCE_SHA=$GITHUB_SHA" \
+            --tag "$drill_tag" .
+          docker push "$drill_tag"
+
+          production_digest=$(aws ecr describe-images \
+            --repository-name "$repository_name" \
+            --image-ids "imageTag=production-$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          drill_digest=$(aws ecr describe-images \
+            --repository-name "$repository_name" \
+            --image-ids "imageTag=drill-$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          for digest in "$production_digest" "$drill_digest"; do
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::A drill artifact did not resolve to an immutable digest." >&2
+              exit 1
+            fi
+          done
+
+          docker run --rm --entrypoint sh "$production_tag" -ceu '
+            test ! -e /app/scripts/ops/failure-drills
+            test ! -e /app/packages/server/app/api/failure-drills
+            test ! -e /app/packages/server/.next/server/app/api/failure-drills
+          '
+          docker run --rm --entrypoint sh "$drill_tag" -ceu '
+            test -f /app/scripts/ops/failure-drills/failure-drill-runner.ts
+            test -e /app/packages/server/.next/server/app/api/failure-drills/session/route.js
+            test -e /app/packages/server/.next/server/app/api/failure-drills/callback/route.js
+          '
+          {
+            echo "FAILURE_DRILL_PRODUCTION_DIGEST=$production_digest"
+            echo "FAILURE_DRILL_IMAGE_DIGEST=$drill_digest"
+          } >> "$GITHUB_ENV"
+          {
+            echo ""
+            echo "| Artifact | Digest |"
+            echo "|---|---|"
+            echo "| Production/bootstrap (fault controls absent) | \`$production_digest\` |"
+            echo "| Failure drill | \`$drill_digest\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pin the exact artifacts into the stack
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          mobile_digest=$(printf 'f%.0s' {1..64})
+          application_origin="https://$FAILURE_DRILL_RUN_ID.example.invalid"
+          bunx --bun cdk \
+            --app "bun bin/failure-drill.ts" \
+            deploy "$FAILURE_DRILL_STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --outputs-file ../artifacts/failure-drill/stack-outputs.json \
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=false" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
+
+      - name: Run native database bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/failure-drill/stack-outputs.json
+          cluster=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapEcsClusterArn" "$outputs")
+          task_definition=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapTaskDefinitionArn" "$outputs")
+          subnets=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapPrivateSubnetIds" "$outputs")
+          security_group=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapSecurityGroupId" "$outputs")
+          task_arn=$(aws ecs run-task \
+            --cluster "$cluster" \
+            --task-definition "$task_definition" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --count 1 \
+            --started-by "failure-drill-bootstrap-$GITHUB_RUN_ID" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=DISABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task_arn"
+          exit_code=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task_arn" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [[ "$exit_code" != "0" ]]; then
+            echo "::error::Synthetic database bootstrap exited $exit_code." >&2
+            exit 1
+          fi
+
+      - name: Deploy the synthetic application
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          mobile_digest=$(printf 'f%.0s' {1..64})
+          application_origin="https://$FAILURE_DRILL_RUN_ID.example.invalid"
+          bunx --bun cdk \
+            --app "bun bin/failure-drill.ts" \
+            deploy "$FAILURE_DRILL_STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --outputs-file ../artifacts/failure-drill/stack-outputs.json \
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=true" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
+
+      - name: Bind the exact generated App Runner origin
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=../artifacts/failure-drill/stack-outputs.json
+          application_origin=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".AppRunnerServiceUrl" "$outputs")
+          mobile_digest=$(printf 'f%.0s' {1..64})
+          bunx --bun cdk \
+            --app "bun bin/failure-drill.ts" \
+            deploy "$FAILURE_DRILL_STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --outputs-file "$outputs" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:ProvisionApplication=true" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:AppImageDigest=$FAILURE_DRILL_IMAGE_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapImageDigest=$FAILURE_DRILL_PRODUCTION_DIGEST" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:BootstrapSourceSha=$GITHUB_SHA" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupId=31000000-0000-4000-8000-000000000031" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupEmail=operator@example.invalid" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialAccessGroupName=Synthetic failure-drill administrators" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:InitialMobileTransitionEmailSha256=$mobile_digest" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorToken=$FAILURE_DRILL_OPERATOR_TOKEN" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillOperatorRoleName=$FAILURE_DRILL_OPERATOR_ROLE_NAME" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:FailureDrillApplicationOrigin=$application_origin" \
+            --parameters "$FAILURE_DRILL_STACK_NAME:SourceSha=$GITHUB_SHA"
+
+      - name: Wait for the synthetic application
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/failure-drill/stack-outputs.json
+          app_url=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".AppRunnerServiceUrl" "$outputs")
+          for attempt in {1..60}; do
+            code=$(curl -sS -o /tmp/failure-drill-health.json -w '%{http_code}' \
+              --max-time 20 "$app_url/api/health" || echo '000')
+            if [[ "$code" == "200" ]]; then
+              echo "Synthetic application is healthy on the digest pinned by the completed stack update."
+              exit 0
+            fi
+            echo "attempt $attempt: health http=$code"
+            sleep 15
+          done
+          echo "::error::Synthetic App Runner health endpoint did not become ready." >&2
+          exit 1
+
+      - name: Run all eight failure scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/failure-drill/stack-outputs.json
+          cluster=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapEcsClusterArn" "$outputs")
+          task_definition=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".FailureDrillTaskDefinitionArn" "$outputs")
+          subnets=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapPrivateSubnetIds" "$outputs")
+          security_group=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapSecurityGroupId" "$outputs")
+          log_group=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".FailureDrillLogGroupName" "$outputs")
+          task_arn=$(aws ecs run-task \
+            --cluster "$cluster" \
+            --task-definition "$task_definition" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --count 1 \
+            --started-by "failure-drill-$GITHUB_RUN_ID" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=DISABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          for attempt in {1..160}; do
+            status=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task_arn" \
+              --query 'tasks[0].lastStatus' --output text)
+            [[ "$status" == "STOPPED" ]] && break
+            sleep 10
+          done
+          read -r status exit_code < <(aws ecs describe-tasks \
+            --cluster "$cluster" --tasks "$task_arn" \
+            --query 'tasks[0].[lastStatus,containers[0].exitCode]' --output text)
+          aws logs filter-log-events --log-group-name "$log_group" \
+            --query 'events[].message' --output json \
+            > artifacts/failure-drill/drill-log-messages.json
+          jq -cer '
+            map(fromjson? | select(.kind == "failure-drill-manifest")) |
+            if length == 1 then .[0].manifest else error("expected one manifest") end
+          ' artifacts/failure-drill/drill-log-messages.json \
+            > artifacts/failure-drill/manifest-pending-cleanup.json
+          bun scripts/ops/failure-drills/validate-evidence.ts \
+            artifacts/failure-drill/manifest-pending-cleanup.json
+          if [[ "$status" != "STOPPED" || "$exit_code" != "0" ]]; then
+            echo "::error::Failure-drill task ended status=$status exit=$exit_code." >&2
+            exit 1
+          fi
+
+      - name: Install Chromium for deployed browser proof
+        run: bunx playwright install --with-deps chromium
+
+      - name: Prove deployed recovery at desktop and mobile widths
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_url=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".AppRunnerServiceUrl" \
+            artifacts/failure-drill/stack-outputs.json)
+          FAILURE_DRILL_APP_URL="$app_url" \
+          FAILURE_DRILL_OPERATOR_TOKEN="$FAILURE_DRILL_OPERATOR_TOKEN" \
+          FAILURE_DRILL_EVIDENCE_DIRECTORY="artifacts/failure-drill/browser" \
+            bun scripts/ops/failure-drills/remote-e2e.ts
+
+      - name: Destroy the exact synthetic stack
+        id: cleanup
+        if: always()
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${FAILURE_DRILL_STACK_NAME:-}" ]]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          resources=../artifacts/failure-drill/stack-resources-before-cleanup.json
+          aws cloudformation list-stack-resources \
+            --stack-name "$FAILURE_DRILL_STACK_NAME" \
+            --query 'StackResourceSummaries[].{logicalId:LogicalResourceId,physicalId:PhysicalResourceId,type:ResourceType}' \
+            --output json > "$resources"
+          cluster=$(jq -r '.[] | select(.type == "AWS::ECS::Cluster") | .physicalId' \
+            "$resources" | head -n 1)
+          if [[ -n "$cluster" ]]; then
+            mapfile -t tasks < <(
+              for desired in RUNNING PENDING; do
+                aws ecs list-tasks --cluster "$cluster" --desired-status "$desired" \
+                  --output json | jq -r '.taskArns[]'
+              done | sort -u
+            )
+            for task in "${tasks[@]}"; do
+              aws ecs stop-task --cluster "$cluster" --task "$task" \
+                --reason "Exact failure-drill stack cleanup" >/dev/null
+            done
+            if (( ${#tasks[@]} > 0 )); then
+              aws ecs wait tasks-stopped --cluster "$cluster" --tasks "${tasks[@]}"
+            fi
+          fi
+          bunx --bun cdk \
+            --app "bun bin/failure-drill.ts" \
+            destroy "$FAILURE_DRILL_STACK_NAME" \
+            --exclusively \
+            --force \
+            --no-notices
+
+          stack_absent=false
+          for attempt in {1..60}; do
+            set +e
+            lookup=$(aws cloudformation describe-stacks \
+              --stack-name "$FAILURE_DRILL_STACK_NAME" --output json 2>&1)
+            lookup_status=$?
+            set -e
+            if [[ "$lookup_status" != "0" && "$lookup" == *"(ValidationError)"* && "$lookup" == *"does not exist"* ]]; then
+              stack_absent=true
+              break
+            fi
+            if [[ "$lookup_status" != "0" ]]; then
+              echo "::error::Could not verify exact stack deletion." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          if [[ "$stack_absent" != "true" ]]; then
+            echo "::error::The exact synthetic stack still exists after destroy." >&2
+            exit 1
+          fi
+
+          checked='[]'
+          remaining='[]'
+          while IFS=$'\t' read -r type physical_id; do
+            [[ -z "$physical_id" ]] && continue
+            checked=$(jq -c --arg value "$type:$physical_id" '. + [$value]' <<<"$checked")
+            exists=false
+            case "$type" in
+              AWS::RDS::DBCluster)
+                set +e
+                readback=$(aws rds describe-db-clusters --db-cluster-identifier "$physical_id" 2>&1)
+                status=$?
+                set -e
+                [[ "$status" == "0" ]] && exists=true
+                [[ "$status" != "0" && "$readback" != *"DBClusterNotFoundFault"* ]] && { echo "::error::RDS cluster cleanup readback failed." >&2; exit 1; }
+                ;;
+              AWS::RDS::DBInstance)
+                set +e
+                readback=$(aws rds describe-db-instances --db-instance-identifier "$physical_id" 2>&1)
+                status=$?
+                set -e
+                [[ "$status" == "0" ]] && exists=true
+                [[ "$status" != "0" && "$readback" != *"DBInstanceNotFound"* ]] && { echo "::error::RDS instance cleanup readback failed." >&2; exit 1; }
+                ;;
+              AWS::AppRunner::Service)
+                set +e
+                readback=$(aws apprunner describe-service --service-arn "$physical_id" 2>&1)
+                status=$?
+                set -e
+                [[ "$status" == "0" ]] && exists=true
+                [[ "$status" != "0" && "$readback" != *"ResourceNotFoundException"* ]] && { echo "::error::App Runner cleanup readback failed." >&2; exit 1; }
+                ;;
+              AWS::ECR::Repository)
+                set +e
+                readback=$(aws ecr describe-repositories --repository-names "$physical_id" 2>&1)
+                status=$?
+                set -e
+                [[ "$status" == "0" ]] && exists=true
+                [[ "$status" != "0" && "$readback" != *"RepositoryNotFoundException"* ]] && { echo "::error::ECR cleanup readback failed." >&2; exit 1; }
+                ;;
+              AWS::SQS::Queue)
+                set +e
+                readback=$(aws sqs get-queue-attributes --queue-url "$physical_id" --attribute-names QueueArn 2>&1)
+                status=$?
+                set -e
+                [[ "$status" == "0" ]] && exists=true
+                [[ "$status" != "0" && "$readback" != *"NonExistentQueue"* ]] && { echo "::error::SQS cleanup readback failed." >&2; exit 1; }
+                ;;
+              AWS::Logs::LogGroup)
+                count=$(aws logs describe-log-groups --log-group-name-prefix "$physical_id" \
+                  --output json | jq --arg name "$physical_id" '[.logGroups[] | select(.logGroupName == $name)] | length')
+                [[ "$count" != "0" ]] && exists=true
+                ;;
+              AWS::SecretsManager::Secret)
+                set +e
+                readback=$(aws secretsmanager describe-secret --secret-id "$physical_id" 2>&1)
+                status=$?
+                set -e
+                [[ "$status" == "0" ]] && exists=true
+                [[ "$status" != "0" && "$readback" != *"ResourceNotFoundException"* ]] && { echo "::error::Secret cleanup readback failed." >&2; exit 1; }
+                ;;
+            esac
+            if [[ "$exists" == "true" ]]; then
+              remaining=$(jq -c --arg value "$type:$physical_id" '. + [$value]' <<<"$remaining")
+            fi
+          done < <(jq -r '.[] | select(.type == "AWS::RDS::DBCluster" or .type == "AWS::RDS::DBInstance" or .type == "AWS::AppRunner::Service" or .type == "AWS::ECR::Repository" or .type == "AWS::SQS::Queue" or .type == "AWS::Logs::LogGroup" or .type == "AWS::SecretsManager::Secret") | [.type, .physicalId] | @tsv' "$resources")
+          jq -n \
+            --arg stackName "$FAILURE_DRILL_STACK_NAME" \
+            --arg observedAt "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            --argjson checkedResources "$checked" \
+            --argjson remainingResources "$remaining" \
+            '{stackName:$stackName,stackAbsent:true,observedAt:$observedAt,checkedResources:$checkedResources,remainingResources:$remainingResources}' \
+            > ../artifacts/failure-drill/cleanup-observation.json
+          if [[ $(jq 'length' <<<"$remaining") != "0" ]]; then
+            echo "::error::One or more exact synthetic resources still exist." >&2
+            exit 1
+          fi
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+
+      - name: Finalize cleanup evidence
+        if: always() && steps.cleanup.outputs.complete == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          input=artifacts/failure-drill/manifest-pending-cleanup.json
+          if [[ -f "$input" ]]; then
+            bun scripts/ops/failure-drills/finalize-evidence.ts \
+              "$input" artifacts/failure-drill/cleanup-observation.json \
+              artifacts/failure-drill/manifest.json
+          fi
+
+      - name: Upload immutable drill evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: failure-drill-${{ github.run_id }}
+          path: artifacts/failure-drill
+          if-no-files-found: warn
+          retention-days: 90

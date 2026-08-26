@@ -1,0 +1,12 @@
+.git
+.github
+.verification
+.env
+.env.*
+**/.env
+**/.env.*
+**/.next
+**/node_modules
+node_modules
+*.log
+coverage

@@ -6,6 +6,7 @@
   "scripts": {
     "deploy": "cdk deploy --output ../node_modules/.cache/psd-eoc-cdk.out",
     "synth": "cdk synth --quiet --no-lookups --strict --no-notices --output ../node_modules/.cache/psd-eoc-cdk.out",
+    "synth:failure-drill": "cdk synth --app 'bun bin/failure-drill.ts' --quiet --no-lookups --strict --no-notices --output ../node_modules/.cache/psd-eoc-failure-drill-cdk.out",
     "synth:example": "bun bin/synthesize-example.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit --project tsconfig.json && bun run synth"

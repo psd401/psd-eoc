@@ -7,6 +7,12 @@
     "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {
-    "@psd-eoc/contracts": "workspace:*"
+    "@aws-sdk/client-cloudwatch": "3.883.0",
+    "@aws-sdk/client-ecs": "3.883.0",
+    "@aws-sdk/client-rds": "3.883.0",
+    "@aws-sdk/client-sqs": "3.883.0",
+    "@psd-eoc/contracts": "workspace:*",
+    "@psd-eoc/server": "workspace:*",
+    "postgres": "3.4.8"
   }
 }

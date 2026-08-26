@@ -84,6 +84,14 @@ export interface MonitoringRuntimeParameters {
   readonly canaryFacilityId: string;
 }
 
+export interface FailureDrillMonitoringProps {
+  readonly applicationCondition: CfnCondition;
+  readonly appRunnerService: apprunner.CfnService;
+  readonly database: rds.DatabaseCluster;
+  readonly deadLetterQueues: readonly sqs.IQueue[];
+  readonly namePrefix: string;
+}
+
 type AlarmTier = 'infrastructure' | 'application';
 
 interface AlarmDefinition {
@@ -1444,6 +1452,126 @@ export function configureInfrastructureMonitoring(
   configureAlarms(scope, props, metrics, false);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);
+}
+
+/**
+ * Native-metric evidence for a one-run synthetic stack.
+ *
+ * These alarms intentionally have no actions: the drill records their state in
+ * its evidence ledger, but it cannot notify a person or gain provider send
+ * authority. Names and dimensions are derived only from the disposable stack.
+ */
+export function configureFailureDrillMonitoring(
+  scope: Construct,
+  props: FailureDrillMonitoringProps,
+): void {
+  const addAlarm = (
+    id: string,
+    suffix: string,
+    metric: cloudwatch.IMetric,
+    threshold = 1,
+  ): void => {
+    const alarm = new cloudwatch.Alarm(scope, id, {
+      actionsEnabled: false,
+      alarmDescription:
+        'Synthetic failure-drill evidence only; no notification actions are attached.',
+      alarmName: `${props.namePrefix}-${suffix}`,
+      evaluationPeriods: 1,
+      metric,
+      threshold,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      props.applicationCondition;
+  };
+
+  addAlarm(
+    'FailureDrillAppRunner5xxAlarm',
+    'apprunner-5xx',
+    new cloudwatch.Metric({
+      dimensionsMap: {
+        ServiceID: props.appRunnerService.attrServiceId,
+        ServiceName: props.namePrefix,
+      },
+      metricName: '5xxStatusResponses',
+      namespace: 'AWS/AppRunner',
+      period: ONE_MINUTE,
+      statistic: 'Sum',
+    }),
+  );
+  addAlarm(
+    'FailureDrillAuroraCapacityAlarm',
+    'aurora-acu',
+    databaseMetric(
+      props.database,
+      'ACUUtilization',
+      'Maximum',
+      cloudwatch.Unit.PERCENT,
+    ),
+    80,
+  );
+  for (const [index, queue] of props.deadLetterQueues.entries()) {
+    addAlarm(
+      `FailureDrillDeadLetterQueue${String(index + 1)}Alarm`,
+      `dlq-${String(index + 1)}`,
+      queue.metricApproximateNumberOfMessagesVisible({
+        period: ONE_MINUTE,
+        statistic: 'Maximum',
+      }),
+    );
+  }
+  const dashboard = new cloudwatch.Dashboard(scope, 'FailureDrillDashboard', {
+    dashboardName: `${props.namePrefix}-recovery`,
+    periodOverride: cloudwatch.PeriodOverride.INHERIT,
+    start: '-PT1H',
+  });
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      left: [
+        new cloudwatch.Metric({
+          dimensionsMap: {
+            ServiceID: props.appRunnerService.attrServiceId,
+            ServiceName: props.namePrefix,
+          },
+          metricName: '5xxStatusResponses',
+          namespace: 'AWS/AppRunner',
+          period: ONE_MINUTE,
+          statistic: 'Sum',
+        }),
+      ],
+      title: 'Synthetic App Runner 5xx recovery signal',
+      width: 12,
+    }) as unknown as cloudwatch.IWidget,
+    new cloudwatch.GraphWidget({
+      left: [
+        databaseMetric(
+          props.database,
+          'ACUUtilization',
+          'Maximum',
+          cloudwatch.Unit.PERCENT,
+        ),
+      ],
+      title: 'Synthetic Aurora capacity through failover',
+      width: 12,
+    }) as unknown as cloudwatch.IWidget,
+  );
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      left: props.deadLetterQueues.map((queue, index) =>
+        queue
+          .metricApproximateNumberOfMessagesVisible({
+            period: ONE_MINUTE,
+            statistic: 'Maximum',
+          })
+          .with({ label: `Synthetic DLQ ${String(index + 1)}` }),
+      ),
+      title: 'Synthetic dead-letter queue reconciliation',
+      width: 24,
+    }) as unknown as cloudwatch.IWidget,
+  );
+  (
+    dashboard.node.defaultChild as cloudwatch.CfnDashboard
+  ).cfnOptions.condition = props.applicationCondition;
 }
 
 /** Adds phase-5 monitoring without any notification-provider send authority. */

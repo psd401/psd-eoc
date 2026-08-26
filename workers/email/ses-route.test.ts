@@ -526,6 +526,27 @@ describe('SES signed SNS webhook route', () => {
     expect(app.store.endpointWrites).toHaveLength(0);
     expect(app.store.completeCalls).toBe(1);
     expect(app.store.closeCalls).toBe(2);
+    if (
+      process.env.PSD_EOC_FAILURE_DRILL_CAPTURE_SCENARIO ===
+      'duplicate-provider-callback'
+    ) {
+      const identity = `callback:${envelope.MessageId}:attempt:${ATTEMPT.id}:endpoint:${ATTEMPT.endpointId}`;
+      console.log(
+        JSON.stringify({
+          kind: 'failure-drill-focused-result',
+          scenarioId: 'duplicate-provider-callback',
+          expectedSideEffects: [identity],
+          observedSideEffects: app.store.evidenceWrites.map(
+            ({ attempt }) =>
+              `callback:${envelope.MessageId}:attempt:${attempt.id}:endpoint:${attempt.endpointId}`,
+          ),
+          facts: {
+            callbackClaimCount: app.store.claimCalls,
+            capabilityWriteCount: app.store.evidenceWrites.length,
+          },
+        }),
+      );
+    }
   });
 
   test('returns retryable failure for a fresh in-progress duplicate without writes', async () => {
