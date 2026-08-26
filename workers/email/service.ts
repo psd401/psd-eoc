@@ -14,6 +14,7 @@ import {
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { AwsSesV2Client } from './aws-client';
+import { sqsQueueUrlForArn } from './aws-arn';
 import { EmailQueueRuntime, type EmailRetryPublisher } from './queue-runtime';
 import { SesEmailRuntime } from './runtime';
 import { EmailRuntimeClient } from './state-client';
@@ -85,23 +86,20 @@ function token(
   return value;
 }
 
-function exactHttpsUrl(value: string, kind: 'origin' | 'queue'): string {
+function exactHttpsOrigin(value: string): string {
   try {
     const url = new URL(value);
-    const originOnly =
-      kind !== 'origin' ||
-      (url.pathname === '/' && url.search === '' && url.hash === '');
-    const queueHost = kind !== 'queue' || url.hostname.startsWith('sqs.');
     if (
       url.protocol !== 'https:' ||
       url.username !== '' ||
       url.password !== '' ||
-      !originOnly ||
-      !queueHost
+      url.pathname !== '/' ||
+      url.search !== '' ||
+      url.hash !== ''
     ) {
       throw new Error();
     }
-    return kind === 'origin' ? url.origin : url.toString();
+    return url.origin;
   } catch {
     throw new EmailServiceError('INVALID_CONFIGURATION');
   }
@@ -124,15 +122,21 @@ export function readEmailServiceConfiguration(
   if (!verificationReference.success) {
     throw new EmailServiceError('FEATURE_DISABLED');
   }
-  return Object.freeze({
-    queueUrl: exactHttpsUrl(
+  const queueArn = required(environment, 'EMAIL_QUEUE_ARN', 2_048);
+  let queueUrl: string;
+  try {
+    queueUrl = sqsQueueUrlForArn(
       required(environment, 'EMAIL_QUEUE_URL', 2_048),
-      'queue',
-    ),
-    queueArn: required(environment, 'EMAIL_QUEUE_ARN', 2_048),
-    serviceOrigin: exactHttpsUrl(
+      queueArn,
+    );
+  } catch {
+    throw new EmailServiceError('INVALID_CONFIGURATION');
+  }
+  return Object.freeze({
+    queueUrl,
+    queueArn,
+    serviceOrigin: exactHttpsOrigin(
       required(environment, 'PSD_EOC_SERVICE_ORIGIN', 2_048),
-      'origin',
     ),
     fromEmailAddress: required(environment, 'PSD_EOC_SES_FROM_ADDRESS', 320),
     attemptExecutionToken: token(
