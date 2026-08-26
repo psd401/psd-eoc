@@ -1390,6 +1390,10 @@ export class PsdEocStack extends Stack {
                   value: deploymentIdentity.organizationName,
                 },
                 {
+                  name: 'PSD_EOC_PRIVACY_CONTACT_URL',
+                  value: deploymentIdentity.privacyContactUrl,
+                },
+                {
                   name: 'PSD_EOC_DISPLAY_TIME_ZONE',
                   value: deploymentIdentity.displayTimeZone,
                 },
