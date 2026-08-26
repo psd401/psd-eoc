@@ -66,6 +66,7 @@ export interface MonitoringProps {
   readonly appRunnerService: apprunner.CfnService;
   readonly criticalAlarmTopic: sns.ITopic;
   readonly database: rds.DatabaseCluster;
+  readonly displayTimeZone: string;
   readonly delivery: QueueWithDeadLetterQueue;
   readonly channelQueues: Readonly<
     Record<(typeof NOTIFICATION_CHANNELS)[number], QueueWithDeadLetterQueue>
@@ -673,6 +674,7 @@ function createMetricsCollectorFunction(
       DATABASE_ARN: props.database.clusterArn,
       DATABASE_NAME: 'psd_eoc',
       DATABASE_SECRET_ARN: parameters.metricsDatabaseSecret.secretArn,
+      DISPLAY_TIME_ZONE: props.displayTimeZone,
       METRIC_NAMESPACE: MONITORING_METRIC_NAMESPACE,
       TRANSACTION_MODE: 'read-only-always-rollback',
     },
@@ -1073,8 +1075,7 @@ function configureAlarms(
     metric: metrics.monthlyDeliveryTestMissed,
     name: 'psd-eoc-monthly-live-delivery-test-missed',
     runbookAnchor: 'runbook-monthly-live-delivery-test',
-    summary:
-      'The immediately preceding America/Los_Angeles calendar month has no successful terminal live delivery-test report.',
+    summary: `The immediately preceding ${props.displayTimeZone} calendar month has no successful terminal live delivery-test report.`,
     threshold: 1,
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

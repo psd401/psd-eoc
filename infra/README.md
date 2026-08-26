@@ -75,9 +75,10 @@ procedure.
 
 ### Runbook: Monthly live delivery test
 
-A schedule may remind a human that a test is due; it may never send one. Any
-provider test requires current readiness evidence and an authenticated human in
-the application.
+Use the
+[monthly delivery-test alarm](../docs/runbooks/alarm-monthly-delivery-test.md)
+procedure. A schedule may remind a human that a test is due; it may never send
+one.
 
 ### Runbook: Shallow canary
 

@@ -31,8 +31,10 @@ Safety-boundary failures are **SEV-0**.
 
 ## Verify
 
-Confirm new eligible work drains normally, old-epoch work stays suppressed,
-DLQ growth stops, and append-only SES callback/evidence processing remains
-truthful. A `MessageId` is not delivery or human receipt. Keep each retained
-item blocked unless an individually reviewed mechanism can prove zero duplicate
-provider side effect.
+Confirm newly authorized work drains normally, DLQ growth stops, and append-only
+SES callback/evidence processing remains truthful. Pausing a consumer does not
+suppress queued work, and its SQS retention clock keeps running. Record the
+configured retention deadline. Keep each retained item blocked unless it has
+been reconciled before that deadline and an individually reviewed mechanism can
+prove zero duplicate provider side effect. A `MessageId` is not delivery or
+human receipt.

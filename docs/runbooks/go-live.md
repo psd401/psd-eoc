@@ -26,7 +26,8 @@ contact details, or provider payloads.
 6. For each enabled notification channel, require the readiness register to
    show evidence sufficient for the intended use. A channel that is not ready
    stays dark and receives no routable work.
-7. Verify backup/restoration evidence, failure drills, rollback points, and
+7. Verify backup/restoration evidence, failure drills, rollback points, the
+   [emergency notification stop](rollback.md#emergency-notification-stop), and
    operator contacts applicable to this release.
 8. Verify the exact privately distributed mobile builds and install guidance
    if mobile is in scope.
@@ -37,6 +38,14 @@ Production changes occur through the GitHub Actions deploy workflow described
 in [CONFIGURATION.md](../CONFIGURATION.md). A deploy does not start an incident
 or send a notification. Any later real incident, real notification, all-clear,
 or event closure still requires an authenticated human acting in the app.
+
+## Record the go-live decision
+
+Before production traffic begins, record the product owner's direct approval
+for the exact release in the existing release or change history. A direct
+instruction to deploy that release is the sign-off; no separate form, signature
+ritual, or approval workflow is required. If the product owner has not approved
+production traffic for that release, do not deploy it.
 
 The superseded launch checklist and its unfilled evidence fields are preserved
 in the [historical archive](../archive/runbooks/go-live-2026-08-25.md).

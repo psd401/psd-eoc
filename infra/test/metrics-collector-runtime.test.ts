@@ -134,6 +134,7 @@ describe('operational collector runtime boundaries', () => {
     process.env.DATABASE_NAME = 'psd_eoc';
     process.env.DATABASE_SECRET_ARN =
       'arn:aws:secretsmanager:us-west-2:123456789012:secret:synthetic';
+    process.env.DISPLAY_TIME_ZONE = 'America/New_York';
     process.env.TRANSACTION_MODE = 'read-only-always-rollback';
     const commands: unknown[] = [];
     let publications = 0;
@@ -177,6 +178,7 @@ describe('operational collector runtime boundaries', () => {
     process.env.DATABASE_NAME = 'psd_eoc';
     process.env.DATABASE_SECRET_ARN =
       'arn:aws:secretsmanager:us-west-2:123456789012:secret:synthetic';
+    process.env.DISPLAY_TIME_ZONE = 'America/New_York';
     process.env.TRANSACTION_MODE = 'read-only-always-rollback';
     const timeline: string[] = [];
     const publications: Array<ReadonlyArray<Record<string, unknown>>> = [];
@@ -190,6 +192,7 @@ describe('operational collector runtime boundaries', () => {
       [{ stuck_count: 0 }],
     ];
     let selectIndex = 0;
+    let deliveryTestParameters: unknown;
     const databaseClient = {
       async send(command: unknown) {
         if (command instanceof BeginTransactionCommand) {
@@ -204,6 +207,9 @@ describe('operational collector runtime boundaries', () => {
           if (command.input.sql === 'SET TRANSACTION READ ONLY') {
             timeline.push('read-only');
             return {};
+          }
+          if (command.input.sql?.includes(':display_time_zone') === true) {
+            deliveryTestParameters = command.input.parameters;
           }
           timeline.push(`select-${selectIndex}`);
           return {
@@ -223,6 +229,10 @@ describe('operational collector runtime boundaries', () => {
       });
 
       expect(selectIndex).toBe(7);
+      expect(deliveryTestParameters).toContainEqual({
+        name: 'display_time_zone',
+        value: { stringValue: 'America/New_York' },
+      });
       expect(timeline.at(-3)).toBe('rollback');
       expect(timeline.at(-2)).toBe('publish-1');
       expect(timeline.at(-1)).toBe('publish-2');

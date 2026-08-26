@@ -7,6 +7,7 @@ import {
   currentDocumentationViolations,
   extractContractList,
   validateMarkdownLinks,
+  validateMonitoringRunbooks,
   verifyDocumentation,
 } from './verify-documentation';
 
@@ -21,6 +22,33 @@ afterEach(() => {
 describe('documentation contract', () => {
   test('keeps the repository documentation synchronized', () => {
     expect(verifyDocumentation()).toEqual([]);
+  });
+
+  test('maps every monitoring alarm anchor to a current procedure', () => {
+    expect(validateMonitoringRunbooks(join(import.meta.dir, '..'))).toEqual([]);
+  });
+
+  test('rejects monitoring anchors without a current procedure', () => {
+    const root = mkdtempSync(join(tmpdir(), 'psd-eoc-monitoring-docs-'));
+    temporaryDirectories.push(root);
+    mkdirSync(join(root, 'infra', 'src'), { recursive: true });
+    writeFileSync(
+      join(root, 'infra', 'src', 'monitoring.ts'),
+      "runbookAnchor: 'missing-procedure'\n",
+    );
+    writeFileSync(
+      join(root, 'infra', 'README.md'),
+      '### Missing procedure\n\nDescribe the alarm without a link.\n',
+    );
+
+    expect(validateMonitoringRunbooks(root)).toEqual([
+      {
+        file: 'infra/README.md',
+        line: 1,
+        message:
+          'monitoring runbook anchor has no current procedure link: missing-procedure',
+      },
+    ]);
   });
 
   test('validates relative files, directories, and heading fragments', () => {
@@ -86,6 +114,14 @@ describe('documentation contract', () => {
       ),
     ).toEqual([
       'current runbook delegates durable behavior to a completed issue',
+    ]);
+    expect(
+      currentDocumentationViolations(
+        'docs/runbooks/rollback.md',
+        'Verify the current delivery control\n   epoch before recovery.',
+      ),
+    ).toEqual([
+      'current runbook references the removed notification control gate',
     ]);
     expect(
       currentDocumentationViolations(
