@@ -71,7 +71,7 @@ describe('issue-32 mobile E2E harness', () => {
     for (const flowName of flowNames) {
       const flow = await Bun.file(resolve(flowRoot, flowName)).text();
       expect(flow).toStartWith(
-        flowName === 'open-push-ios.yaml'
+        flowName === 'open-push-ios.yaml' || flowName === 'reveal-push-ios.yaml'
           ? 'appId: ${SYSTEM_APP_ID}\n'
           : 'appId: ${APP_ID}\n',
       );
@@ -136,6 +136,7 @@ describe('issue-32 mobile E2E harness', () => {
     const iosReveal = await Bun.file(
       resolve(flowRoot, 'reveal-push-ios.yaml'),
     ).text();
+    expect(iosReveal).toStartWith('appId: ${SYSTEM_APP_ID}\n');
     expect(iosReveal).toContain('start: 25%, 1%');
     expect(iosReveal).toContain('start: 50%, 1%');
     expect(iosReveal).toContain('start: 35%, 1%');
