@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import { createDisposableDatabase } from '../lib/testing/database';
@@ -20,6 +27,8 @@ import { groupMembers, groupSources } from './schema';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const CONFIGURATION = Object.freeze({
   googleGroupId: 'groups/synthetic-initial-administrators',

@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import {
@@ -9,11 +16,14 @@ import {
 } from './client';
 import { migrateDatabase } from '../drizzle/migrate';
 import { resolveEventRecipients } from '../lib/notify/event-recipients';
+import { createDisposableDatabase } from '../lib/testing/database';
 import { bootstrapSyntheticGroups } from './bootstrap-synthetic-groups';
 import { facilities, groupMembers, groupSources } from './schema';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const SCHOOL = randomUUID();
 const STAFF_GROUP = randomUUID();
@@ -28,6 +38,9 @@ const environment = {
 };
 
 let connection: PostgresDatabaseConnection | undefined;
+let disposable:
+  | Awaited<ReturnType<typeof createDisposableDatabase>>
+  | undefined;
 
 function database(): PostgresDatabaseConnection['db'] {
   if (connection === undefined) throw new Error('no database');
@@ -36,22 +49,10 @@ function database(): PostgresDatabaseConnection['db'] {
 
 describeWithDatabase('synthetic group bootstrap', () => {
   beforeAll(async () => {
-    if (baseUrl === undefined) throw new Error('TEST_DATABASE_URL required');
-    const name = `psd_eoc_synseed_${randomUUID().replaceAll('-', '')}_test`;
-    const admin = createDatabaseClient({
-      driver: 'postgres',
-      url: baseUrl,
-      maxConnections: 1,
-    });
-    if (admin.driver !== 'postgres') throw new Error('postgres required');
-    await admin.db.execute(`create database "${name}"` as never);
-    await admin.close();
-
-    const url = new URL(baseUrl);
-    url.pathname = `/${name}`;
+    disposable = await createDisposableDatabase('psd_eoc_synseed', baseUrl);
     const opened = createDatabaseClient({
       driver: 'postgres',
-      url: url.toString(),
+      url: disposable.url,
       maxConnections: 2,
     });
     if (opened.driver !== 'postgres') throw new Error('postgres required');
@@ -83,6 +84,9 @@ describeWithDatabase('synthetic group bootstrap', () => {
 
   afterAll(async () => {
     await connection?.close();
+    connection = undefined;
+    await disposable?.drop();
+    disposable = undefined;
   });
 
   test('creates the group and its members, and skips an unknown facility', async () => {
