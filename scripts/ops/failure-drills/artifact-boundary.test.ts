@@ -86,6 +86,9 @@ test('the separate synthetic artifact adds the runner and operator route at buil
   expect(drill).toContain(
     'packages/server/app/api/failure-drills/callback/route.ts',
   );
+  expect(drill).toContain(
+    'packages/server/app/api/failure-drills/callback/drill-callback-boundary.ts',
+  );
   expect(drill).toContain('org.psd-eoc.provider-mode="mocked"');
 });
 
