@@ -21,11 +21,16 @@ It performs no AWS, Google, DNS, store, or notification-provider call.
 
 ## Deployment
 
-Deployment has one path: run `cdk deploy PsdEoc` from this directory with a
-locally authenticated, short-lived AWS session and the required parameters in
-[docs/CONFIGURATION.md](../docs/CONFIGURATION.md). GitHub Actions, repository
-environments, repository variables, repository secrets, and GitHub OIDC roles
-are not deployment surfaces.
+Deployment has one path: from the repository root, run the single
+`bun run --cwd infra deploy -- PsdEoc` command with a locally authenticated,
+short-lived AWS session and the required parameters in
+[docs/CONFIGURATION.md](../docs/CONFIGURATION.md). That command builds and
+publishes the CDK image asset, runs the database bootstrap, and promotes the
+services only after bootstrap succeeds. There is no separate build, push,
+migration, or promotion command. GitHub Actions, repository environments,
+repository variables, repository secrets, and GitHub OIDC roles are not
+deployment surfaces. The deploy script intrinsically refuses a dirty Git
+worktree so the image's source revision always identifies its exact contents.
 
 ## Alarm response runbooks
 
