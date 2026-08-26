@@ -1068,7 +1068,7 @@ export class PsdEocStack extends Stack {
           excludePunctuation: true,
           passwordLength: 64,
         },
-        removalPolicy: RemovalPolicy.RETAIN,
+        removalPolicy: RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
         secretName: `${SECRET_PREFIX}/workers/email-runtime-token`,
       },
     );
@@ -1120,7 +1120,7 @@ export class PsdEocStack extends Stack {
             topic: 'UNCONFIGURED',
           }),
         },
-        removalPolicy: RemovalPolicy.RETAIN,
+        removalPolicy: RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
         secretName: `${SECRET_PREFIX}/providers/apns-direct`,
       },
     );
@@ -1141,7 +1141,7 @@ export class PsdEocStack extends Stack {
             status: 'UNCONFIGURED',
           }),
         },
-        removalPolicy: RemovalPolicy.RETAIN,
+        removalPolicy: RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
         secretName: `${SECRET_PREFIX}/providers/fcm-direct`,
       },
     );
@@ -1560,7 +1560,7 @@ export class PsdEocStack extends Stack {
       'EmailCallbackWorkerLogGroup',
       {
         logGroupName: EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME,
-        removalPolicy: RemovalPolicy.RETAIN,
+        removalPolicy: RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
         retention: logs.RetentionDays.TWO_WEEKS,
       },
     );
@@ -1671,7 +1671,9 @@ export class PsdEocStack extends Stack {
         retentionPeriod: Duration.days(14),
       },
     );
-    emailCallbackDeadLetterQueue.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    emailCallbackDeadLetterQueue.applyRemovalPolicy(
+      RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+    );
     const emailCallbackQueue = new sqs.Queue(this, 'EmailCallbackQueue', {
       deadLetterQueue: {
         maxReceiveCount: EMAIL_QUEUE_MAX_RECEIVES,
@@ -1683,7 +1685,9 @@ export class PsdEocStack extends Stack {
       retentionPeriod: Duration.days(14),
       visibilityTimeout: Duration.minutes(2),
     });
-    emailCallbackQueue.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    emailCallbackQueue.applyRemovalPolicy(
+      RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+    );
     const emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
       displayName: 'PSD EOC live-pilot SES event evidence',
       enforceSSL: true,
