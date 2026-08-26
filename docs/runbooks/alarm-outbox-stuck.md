@@ -1,7 +1,11 @@
 # Alarm runbook: transactional outbox stuck rows
 
-**Source-defined CloudWatch alarm name:**
-`psd-eoc-stuck-production-outbox`.
+**CloudWatch alarm names:**
+
+- `psd-eoc-push-stuck-production-outbox` is created conditionally with the
+  enabled Expo worker and its count-only publisher; and
+- `psd-eoc-stuck-production-outbox` remains source-defined for the future
+  full read-only metrics collector.
 
 Current deployment and alarm read-back state lives only in the
 [operational readiness register](../INTEGRATIONS.md). A source-defined alarm
@@ -9,11 +13,12 @@ name is not deployment evidence.
 
 ## Meaning
 
-The source-defined alarm fires when at least one staff outbox row remains
-neither published nor terminally failed for one minute. Missing metric data is
-breaching. The event may exist even when delivery has not started. The collector
-excludes test data; source code is not proof that the deployed query, metric,
-or alarm is current.
+The alarms fire when at least one staff outbox row remains neither published
+nor terminally failed for one minute. Missing metric data is breaching. The
+event may exist even when delivery has not started. The push worker publishes
+only the aggregate count through its authenticated server route and excludes
+test data; it receives no database credential or row contents. Source code is
+not proof that the deployed query, metric, or alarm is current.
 
 ## Safety posture
 

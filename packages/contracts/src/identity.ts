@@ -1088,6 +1088,51 @@ export const DeviceSessionPageSchema = paginatedSchema(
 export type DeviceSessionPage = z.infer<typeof DeviceSessionPageSchema>;
 
 /**
+ * Owns the immutable native-build identity carried with a push registration.
+ * These values are non-secret release evidence. The server compares the exact
+ * tuple with protected deployment configuration; a public client flag alone
+ * never authorizes provider registration.
+ */
+export const NativePushBuildIdentitySchema = z
+  .object({
+    applicationId: z
+      .string()
+      .trim()
+      .min(3)
+      .max(255)
+      .regex(/^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)+$/u),
+    applicationVersion: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/u),
+    nativeBuildVersion: z.string().regex(/^[1-9][0-9]{0,17}$/u),
+    expoProjectId: UuidSchema,
+    updateMode: z.literal('embedded-only'),
+  })
+  .strict()
+  .readonly();
+
+/** Immutable native-build identity inferred from its schema. */
+export type NativePushBuildIdentity = z.infer<
+  typeof NativePushBuildIdentitySchema
+>;
+
+/**
+ * Owns one protected server allowlist entry for native push registration.
+ * The allowlist is deployment configuration and is empty when omitted.
+ */
+export const PushRegistrationBuildAuthorizationSchema = z
+  .object({
+    platform: z.enum(['ios', 'android']),
+    provider: z.literal('expo'),
+    build: NativePushBuildIdentitySchema,
+  })
+  .strict()
+  .readonly();
+
+/** Protected push-registration build authorization inferred from its schema. */
+export type PushRegistrationBuildAuthorization = z.infer<
+  typeof PushRegistrationBuildAuthorizationSchema
+>;
+
+/**
  * Owns native push-token registration input. The token is untrusted contact
  * input, never a fixture or log field, and is bound to an existing native
  * device enrollment rather than a caller-provided user identity.
@@ -1096,6 +1141,8 @@ export const RegisterPushTokenInputSchema = z
   .object({
     deviceEnrollmentId: DeviceEnrollmentIdSchema,
     platform: z.enum(['ios', 'android']),
+    provider: z.literal('expo'),
+    build: NativePushBuildIdentitySchema,
     token: z.string().trim().min(16).max(4_096),
   })
   .strict()

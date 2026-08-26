@@ -44,6 +44,10 @@ interface DeliveryTestConsoleProps {
 }
 
 interface TargetDraft {
+  readonly mode:
+    | 'multi-channel'
+    | 'controlled-email-canary'
+    | 'controlled-push-canary';
   readonly previousVersionId: string;
   readonly previousVersionNumber: string;
   readonly facilityId: string;
@@ -52,6 +56,7 @@ interface TargetDraft {
 }
 
 const EMPTY_TARGET_DRAFT: TargetDraft = Object.freeze({
+  mode: 'multi-channel',
   previousVersionId: '',
   previousVersionNumber: '',
   facilityId: '',
@@ -445,6 +450,9 @@ export function DeliveryTestConsole({
               version: Number(targetDraft.previousVersionNumber),
             };
       const command = CreateDeliveryTestTargetSetVersionInputSchema.parse({
+        ...(targetDraft.mode === 'multi-channel'
+          ? {}
+          : { mode: targetDraft.mode }),
         previousVersion,
         facilityId: targetDraft.facilityId,
         rosterSnapshotId: targetDraft.rosterSnapshotId,
@@ -611,6 +619,26 @@ export function DeliveryTestConsole({
             }}
           >
             <div className="delivery-test-grid">
+              <label>
+                Target mode
+                <select
+                  value={targetDraft.mode}
+                  onChange={(event) =>
+                    setTargetDraft({
+                      ...targetDraft,
+                      mode: event.currentTarget.value as TargetDraft['mode'],
+                    })
+                  }
+                >
+                  <option value="multi-channel">Push and email</option>
+                  <option value="controlled-push-canary">
+                    One approved push endpoint
+                  </option>
+                  <option value="controlled-email-canary">
+                    One approved email endpoint
+                  </option>
+                </select>
+              </label>
               <label>
                 Facility
                 <select

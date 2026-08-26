@@ -29,9 +29,11 @@ independently verified.
 2. Create a new least-privilege Expo token for the exact PSD EOC project. Keep
    the old token active for rollback unless compromise requires immediate
    revocation.
-3. Store the new value as a new encrypted secret version and update only the
-   push worker's approved runtime reference. If the readiness register does not
-   prove that exact worker path, stop before the provider write.
+3. Store the new value as a new encrypted JSON secret version with exactly
+   `accessToken` and `status`. Set `status` to `verified` only after the exact
+   credential evidence is retained, and update only the push worker's approved
+   runtime reference. If the readiness register does not prove that exact
+   worker path, stop before the provider write.
 4. Verify in isolated non-production that the worker authenticates only at the
    push provider boundary, rejects staff/routable targets, preserves
    real/drill markers, and sends zero provider requests under mocked truth.

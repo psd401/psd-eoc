@@ -10,7 +10,9 @@ import {
 } from 'bun:test';
 import {
   ChannelAttemptSchema,
+  DeliveryEvidenceSchema,
   DispatchBatchSchema,
+  EndpointSchema,
   NotificationOutboxMessageSchema,
   RosterSnapshotSchema,
 } from '@psd-eoc/contracts';
@@ -30,6 +32,7 @@ import {
 import { seedDatabase } from '../../../db/seed';
 import {
   accessMembershipSnapshots,
+  channelAttemptExecutions,
   dispatchBatches,
   deviceEnrollments,
   devicePushTokenRegistrations,
@@ -68,6 +71,15 @@ import {
   resolvePushEndpoints,
 } from '../../../lib/capabilities/devices';
 import { createDrizzleRosterSyncStore } from '../../../lib/roster/groups-sync';
+import { createDrizzleExpoPushRuntimeStore } from '../../../lib/notify/expo-push-runtime-store';
+import { createDrizzleAttemptExecutionStore } from '../../../lib/notify/attempt-execution-store';
+import { createPersistedExpoReceiptTarget } from '../../../../../workers/push/receipt-lifecycle';
+import { workerAttemptFingerprint } from '../../../../../workers/shared/attempt';
+import {
+  WorkerAttemptProcessor,
+  type AttemptExecutionStore as WorkerAttemptExecutionStore,
+  type AttemptIdempotentProviderAdapter,
+} from '../../../../../workers/shared/processor';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -93,11 +105,15 @@ const fixture = Object.freeze({
   groupSourceId: randomUUID(),
   rosterConfigurationId: randomUUID(),
   rosterSnapshotId: randomUUID(),
+  runtimeRosterSnapshotId: randomUUID(),
   syntheticRosterSnapshotId: randomUUID(),
   recipientId: randomUUID(),
+  runtimeRecipientId: randomUUID(),
   syntheticRecipientId: randomUUID(),
+  runtimeEndpointId: randomUUID(),
   rosterVersion: randomInt(100_000_000, 900_000_000),
-  syntheticRosterVersion: 2,
+  runtimeRosterVersion: 2,
+  syntheticRosterVersion: 3,
   membershipVersion: randomInt(100_000_000, 900_000_000),
 });
 const fixtureSuffix = fixture.userId.replaceAll('-', '');
@@ -107,6 +123,25 @@ const replacementToken = `synthetic-unroutable:device-${fixtureSuffix}-replaceme
 const contendedToken = `ExponentPushToken[synthetic-${fixtureSuffix}-contended]`;
 const revokedSessionToken = `ExponentPushToken[synthetic-${fixtureSuffix}-revoked]`;
 const unrelatedToken = `synthetic-unroutable:device-${fixtureSuffix}-unrelated`;
+const runtimeToken = `synthetic-unroutable:push-runtime-${fixture.runtimeEndpointId}`;
+const pushBuild = Object.freeze({
+  applicationId: 'example.synthetic.eoc',
+  applicationVersion: '1.0.4',
+  nativeBuildVersion: '7',
+  expoProjectId: '00000000-0000-4000-8000-000000001299',
+  updateMode: 'embedded-only' as const,
+});
+const registrationIdentity = Object.freeze({
+  provider: 'expo' as const,
+  build: pushBuild,
+});
+const pushBuildAllowlist = Object.freeze([
+  Object.freeze({
+    platform: 'ios' as const,
+    provider: 'expo' as const,
+    build: pushBuild,
+  }),
+]);
 const facilityId = '00000000-0000-4000-8000-000000000001';
 const SEEDED = Object.freeze({
   audienceId: '00000000-0000-4000-8000-000000000020',
@@ -120,6 +155,10 @@ const SEEDED = Object.freeze({
   emailIntegrationStatusId: '00000000-0000-4000-8000-000000000302',
   integrationObservedAt: '2026-08-06T12:00:00.000Z',
 });
+
+function deviceCapabilityStore(database: PostgresDatabase) {
+  return createDrizzleDeviceCapabilityStore(database, pushBuildAllowlist);
+}
 
 let connection: PostgresDatabaseConnection | undefined;
 let disposableContext: DisposableDatabaseContext | undefined;
@@ -537,81 +576,86 @@ async function publishSyntheticRosterEndpointFixture(
     rosterVersion: fixture.syntheticRosterVersion,
     recipientId: fixture.syntheticRecipientId,
   },
+  installSnapshot = true,
 ): Promise<void> {
   const capturedAt = new Date();
   const syncStartedAt = new Date(capturedAt.getTime() - 60_000);
   await database.transaction(async (transaction) => {
-    await transaction.insert(rosterSnapshots).values({
-      id: identity.rosterSnapshotId,
-      version: identity.rosterVersion,
-      population: 'synthetic',
-      complete: true,
-      sourceConfigurationId: SEEDED.rosterConfigurationId,
-      sourceConfigurationVersion: 1,
-      syncStartedAt,
-      capturedAt,
-    });
-    await transaction.insert(rosterSnapshotFacilities).values([
-      { rosterSnapshotId: identity.rosterSnapshotId, facilityId },
-      {
+    if (installSnapshot) {
+      await transaction.insert(rosterSnapshots).values({
+        id: identity.rosterSnapshotId,
+        version: identity.rosterVersion,
+        population: 'synthetic',
+        complete: true,
+        sourceConfigurationId: SEEDED.rosterConfigurationId,
+        sourceConfigurationVersion: 1,
+        syncStartedAt,
+        capturedAt,
+      });
+      await transaction.insert(rosterSnapshotFacilities).values([
+        { rosterSnapshotId: identity.rosterSnapshotId, facilityId },
+        {
+          rosterSnapshotId: identity.rosterSnapshotId,
+          facilityId: SEEDED.facilitySouthId,
+        },
+      ]);
+      await transaction.insert(rosterSnapshotSources).values(
+        [
+          { id: SEEDED.groupNorthId, purpose: 'building' as const },
+          { id: SEEDED.groupSouthId, purpose: 'building' as const },
+          { id: SEEDED.groupOthersId, purpose: 'others' as const },
+        ].flatMap((source) => [
+          {
+            rosterSnapshotId: identity.rosterSnapshotId,
+            population: 'synthetic' as const,
+            groupSourceId: source.id,
+            groupSourceKind: 'synthetic' as const,
+            groupPurpose: source.purpose,
+            completionKind: 'expected' as const,
+          },
+          {
+            rosterSnapshotId: identity.rosterSnapshotId,
+            population: 'synthetic' as const,
+            groupSourceId: source.id,
+            groupSourceKind: 'synthetic' as const,
+            groupPurpose: source.purpose,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(rosterRecipients).values({
+        id: identity.recipientId,
         rosterSnapshotId: identity.rosterSnapshotId,
-        facilityId: SEEDED.facilitySouthId,
-      },
-    ]);
-    await transaction.insert(rosterSnapshotSources).values(
-      [
-        { id: SEEDED.groupNorthId, purpose: 'building' as const },
-        { id: SEEDED.groupSouthId, purpose: 'building' as const },
-        { id: SEEDED.groupOthersId, purpose: 'others' as const },
-      ].flatMap((source) => [
-        {
-          rosterSnapshotId: identity.rosterSnapshotId,
-          population: 'synthetic' as const,
-          groupSourceId: source.id,
-          groupSourceKind: 'synthetic' as const,
-          groupPurpose: source.purpose,
-          completionKind: 'expected' as const,
-        },
-        {
-          rosterSnapshotId: identity.rosterSnapshotId,
-          population: 'synthetic' as const,
-          groupSourceId: source.id,
-          groupSourceKind: 'synthetic' as const,
-          groupPurpose: source.purpose,
-          completionKind: 'completed' as const,
-        },
-      ]),
-    );
-    await transaction.insert(rosterRecipients).values({
-      id: identity.recipientId,
-      rosterSnapshotId: identity.rosterSnapshotId,
-      population: 'synthetic',
-      googleSubject: null,
-      displayName: 'Synthetic Device Invalidation Recipient',
-    });
-    await transaction.insert(rosterRecipientGroupSources).values({
-      rosterSnapshotId: identity.rosterSnapshotId,
-      recipientId: identity.recipientId,
-      population: 'synthetic',
-      groupSourceId: SEEDED.groupNorthId,
-      groupSourceKind: 'synthetic',
-      groupPurpose: 'building',
-    });
-    await transaction.insert(rosterEndpoints).values(
-      registrations.map((registration) => ({
-        id: registration.id,
+        population: 'synthetic',
+        googleSubject: null,
+        displayName: 'Synthetic Device Invalidation Recipient',
+      });
+      await transaction.insert(rosterRecipientGroupSources).values({
         rosterSnapshotId: identity.rosterSnapshotId,
         recipientId: identity.recipientId,
-        population: 'synthetic' as const,
-        channel: 'push' as const,
-        status: 'active' as const,
-        capturedAt,
-        platform: 'ios' as const,
-        token: registration.token,
-        email: null,
-        phoneNumber: null,
-      })),
-    );
+        population: 'synthetic',
+        groupSourceId: SEEDED.groupNorthId,
+        groupSourceKind: 'synthetic',
+        groupPurpose: 'building',
+      });
+    }
+    if (registrations.length > 0) {
+      await transaction.insert(rosterEndpoints).values(
+        registrations.map((registration) => ({
+          id: registration.id,
+          rosterSnapshotId: identity.rosterSnapshotId,
+          recipientId: identity.recipientId,
+          population: 'synthetic' as const,
+          channel: 'push' as const,
+          status: 'active' as const,
+          capturedAt,
+          platform: 'ios' as const,
+          token: registration.token,
+          email: null,
+          phoneNumber: null,
+        })),
+      );
+    }
   });
 }
 
@@ -723,8 +767,15 @@ function pushResolutionFixture(
 async function installDeviceNotRegisteredAttemptFixture(
   database: PostgresDatabase,
   endpointId: string,
-  provider: 'expo-push' | 'mock-expo-push',
-): Promise<Date> {
+  provider: 'expo-push' | 'mock-expo-push' | null,
+  identity: Readonly<{
+    rosterSnapshotId: string;
+    recipientId: string;
+  }> = {
+    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    recipientId: fixture.syntheticRecipientId,
+  },
+) {
   const ids = Object.freeze({
     event: randomUUID(),
     intent: randomUUID(),
@@ -787,11 +838,34 @@ async function installDeviceNotRegisteredAttemptFixture(
       id: SEEDED.eventTypeVersionId,
       templateMode: 'drill',
     },
-    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterSnapshotId: identity.rosterSnapshotId,
     rosterPopulation: 'synthetic',
     requestId: ids.request,
     authorization,
     channels,
+    createdAt: createdAt.toISOString(),
+  });
+  const batch = DispatchBatchSchema.parse({
+    id: ids.batch,
+    intentId: ids.intent,
+    eventId: ids.event,
+    facilityId,
+    eventKind: 'test',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: {
+      id: SEEDED.eventTypeVersionId,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: identity.rosterSnapshotId,
+    rosterPopulation: 'synthetic',
+    requestId: ids.request,
+    authorization,
+    channel: 'push',
+    renderedMessage: pushMessage,
+    integrationStatus: mockedIntegrationStatus('expo-push'),
+    sequence: 1,
+    endpointCount: 1,
     createdAt: createdAt.toISOString(),
   });
 
@@ -803,7 +877,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       status: 'active',
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       rosterPopulation: 'synthetic',
       createdBy: {
         kind: 'system',
@@ -825,7 +899,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
       purpose: 'activation',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       rosterPopulation: 'synthetic',
       createdBy: {
         kind: 'system',
@@ -877,7 +951,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
       purpose: 'activation',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       rosterPopulation: 'synthetic',
       requestId: ids.request,
       authorization,
@@ -901,7 +975,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
       purpose: 'activation',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       rosterPopulation: 'synthetic',
       requestId: ids.request,
       authorization,
@@ -928,9 +1002,9 @@ async function installDeviceNotRegisteredAttemptFixture(
       id: SEEDED.eventTypeVersionId,
       templateMode: 'drill',
     },
-    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterSnapshotId: identity.rosterSnapshotId,
     rosterPopulation: 'synthetic',
-    recipientId: fixture.syntheticRecipientId,
+    recipientId: identity.recipientId,
     endpointId,
     channel: 'push',
     attemptNumber: 1,
@@ -955,9 +1029,14 @@ async function installDeviceNotRegisteredAttemptFixture(
     diagnosticDigest: null,
   };
   const evidenceStore = createDrizzleDeliveryEvidenceStore(database);
-  await evidenceStore.recordAttemptEvidence({ attempt, evidence: attempted });
-  await evidenceStore.recordAttemptEvidence({ attempt, evidence: failed });
-  return attemptedAt;
+  const attemptedEvidence = await evidenceStore.recordAttemptEvidence({
+    attempt,
+    evidence: attempted,
+  });
+  if (provider !== null) {
+    await evidenceStore.recordAttemptEvidence({ attempt, evidence: failed });
+  }
+  return Object.freeze({ attempt, attemptedAt, attemptedEvidence, batch });
 }
 
 async function activeRegistrations(database: PostgresDatabase) {
@@ -1021,6 +1100,15 @@ describeWithDatabase('device push-token persistence', () => {
       await migrateDatabase(connection);
       await seedDatabase(connection.db);
       await installFixture(connection.db);
+      await publishSyntheticRosterEndpointFixture(
+        connection.db,
+        [{ id: fixture.runtimeEndpointId, token: runtimeToken }],
+        {
+          rosterSnapshotId: fixture.runtimeRosterSnapshotId,
+          rosterVersion: fixture.runtimeRosterVersion,
+          recipientId: fixture.runtimeRecipientId,
+        },
+      );
     } catch (error) {
       try {
         await cleanupResources();
@@ -1040,7 +1128,7 @@ describeWithDatabase('device push-token persistence', () => {
 
   test('allows exactly one active owner for a concurrently registered push token', async () => {
     const database = databaseConnection().db;
-    const store = createDrizzleDeviceCapabilityStore(database);
+    const store = deviceCapabilityStore(database);
     const candidates = [
       {
         deviceEnrollmentId: fixture.deviceId,
@@ -1061,6 +1149,7 @@ describeWithDatabase('device push-token persistence', () => {
           {
             deviceEnrollmentId: candidate.deviceEnrollmentId,
             platform: 'ios',
+            ...registrationIdentity,
             token: contendedToken,
           },
           humanInvocation(
@@ -1114,12 +1203,393 @@ describeWithDatabase('device push-token persistence', () => {
     );
   });
 
+  test('durably fences provider I/O, receipts, and opaque retries', async () => {
+    const database = databaseConnection().db;
+    const endpointId = fixture.runtimeEndpointId;
+    const token = runtimeToken;
+    const runtimeIdentity = Object.freeze({
+      rosterSnapshotId: fixture.runtimeRosterSnapshotId,
+      recipientId: fixture.runtimeRecipientId,
+    });
+    const installed = await installDeviceNotRegisteredAttemptFixture(
+      database,
+      endpointId,
+      null,
+      runtimeIdentity,
+    );
+    const runtimeStore = createDrizzleExpoPushRuntimeStore(database);
+    await expect(runtimeStore.countStuckOutbox()).resolves.toBe(0);
+    const endpoint = EndpointSchema.parse({
+      id: endpointId,
+      status: 'active',
+      capturedAt: installed.attempt.attemptedAt,
+      channel: 'push',
+      platform: 'ios',
+      token,
+    });
+    const workItem = Object.freeze({
+      batch: installed.batch,
+      attempt: installed.attempt,
+      endpoint,
+    });
+    const fingerprint = workerAttemptFingerprint(workItem);
+
+    const firstResolution = await runtimeStore.resolveBatch({
+      operation: 'resolve-batch',
+      batch: installed.batch,
+      enqueuedAt: new Date(
+        Date.parse(installed.batch.createdAt) + 1_000,
+      ).toISOString(),
+      cursor: 0,
+    });
+    const redeliveredResolution = await runtimeStore.resolveBatch({
+      operation: 'resolve-batch',
+      batch: installed.batch,
+      enqueuedAt: new Date(
+        Date.parse(installed.batch.createdAt) + 30_000,
+      ).toISOString(),
+      cursor: 0,
+    });
+    expect(redeliveredResolution).toEqual(firstResolution);
+    expect(firstResolution.items[0]?.attempt.attemptedAt).toBe(
+      installed.batch.createdAt,
+    );
+
+    const firstClaim = await runtimeStore.claimProviderIo({
+      attemptId: installed.attempt.id,
+      workFingerprint: fingerprint,
+    });
+    if (firstClaim.kind !== 'execute') {
+      throw new Error('The first provider I/O claim was not acquired.');
+    }
+    const concurrentClaim = await runtimeStore.claimProviderIo({
+      attemptId: installed.attempt.id,
+      workFingerprint: fingerprint,
+    });
+    expect(concurrentClaim).toEqual({ kind: 'uncertain' });
+    const completion = Object.freeze({
+      kind: 'outcome' as const,
+      outcome: Object.freeze({
+        state: 'provider-accepted' as const,
+        provider: 'expo-push',
+        providerReference: 'synthetic-ticket-reference',
+        proof: null,
+        reasonCode: null,
+        diagnosticDigest: null,
+      }),
+    });
+    await runtimeStore.completeProviderIo({
+      attemptId: installed.attempt.id,
+      workFingerprint: fingerprint,
+      claimToken: firstClaim.claimToken,
+      completion,
+    });
+    await expect(
+      runtimeStore.lookupProviderIo({
+        attemptId: installed.attempt.id,
+        workFingerprint: fingerprint,
+      }),
+    ).resolves.toEqual({ kind: 'completed', completion });
+
+    const providerAcceptedEvidence = DeliveryEvidenceSchema.parse({
+      id: randomUUID(),
+      subject: { kind: 'attempt', attemptId: installed.attempt.id },
+      sequence: 2,
+      previousEvidenceId: installed.attemptedEvidence.id,
+      state: 'provider-accepted',
+      recordedAt: new Date(
+        installed.attemptedAt.getTime() + 1_000,
+      ).toISOString(),
+      provider: 'expo-push',
+      providerReference: 'synthetic-ticket-reference',
+      proof: null,
+      reasonCode: null,
+      diagnosticDigest: null,
+    });
+    const receiptTarget = createPersistedExpoReceiptTarget(
+      workItem,
+      providerAcceptedEvidence,
+    );
+    const firstPollAt = new Date().toISOString();
+    await runtimeStore.scheduleReceipt({
+      target: receiptTarget,
+      firstPollAt,
+      horizonAt: receiptTarget.expiresAt,
+    });
+    await runtimeStore.scheduleReceipt({
+      target: receiptTarget,
+      firstPollAt,
+      horizonAt: receiptTarget.expiresAt,
+    });
+    const claims = await runtimeStore.claimDueReceipts({
+      now: new Date().toISOString(),
+      limit: 10,
+      leaseMilliseconds: 60_000,
+    });
+    expect(claims).toHaveLength(1);
+    const receiptClaim = claims[0];
+    if (receiptClaim === undefined) throw new Error('Missing receipt claim.');
+    await runtimeStore.decideReceipt({
+      attemptId: installed.attempt.id,
+      fingerprint: receiptTarget.fingerprint,
+      leaseToken: receiptClaim.leaseToken,
+      decision: {
+        kind: 'complete',
+        decidedAt: new Date().toISOString(),
+        state: 'provider-accepted',
+      },
+    });
+    await expect(
+      runtimeStore.claimDueReceipts({
+        now: new Date().toISOString(),
+        limit: 10,
+        leaseMilliseconds: 60_000,
+      }),
+    ).resolves.toEqual([]);
+
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+    const retryRequest = {
+      operation: 'schedule-retry' as const,
+      sourceAttempt: installed.attempt,
+      sourceFingerprint: fingerprint,
+      receiptId: null,
+      nextAttemptNumber: 2,
+      delayMilliseconds: 60_000,
+      retryAt,
+      expiresAt: receiptTarget.expiresAt,
+      reasonCode: 'EXPO_HTTP_RATE_LIMITED',
+    };
+    const scheduled = await runtimeStore.scheduleRetry(retryRequest);
+    expect(scheduled).toEqual({
+      kind: 'scheduled',
+      attemptId: expect.any(String),
+      retryAt,
+    });
+    await expect(runtimeStore.scheduleRetry(retryRequest)).resolves.toEqual(
+      scheduled,
+    );
+    if (scheduled.kind !== 'scheduled') {
+      throw new Error('The retry schedule unexpectedly expired.');
+    }
+    await expect(
+      runtimeStore.resolveRetry(scheduled.attemptId),
+    ).resolves.toEqual({ kind: 'not-before', retryAt });
+  });
+
+  test('reclaims an expired outer lease only after adapter-ledger recovery', async () => {
+    const database = databaseConnection().db;
+    const endpointId = fixture.runtimeEndpointId;
+    const endpointToken = runtimeToken;
+    const installed = await installDeviceNotRegisteredAttemptFixture(
+      database,
+      endpointId,
+      null,
+      {
+        rosterSnapshotId: fixture.runtimeRosterSnapshotId,
+        recipientId: fixture.runtimeRecipientId,
+      },
+    );
+    const workItem = Object.freeze({
+      batch: installed.batch,
+      attempt: installed.attempt,
+      endpoint: EndpointSchema.parse({
+        id: endpointId,
+        status: 'active',
+        capturedAt: installed.attempt.attemptedAt,
+        channel: 'push',
+        platform: 'ios',
+        token: endpointToken,
+      }),
+    });
+    const fingerprint = workerAttemptFingerprint(workItem);
+    const executionStore = createDrizzleAttemptExecutionStore(database);
+    expect(
+      await executionStore.claim({
+        attemptId: installed.attempt.id,
+        fingerprint,
+        leaseMilliseconds: 60_000,
+      }),
+    ).toMatchObject({ kind: 'acquired' });
+    await database
+      .update(channelAttemptExecutions)
+      .set({ leaseExpiresAt: new Date(0) })
+      .where(eq(channelAttemptExecutions.attemptId, installed.attempt.id));
+    const reclaimable = await executionStore.lookup({
+      attemptId: installed.attempt.id,
+      fingerprint,
+    });
+    expect(reclaimable).toEqual({ kind: 'reclaimable' });
+
+    let recoveries = 0;
+    let sends = 0;
+    const adapter = Object.freeze({
+      channel: 'push' as const,
+      integrationId: 'expo-push',
+      truthLabel: 'mocked' as const,
+      provider: 'mock-expo',
+      deliverySemantics: 'attempt-id-idempotent' as const,
+      recover: () => {
+        recoveries += 1;
+        return Promise.resolve({ kind: 'missing' as const });
+      },
+      send: () => {
+        sends += 1;
+        return Promise.resolve({
+          state: 'provider-accepted' as const,
+          provider: 'mock-expo',
+          providerReference: 'synthetic-expired-lease-ticket',
+          proof: null,
+          reasonCode: null,
+          diagnosticDigest: null,
+        });
+      },
+    }) satisfies AttemptIdempotentProviderAdapter;
+    const processor = new WorkerAttemptProcessor({
+      adapter,
+      // The production boundary serializes the server store's opaque outcome
+      // through the strict worker HTTP client. This test composes the same
+      // methods directly so it can exercise the real transaction and lease.
+      executionStore: executionStore as unknown as WorkerAttemptExecutionStore,
+      evidenceWriter: createDrizzleDeliveryEvidenceStore(database),
+    });
+
+    await expect(processor.process(workItem)).resolves.toEqual(
+      expect.objectContaining({ kind: 'completed', replayed: false }),
+    );
+    expect({ recoveries, sends }).toEqual({ recoveries: 1, sends: 1 });
+    await expect(processor.process(workItem)).resolves.toEqual(
+      expect.objectContaining({ kind: 'completed', replayed: true }),
+    );
+    expect({ recoveries, sends }).toEqual({ recoveries: 1, sends: 1 });
+  });
+
+  test('rejects a stale unique receipt decision after a receipt collision', async () => {
+    const database = databaseConnection().db;
+    const runtimeStore = createDrizzleExpoPushRuntimeStore(database);
+    const evidenceStore = createDrizzleDeliveryEvidenceStore(database);
+    const sharedReceiptId = `synthetic-conflicted-receipt-${randomUUID()}`;
+    const targets: ReturnType<typeof createPersistedExpoReceiptTarget>[] = [];
+    for (const endpointId of [
+      fixture.runtimeEndpointId,
+      fixture.runtimeEndpointId,
+    ]) {
+      const endpointToken = runtimeToken;
+      const installed = await installDeviceNotRegisteredAttemptFixture(
+        database,
+        endpointId,
+        null,
+        {
+          rosterSnapshotId: fixture.runtimeRosterSnapshotId,
+          recipientId: fixture.runtimeRecipientId,
+        },
+      );
+      const accepted = await evidenceStore.recordAttemptEvidence({
+        attempt: installed.attempt,
+        evidence: {
+          subject: { kind: 'attempt', attemptId: installed.attempt.id },
+          state: 'provider-accepted',
+          provider: 'expo-push',
+          providerReference: sharedReceiptId,
+          proof: null,
+          reasonCode: null,
+          diagnosticDigest: null,
+        },
+      });
+      const item = Object.freeze({
+        batch: installed.batch,
+        attempt: installed.attempt,
+        endpoint: EndpointSchema.parse({
+          id: endpointId,
+          status: 'active',
+          capturedAt: installed.attempt.attemptedAt,
+          channel: 'push',
+          platform: 'ios',
+          token: endpointToken,
+        }),
+      });
+      targets.push(createPersistedExpoReceiptTarget(item, accepted));
+    }
+    const first = targets[0];
+    const second = targets[1];
+    if (first === undefined || second === undefined) {
+      throw new Error('The receipt collision fixtures were not created.');
+    }
+    const firstPollAt = new Date().toISOString();
+    await runtimeStore.scheduleReceipt({
+      target: first,
+      firstPollAt,
+      horizonAt: first.expiresAt,
+    });
+    const [staleUniqueClaim] = await runtimeStore.claimDueReceipts({
+      now: new Date().toISOString(),
+      limit: 1,
+      leaseMilliseconds: 60_000,
+    });
+    if (staleUniqueClaim === undefined) {
+      throw new Error('The unique receipt claim was not acquired.');
+    }
+    expect(staleUniqueClaim.receiptReferenceState).toBe('unique');
+    await runtimeStore.scheduleReceipt({
+      target: second,
+      firstPollAt,
+      horizonAt: second.expiresAt,
+    });
+
+    await expect(
+      runtimeStore.decideReceipt({
+        attemptId: first.attempt.id,
+        fingerprint: first.fingerprint,
+        leaseToken: staleUniqueClaim.leaseToken,
+        decision: {
+          kind: 'known-outcome-pending',
+          decidedAt: new Date().toISOString(),
+          action: {
+            kind: 'terminal-failure',
+            state: 'failed',
+            reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+            invalidatesEndpoint: true,
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'RECEIPT_CONFLICT' });
+
+    const decidedAt = new Date().toISOString();
+    await runtimeStore.decideReceipt({
+      attemptId: first.attempt.id,
+      fingerprint: first.fingerprint,
+      leaseToken: staleUniqueClaim.leaseToken,
+      decision: {
+        kind: 'known-outcome-pending',
+        decidedAt,
+        action: {
+          kind: 'terminal-unknown',
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        },
+      },
+    });
+    await expect(
+      runtimeStore.decideReceipt({
+        attemptId: first.attempt.id,
+        fingerprint: first.fingerprint,
+        leaseToken: staleUniqueClaim.leaseToken,
+        decision: {
+          kind: 'terminal-dlq',
+          decidedAt,
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   test('reconciles DNR evidence while allowing only a fresh same-device generation', async () => {
     const database = databaseConnection().db;
-    const store = createDrizzleDeviceCapabilityStore(database);
+    const store = deviceCapabilityStore(database);
     const registrationInput = {
       deviceEnrollmentId: fixture.deviceId,
       platform: 'ios' as const,
+      ...registrationIdentity,
       token: firstToken,
     };
 
@@ -1206,6 +1676,33 @@ describeWithDatabase('device push-token persistence', () => {
       throw new Error('The replacement registration was not retained.');
     }
     await publishRosterEndpointFixture(database, active);
+    const staffPolicyQuery = Object.freeze({
+      rosterSnapshotId: fixture.rosterSnapshotId,
+      rosterPopulation: 'staff' as const,
+      candidates: Object.freeze([
+        Object.freeze({
+          recipientId: fixture.recipientId,
+          endpointId: active.id,
+        }),
+      ]),
+    });
+    await expect(
+      createDrizzlePushEndpointPolicyStore(
+        database,
+        pushBuildAllowlist,
+      ).loadEndpointPolicy(staffPolicyQuery),
+    ).resolves.toEqual([
+      {
+        recipientId: fixture.recipientId,
+        endpointId: active.id,
+        status: 'active',
+      },
+    ]);
+    await expect(
+      createDrizzlePushEndpointPolicyStore(database, []).loadEndpointPolicy(
+        staffPolicyQuery,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_PUSH_ENDPOINT_POLICY' });
     await publishSyntheticRosterEndpointFixture(database, [active]);
     const pushResolution = pushResolutionFixture([active]);
     const pushPolicyStore = createDrizzlePushEndpointPolicyStore(database);
@@ -1271,7 +1768,7 @@ describeWithDatabase('device push-token persistence', () => {
       await activeRegistrationsForToken(database, replacementToken),
     ).toEqual([{ id: active.id, deviceEnrollmentId: fixture.deviceId }]);
 
-    const attemptedAt = await installDeviceNotRegisteredAttemptFixture(
+    const { attemptedAt } = await installDeviceNotRegisteredAttemptFixture(
       database,
       active.id,
       'mock-expo-push',
@@ -1285,8 +1782,10 @@ describeWithDatabase('device push-token persistence', () => {
         await applicationRoleConnection.db.execute(sql`set role psd_eoc_app`);
         await expect(
           applicationRoleConnection.db.transaction(async (transaction) => {
-            const applicationRoleStore =
-              createDrizzleDeviceCapabilityStore(transaction);
+            const applicationRoleStore = createDrizzleDeviceCapabilityStore(
+              transaction,
+              pushBuildAllowlist,
+            );
             return executeDeviceCapability(
               'record-endpoint-status',
               invalidationInput,
@@ -1359,6 +1858,7 @@ describeWithDatabase('device push-token persistence', () => {
         {
           deviceEnrollmentId: fixture.otherDeviceId,
           platform: 'ios',
+          ...registrationIdentity,
           token: replacementToken,
         },
         humanInvocation(
@@ -1393,6 +1893,7 @@ describeWithDatabase('device push-token persistence', () => {
       {
         deviceEnrollmentId: fixture.deviceId,
         platform: 'ios',
+        ...registrationIdentity,
         token: replacementToken,
       },
       humanInvocation('post-attempt-new-registration'),
@@ -1429,6 +1930,7 @@ describeWithDatabase('device push-token persistence', () => {
       {
         deviceEnrollmentId: fixture.deviceId,
         platform: 'ios',
+        ...registrationIdentity,
         token: replacementToken,
       },
       humanInvocation('post-attempt-registration-replay'),
@@ -1527,6 +2029,7 @@ describeWithDatabase('device push-token persistence', () => {
         {
           deviceEnrollmentId: fixture.otherDeviceId,
           platform: 'ios',
+          ...registrationIdentity,
           token: replacementToken,
         },
         humanInvocation(
@@ -1552,6 +2055,7 @@ describeWithDatabase('device push-token persistence', () => {
       {
         deviceEnrollmentId: fixture.deviceId,
         platform: 'ios',
+        ...registrationIdentity,
         token: replacementToken,
       },
       humanInvocation('same-device-terminal-token-recovery'),
@@ -1586,6 +2090,7 @@ describeWithDatabase('device push-token persistence', () => {
       {
         deviceEnrollmentId: fixture.otherDeviceId,
         platform: 'ios',
+        ...registrationIdentity,
         token: unrelatedToken,
       },
       humanInvocation(
@@ -1747,7 +2252,7 @@ describeWithDatabase('device push-token persistence', () => {
 
   test('denies push-token mutation from an append-only revoked session', async () => {
     const database = databaseConnection().db;
-    const store = createDrizzleDeviceCapabilityStore(database);
+    const store = deviceCapabilityStore(database);
     await database.insert(sessionRevocations).values({
       sessionId: fixture.revokedSessionId,
       revokedBy: {
@@ -1765,6 +2270,7 @@ describeWithDatabase('device push-token persistence', () => {
         {
           deviceEnrollmentId: fixture.deviceId,
           platform: 'ios',
+          ...registrationIdentity,
           token: revokedSessionToken,
         },
         humanInvocation(
