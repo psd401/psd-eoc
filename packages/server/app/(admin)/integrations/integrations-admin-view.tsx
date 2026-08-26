@@ -146,6 +146,34 @@ function ChannelStateSection({
                     <Timestamp value={configuration.changedAt} />
                   </td>
                   <td>
+                    {configuration.integrationId === 'ses-email' &&
+                    (configuration.status.label === 'configured-unverified' ||
+                      (configuration.enabled &&
+                        configuration.status.label === 'live-verified')) ? (
+                      <form action="/integrations/api" method="post">
+                        <AdminMutationFields csrfToken={csrfToken} />
+                        <input
+                          name="intent"
+                          type="hidden"
+                          value="verify-email-integration"
+                        />
+                        <input
+                          name="integrationId"
+                          type="hidden"
+                          value="ses-email"
+                        />
+                        <p className="field-help">
+                          Uses the retained, address-free SES verification
+                          reference configured on this deployment. This does not
+                          send an email.
+                        </p>
+                        <button type="submit">
+                          {configuration.status.label === 'live-verified'
+                            ? 'Re-verify email deployment'
+                            : 'Verify and enable email'}
+                        </button>
+                      </form>
+                    ) : null}
                     <form action="/integrations/api" method="post">
                       <AdminMutationFields csrfToken={csrfToken} />
                       <input

@@ -5,7 +5,9 @@ import {
   MAX_SNS_SIGNING_CERTIFICATE_BYTES,
   SnsSignatureError,
   canonicalSnsEnvelopeDigest,
+  confirmSnsSubscription,
   parseSnsEnvelope,
+  parseSnsSubscriptionConfirmationEnvelope,
   parseSnsTopicArn,
   verifySnsSignature,
   type SnsNotificationEnvelope,
@@ -63,16 +65,18 @@ function canonicalString(input: {
   readonly TopicArn: string;
   readonly Type: 'Notification';
 }): string {
-  return [
-    ['Message', input.Message],
-    ['MessageId', input.MessageId],
-    ...(input.Subject === undefined ? [] : [['Subject', input.Subject]]),
-    ['Timestamp', input.Timestamp],
-    ['TopicArn', input.TopicArn],
-    ['Type', input.Type],
-  ]
-    .map(([name, value]) => `${name}\n${value}`)
-    .join('\n');
+  return (
+    [
+      ['Message', input.Message],
+      ['MessageId', input.MessageId],
+      ...(input.Subject === undefined ? [] : [['Subject', input.Subject]]),
+      ['Timestamp', input.Timestamp],
+      ['TopicArn', input.TopicArn],
+      ['Type', input.Type],
+    ]
+      .map(([name, value]) => `${name}\n${value}`)
+      .join('\n') + '\n'
+  );
 }
 
 function signedEnvelope(
@@ -169,6 +173,12 @@ describe('SNS Notification signature verification', () => {
       canonicalSnsEnvelopeDigest(first),
     );
     expect(canonicalSnsEnvelopeDigest(first)).toMatch(/^[a-f0-9]{64}$/u);
+    // Independently calculated from AWS's documented field order, including
+    // the required newline after the final Type value. This catches a helper
+    // and verifier accidentally sharing the same malformed construction.
+    expect(canonicalSnsEnvelopeDigest(first)).toBe(
+      'b82725f4361e6e53d2dea4209c415714626bed0e7ae2b67777fb0213cc27f872',
+    );
   });
 
   test('rejects the wrong topic, region, account, message type, and extra fields', () => {
@@ -266,5 +276,85 @@ describe('SNS Notification signature verification', () => {
         now: () => new Date('2040-01-01T00:00:00.000Z'),
       }),
     ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_CERTIFICATE' }));
+  });
+});
+
+describe('SNS subscription confirmation', () => {
+  test('verifies and follows only the exact signed AWS confirmation URL', async () => {
+    const token = 'synthetic-confirmation-token';
+    const subscribeUrl =
+      `https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription` +
+      `&TopicArn=${encodeURIComponent(TOPIC_ARN)}` +
+      `&Token=${encodeURIComponent(token)}`;
+    const unsigned = {
+      Type: 'SubscriptionConfirmation' as const,
+      MessageId: '10000000-0000-4000-8000-000000000009',
+      Token: token,
+      TopicArn: TOPIC_ARN,
+      Message: 'You have chosen to subscribe.',
+      SubscribeURL: subscribeUrl,
+      Timestamp: '2026-08-11T20:30:00.000Z',
+      SignatureVersion: '2' as const,
+      Signature: '',
+      SigningCertURL: CERTIFICATE_URL,
+    };
+    const signingString =
+      [
+        ['Message', unsigned.Message],
+        ['MessageId', unsigned.MessageId],
+        ['SubscribeURL', unsigned.SubscribeURL],
+        ['Timestamp', unsigned.Timestamp],
+        ['Token', unsigned.Token],
+        ['TopicArn', unsigned.TopicArn],
+        ['Type', unsigned.Type],
+      ]
+        .map(([name, value]) => `${name}\n${value}`)
+        .join('\n') + '\n';
+    const envelope = parseSnsSubscriptionConfirmationEnvelope(
+      {
+        ...unsigned,
+        Signature: sign(
+          'sha256',
+          Buffer.from(signingString, 'utf8'),
+          TEST_PRIVATE_KEY,
+        ).toString('base64'),
+      },
+      TOPIC_ARN,
+    );
+    await expect(
+      verifySnsSignature(envelope, testCertificateOptions()),
+    ).resolves.toBeUndefined();
+
+    const calls: unknown[] = [];
+    await confirmSnsSubscription(envelope, (input, init) => {
+      calls.push({ input, init });
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(expect.objectContaining({ input: subscribeUrl }));
+  });
+
+  test('rejects a signed-looking confirmation URL outside the exact topic host', () => {
+    const token = 'synthetic-confirmation-token';
+    expect(() =>
+      parseSnsSubscriptionConfirmationEnvelope(
+        {
+          Type: 'SubscriptionConfirmation',
+          MessageId: '10000000-0000-4000-8000-000000000009',
+          Token: token,
+          TopicArn: TOPIC_ARN,
+          Message: 'You have chosen to subscribe.',
+          SubscribeURL:
+            `https://example.invalid/?Action=ConfirmSubscription` +
+            `&TopicArn=${encodeURIComponent(TOPIC_ARN)}` +
+            `&Token=${token}`,
+          Timestamp: '2026-08-11T20:30:00.000Z',
+          SignatureVersion: '2',
+          Signature: Buffer.from('synthetic').toString('base64'),
+          SigningCertURL: CERTIFICATE_URL,
+        },
+        TOPIC_ARN,
+      ),
+    ).toThrow(SnsSignatureError);
   });
 });

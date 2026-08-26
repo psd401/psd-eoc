@@ -1,10 +1,30 @@
 import { describe, expect, it, mock } from 'bun:test';
 
+class ChangeMessageVisibilityCommand {
+  public constructor(public readonly input: Record<string, unknown>) {}
+}
+
+class DeleteMessageCommand {
+  public constructor(public readonly input: Record<string, unknown>) {}
+}
+
+class ReceiveMessageCommand {
+  public constructor(public readonly input: Record<string, unknown>) {}
+}
+
+class SendMessageCommand {
+  public constructor(public readonly input: Record<string, unknown>) {}
+}
+
+// Bun shares module mocks across files in one shard. Keep this test's SDK
+// surface complete for every repository SQS consumer so parallel imports do
+// not become order-dependent.
 mock.module('@aws-sdk/client-sqs', () => ({
+  ChangeMessageVisibilityCommand,
+  DeleteMessageCommand,
+  ReceiveMessageCommand,
   SQSClient: class SQSClient {},
-  SendMessageCommand: class SendMessageCommand {
-    public constructor(public readonly input: Record<string, unknown>) {}
-  },
+  SendMessageCommand,
 }));
 
 const { routeDeliveryBatches } = await import(

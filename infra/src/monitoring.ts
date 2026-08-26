@@ -69,6 +69,10 @@ export interface MonitoringProps {
   readonly database: rds.DatabaseCluster;
   readonly displayTimeZone: string;
   readonly delivery: QueueWithDeadLetterQueue;
+  readonly emailCallbackDeadLetterQueue: sqs.IQueue;
+  readonly emailCallbackWorkerLogGroup?: logs.ILogGroup;
+  readonly emailWorkerCondition?: CfnCondition;
+  readonly emailWorkerLogGroup?: logs.ILogGroup;
   readonly smsReceipt: QueueWithDeadLetterQueue;
   readonly channelQueues: Readonly<
     Record<(typeof NOTIFICATION_CHANNELS)[number], QueueWithDeadLetterQueue>
@@ -346,6 +350,140 @@ function configurePushWorkerMonitoring(
     alarm.addOkAction(action);
     (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
       props.pushWorkerCondition;
+  }
+}
+
+function configureEmailWorkerMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  const definitions = [
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailWorkerHeartbeatMetric',
+      logGroup: props.emailWorkerLogGroup,
+      metricName: 'EmailWorkerHeartbeat',
+      metricValue: '1',
+      pattern: '{ $.event = "email-worker-heartbeat" }',
+    },
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailProviderLatencyMetric',
+      logGroup: props.emailWorkerLogGroup,
+      metricName: 'EmailOutboxToProviderLatency',
+      metricValue: '$.durationMilliseconds',
+      pattern: '{ $.event = "email-worker-message-completed" }',
+    },
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailProviderIncompleteMetric',
+      logGroup: props.emailWorkerLogGroup,
+      metricName: 'EmailOutboxToProviderIncompleteCount',
+      metricValue: '$.count',
+      pattern:
+        '{ ($.event = "email-worker-message-failed") || ($.event = "email-worker-message-incomplete") }',
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackWorkerHeartbeatMetric',
+      logGroup: props.emailCallbackWorkerLogGroup,
+      metricName: 'EmailCallbackWorkerHeartbeat',
+      metricValue: '1',
+      pattern: '{ $.event = "email-callback-worker-heartbeat" }',
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackFailureMetric',
+      logGroup: props.emailCallbackWorkerLogGroup,
+      metricName: 'EmailCallbackFailureCount',
+      metricValue: '$.count',
+      pattern: '{ $.event = "email-callback-message-failed" }',
+    },
+  ] as const;
+  for (const definition of definitions) {
+    if (definition.condition === undefined || definition.logGroup === undefined)
+      continue;
+    const filter = new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: definition.logGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: definition.metricValue,
+      unit:
+        definition.metricName === 'EmailOutboxToProviderLatency'
+          ? cloudwatch.Unit.MILLISECONDS
+          : cloudwatch.Unit.COUNT,
+    });
+    (filter.node.defaultChild as logs.CfnMetricFilter).cfnOptions.condition =
+      definition.condition;
+  }
+
+  const alarms = [
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailWorkerHealthAlarm',
+      metric: customMetric('EmailWorkerHeartbeat', { statistic: 'Sum' }),
+      name: 'psd-eoc-email-worker-health',
+      summary: 'The enabled SES email worker stopped emitting heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      condition: props.emailWorkerCondition,
+      id: 'EmailProviderIncompleteLogAlarm',
+      metric: customMetric('EmailOutboxToProviderIncompleteCount', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-email-provider-incomplete',
+      summary: 'One or more SES provider handoffs did not complete.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackWorkerHealthAlarm',
+      metric: customMetric('EmailCallbackWorkerHeartbeat', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-email-callback-worker-health',
+      summary: 'The durable SES callback consumer stopped emitting heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      condition: props.applicationCondition,
+      id: 'EmailCallbackFailureAlarm',
+      metric: customMetric('EmailCallbackFailureCount', { statistic: 'Sum' }),
+      name: 'psd-eoc-email-callback-failures',
+      summary: 'A signed SES callback could not reach verified persistence.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ] as const;
+  for (const definition of alarms) {
+    if (definition.condition === undefined) continue;
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        'runbook-email-dlq',
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator:
+        definition.treatMissingData === cloudwatch.TreatMissingData.BREACHING
+          ? cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD
+          : cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      metric: definition.metric,
+      threshold: definition.threshold,
+      treatMissingData: definition.treatMissingData,
+    });
+    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      definition.condition;
   }
 }
 
@@ -1476,6 +1614,22 @@ function configureAlarms(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
   }
+  emit({
+    tier: 'infrastructure',
+    evaluationPeriods: 1,
+    id: 'EmailCallbackDeadLetterQueueDepthAlarm',
+    metric:
+      props.emailCallbackDeadLetterQueue.metricApproximateNumberOfMessagesVisible(
+        { period: ONE_MINUTE, statistic: 'Maximum' },
+      ),
+    name: 'psd-eoc-email-callback-dlq-depth',
+    runbookAnchor: 'runbook-queue-age-and-dead-letter-queues',
+    summary:
+      'The retained SES callback dead-letter queue contains one or more signed events.',
+    threshold: 1,
+    topic: props.criticalAlarmTopic,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
   for (const channel of NOTIFICATION_CHANNELS) {
     const threshold = channel === 'push' ? 5_000 : 15_000;
     emit({
@@ -1681,8 +1835,6 @@ function publishDashboardOutputs(
  *   latency, and the monthly delivery test;
  * - Aurora replica lag, because the cluster runs a single writer with no
  *   reader, so `AuroraReplicaLagMaximum` never reports;
- * - email outbox-to-provider latency, because that channel worker is not
- *   deployed. Expo and SMS metrics are added conditionally with their workers.
  *
  * Several of those treat missing data as breaching. Deploying them against a
  * metric nobody publishes would page the operations team every minute forever,
@@ -1715,6 +1867,7 @@ export function configureInfrastructureMonitoring(
   );
   configureAlarms(scope, props, metrics, false);
   configurePushWorkerMonitoring(scope, props);
+  configureEmailWorkerMonitoring(scope, props);
   configureSmsWorkerMonitoring(scope, props);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);

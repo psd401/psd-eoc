@@ -863,7 +863,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       reasonCode: null,
       diagnosticDigest: null,
     };
-    const accepted = await evidenceStore.recordAttemptEvidence({
+    await evidenceStore.recordAttemptEvidence({
       attempt,
       evidence: providerAccepted,
     });
@@ -871,7 +871,11 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       attempt,
       evidence: reconciliationUnknown,
     });
-    expect(replayedUnknown).toEqual(reconciledUnknown);
+    expect(replayedUnknown).toMatchObject({
+      state: 'provider-accepted',
+      provider: 'synthetic-provider',
+      providerReference: 'synthetic-acceptance-reference',
+    });
 
     const statesAfterUnknownReplay = await database
       .select({ state: deliveryEvidence.state })
@@ -888,7 +892,10 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       subject: { kind: 'attempt', attemptId: attempt.id },
       state: 'delivered',
       provider: 'synthetic-provider',
-      providerReference: 'synthetic-delivery-reference',
+      // Acceptance and delivery callbacks for one provider operation carry
+      // the same provider message reference. A terminal fact may only
+      // subsume a late acceptance replay when that lineage still matches.
+      providerReference: 'synthetic-acceptance-reference',
       proof: {
         kind: 'provider-delivery-receipt',
         provider: 'synthetic-provider',
@@ -903,7 +910,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       attempt,
       evidence: providerAccepted,
     });
-    expect(replayedAcceptance).toEqual(accepted);
+    expect(replayedAcceptance.state).toBe('delivered');
 
     const statesAfterHistoricalReplay = await database
       .select({ state: deliveryEvidence.state })
@@ -914,6 +921,51 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       'attempted',
       'unknown',
       'provider-accepted',
+      'delivered',
+    ]);
+
+    const outOfOrderAttempt = ChannelAttemptSchema.parse({
+      ...attempt,
+      id: randomUUID(),
+      attemptNumber: 2,
+      attemptedAt: new Date(
+        Date.parse(attempt.attemptedAt) + 10_000,
+      ).toISOString(),
+    });
+    const outOfOrderAttempted: AttemptEvidenceInput = {
+      ...attempted,
+      subject: { kind: 'attempt', attemptId: outOfOrderAttempt.id },
+    };
+    const outOfOrderDelivered: AttemptEvidenceInput = {
+      ...delivered,
+      subject: { kind: 'attempt', attemptId: outOfOrderAttempt.id },
+    };
+    const lateAcceptance: AttemptEvidenceInput = {
+      ...providerAccepted,
+      subject: { kind: 'attempt', attemptId: outOfOrderAttempt.id },
+    };
+    await evidenceStore.recordAttemptEvidence({
+      attempt: outOfOrderAttempt,
+      evidence: outOfOrderAttempted,
+    });
+    const retainedDelivered = await evidenceStore.recordAttemptEvidence({
+      attempt: outOfOrderAttempt,
+      evidence: outOfOrderDelivered,
+    });
+    await expect(
+      evidenceStore.recordAttemptEvidence({
+        attempt: outOfOrderAttempt,
+        evidence: lateAcceptance,
+      }),
+    ).resolves.toEqual(retainedDelivered);
+
+    const outOfOrderStates = await database
+      .select({ state: deliveryEvidence.state })
+      .from(deliveryEvidence)
+      .where(eq(deliveryEvidence.attemptId, outOfOrderAttempt.id))
+      .orderBy(deliveryEvidence.sequence);
+    expect(outOfOrderStates.map((entry) => entry.state)).toEqual([
+      'attempted',
       'delivered',
     ]);
   });

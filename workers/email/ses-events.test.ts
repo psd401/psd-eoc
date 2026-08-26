@@ -45,6 +45,7 @@ function sesEvent(
         [SES_CORRELATION_TAG_NAMES.recipientId]: [IDS.recipient],
         [SES_CORRELATION_TAG_NAMES.templateMode]: ['drill'],
         [SES_CORRELATION_TAG_NAMES.eventKind]: ['test'],
+        [SES_CORRELATION_TAG_NAMES.providerIoClaimToken]: [IDS.confirmation],
       },
     },
     [bodyKey]: eventBody,
@@ -71,6 +72,7 @@ describe('signed SES configuration-set event mapping', () => {
       recipientId: IDS.recipient,
       templateMode: 'drill',
       eventKind: 'test',
+      providerIoClaimToken: IDS.confirmation,
       mailMessageId: SES_MESSAGE_ID,
       evidence: {
         subject: { kind: 'attempt', attemptId: IDS.attempt },
@@ -261,6 +263,7 @@ describe('signed SES configuration-set event mapping', () => {
       SES_CORRELATION_TAG_NAMES.endpointId,
       SES_CORRELATION_TAG_NAMES.rosterSnapshotId,
       SES_CORRELATION_TAG_NAMES.recipientId,
+      SES_CORRELATION_TAG_NAMES.providerIoClaimToken,
       SES_CORRELATION_TAG_NAMES.templateMode,
       SES_CORRELATION_TAG_NAMES.eventKind,
       'ses:configuration-set',

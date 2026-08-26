@@ -3,6 +3,7 @@ import {
   IntegrationChannelChangeAuthorizationSchema,
   IntegrationIdSchema,
   IntegrationHealthSchema,
+  SesVerificationReferenceSchema,
   type Actor,
   type CapabilityInput,
   type ChannelConfiguration,
@@ -40,6 +41,9 @@ import {
 } from '../../../lib/capabilities/admin';
 
 export const SMS_INTEGRATION_ID = 'aws-eum-sms' as const;
+export const SES_VERIFICATION_REFERENCE_ENV =
+  'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE' as const;
+export const EMAIL_WORKER_ENABLED_ENV = 'PSD_EOC_EMAIL_WORKER_ENABLED' as const;
 
 export interface SmsWorkerReadiness {
   readonly ready: boolean;
@@ -671,6 +675,178 @@ function createSetChannelEnabledRegistration(
 export const setChannelEnabledRegistration =
   createSetChannelEnabledRegistration(readSmsWorkerReadiness);
 
+function readSesVerificationReference(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string | null {
+  if (environment[EMAIL_WORKER_ENABLED_ENV] !== 'true') return null;
+  const parsed = SesVerificationReferenceSchema.safeParse(
+    environment[SES_VERIFICATION_REFERENCE_ENV],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+function verifyEmailIntegrationRegistration(
+  verificationReference: string | null,
+): ServerCapabilityRegistration<
+  'verify-email-integration',
+  AdminCapabilityTransaction
+> {
+  return {
+    id: 'verify-email-integration',
+    canonicalizeIdempotencyInput: (input) => ({
+      ...input,
+      verificationReference,
+    }),
+    async resolveFacilityId(_input, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
+      );
+      return null;
+    },
+    async handler(input, context) {
+      if (
+        input.integrationId !== 'ses-email' ||
+        verificationReference === null ||
+        context.invocation.actor.kind !== 'human'
+      ) {
+        throw new AdminCapabilityError(
+          'FORBIDDEN',
+          'SES verification evidence is unavailable to this human session.',
+          403,
+        );
+      }
+      await lockIntegrationChange(context.transaction, input.integrationId);
+      const previousConfiguration = await lockChannelConfigurationState(
+        context.transaction,
+        input.integrationId,
+      );
+      const latest = await latestStatusForChange(
+        context.transaction,
+        input.integrationId,
+      );
+      if (latest === null) {
+        throw new AdminCapabilityError(
+          'NOT_FOUND',
+          'The SES integration status was not found.',
+          404,
+        );
+      }
+      const changedAt = await readCapabilityTime(context);
+      if (latest.label === 'live-verified') {
+        if (
+          previousConfiguration?.enabled !== true ||
+          previousConfiguration.statusId !== latest.id
+        ) {
+          throw new AdminCapabilityError(
+            'CONFLICT',
+            'SES verification cannot re-enable a deliberately disabled channel.',
+            409,
+          );
+        }
+        if (latest.authorizationReference === verificationReference) {
+          const existing = await loadChannelConfiguration(
+            context.transaction,
+            input.integrationId,
+          );
+          if (existing === null) {
+            throw new AdminCapabilityError(
+              'INTERNAL_ERROR',
+              'The verified SES channel could not be reloaded.',
+              500,
+            );
+          }
+          return existing;
+        }
+      } else if (latest.label !== 'configured-unverified') {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'SES integration truth cannot advance from its current state.',
+          409,
+        );
+      }
+      const [inserted] = await context.transaction.database
+        .insert(integrationStatuses)
+        .values({
+          integrationId: input.integrationId,
+          label: 'live-verified',
+          verifiedAt: changedAt,
+          verifiedByUserId: context.invocation.actor.userId,
+          authorizationReference: verificationReference,
+          reasonCode: null,
+          observedAt: changedAt,
+        })
+        .returning({ id: integrationStatuses.id });
+      if (inserted === undefined) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The SES verification observation was not recorded.',
+          500,
+        );
+      }
+      const statusId = inserted.id;
+      await context.transaction.database
+        .insert(channelConfigurations)
+        .values({
+          integrationId: input.integrationId,
+          enabled: true,
+          statusId,
+          statusLabel: 'live-verified',
+          changedAt,
+        })
+        .onConflictDoUpdate({
+          target: channelConfigurations.integrationId,
+          set: {
+            enabled: true,
+            statusId,
+            statusLabel: 'live-verified',
+            changedAt,
+          },
+        });
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        input.integrationId,
+      );
+      if (result === null) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The verified SES channel could not be reloaded.',
+          500,
+        );
+      }
+      return result;
+    },
+    resultReference: channelResultReference,
+    async loadReplay(resultReference, context) {
+      const parsed = parseChannelResultReference(resultReference);
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        parsed.integrationId,
+      );
+      if (
+        result === null ||
+        digestCapabilityValue(result) !== parsed.outputDigest
+      ) {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'The original SES verification result is no longer reconstructable.',
+          409,
+        );
+      }
+      return result;
+    },
+    resolveReplayFacilityId(resultReference, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
+      );
+      parseChannelResultReference(resultReference);
+      return null;
+    },
+    replayFacilityId: () => null,
+  };
+}
+
 /** Executes the canonical health query and captures its typed channel projection. */
 export async function executeIntegrationHealthProjection(input: {
   readonly authenticated: AuthenticatedSession;
@@ -727,6 +903,36 @@ export function executeSetChannelEnabledCapability(input: {
       : createSetChannelEnabledRegistration(() => readiness);
   return executeAdminMutationCapability(
     registration,
+    input.command,
+    input.authenticated,
+    store,
+    input.metadata,
+  );
+}
+
+/** Records deploy-time SES evidence and enables the channel in one admin action. */
+export function executeVerifyEmailIntegrationCapability(input: {
+  readonly authenticated: AuthenticatedSession;
+  readonly command: CapabilityInput<'verify-email-integration'>;
+  readonly metadata: AdminMutationMetadata;
+  readonly verificationReference?: string | null;
+  readonly emailWorkerEnabled?: boolean;
+  readonly store?: AdminCapabilityStore;
+}): Promise<ChannelConfiguration> {
+  const store =
+    input.store ??
+    createDrizzleAdminCapabilityStore(
+      getDefaultAdminDatabase(),
+      input.authenticated,
+    );
+  return executeAdminMutationCapability(
+    verifyEmailIntegrationRegistration(
+      input.verificationReference === undefined
+        ? readSesVerificationReference()
+        : input.emailWorkerEnabled === false
+          ? null
+          : input.verificationReference,
+    ),
     input.command,
     input.authenticated,
     store,

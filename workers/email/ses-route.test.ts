@@ -74,6 +74,7 @@ interface CorrelationOverrides {
   readonly recipientId?: string;
   readonly templateMode?: 'real' | 'drill';
   readonly eventKind?: 'incident' | 'drill' | 'test';
+  readonly providerIoClaimToken?: string;
   readonly configurationSet?: string;
 }
 
@@ -157,6 +158,9 @@ function sesMessage(
           correlation.templateMode ?? ATTEMPT.templateMode,
         ],
         'psd-eoc-event-kind': [correlation.eventKind ?? ATTEMPT.eventKind],
+        'psd-eoc-provider-io-claim': [
+          correlation.providerIoClaimToken ?? IDS.confirmation,
+        ],
       },
     },
     [bodyKey]: eventBody(eventType),
@@ -246,6 +250,7 @@ class MemorySesWebhookStore implements SesWebhookStore {
   }>[] = [];
   public claimCalls = 0;
   public completeCalls = 0;
+  public reconcileCalls = 0;
   public loadAttemptCalls = 0;
   public closeCalls = 0;
 
@@ -339,6 +344,22 @@ class MemorySesWebhookStore implements SesWebhookStore {
     return Promise.resolve(attemptId === ATTEMPT.id ? ATTEMPT : null);
   }
 
+  public reconcileProviderIo(
+    attempt: ChannelAttempt,
+    providerReference: string,
+    providerIoClaimToken: string,
+  ): Promise<void> {
+    if (
+      attempt.id !== ATTEMPT.id ||
+      providerReference.length === 0 ||
+      providerIoClaimToken !== IDS.confirmation
+    ) {
+      return Promise.reject(new Error('Synthetic reconciliation mismatch.'));
+    }
+    this.reconcileCalls += 1;
+    return Promise.resolve();
+  }
+
   public recordAttemptEvidence(
     attempt: ChannelAttempt,
     inputValue: RecordDeliveryEvidenceInput,
@@ -409,6 +430,9 @@ function createHarness(
     async verifySignature(envelope): Promise<void> {
       calls.verifySignature += 1;
       if (verifierError !== undefined) throw verifierError;
+      if (envelope.Type !== 'Notification') {
+        throw new Error('Unexpected confirmation in notification harness.');
+      }
       const valid = verify(
         'sha256',
         Buffer.from(canonicalString(envelope), 'utf8'),
@@ -417,6 +441,7 @@ function createHarness(
       );
       if (!valid) throw new Error('Synthetic invalid signature.');
     },
+    confirmSubscription: () => Promise.resolve(),
     createStore: () => {
       calls.createStore += 1;
       return Promise.resolve(store);
@@ -433,6 +458,56 @@ async function errorCode(response: Response): Promise<string | undefined> {
 }
 
 describe('SES signed SNS webhook route', () => {
+  test('confirms an authenticated managed subscription before opening storage', async () => {
+    const messageId = '10000000-0000-4000-8000-000000000099';
+    const token = 'synthetic-confirmation-token';
+    const subscribeUrl =
+      `https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription` +
+      `&TopicArn=${encodeURIComponent(TOPIC_ARN)}` +
+      `&Token=${encodeURIComponent(token)}`;
+    let confirmations = 0;
+    let stores = 0;
+    const handler = createSesWebhookRouteHandler({
+      readExpectedTopicArn: () => TOPIC_ARN,
+      verifySignature: () => Promise.resolve(),
+      confirmSubscription(envelope) {
+        confirmations += 1;
+        expect(envelope.SubscribeURL).toBe(subscribeUrl);
+        return Promise.resolve();
+      },
+      createStore() {
+        stores += 1;
+        return Promise.resolve(new MemorySesWebhookStore());
+      },
+    });
+    const response = await handler(
+      new Request('https://eoc.example.invalid/api/webhooks/ses', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-amz-sns-message-type': 'SubscriptionConfirmation',
+          'x-amz-sns-message-id': messageId,
+          'x-amz-sns-topic-arn': TOPIC_ARN,
+        },
+        body: JSON.stringify({
+          Type: 'SubscriptionConfirmation',
+          MessageId: messageId,
+          Token: token,
+          TopicArn: TOPIC_ARN,
+          Message: 'You have chosen to subscribe.',
+          SubscribeURL: subscribeUrl,
+          Timestamp: '2026-08-11T20:30:00.000Z',
+          SignatureVersion: '2',
+          Signature: Buffer.from('synthetic').toString('base64'),
+          SigningCertURL:
+            'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem',
+        }),
+      }),
+    );
+    expect(response.status).toBe(204);
+    expect(confirmations).toBe(1);
+    expect(stores).toBe(0);
+  });
   for (const fixture of [
     { eventType: 'Send', state: 'provider-accepted' },
     { eventType: 'Delivery', state: 'delivered' },
@@ -450,6 +525,7 @@ describe('SES signed SNS webhook route', () => {
       expect(app.store.evidenceWrites[0]?.input.state).toBe(fixture.state);
       expect(app.store.evidenceWrites[0]?.attempt).toEqual(ATTEMPT);
       expect(app.store.endpointWrites).toHaveLength(0);
+      expect(app.store.reconcileCalls).toBe(1);
       expect(app.store.completeCalls).toBe(1);
       expect(app.store.closeCalls).toBe(1);
       if (fixture.eventType === 'Delivery') {
@@ -478,6 +554,7 @@ describe('SES signed SNS webhook route', () => {
       'SES_PERMANENT_BOUNCE',
     );
     expect(app.store.endpointWrites).toHaveLength(1);
+    expect(app.store.reconcileCalls).toBe(1);
     expect(app.store.endpointWrites[0]?.input).toEqual({
       rosterSnapshotId: ATTEMPT.rosterSnapshotId,
       recipientId: ATTEMPT.recipientId,
@@ -500,6 +577,7 @@ describe('SES signed SNS webhook route', () => {
     expect(response.status).toBe(204);
     expect(app.store.evidenceWrites).toHaveLength(0);
     expect(app.store.endpointWrites).toHaveLength(1);
+    expect(app.store.reconcileCalls).toBe(1);
     expect(app.store.endpointWrites[0]?.input).toEqual({
       rosterSnapshotId: ATTEMPT.rosterSnapshotId,
       recipientId: ATTEMPT.recipientId,
@@ -522,6 +600,7 @@ describe('SES signed SNS webhook route', () => {
     expect(await replay.text()).toBe('');
     expect(app.store.claimCalls).toBe(2);
     expect(app.store.loadAttemptCalls).toBe(1);
+    expect(app.store.reconcileCalls).toBe(1);
     expect(app.store.evidenceWrites).toHaveLength(1);
     expect(app.store.endpointWrites).toHaveLength(0);
     expect(app.store.completeCalls).toBe(1);
