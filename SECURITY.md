@@ -30,8 +30,9 @@ human-only for critical actions.
   Google outage degrades to cached sessions/groups — never to open access.
 - Media: content-validated, re-encoded, EXIF-stripped, private-bucket only,
   authorized on every read. No public URLs anywhere in the system.
-- Secrets in AWS Secrets Manager only. GitHub Actions OIDC deploy; no static
-  AWS keys. No secrets in repo, CI logs, or client bundles.
+- Secrets in AWS Secrets Manager only. Deploy only with direct `cdk deploy`
+  from a locally authenticated, short-lived AWS session. GitHub has no
+  deployment authority. No secrets in the repo, CI logs, or client bundles.
 - Provider callbacks are authenticated/verified; replayed or forged callbacks
   must not corrupt delivery state.
 - Test/training mode targets synthetic rosters only; production recipient data

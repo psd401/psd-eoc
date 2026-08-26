@@ -16,7 +16,8 @@ contact details, or provider payloads.
 
 1. Run `bun run check` on the exact commit and require green CI.
 2. Confirm the deployed configuration names match
-   [CONFIGURATION.md](../CONFIGURATION.md) and the protected GitHub environment.
+   [CONFIGURATION.md](../CONFIGURATION.md) and the reviewed direct CDK
+   parameters.
 3. Verify human-only enforcement, real/drill distinction, deny-by-default
    authorization, append-only records, and honest delivery states.
 4. Read back the exact application digest, health, database protections,
@@ -26,7 +27,7 @@ contact details, or provider payloads.
 6. For each enabled notification channel, require the readiness register to
    show evidence sufficient for the intended use. A channel that is not ready
    stays dark and receives no routable work.
-7. Verify backup/restoration evidence, failure drills, rollback points, the
+7. Verify backup/restoration evidence, controlled recovery results, rollback points, the
    [emergency notification stop](rollback.md#emergency-notification-stop), and
    operator contacts applicable to this release.
 8. Verify the exact privately distributed mobile builds and install guidance
@@ -40,10 +41,10 @@ contact details, or provider payloads.
     record remains retained and automated disposition remains absent; it blocks
     any later disposition design until the review is complete.
 
-Production changes occur through the GitHub Actions deploy workflow described
-in [CONFIGURATION.md](../CONFIGURATION.md). A deploy does not start an incident
-or send a notification. Any later real incident, real notification, all-clear,
-or event closure still requires an authenticated human acting in the app.
+Production changes use only the direct `cdk deploy` command described in
+[CONFIGURATION.md](../CONFIGURATION.md). A deploy does not start an incident or
+send a notification. Any later real incident, real notification, all-clear, or
+event closure still requires an authenticated human acting in the app.
 
 ## Record the go-live decision
 

@@ -1799,10 +1799,6 @@ describe('one-off native bootstrap boundary', () => {
   });
 
   it('refreshes membership on a schedule no human has to approve', () => {
-    // The previous trigger was a GitHub Actions workflow whose environment
-    // required a named reviewer, so every scheduled run parked waiting for an
-    // approval a cron cannot give. Membership then aged past the freshness
-    // bound in trusted-group-access.ts and refused everyone.
     const named = resourceEntries('AWS::Events::Rule').filter(
       ([, resource]) =>
         properties(resource).Name ===

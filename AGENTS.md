@@ -87,11 +87,13 @@ Follow these unless Kris says otherwise:
 
 These are real failure patterns from this repo's history. Avoid them.
 
-- **Don't invent ceremony.** Do not add approval gates, acknowledgement
-  strings, hand-computed SHA-256 inputs, cost-estimate fields, or
-  "consequence preview" steps to workflows. Kris approves things by telling
-  you to do them. A manual deploy is: pick a commit, click run. Merges to main
-  use the same GitHub Actions/OIDC deployment path automatically.
+- **Deployment is not a repository workflow.** Never add a GitHub deployment
+  workflow, deployment environment, deployment secrets or variables, OIDC
+  deployment role, or issue asking for one. Production infrastructure is
+  deployed only from a locally authenticated shell with a direct `cdk deploy`
+  command. CI may verify and synthesize; it may never deploy.
+- **Failure drills do not own infrastructure.** Never add a repository-hosted
+  failure-drill stack, deployment workflow, or fault-injection runtime.
 - **Don't split work into micro-issues.** If a task needs four files changed,
   change four files. Do not open a chain of dependent issues each owning two
   files.
@@ -110,7 +112,9 @@ These are real failure patterns from this repo's history. Avoid them.
 
 ## 6. Production
 
-Kris approves production changes by asking for them. Deploys run through
-GitHub Actions with OIDC — no static AWS keys, ever. When a deploy or
-infrastructure change is risky, say what will happen in plain language before
-you run it, then run it.
+Kris approves production changes by asking for them. Deployment is only a
+direct `cdk deploy` from a locally authenticated AWS session. GitHub Actions,
+repository environments, repository variables, repository secrets, and GitHub
+OIDC roles must never be part of deployment. When a deploy or infrastructure
+change is risky, say what will happen in plain language before you run it, then
+run it.
