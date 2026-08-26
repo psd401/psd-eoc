@@ -417,13 +417,14 @@ try {
   }
   await capture(`${platform}-synthetic-push`);
   if (platform === 'ios') {
-    await maestro('open-push-ios.yaml');
-    // Hosted simulators can evict the JavaScript session while the synthetic
-    // notification is visible. The notification tap still launches the exact
-    // native development client and retains its native response; reconnecting
-    // the config-derived Metro URL proves that killed-process response routes
-    // to the intended event instead of mistaking the Expo launcher for success.
+    // Keep the JavaScript session connected before consuming the native
+    // notification response. Hosted simulators can evict the development
+    // session while Notification Center is open; reconnecting after the tap
+    // would consume the response in the launcher and reset navigation home.
     await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);
+    await Bun.sleep(5_000);
+    await maestro('reveal-push-ios.yaml');
+    await maestro('open-push-ios.yaml');
   } else {
     await maestro('open-push-android.yaml');
   }
