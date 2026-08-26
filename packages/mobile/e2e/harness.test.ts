@@ -64,6 +64,7 @@ describe('issue-32 mobile E2E harness', () => {
       'open-push-android.yaml',
       'open-push-ios.yaml',
       'prepare-ios.yaml',
+      'push-opened-event-room.yaml',
       'reveal-push-ios.yaml',
       'start-drill.yaml',
     ]);
@@ -118,6 +119,16 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosNotification).toContain("visible: 'Open'");
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
+    expect(iosNotification).not.toContain(
+      'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+    );
+    const openedEventRoom = await Bun.file(
+      resolve(flowRoot, 'push-opened-event-room.yaml'),
+    ).text();
+    expect(openedEventRoom).toContain(
+      "visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'",
+    );
+    expect(openedEventRoom).toContain("assertNotVisible: '^REAL INCIDENT$'");
     const iosReveal = await Bun.file(
       resolve(flowRoot, 'reveal-push-ios.yaml'),
     ).text();
@@ -168,6 +179,10 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain("const metroUrl = 'http://127.0.0.1:8081'");
     expect(runner).toContain("'simctl', 'launch', deviceId, appId");
     expect(runner).toContain('await openIosDevelopmentClient');
+    expect(runner).toContain(
+      "await maestro('open-push-ios.yaml');\n    // Hosted simulators can evict the JavaScript session",
+    );
+    expect(runner).toContain("await maestro('push-opened-event-room.yaml')");
     expect(runner).toContain('iOS mobile E2E cannot skip the native build');
     expect(runner).not.toContain('http://10.0.2.2:8081');
     expect(runner.indexOf('const childEnvironment')).toBeLessThan(
