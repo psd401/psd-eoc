@@ -97,7 +97,7 @@ drills and unroutable fixtures remain safe for automated tests.
 
 ## Records-retention classification
 
-<!-- psd-eoc:records-retention -->
+<!-- psd-eoc:records-retention:start -->
 
 The product retains records; it does not decide when a district may dispose of
 them. The repository defines the content inventory and safety boundary below.
@@ -109,7 +109,7 @@ The following official sources were rechecked on 2026-08-25:
 - [Local Government Common Records Retention Schedule (CORE)](https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF):
   version 5.0, approved and effective October 2, 2024.
 - [Public Schools (K-12) Records Retention Schedule](https://www.sos.wa.gov/sites/default/files/2026-06/Public-Schools-%28K-12%29-Records-Retention-Schedule.PDF):
-  version 9.1, approved June 3, 2026.
+  version 9.1, approved and effective June 3, 2026.
 - [Washington State Archives school and ESD schedule index](https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records):
   identifies those two versions as the current schedules used together.
 
@@ -138,8 +138,9 @@ names, file formats, or one blanket DAN for the database. The inventory is:
   Outbox work, batches, channel attempts and executions, provider facts,
   delivery evidence, endpoint-status facts, and SMS opt-out facts.
 - `drills-and-delivery-tests`
-  Drill events and controlled synthetic tests, canary eligibility, target-set
-  versions, endpoints, runs, and append-only reports.
+  Drill events, unroutable synthetic tests, and authenticated-human controlled
+  live delivery tests to approved staff endpoints, plus canary eligibility,
+  target-set versions, endpoints, runs, and append-only reports.
 - `media-and-private-objects`
   Upload intents, sanitized metadata and checksums, quarantine objects,
   sanitized private objects, and journal references. A presentation redaction
@@ -212,9 +213,20 @@ Archives, not an engineering guess.
 
 Until a separately approved disposition design exists, retain every event,
 journal entry, audit fact, delivery fact, drill/test record, roster snapshot,
-media object, and export. No deletion, purge, retention timer, lifecycle rule,
-down migration, or automated disposition is authorized by this guidance.
-Applied migrations and append-only product history remain unchanged.
+media object, and export. This guidance authorizes none of the following:
+deletion, purge, a retention timer, a lifecycle rule, a down migration, or
+automated disposition. Applied migrations and append-only product history
+remain unchanged.
+
+<!-- docs-contract:records-retention-policy:start -->
+
+- `record-retention: all`
+- `automated-disposition: prohibited`
+- `down-migrations: prohibited`
+
+<!-- docs-contract:records-retention-policy:end -->
+
+<!-- psd-eoc:records-retention:end -->
 
 ## Configuration boundaries
 

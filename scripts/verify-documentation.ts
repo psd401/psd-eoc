@@ -396,11 +396,19 @@ const RECORDS_RETENTION_SOURCE_URLS = Object.freeze([
   'https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records',
 ]);
 
+const RECORDS_RETENTION_POLICY = Object.freeze([
+  'automated-disposition: prohibited',
+  'down-migrations: prohibited',
+  'record-retention: all',
+]);
+
+const MINIMUM_RECORDS_RETENTION_SOURCE_CHECK_DATE = '2026-08-25';
+
 function recordsRetentionError(
   file: string,
   contents: string,
   message: string,
-  token = '<!-- psd-eoc:records-retention -->',
+  token = '<!-- psd-eoc:records-retention:start -->',
 ): DocumentationError {
   const offset = contents.indexOf(token);
   return {
@@ -414,6 +422,42 @@ function normalizedDocumentationText(contents: string): string {
   return contents
     .replace(/([A-Za-z])-\s+([a-z])/gu, '$1-$2')
     .replace(/\s+/gu, ' ');
+}
+
+function occurrenceCount(contents: string, token: string): number {
+  return contents.split(token).length - 1;
+}
+
+function boundedDocumentationSection(
+  contents: string,
+  start: string,
+  end: string,
+): string | null {
+  if (
+    occurrenceCount(contents, start) !== 1 ||
+    occurrenceCount(contents, end) !== 1
+  ) {
+    return null;
+  }
+  const startOffset = contents.indexOf(start) + start.length;
+  const endOffset = contents.indexOf(end);
+  return endOffset > startOffset
+    ? contents.slice(startOffset, endOffset)
+    : null;
+}
+
+function uniqueCapture(contents: string, pattern: RegExp): string | undefined {
+  const matches = [...contents.matchAll(pattern)];
+  return matches.length === 1 ? matches[0]?.[1] : undefined;
+}
+
+function isRealIsoDate(value: string | undefined): value is string {
+  if (value === undefined || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return (
+    !Number.isNaN(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 'YYYY-MM-DD'.length) === value
+  );
 }
 
 /**
@@ -435,26 +479,85 @@ export function validateRecordsRetentionDocumentation(
     'utf8',
   );
   const goLive = readFileSync(join(repositoryRoot, goLiveFile), 'utf8');
-  const normalizedArchitecture = normalizedDocumentationText(architecture);
-  const normalizedIntegrations = normalizedDocumentationText(integrations);
   const normalizedGoLive = normalizedDocumentationText(goLive);
   const errors: DocumentationError[] = [];
 
-  const marker = '<!-- psd-eoc:records-retention -->';
-  const markerCount = currentMarkdownFiles(repositoryRoot).reduce(
-    (count, file) =>
-      count +
-      (readFileSync(file, 'utf8').match(new RegExp(marker, 'gu'))?.length ?? 0),
-    0,
+  const architectureStart = '<!-- psd-eoc:records-retention:start -->';
+  const architectureEnd = '<!-- psd-eoc:records-retention:end -->';
+  const reviewStart = '<!-- psd-eoc:records-retention-review-status:start -->';
+  const reviewEnd = '<!-- psd-eoc:records-retention-review-status:end -->';
+  const currentDocuments = currentMarkdownFiles(repositoryRoot).map((file) =>
+    readFileSync(file, 'utf8'),
   );
-  if (markerCount !== 1 || !architecture.includes(marker)) {
+  const currentMarkerCount = (marker: string): number =>
+    currentDocuments.reduce(
+      (count, contents) => count + occurrenceCount(contents, marker),
+      0,
+    );
+  const architectureSection = boundedDocumentationSection(
+    architecture,
+    architectureStart,
+    architectureEnd,
+  );
+  const reviewSection = boundedDocumentationSection(
+    integrations,
+    reviewStart,
+    reviewEnd,
+  );
+  if (
+    architectureSection === null ||
+    currentMarkerCount(architectureStart) !== 1 ||
+    currentMarkerCount(architectureEnd) !== 1
+  ) {
     errors.push(
       recordsRetentionError(
         architectureFile,
         architecture,
-        `expected one current records-retention marker; found ${String(markerCount)}`,
+        'expected one bounded current records-retention section',
       ),
     );
+  }
+  if (
+    reviewSection === null ||
+    currentMarkerCount(reviewStart) !== 1 ||
+    currentMarkerCount(reviewEnd) !== 1
+  ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'expected one bounded records-retention review-status section',
+        reviewStart,
+      ),
+    );
+  }
+  const retentionGuidance = architectureSection ?? '';
+  const retentionReview = reviewSection ?? '';
+  const normalizedArchitecture = normalizedDocumentationText(retentionGuidance);
+  const normalizedIntegrations = normalizedDocumentationText(retentionReview);
+
+  for (const contract of [
+    'records-retention-classes',
+    'records-retention-policy',
+  ]) {
+    if (
+      occurrenceCount(
+        architecture,
+        `<!-- docs-contract:${contract}:start -->`,
+      ) !== 1 ||
+      occurrenceCount(
+        architecture,
+        `<!-- docs-contract:${contract}:end -->`,
+      ) !== 1
+    ) {
+      errors.push(
+        recordsRetentionError(
+          architectureFile,
+          architecture,
+          `expected one bounded ${contract} contract`,
+        ),
+      );
+    }
   }
 
   const documentedClasses = extractContractList(
@@ -474,8 +577,25 @@ export function validateRecordsRetentionDocumentation(
     );
   }
 
+  const documentedPolicy = extractContractList(
+    architecture,
+    'records-retention-policy',
+  );
+  if (
+    JSON.stringify(documentedPolicy) !==
+    JSON.stringify([...RECORDS_RETENTION_POLICY].sort())
+  ) {
+    errors.push(
+      recordsRetentionError(
+        architectureFile,
+        architecture,
+        `records-retention policy differs: documented=${documentedPolicy.join(',')} actual=${RECORDS_RETENTION_POLICY.join(',')}`,
+      ),
+    );
+  }
+
   for (const sourceUrl of RECORDS_RETENTION_SOURCE_URLS) {
-    if (!architecture.includes(sourceUrl)) {
+    if (!retentionGuidance.includes(sourceUrl)) {
       errors.push(
         recordsRetentionError(
           architectureFile,
@@ -491,11 +611,11 @@ export function validateRecordsRetentionDocumentation(
       /CORE[\s\S]{0,240}version 5\.0[\s\S]{0,160}October 2, 2024/iu,
     ],
     [
-      'Public Schools (K-12) v9.1 and its June 3, 2026 approval date',
-      /Public Schools \(K-12\)[\s\S]{0,240}version 9\.1[\s\S]{0,160}June 3, 2026/iu,
+      'Public Schools (K-12) v9.1 and its June 3, 2026 approval/effective date',
+      /Public Schools \(K-12\)[\s\S]{0,240}version 9\.1[\s\S]{0,160}approved and effective June 3, 2026/iu,
     ],
   ] as const) {
-    if (!pattern.test(architecture)) {
+    if (!pattern.test(retentionGuidance)) {
       errors.push(
         recordsRetentionError(
           architectureFile,
@@ -521,7 +641,7 @@ export function validateRecordsRetentionDocumentation(
     'active public-records request',
     'archival appraisal',
     'district-controlled operations record',
-    'No deletion, purge, retention timer, lifecycle rule, down migration, or automated disposition',
+    'This guidance authorizes none of the following: deletion, purge, a retention timer, a lifecycle rule, a down migration, or automated disposition',
     'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
   ]) {
     if (!normalizedArchitecture.includes(required)) {
@@ -535,63 +655,96 @@ export function validateRecordsRetentionDocumentation(
     }
   }
 
-  const status = integrations.match(
-    /Controlled mapping review status: `([^`]+)`\./u,
-  )?.[1];
-  const reviewDate = integrations.match(
-    /Controlled mapping review date: `([^`]+)`\./u,
-  )?.[1];
-  const sourceCheckDate = integrations.match(
-    /Official sources last rechecked: `(\d{4}-\d{2}-\d{2})`\./u,
-  )?.[1];
+  const architectureSourceCheckDate = uniqueCapture(
+    retentionGuidance,
+    /official sources were rechecked on (\d{4}-\d{2}-\d{2}):/giu,
+  );
+  const status = uniqueCapture(
+    integrations,
+    /^- Controlled mapping review status: `([^`]+)`\.$/gmu,
+  );
+  const reviewDate = uniqueCapture(
+    integrations,
+    /^- Controlled mapping review date: `([^`]+)`\.$/gmu,
+  );
+  const sourceCheckDate = uniqueCapture(
+    integrations,
+    /^- Official sources last rechecked: `(\d{4}-\d{2}-\d{2})`\.$/gmu,
+  );
   if (status !== 'pending' && status !== 'reviewed') {
     errors.push(
       recordsRetentionError(
         integrationsFile,
         integrations,
-        'records-retention mapping status must be pending or reviewed',
-        '<!-- psd-eoc:records-retention-review-status -->',
+        'records-retention mapping status must occur once and be pending or reviewed',
+        reviewStart,
       ),
     );
   }
+  const reviewDateIsHonest =
+    (status === 'pending' && reviewDate === 'not completed') ||
+    (status === 'reviewed' &&
+      isRealIsoDate(reviewDate) &&
+      isRealIsoDate(sourceCheckDate) &&
+      reviewDate >= sourceCheckDate);
+  const pendingEvidence = normalizedIntegrations.includes(
+    'No completed records-officer review or ambiguity guidance has been supplied',
+  );
   if (
-    reviewDate === undefined ||
-    (status === 'pending' && reviewDate !== 'not completed') ||
-    (status === 'reviewed' && !/^\d{4}-\d{2}-\d{2}$/u.test(reviewDate))
+    !reviewDateIsHonest ||
+    (status === 'pending' && !pendingEvidence) ||
+    (status === 'reviewed' &&
+      (pendingEvidence || normalizedIntegrations.includes('pending')))
   ) {
     errors.push(
       recordsRetentionError(
         integrationsFile,
         integrations,
-        'records-retention mapping status lacks an honest review date',
-        '<!-- psd-eoc:records-retention-review-status -->',
-      ),
-    );
-  }
-  if (sourceCheckDate === undefined) {
-    errors.push(
-      recordsRetentionError(
-        integrationsFile,
-        integrations,
-        'records-retention official-source check lacks an ISO date',
-        '<!-- psd-eoc:records-retention-review-status -->',
+        'records-retention mapping status, date, and evidence are inconsistent',
+        reviewStart,
       ),
     );
   }
   if (
-    !integrations.includes(
-      '<!-- psd-eoc:records-retention-review-status -->',
-    ) ||
-    !normalizedIntegrations.includes('retain every product record')
+    !isRealIsoDate(architectureSourceCheckDate) ||
+    !isRealIsoDate(sourceCheckDate) ||
+    architectureSourceCheckDate < MINIMUM_RECORDS_RETENTION_SOURCE_CHECK_DATE ||
+    architectureSourceCheckDate !== sourceCheckDate
   ) {
+    errors.push(
+      recordsRetentionError(
+        integrationsFile,
+        integrations,
+        'records-retention official-source dates are invalid, stale, duplicated, or inconsistent',
+        reviewStart,
+      ),
+    );
+  }
+  if (!normalizedIntegrations.includes('retain every product record')) {
     errors.push(
       recordsRetentionError(
         integrationsFile,
         integrations,
         'readiness register lacks aggregate retention review evidence and the retain-everything boundary',
-        '<!-- psd-eoc:records-retention-review-status -->',
+        reviewStart,
       ),
     );
+  }
+
+  const normalizedRetentionDocuments = `${normalizedArchitecture} ${normalizedIntegrations} ${normalizedGoLive}`;
+  for (const contradiction of [
+    /\bdo not retain every product record\b/iu,
+    /\b(?:automated disposition|disposition automation) (?:is|becomes|remains)(?: now)? (?:enabled|allowed|authorized)\b/iu,
+  ]) {
+    if (contradiction.test(normalizedRetentionDocuments)) {
+      errors.push(
+        recordsRetentionError(
+          architectureFile,
+          architecture,
+          'records-retention guidance contradicts the retain-everything policy',
+        ),
+      );
+    }
   }
 
   for (const required of [
