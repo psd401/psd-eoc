@@ -33,6 +33,12 @@ contact details, or provider payloads.
    if mobile is in scope.
 9. Record every accepted gap, consequence, compensating control, owner, and
    deadline. Repository safety rules are not waivable gaps.
+10. Confirm the district-controlled mapping described by the
+    [records-retention classification](../ARCHITECTURE.md#records-retention-classification)
+    has records-officer review, or record the pending review as an accepted
+    operational gap. A pending mapping does not block launch while every product
+    record remains retained and automated disposition remains absent; it blocks
+    any later disposition design until the review is complete.
 
 Production changes occur through the GitHub Actions deploy workflow described
 in [CONFIGURATION.md](../CONFIGURATION.md). A deploy does not start an incident

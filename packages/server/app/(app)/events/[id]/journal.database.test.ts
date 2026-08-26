@@ -1796,1207 +1796,1173 @@ describeWithDatabase('event journal database guarantees', () => {
 
   test('binds mobile real staff all-clear and close to exact fresh human confirmations', async () => {
     const ids = syntheticFixtureIds();
-    const rollbackFixture = new Error(
-      'Rollback the isolated real/staff confirmation fixture.',
-    );
-    try {
-      await databaseConnection().db.transaction(async (transaction) => {
-        const transactionalDatabase = transaction as unknown as Database;
-        const journalStore = createDrizzleJournalCapabilityStore(
-          transactionalDatabase,
-        );
-        const eventStore = createDrizzleEventCapabilityStore(
-          transactionalDatabase,
-        );
-        const journalRuntime = createJournalCapabilityRuntime({
-          driver: 'postgres',
-          db: transaction as unknown as PostgresDatabaseConnection['db'],
-          close: async () => {},
-        });
-        const suffix = randomUUID().replaceAll('-', '');
-        const membershipSnapshotVersion =
-          Number.parseInt(suffix.slice(0, 7), 16) + 1;
-        const fixtureTime = new Date();
-        const identityCreatedAt = new Date(fixtureTime.getTime() - 60_000);
-        const membershipSnapshotId = randomUUID();
-        const deviceEnrollmentId = randomUUID();
-        const staffRosterSnapshotId = randomUUID();
-        const staffRecipientId = randomUUID();
-        const sourcePreviewId = randomUUID();
-        const eventId = randomUUID();
+    // The full gate already gives this shard a fresh database. Let the
+    // production stores own top-level transactions instead of turning this
+    // entire scenario into one long rollback transaction of nested savepoints.
+    const fixtureDatabase = databaseConnection().db;
+    const journalStore = createDrizzleJournalCapabilityStore(fixtureDatabase);
+    const eventStore = createDrizzleEventCapabilityStore(fixtureDatabase);
+    const journalRuntime = createJournalCapabilityRuntime({
+      driver: 'postgres',
+      db: fixtureDatabase,
+      close: async () => {},
+    });
+    const suffix = randomUUID().replaceAll('-', '');
+    const membershipSnapshotVersion =
+      Number.parseInt(suffix.slice(0, 7), 16) + 1;
+    const fixtureTime = new Date();
+    const identityCreatedAt = new Date(fixtureTime.getTime() - 60_000);
+    const membershipSnapshotId = randomUUID();
+    const deviceEnrollmentId = randomUUID();
+    const staffRosterSnapshotId = randomUUID();
+    const staffRecipientId = randomUUID();
+    const sourcePreviewId = randomUUID();
+    const eventId = randomUUID();
 
-        const [realEventTypeVersion] = await transaction
-          .select({ id: eventTypeVersions.id })
-          .from(eventTypeVersions)
-          .where(eq(eventTypeVersions.templateMode, 'real'))
-          .orderBy(asc(eventTypeVersions.id))
-          .limit(1);
-        if (realEventTypeVersion === undefined) {
-          throw new Error('The seed is missing a real incident event type.');
-        }
+    const [realEventTypeVersion] = await fixtureDatabase
+      .select({ id: eventTypeVersions.id })
+      .from(eventTypeVersions)
+      .where(eq(eventTypeVersions.templateMode, 'real'))
+      .orderBy(asc(eventTypeVersions.id))
+      .limit(1);
+    if (realEventTypeVersion === undefined) {
+      throw new Error('The seed is missing a real incident event type.');
+    }
 
-        const [latestStaffRosterSnapshot] = await transaction
-          .select({
-            version: rosterSnapshots.version,
-            sourceConfigurationId: rosterSnapshots.sourceConfigurationId,
-            sourceConfigurationVersion:
-              rosterSnapshots.sourceConfigurationVersion,
-          })
-          .from(rosterSnapshots)
-          .where(eq(rosterSnapshots.population, 'staff'))
-          .orderBy(desc(rosterSnapshots.version))
-          .limit(1);
-        const [unpublishedStaffConfiguration] =
-          latestStaffRosterSnapshot === undefined
-            ? await transaction
-                .select({
-                  id: rosterSourceConfigurations.id,
-                  version: rosterSourceConfigurations.version,
-                })
-                .from(rosterSourceConfigurations)
-                .where(eq(rosterSourceConfigurations.population, 'staff'))
-                .orderBy(
-                  desc(rosterSourceConfigurations.version),
-                  asc(rosterSourceConfigurations.id),
-                )
-                .limit(1)
-            : [];
-        const staffRosterConfigurationId =
-          latestStaffRosterSnapshot?.sourceConfigurationId ??
-          unpublishedStaffConfiguration?.id ??
-          randomUUID();
-        const staffRosterConfigurationVersion =
-          latestStaffRosterSnapshot?.sourceConfigurationVersion ??
-          unpublishedStaffConfiguration?.version ??
-          1;
-        const staffRosterSnapshotVersion =
-          (latestStaffRosterSnapshot?.version ?? 0) + 1;
-
-        await transaction.insert(users).values({
-          id: HUMAN_ACTOR.userId,
-          googleSubject: `synthetic-issue77-${suffix}`,
-          email: `synthetic.issue77.${suffix}@example.invalid`,
-          displayName: 'Synthetic Issue 77 Staff Operator',
-          facilityScopeKind: 'district',
-          createdAt: identityCreatedAt,
-          disabledAt: null,
-        });
-        await transaction.insert(accessMembershipSnapshots).values({
-          id: membershipSnapshotId,
-          version: membershipSnapshotVersion,
-          complete: true,
-          syncStartedAt: identityCreatedAt,
-          capturedAt: identityCreatedAt,
-        });
-        await transaction.insert(deviceEnrollments).values({
-          id: deviceEnrollmentId,
-          userId: HUMAN_ACTOR.userId,
-          platform: 'ios',
-          unlockMethod: 'biometric',
-          installationId: `synthetic-issue77-${suffix}`,
-          enrolledAt: identityCreatedAt,
-          lastSeenAt: fixtureTime,
-          revokedAt: null,
-        });
-        const membershipValidUntil = new Date(
-          fixtureTime.getTime() + 60 * 60_000,
-        );
-        const membershipGraceUntil = new Date(
-          fixtureTime.getTime() + 2 * 60 * 60_000,
-        );
-        const sessionExpiresAt = new Date(
-          fixtureTime.getTime() + 24 * 60 * 60_000,
-        );
-        await transaction.insert(sessions).values({
-          id: HUMAN_ACTOR.sessionId,
-          userId: HUMAN_ACTOR.userId,
-          deviceEnrollmentId,
-          membershipSnapshotId,
-          membershipValidUntil,
-          membershipGraceUntil,
-          createdAt: identityCreatedAt,
-          expiresAt: sessionExpiresAt,
-          revokedAt: null,
-        });
-        await transaction.insert(connectivityEpochs).values({
-          id: CONNECTIVITY_EPOCH_ID,
-          sessionId: HUMAN_ACTOR.sessionId,
-          establishedAt: fixtureTime,
-        });
-        await insertSyntheticAdminSession(transactionalDatabase, fixtureTime);
-
-        const sessionResult = SessionEstablishmentResultSchema.parse({
-          user: {
-            id: HUMAN_ACTOR.userId,
-            googleSubject: `synthetic-issue77-${suffix}`,
-            email: `synthetic.issue77.${suffix}@example.invalid`,
-            displayName: 'Synthetic Issue 77 Staff Operator',
-            roles: ['staff'],
-            facilityScope: { kind: 'district' },
-            createdAt: identityCreatedAt.toISOString(),
-            disabledAt: null,
-          },
-          session: {
-            id: HUMAN_ACTOR.sessionId,
-            userId: HUMAN_ACTOR.userId,
-            deviceEnrollmentId,
-            createdAt: identityCreatedAt.toISOString(),
-            expiresAt: sessionExpiresAt.toISOString(),
-            authorization: {
-              kind: 'group-membership',
-              source: 'google-group-snapshot',
-              membershipSnapshotId,
-              membershipValidUntil: membershipValidUntil.toISOString(),
-              membershipGraceUntil: membershipGraceUntil.toISOString(),
-            },
-            revokedAt: null,
-          },
-          deviceEnrollment: {
-            id: deviceEnrollmentId,
-            userId: HUMAN_ACTOR.userId,
-            platform: 'ios',
-            unlockMethod: 'biometric',
-            installationId: `synthetic-issue77-${suffix}`,
-            enrolledAt: identityCreatedAt.toISOString(),
-            lastSeenAt: fixtureTime.toISOString(),
-            revokedAt: null,
-          },
-          connectivityEpoch: {
-            id: CONNECTIVITY_EPOCH_ID,
-            sessionId: HUMAN_ACTOR.sessionId,
-            establishedAt: fixtureTime.toISOString(),
-          },
-        });
-        const authenticated: AuthenticatedSession = Object.freeze({
-          actor: HUMAN_ACTOR,
-          source: 'mobile',
-          roles: ['staff'] as const,
-          scope: DISTRICT_SCOPE,
-          membershipState: 'fresh',
-          result: sessionResult,
-        });
-        const webEnrollmentSessionResult =
-          SessionEstablishmentResultSchema.parse({
-            ...sessionResult,
-            deviceEnrollment: {
-              ...sessionResult.deviceEnrollment,
-              platform: 'web',
-              unlockMethod: 'secure-session-cookie',
-            },
-          });
-        const androidAuthenticated: AuthenticatedSession = Object.freeze({
-          ...authenticated,
-          result: SessionEstablishmentResultSchema.parse({
-            ...sessionResult,
-            deviceEnrollment: {
-              ...sessionResult.deviceEnrollment,
-              platform: 'android',
-              unlockMethod: 'biometric',
-            },
-          }),
-        });
-
-        if (
-          latestStaffRosterSnapshot === undefined &&
-          unpublishedStaffConfiguration === undefined
-        ) {
-          await transaction.insert(rosterSourceConfigurations).values({
-            id: staffRosterConfigurationId,
-            version: staffRosterConfigurationVersion,
-            population: 'staff',
-            createdAt: identityCreatedAt,
-          });
-        }
-        await transaction.insert(rosterSnapshots).values({
-          id: staffRosterSnapshotId,
-          version: staffRosterSnapshotVersion,
-          population: 'staff',
-          complete: true,
-          sourceConfigurationId: staffRosterConfigurationId,
-          sourceConfigurationVersion: staffRosterConfigurationVersion,
-          syncStartedAt: identityCreatedAt,
-          capturedAt: fixtureTime,
-        });
-        await transaction.insert(rosterSnapshotFacilities).values({
-          rosterSnapshotId: staffRosterSnapshotId,
-          facilityId: ids.northFacilityId,
-        });
-        await transaction.insert(rosterRecipients).values({
-          id: staffRecipientId,
-          rosterSnapshotId: staffRosterSnapshotId,
-          population: 'staff',
-          googleSubject: `synthetic-staff-target-${suffix}`,
-          displayName: 'Synthetic Staff Notification Target',
-        });
-        await transaction.insert(rosterEndpoints).values([
-          {
-            id: randomUUID(),
-            rosterSnapshotId: staffRosterSnapshotId,
-            recipientId: staffRecipientId,
-            population: 'staff',
-            channel: 'push',
-            status: 'active',
-            capturedAt: fixtureTime,
-            platform: 'ios',
-            token: `synthetic-unroutable:issue77-${suffix}`,
-            email: null,
-            phoneNumber: null,
-          },
-          {
-            id: randomUUID(),
-            rosterSnapshotId: staffRosterSnapshotId,
-            recipientId: staffRecipientId,
-            population: 'staff',
-            channel: 'email',
-            status: 'active',
-            capturedAt: fixtureTime,
-            platform: null,
-            token: null,
-            email: `issue77-${suffix}@example.invalid`,
-            phoneNumber: null,
-          },
-        ]);
-
-        const integrationIds = ['expo-push', 'ses-email'] as const;
-        const originalConfigurations = await transaction
-          .select()
-          .from(channelConfigurations)
-          .where(inArray(channelConfigurations.integrationId, integrationIds));
-        if (originalConfigurations.length !== integrationIds.length) {
-          throw new Error(
-            'The synthetic seed is missing push/email channel configurations.',
-          );
-        }
-        const verifiedAt = new Date(fixtureTime.getTime() - 5_000);
-        const observedAt = new Date(fixtureTime.getTime() - 4_000);
-        const liveStatuses = integrationIds.map((integrationId) => ({
-          id: randomUUID(),
-          value: IntegrationStatusSchema.parse({
-            integrationId,
-            label: 'live-verified',
-            verifiedAt: verifiedAt.toISOString(),
-            verifiedByUserId: HUMAN_ACTOR.userId,
-            authorizationReference: 'synthetic-issue77-test-authorization',
-            reasonCode: null,
-            observedAt: observedAt.toISOString(),
-          }),
-        }));
-        await transaction.insert(integrationStatuses).values(
-          liveStatuses.map(({ id, value }) => ({
-            id,
-            integrationId: value.integrationId,
-            label: value.label,
-            verifiedAt,
-            verifiedByUserId: value.verifiedByUserId,
-            authorizationReference: value.authorizationReference,
-            reasonCode: value.reasonCode,
-            observedAt,
-          })),
-        );
-        for (const status of liveStatuses) {
-          await transaction
-            .update(channelConfigurations)
-            .set({
-              enabled: true,
-              statusId: status.id,
-              statusLabel: status.value.label,
-              changedAt: fixtureTime,
+    const [latestStaffRosterSnapshot] = await fixtureDatabase
+      .select({
+        version: rosterSnapshots.version,
+        sourceConfigurationId: rosterSnapshots.sourceConfigurationId,
+        sourceConfigurationVersion: rosterSnapshots.sourceConfigurationVersion,
+      })
+      .from(rosterSnapshots)
+      .where(eq(rosterSnapshots.population, 'staff'))
+      .orderBy(desc(rosterSnapshots.version))
+      .limit(1);
+    const [unpublishedStaffConfiguration] =
+      latestStaffRosterSnapshot === undefined
+        ? await fixtureDatabase
+            .select({
+              id: rosterSourceConfigurations.id,
+              version: rosterSourceConfigurations.version,
             })
-            .where(
-              eq(
-                channelConfigurations.integrationId,
-                status.value.integrationId,
-              ),
-            );
+            .from(rosterSourceConfigurations)
+            .where(eq(rosterSourceConfigurations.population, 'staff'))
+            .orderBy(
+              desc(rosterSourceConfigurations.version),
+              asc(rosterSourceConfigurations.id),
+            )
+            .limit(1)
+        : [];
+    const staffRosterConfigurationId =
+      latestStaffRosterSnapshot?.sourceConfigurationId ??
+      unpublishedStaffConfiguration?.id ??
+      randomUUID();
+    const staffRosterConfigurationVersion =
+      latestStaffRosterSnapshot?.sourceConfigurationVersion ??
+      unpublishedStaffConfiguration?.version ??
+      1;
+    const staffRosterSnapshotVersion =
+      (latestStaffRosterSnapshot?.version ?? 0) + 1;
+
+    await fixtureDatabase.insert(users).values({
+      id: HUMAN_ACTOR.userId,
+      googleSubject: `synthetic-issue77-${suffix}`,
+      email: `synthetic.issue77.${suffix}@example.invalid`,
+      displayName: 'Synthetic Issue 77 Staff Operator',
+      facilityScopeKind: 'district',
+      createdAt: identityCreatedAt,
+      disabledAt: null,
+    });
+    await fixtureDatabase.insert(accessMembershipSnapshots).values({
+      id: membershipSnapshotId,
+      version: membershipSnapshotVersion,
+      complete: true,
+      syncStartedAt: identityCreatedAt,
+      capturedAt: identityCreatedAt,
+    });
+    await fixtureDatabase.insert(deviceEnrollments).values({
+      id: deviceEnrollmentId,
+      userId: HUMAN_ACTOR.userId,
+      platform: 'ios',
+      unlockMethod: 'biometric',
+      installationId: `synthetic-issue77-${suffix}`,
+      enrolledAt: identityCreatedAt,
+      lastSeenAt: fixtureTime,
+      revokedAt: null,
+    });
+    const membershipValidUntil = new Date(fixtureTime.getTime() + 60 * 60_000);
+    const membershipGraceUntil = new Date(
+      fixtureTime.getTime() + 2 * 60 * 60_000,
+    );
+    const sessionExpiresAt = new Date(fixtureTime.getTime() + 24 * 60 * 60_000);
+    await fixtureDatabase.insert(sessions).values({
+      id: HUMAN_ACTOR.sessionId,
+      userId: HUMAN_ACTOR.userId,
+      deviceEnrollmentId,
+      membershipSnapshotId,
+      membershipValidUntil,
+      membershipGraceUntil,
+      createdAt: identityCreatedAt,
+      expiresAt: sessionExpiresAt,
+      revokedAt: null,
+    });
+    await fixtureDatabase.insert(connectivityEpochs).values({
+      id: CONNECTIVITY_EPOCH_ID,
+      sessionId: HUMAN_ACTOR.sessionId,
+      establishedAt: fixtureTime,
+    });
+    await insertSyntheticAdminSession(fixtureDatabase, fixtureTime);
+
+    const sessionResult = SessionEstablishmentResultSchema.parse({
+      user: {
+        id: HUMAN_ACTOR.userId,
+        googleSubject: `synthetic-issue77-${suffix}`,
+        email: `synthetic.issue77.${suffix}@example.invalid`,
+        displayName: 'Synthetic Issue 77 Staff Operator',
+        roles: ['staff'],
+        facilityScope: { kind: 'district' },
+        createdAt: identityCreatedAt.toISOString(),
+        disabledAt: null,
+      },
+      session: {
+        id: HUMAN_ACTOR.sessionId,
+        userId: HUMAN_ACTOR.userId,
+        deviceEnrollmentId,
+        createdAt: identityCreatedAt.toISOString(),
+        expiresAt: sessionExpiresAt.toISOString(),
+        authorization: {
+          kind: 'group-membership',
+          source: 'google-group-snapshot',
+          membershipSnapshotId,
+          membershipValidUntil: membershipValidUntil.toISOString(),
+          membershipGraceUntil: membershipGraceUntil.toISOString(),
+        },
+        revokedAt: null,
+      },
+      deviceEnrollment: {
+        id: deviceEnrollmentId,
+        userId: HUMAN_ACTOR.userId,
+        platform: 'ios',
+        unlockMethod: 'biometric',
+        installationId: `synthetic-issue77-${suffix}`,
+        enrolledAt: identityCreatedAt.toISOString(),
+        lastSeenAt: fixtureTime.toISOString(),
+        revokedAt: null,
+      },
+      connectivityEpoch: {
+        id: CONNECTIVITY_EPOCH_ID,
+        sessionId: HUMAN_ACTOR.sessionId,
+        establishedAt: fixtureTime.toISOString(),
+      },
+    });
+    const authenticated: AuthenticatedSession = Object.freeze({
+      actor: HUMAN_ACTOR,
+      source: 'mobile',
+      roles: ['staff'] as const,
+      scope: DISTRICT_SCOPE,
+      membershipState: 'fresh',
+      result: sessionResult,
+    });
+    const webEnrollmentSessionResult = SessionEstablishmentResultSchema.parse({
+      ...sessionResult,
+      deviceEnrollment: {
+        ...sessionResult.deviceEnrollment,
+        platform: 'web',
+        unlockMethod: 'secure-session-cookie',
+      },
+    });
+    const androidAuthenticated: AuthenticatedSession = Object.freeze({
+      ...authenticated,
+      result: SessionEstablishmentResultSchema.parse({
+        ...sessionResult,
+        deviceEnrollment: {
+          ...sessionResult.deviceEnrollment,
+          platform: 'android',
+          unlockMethod: 'biometric',
+        },
+      }),
+    });
+
+    if (
+      latestStaffRosterSnapshot === undefined &&
+      unpublishedStaffConfiguration === undefined
+    ) {
+      await fixtureDatabase.insert(rosterSourceConfigurations).values({
+        id: staffRosterConfigurationId,
+        version: staffRosterConfigurationVersion,
+        population: 'staff',
+        createdAt: identityCreatedAt,
+      });
+    }
+    // A published roster snapshot and all of its children are one immutable
+    // fact. Build them in the same transaction, as the production sync does.
+    await fixtureDatabase.transaction(async (snapshotTransaction) => {
+      await snapshotTransaction.insert(rosterSnapshots).values({
+        id: staffRosterSnapshotId,
+        version: staffRosterSnapshotVersion,
+        population: 'staff',
+        complete: true,
+        sourceConfigurationId: staffRosterConfigurationId,
+        sourceConfigurationVersion: staffRosterConfigurationVersion,
+        syncStartedAt: identityCreatedAt,
+        capturedAt: fixtureTime,
+      });
+      await snapshotTransaction.insert(rosterSnapshotFacilities).values({
+        rosterSnapshotId: staffRosterSnapshotId,
+        facilityId: ids.northFacilityId,
+      });
+      await snapshotTransaction.insert(rosterRecipients).values({
+        id: staffRecipientId,
+        rosterSnapshotId: staffRosterSnapshotId,
+        population: 'staff',
+        googleSubject: `synthetic-staff-target-${suffix}`,
+        displayName: 'Synthetic Staff Notification Target',
+      });
+      await snapshotTransaction.insert(rosterEndpoints).values([
+        {
+          id: randomUUID(),
+          rosterSnapshotId: staffRosterSnapshotId,
+          recipientId: staffRecipientId,
+          population: 'staff',
+          channel: 'push',
+          status: 'active',
+          capturedAt: fixtureTime,
+          platform: 'ios',
+          token: `synthetic-unroutable:issue77-${suffix}`,
+          email: null,
+          phoneNumber: null,
+        },
+        {
+          id: randomUUID(),
+          rosterSnapshotId: staffRosterSnapshotId,
+          recipientId: staffRecipientId,
+          population: 'staff',
+          channel: 'email',
+          status: 'active',
+          capturedAt: fixtureTime,
+          platform: null,
+          token: null,
+          email: `issue77-${suffix}@example.invalid`,
+          phoneNumber: null,
+        },
+      ]);
+    });
+
+    const integrationIds = ['expo-push', 'ses-email'] as const;
+    const originalConfigurations = await fixtureDatabase
+      .select()
+      .from(channelConfigurations)
+      .where(inArray(channelConfigurations.integrationId, integrationIds));
+    if (originalConfigurations.length !== integrationIds.length) {
+      throw new Error(
+        'The synthetic seed is missing push/email channel configurations.',
+      );
+    }
+    try {
+      const verifiedAt = new Date(fixtureTime.getTime() - 5_000);
+      const observedAt = new Date(fixtureTime.getTime() - 4_000);
+      const liveStatuses = integrationIds.map((integrationId) => ({
+        id: randomUUID(),
+        value: IntegrationStatusSchema.parse({
+          integrationId,
+          label: 'live-verified',
+          verifiedAt: verifiedAt.toISOString(),
+          verifiedByUserId: HUMAN_ACTOR.userId,
+          authorizationReference: 'synthetic-issue77-test-authorization',
+          reasonCode: null,
+          observedAt: observedAt.toISOString(),
+        }),
+      }));
+      await fixtureDatabase.insert(integrationStatuses).values(
+        liveStatuses.map(({ id, value }) => ({
+          id,
+          integrationId: value.integrationId,
+          label: value.label,
+          verifiedAt,
+          verifiedByUserId: value.verifiedByUserId,
+          authorizationReference: value.authorizationReference,
+          reasonCode: value.reasonCode,
+          observedAt,
+        })),
+      );
+      for (const status of liveStatuses) {
+        await fixtureDatabase
+          .update(channelConfigurations)
+          .set({
+            enabled: true,
+            statusId: status.id,
+            statusLabel: status.value.label,
+            changedAt: fixtureTime,
+          })
+          .where(
+            eq(channelConfigurations.integrationId, status.value.integrationId),
+          );
+      }
+
+      const sourceCreatedAt = new Date(fixtureTime.getTime() - 3_000);
+      const activatedAt = new Date(fixtureTime.getTime() - 2_000);
+      const sourceConsequenceDigest = digestCapabilityValue({
+        fixture: 'issue-77-real-staff-activation',
+        sourcePreviewId,
+      });
+      const statusFor = (integrationId: (typeof integrationIds)[number]) => {
+        const status = liveStatuses.find(
+          (candidate) => candidate.value.integrationId === integrationId,
+        );
+        if (status === undefined) {
+          throw new Error(`The ${integrationId} status fixture is missing.`);
         }
-
-        try {
-          const sourceCreatedAt = new Date(fixtureTime.getTime() - 3_000);
-          const activatedAt = new Date(fixtureTime.getTime() - 2_000);
-          const sourceConsequenceDigest = digestCapabilityValue({
-            fixture: 'issue-77-real-staff-activation',
-            sourcePreviewId,
-          });
-          const statusFor = (
-            integrationId: (typeof integrationIds)[number],
-          ) => {
-            const status = liveStatuses.find(
-              (candidate) => candidate.value.integrationId === integrationId,
-            );
-            if (status === undefined) {
-              throw new Error(
-                `The ${integrationId} status fixture is missing.`,
-              );
-            }
-            return status.value;
-          };
-          const sourcePreview = ActivationPreviewSchema.parse({
-            id: sourcePreviewId,
-            facilityId: ids.northFacilityId,
-            kind: 'incident',
-            templateMode: 'real',
-            eventTypeVersion: {
-              id: realEventTypeVersion.id,
+        return status.value;
+      };
+      const sourcePreview = ActivationPreviewSchema.parse({
+        id: sourcePreviewId,
+        facilityId: ids.northFacilityId,
+        kind: 'incident',
+        templateMode: 'real',
+        eventTypeVersion: {
+          id: realEventTypeVersion.id,
+          templateMode: 'real',
+        },
+        rosterSnapshotId: staffRosterSnapshotId,
+        rosterPopulation: 'staff',
+        recipientCount: 1,
+        channels: [
+          {
+            channel: 'push',
+            endpointCount: 1,
+            renderedMessage: {
+              channel: 'push',
+              eventKind: 'incident',
               templateMode: 'real',
+              purpose: 'activation',
+              classificationMarker: 'INCIDENT',
+              title: '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
+              body: '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
             },
-            rosterSnapshotId: staffRosterSnapshotId,
-            rosterPopulation: 'staff',
-            recipientCount: 1,
-            channels: [
-              {
-                channel: 'push',
-                endpointCount: 1,
-                renderedMessage: {
-                  channel: 'push',
-                  eventKind: 'incident',
-                  templateMode: 'real',
-                  purpose: 'activation',
-                  classificationMarker: 'INCIDENT',
-                  title: '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
-                  body: '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
-                },
-                integrationStatus: statusFor('expo-push'),
-              },
-              {
-                channel: 'email',
-                endpointCount: 1,
-                renderedMessage: {
-                  channel: 'email',
-                  eventKind: 'incident',
-                  templateMode: 'real',
-                  purpose: 'activation',
-                  classificationMarker: 'INCIDENT',
-                  subject:
-                    '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
-                  textBody:
-                    '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
-                },
-                integrationStatus: statusFor('ses-email'),
-              },
-            ],
-            sendReadiness: 'ready',
-            blockingReasonCodes: [],
-            activeEventIds: [],
-            consequenceDigest: sourceConsequenceDigest,
-            createdAt: sourceCreatedAt.toISOString(),
-            expiresAt: new Date(
-              sourceCreatedAt.getTime() + 15 * 60_000,
-            ).toISOString(),
-          });
-          await transaction.insert(activationPreviews).values({
-            id: sourcePreview.id,
-            facilityId: sourcePreview.facilityId,
-            kind: sourcePreview.kind,
-            templateMode: sourcePreview.templateMode,
-            eventTypeVersionId: sourcePreview.eventTypeVersion.id,
-            rosterSnapshotId: sourcePreview.rosterSnapshotId,
-            rosterPopulation: sourcePreview.rosterPopulation,
-            recipientCount: sourcePreview.recipientCount,
-            channels: sourcePreview.channels,
-            sendReadiness: sourcePreview.sendReadiness,
-            blockingReasonCodes: sourcePreview.blockingReasonCodes,
-            activeEventIds: sourcePreview.activeEventIds,
-            consequenceDigest: sourcePreview.consequenceDigest,
-            createdAt: sourceCreatedAt,
-            expiresAt: new Date(sourcePreview.expiresAt),
-          });
-          const activationRequestId = randomUUID();
-          const activationConfirmationId = randomUUID();
-          const activationAuthorization = {
-            kind: 'human-confirmed' as const,
-            activationPreviewId: sourcePreview.id,
-            preparedActivationId: null,
-            confirmationId: activationConfirmationId,
-            consequenceDigest: sourcePreview.consequenceDigest,
-            requestId: activationRequestId,
-          };
-          const activationTransition = EventTransitionSchema.parse({
-            id: randomUUID(),
-            sequence: 1,
-            transition: 'activate',
-            eventId,
-            from: 'draft',
-            to: 'active',
-            actor: HUMAN_ACTOR,
-            source: 'web',
-            occurredAt: activatedAt.toISOString(),
-            requestId: activationRequestId,
-            confirmationId: activationConfirmationId,
-            consequenceDigest: sourcePreview.consequenceDigest,
-            targeting: {
-              kind: 'incident',
+            integrationStatus: statusFor('expo-push'),
+          },
+          {
+            channel: 'email',
+            endpointCount: 1,
+            renderedMessage: {
+              channel: 'email',
+              eventKind: 'incident',
               templateMode: 'real',
-              rosterPopulation: 'staff',
+              purpose: 'activation',
+              classificationMarker: 'INCIDENT',
+              subject: '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
+              textBody:
+                '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
             },
-            idempotencyKey: `issue77-real-activation-${suffix}`,
-            activationAuthorization,
-          });
-          if (activationTransition.transition !== 'activate') {
-            throw new Error('The fixture transition was not activation.');
-          }
-          await transaction.insert(humanConfirmationRecords).values({
-            id: activationConfirmationId,
-            capabilityId: 'start-event',
-            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
-            confirmedByUserId: HUMAN_ACTOR.userId,
-            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
-            consequenceDigest: sourcePreview.consequenceDigest,
-            issuedAt: sourceCreatedAt,
-            expiresAt: new Date(sourceCreatedAt.getTime() + 5 * 60_000),
-            status: 'consumed',
-            consumedAt: activatedAt,
-            consumedForRequestId: activationRequestId,
-            expiredAt: null,
-          });
-          await transaction.insert(humanConfirmationActions).values([
-            {
-              confirmationId: activationConfirmationId,
-              actionId: 'start-real-incident',
-            },
-            {
-              confirmationId: activationConfirmationId,
-              actionId: 'send-real-notification',
-            },
-          ]);
-          await transaction.insert(events).values({
-            id: eventId,
-            facilityId: ids.northFacilityId,
-            kind: 'incident',
-            templateMode: 'real',
-            eventTypeVersionId: realEventTypeVersion.id,
-            status: 'active',
-            rosterSnapshotId: staffRosterSnapshotId,
-            rosterPopulation: 'staff',
-            createdBy: HUMAN_ACTOR,
-            createdAt: sourceCreatedAt,
-            activatedAt,
-            allClearAt: null,
-            reactivatedAt: null,
-            closedAt: null,
-            correctionOfEventId: null,
-            correctionReason: null,
-            activationAuthorization,
-          });
-          await transaction.insert(eventTransitions).values({
-            id: activationTransition.id,
-            sequence: activationTransition.sequence,
-            transition: activationTransition.transition,
-            eventId: activationTransition.eventId,
-            sourceEventId: null,
-            correctionEventId: null,
-            journalEventId: activationTransition.eventId,
-            fromStatus: activationTransition.from,
-            toStatus: activationTransition.to,
-            kind: activationTransition.targeting.kind,
-            templateMode: activationTransition.targeting.templateMode,
-            rosterPopulation: activationTransition.targeting.rosterPopulation,
-            actor: activationTransition.actor,
-            source: activationTransition.source,
-            occurredAt: activatedAt,
-            requestId: activationTransition.requestId,
-            confirmationId: activationTransition.confirmationId,
-            confirmationStatus: 'consumed',
-            consequenceDigest: activationTransition.consequenceDigest,
-            idempotencyKey: activationTransition.idempotencyKey,
-            activationAuthorization:
-              activationTransition.activationAuthorization,
-            notificationAuthorization: null,
-            correctionReason: null,
-          });
-          await transaction.insert(journalEntries).values({
-            id: randomUUID(),
-            eventId,
-            sequence: 1,
-            kind: 'system',
-            author: HUMAN_ACTOR,
-            source: 'web',
-            serverTime: activatedAt,
-            clientTime: null,
-            payload: {
-              code: 'event-activated',
-              summary: 'Synthetic real/staff fixture activation recorded.',
-              transition: activationTransition,
-            },
-            mediaId: null,
-            transitionId: activationTransition.id,
-            supersedesEntryId: null,
-            supersedesEntrySequence: null,
-            supersessionKind: null,
-            supersessionReason: null,
-          });
+            integrationStatus: statusFor('ses-email'),
+          },
+        ],
+        sendReadiness: 'ready',
+        blockingReasonCodes: [],
+        activeEventIds: [],
+        consequenceDigest: sourceConsequenceDigest,
+        createdAt: sourceCreatedAt.toISOString(),
+        expiresAt: new Date(
+          sourceCreatedAt.getTime() + 15 * 60_000,
+        ).toISOString(),
+      });
+      await fixtureDatabase.insert(activationPreviews).values({
+        id: sourcePreview.id,
+        facilityId: sourcePreview.facilityId,
+        kind: sourcePreview.kind,
+        templateMode: sourcePreview.templateMode,
+        eventTypeVersionId: sourcePreview.eventTypeVersion.id,
+        rosterSnapshotId: sourcePreview.rosterSnapshotId,
+        rosterPopulation: sourcePreview.rosterPopulation,
+        recipientCount: sourcePreview.recipientCount,
+        channels: sourcePreview.channels,
+        sendReadiness: sourcePreview.sendReadiness,
+        blockingReasonCodes: sourcePreview.blockingReasonCodes,
+        activeEventIds: sourcePreview.activeEventIds,
+        consequenceDigest: sourcePreview.consequenceDigest,
+        createdAt: sourceCreatedAt,
+        expiresAt: new Date(sourcePreview.expiresAt),
+      });
+      const activationRequestId = randomUUID();
+      const activationConfirmationId = randomUUID();
+      const activationAuthorization = {
+        kind: 'human-confirmed' as const,
+        activationPreviewId: sourcePreview.id,
+        preparedActivationId: null,
+        confirmationId: activationConfirmationId,
+        consequenceDigest: sourcePreview.consequenceDigest,
+        requestId: activationRequestId,
+      };
+      const activationTransition = EventTransitionSchema.parse({
+        id: randomUUID(),
+        sequence: 1,
+        transition: 'activate',
+        eventId,
+        from: 'draft',
+        to: 'active',
+        actor: HUMAN_ACTOR,
+        source: 'web',
+        occurredAt: activatedAt.toISOString(),
+        requestId: activationRequestId,
+        confirmationId: activationConfirmationId,
+        consequenceDigest: sourcePreview.consequenceDigest,
+        targeting: {
+          kind: 'incident',
+          templateMode: 'real',
+          rosterPopulation: 'staff',
+        },
+        idempotencyKey: `issue77-real-activation-${suffix}`,
+        activationAuthorization,
+      });
+      if (activationTransition.transition !== 'activate') {
+        throw new Error('The fixture transition was not activation.');
+      }
+      await fixtureDatabase.insert(humanConfirmationRecords).values({
+        id: activationConfirmationId,
+        capabilityId: 'start-event',
+        connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+        confirmedByUserId: HUMAN_ACTOR.userId,
+        confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+        consequenceDigest: sourcePreview.consequenceDigest,
+        issuedAt: sourceCreatedAt,
+        expiresAt: new Date(sourceCreatedAt.getTime() + 5 * 60_000),
+        status: 'consumed',
+        consumedAt: activatedAt,
+        consumedForRequestId: activationRequestId,
+        expiredAt: null,
+      });
+      await fixtureDatabase.insert(humanConfirmationActions).values([
+        {
+          confirmationId: activationConfirmationId,
+          actionId: 'start-real-incident',
+        },
+        {
+          confirmationId: activationConfirmationId,
+          actionId: 'send-real-notification',
+        },
+      ]);
+      await fixtureDatabase.insert(events).values({
+        id: eventId,
+        facilityId: ids.northFacilityId,
+        kind: 'incident',
+        templateMode: 'real',
+        eventTypeVersionId: realEventTypeVersion.id,
+        status: 'active',
+        rosterSnapshotId: staffRosterSnapshotId,
+        rosterPopulation: 'staff',
+        createdBy: HUMAN_ACTOR,
+        createdAt: sourceCreatedAt,
+        activatedAt,
+        allClearAt: null,
+        reactivatedAt: null,
+        closedAt: null,
+        correctionOfEventId: null,
+        correctionReason: null,
+        activationAuthorization,
+      });
+      await fixtureDatabase.insert(eventTransitions).values({
+        id: activationTransition.id,
+        sequence: activationTransition.sequence,
+        transition: activationTransition.transition,
+        eventId: activationTransition.eventId,
+        sourceEventId: null,
+        correctionEventId: null,
+        journalEventId: activationTransition.eventId,
+        fromStatus: activationTransition.from,
+        toStatus: activationTransition.to,
+        kind: activationTransition.targeting.kind,
+        templateMode: activationTransition.targeting.templateMode,
+        rosterPopulation: activationTransition.targeting.rosterPopulation,
+        actor: activationTransition.actor,
+        source: activationTransition.source,
+        occurredAt: activatedAt,
+        requestId: activationTransition.requestId,
+        confirmationId: activationTransition.confirmationId,
+        confirmationStatus: 'consumed',
+        consequenceDigest: activationTransition.consequenceDigest,
+        idempotencyKey: activationTransition.idempotencyKey,
+        activationAuthorization: activationTransition.activationAuthorization,
+        notificationAuthorization: null,
+        correctionReason: null,
+      });
+      await fixtureDatabase.insert(journalEntries).values({
+        id: randomUUID(),
+        eventId,
+        sequence: 1,
+        kind: 'system',
+        author: HUMAN_ACTOR,
+        source: 'web',
+        serverTime: activatedAt,
+        clientTime: null,
+        payload: {
+          code: 'event-activated',
+          summary: 'Synthetic real/staff fixture activation recorded.',
+          transition: activationTransition,
+        },
+        mediaId: null,
+        transitionId: activationTransition.id,
+        supersedesEntryId: null,
+        supersedesEntrySequence: null,
+        supersessionKind: null,
+        supersessionReason: null,
+      });
 
-          const firstPreview = await executeJournalCapability(
-            'create-lifecycle-consequence-preview',
-            { eventId, purpose: 'all-clear' },
-            humanMutationInvocation(
-              `issue77-real-preview-a-${suffix}`,
-              DISTRICT_SCOPE,
-              'mobile',
-            ),
-            journalStore,
-          );
-          const secondPreview = await executeJournalCapability(
-            'create-lifecycle-consequence-preview',
-            { eventId, purpose: 'all-clear' },
-            humanMutationInvocation(
-              `issue77-real-preview-b-${suffix}`,
-              DISTRICT_SCOPE,
-              'mobile',
-            ),
-            journalStore,
-          );
-          expect(firstPreview).toMatchObject({
-            eventId,
-            purpose: 'all-clear',
-            kind: 'incident',
-            templateMode: 'real',
-            rosterPopulation: 'staff',
-            sendReadiness: 'ready',
-            blockingReasonCodes: [],
-          });
-          expect(
-            firstPreview.channels.map((channel) => ({
-              marker: channel.renderedMessage.classificationMarker,
-              integration: channel.integrationStatus.label,
-            })),
-          ).toEqual([
-            { marker: 'INCIDENT', integration: 'live-verified' },
-            { marker: 'INCIDENT', integration: 'live-verified' },
-          ]);
-          expect(secondPreview.consequenceDigest).not.toBe(
-            firstPreview.consequenceDigest,
-          );
+      const firstPreview = await executeJournalCapability(
+        'create-lifecycle-consequence-preview',
+        { eventId, purpose: 'all-clear' },
+        humanMutationInvocation(
+          `issue77-real-preview-a-${suffix}`,
+          DISTRICT_SCOPE,
+          'mobile',
+        ),
+        journalStore,
+      );
+      const secondPreview = await executeJournalCapability(
+        'create-lifecycle-consequence-preview',
+        { eventId, purpose: 'all-clear' },
+        humanMutationInvocation(
+          `issue77-real-preview-b-${suffix}`,
+          DISTRICT_SCOPE,
+          'mobile',
+        ),
+        journalStore,
+      );
+      expect(firstPreview).toMatchObject({
+        eventId,
+        purpose: 'all-clear',
+        kind: 'incident',
+        templateMode: 'real',
+        rosterPopulation: 'staff',
+        sendReadiness: 'ready',
+        blockingReasonCodes: [],
+      });
+      expect(
+        firstPreview.channels.map((channel) => ({
+          marker: channel.renderedMessage.classificationMarker,
+          integration: channel.integrationStatus.label,
+        })),
+      ).toEqual([
+        { marker: 'INCIDENT', integration: 'live-verified' },
+        { marker: 'INCIDENT', integration: 'live-verified' },
+      ]);
+      expect(secondPreview.consequenceDigest).not.toBe(
+        firstPreview.consequenceDigest,
+      );
 
-          // Android biometric enrollment crosses the same trusted mobile
-          // identity boundary as iOS; the deliberately wrong phrase then
-          // fails at validation rather than at the human-only source check.
-          await expect(
-            journalRuntime.issueHumanConfirmation({
-              authenticated: androidAuthenticated,
-              eventId,
-              action: 'all-clear',
-              lifecyclePreviewId: firstPreview.id,
-              confirmationPhrase: 'NOT THE CONFIRMATION PHRASE',
-              requestId: randomUUID(),
-              now: new Date(),
-            }),
-          ).rejects.toMatchObject({
-            code: 'VALIDATION_ERROR',
-            reasonCode: 'PERSISTENCE_CONFLICT',
-            status: 400,
-          });
+      // Android biometric enrollment crosses the same trusted mobile
+      // identity boundary as iOS; the deliberately wrong phrase then
+      // fails at validation rather than at the human-only source check.
+      await expect(
+        journalRuntime.issueHumanConfirmation({
+          authenticated: androidAuthenticated,
+          eventId,
+          action: 'all-clear',
+          lifecyclePreviewId: firstPreview.id,
+          confirmationPhrase: 'NOT THE CONFIRMATION PHRASE',
+          requestId: randomUUID(),
+          now: new Date(),
+        }),
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 400,
+      });
 
-          const mismatchedAuthenticatedSessions = [
-            {
-              name: 'web source with native enrollment',
-              value: Object.freeze({
-                ...authenticated,
-                source: 'web' as const,
-              }),
-            },
-            {
-              name: 'mobile source with web enrollment',
-              value: Object.freeze({
-                ...authenticated,
-                result: webEnrollmentSessionResult,
-              }),
-            },
-          ] as const;
-          for (const mismatch of mismatchedAuthenticatedSessions) {
-            await expect(
-              journalRuntime.issueHumanConfirmation({
-                authenticated: mismatch.value,
-                eventId,
-                action: 'all-clear',
-                lifecyclePreviewId: firstPreview.id,
-                confirmationPhrase: EVENT_CONFIRMATION_PHRASES['all-clear'],
-                requestId: randomUUID(),
-                now: new Date(),
-              }),
-              mismatch.name,
-            ).rejects.toMatchObject({
-              code: 'FORBIDDEN',
-              reasonCode: 'HUMAN_ONLY_REQUIRED',
-              status: 403,
-            });
-          }
-
-          expect(EVENT_CONFIRMATION_PHRASES['all-clear']).toBe('ALL CLEAR');
-          await expect(
-            journalRuntime.issueHumanConfirmation({
-              authenticated,
-              eventId,
-              action: 'all-clear',
-              lifecyclePreviewId: firstPreview.id,
-              confirmationPhrase: 'ALL CLEAR ',
-              requestId: randomUUID(),
-              now: new Date(),
-            }),
-          ).rejects.toMatchObject({
-            code: 'VALIDATION_ERROR',
-            status: 400,
-          });
-          const rejectedPhraseRows = await transaction
-            .select({ id: humanConfirmationRecords.id })
-            .from(humanConfirmationRecords)
-            .where(
-              and(
-                eq(
-                  humanConfirmationRecords.confirmedByUserId,
-                  HUMAN_ACTOR.userId,
-                ),
-                eq(humanConfirmationRecords.capabilityId, 'all-clear-event'),
-              ),
-            );
-          expect(rejectedPhraseRows).toEqual([]);
-
-          const actionRequestId = randomUUID();
-          const issued = await journalRuntime.issueHumanConfirmation({
-            authenticated,
+      const mismatchedAuthenticatedSessions = [
+        {
+          name: 'web source with native enrollment',
+          value: Object.freeze({
+            ...authenticated,
+            source: 'web' as const,
+          }),
+        },
+        {
+          name: 'mobile source with web enrollment',
+          value: Object.freeze({
+            ...authenticated,
+            result: webEnrollmentSessionResult,
+          }),
+        },
+      ] as const;
+      for (const mismatch of mismatchedAuthenticatedSessions) {
+        await expect(
+          journalRuntime.issueHumanConfirmation({
+            authenticated: mismatch.value,
             eventId,
             action: 'all-clear',
             lifecyclePreviewId: firstPreview.id,
             confirmationPhrase: EVENT_CONFIRMATION_PHRASES['all-clear'],
-            requestId: actionRequestId,
+            requestId: randomUUID(),
             now: new Date(),
-          });
-          if (issued.confirmationId === null) {
-            throw new Error('The real staff all-clear omitted confirmation.');
-          }
-          const confirmationId = issued.confirmationId;
-          const [confirmationBeforeUse] = await transaction
-            .select()
-            .from(humanConfirmationRecords)
-            .where(eq(humanConfirmationRecords.id, confirmationId))
-            .limit(1);
-          if (confirmationBeforeUse === undefined) {
-            throw new Error('The issued confirmation was not persisted.');
-          }
-          const confirmationActionRows = await transaction
-            .select({ actionId: humanConfirmationActions.actionId })
-            .from(humanConfirmationActions)
-            .where(eq(humanConfirmationActions.confirmationId, confirmationId));
-          expect(confirmationBeforeUse).toMatchObject({
-            capabilityId: 'all-clear-event',
-            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
-            confirmedByUserId: HUMAN_ACTOR.userId,
-            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
-            consequenceDigest: firstPreview.consequenceDigest,
-            status: 'issued',
-            consumedAt: null,
-            consumedForRequestId: null,
-            expiredAt: null,
-          });
-          expect(
-            confirmationActionRows.map(({ actionId }) => actionId).sort(),
-          ).toEqual(['all-clear', 'send-real-notification']);
-          expect(
-            confirmationBeforeUse.expiresAt.getTime() -
-              confirmationBeforeUse.issuedAt.getTime(),
-          ).toBeLessThanOrEqual(HUMAN_CONFIRMATION_MAX_AGE_SECONDS * 1_000);
-          expect(confirmationBeforeUse.expiresAt.getTime()).toBeLessThanOrEqual(
-            Date.parse(firstPreview.expiresAt),
-          );
-          expect(confirmationBeforeUse.expiresAt.getTime()).toBeGreaterThan(
-            confirmationBeforeUse.issuedAt.getTime(),
-          );
+          }),
+          mismatch.name,
+        ).rejects.toMatchObject({
+          code: 'FORBIDDEN',
+          reasonCode: 'HUMAN_ONLY_REQUIRED',
+          status: 403,
+        });
+      }
 
-          const bindingCases = [
-            {
-              name: 'user',
-              lifecyclePreviewId: firstPreview.id,
-              invocation: confirmedHumanMutationInvocation({
-                idempotencyKey: `issue77-real-wrong-user-${suffix}`,
-                confirmationId,
-                source: 'mobile',
-                actor: {
-                  kind: 'human',
-                  userId: randomUUID(),
-                  sessionId: HUMAN_ACTOR.sessionId,
-                },
-              }),
-            },
-            {
-              name: 'session',
-              lifecyclePreviewId: firstPreview.id,
-              invocation: confirmedHumanMutationInvocation({
-                idempotencyKey: `issue77-real-wrong-session-${suffix}`,
-                confirmationId,
-                source: 'mobile',
-                actor: {
-                  kind: 'human',
-                  userId: HUMAN_ACTOR.userId,
-                  sessionId: randomUUID(),
-                },
-              }),
-            },
-            {
-              name: 'connectivity epoch',
-              lifecyclePreviewId: firstPreview.id,
-              invocation: confirmedHumanMutationInvocation({
-                idempotencyKey: `issue77-real-wrong-epoch-${suffix}`,
-                confirmationId,
-                source: 'mobile',
-                connectivityEpochId: randomUUID(),
-              }),
-            },
-            {
-              name: 'consequence digest',
-              lifecyclePreviewId: secondPreview.id,
-              invocation: confirmedHumanMutationInvocation({
-                idempotencyKey: `issue77-real-wrong-digest-${suffix}`,
-                confirmationId,
-                source: 'mobile',
-              }),
-            },
-          ] as const;
-          for (const bindingCase of bindingCases) {
-            await expect(
-              executeEventCapability(
-                'all-clear-event',
-                {
-                  eventId,
-                  lifecyclePreviewId: bindingCase.lifecyclePreviewId,
-                },
-                bindingCase.invocation,
-                eventStore,
-              ),
-              bindingCase.name,
-            ).rejects.toMatchObject({
-              code: 'FORBIDDEN',
-              reasonCode: 'CONFIRMATION_INVALID',
-              status: 403,
-            });
-          }
-          const [confirmationAfterBindingFailures] = await transaction
-            .select({ status: humanConfirmationRecords.status })
-            .from(humanConfirmationRecords)
-            .where(eq(humanConfirmationRecords.id, confirmationId))
-            .limit(1);
-          expect(confirmationAfterBindingFailures?.status).toBe('issued');
-
-          const expiredConfirmationId = randomUUID();
-          const expiredIssuedAt = new Date(fixtureTime.getTime() - 6 * 60_000);
-          const expiredAt = new Date(fixtureTime.getTime() - 60_000);
-          await transaction.insert(humanConfirmationRecords).values({
-            id: expiredConfirmationId,
-            capabilityId: 'all-clear-event',
-            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
-            confirmedByUserId: HUMAN_ACTOR.userId,
-            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
-            consequenceDigest: firstPreview.consequenceDigest,
-            issuedAt: expiredIssuedAt,
-            expiresAt: expiredAt,
-            status: 'issued',
-            consumedAt: null,
-            consumedForRequestId: null,
-            expiredAt: null,
-          });
-          await transaction.insert(humanConfirmationActions).values([
-            { confirmationId: expiredConfirmationId, actionId: 'all-clear' },
-            {
-              confirmationId: expiredConfirmationId,
-              actionId: 'send-real-notification',
-            },
-          ]);
-          await expect(
-            executeEventCapability(
-              'all-clear-event',
-              { eventId, lifecyclePreviewId: firstPreview.id },
-              confirmedHumanMutationInvocation({
-                idempotencyKey: `issue77-real-expired-${suffix}`,
-                confirmationId: expiredConfirmationId,
-                source: 'mobile',
-              }),
-              eventStore,
-            ),
-          ).rejects.toMatchObject({
-            code: 'FORBIDDEN',
-            reasonCode: 'CONFIRMATION_INVALID',
-            status: 403,
-          });
-
-          const pushStatus = liveStatuses.find(
-            (status) => status.value.integrationId === 'expo-push',
-          );
-          if (pushStatus === undefined) {
-            throw new Error('The live push fixture is unavailable.');
-          }
-          const newerPushStatusId = randomUUID();
-          const newerObservedAt = new Date(fixtureTime.getTime() - 1_000);
-          await transaction.insert(integrationStatuses).values({
-            id: newerPushStatusId,
-            integrationId: 'expo-push',
-            label: 'live-verified',
-            verifiedAt,
-            verifiedByUserId: HUMAN_ACTOR.userId,
-            authorizationReference:
-              'synthetic-issue77-newer-test-authorization',
-            reasonCode: null,
-            observedAt: newerObservedAt,
-          });
-          await transaction
-            .update(channelConfigurations)
-            .set({
-              enabled: true,
-              statusId: newerPushStatusId,
-              statusLabel: 'live-verified',
-              changedAt: newerObservedAt,
-            })
-            .where(eq(channelConfigurations.integrationId, 'expo-push'));
-          await expect(
-            executeEventCapability(
-              'all-clear-event',
-              { eventId, lifecyclePreviewId: firstPreview.id },
-              confirmedHumanMutationInvocation({
-                idempotencyKey: `issue77-real-stale-integration-${suffix}`,
-                confirmationId,
-                source: 'mobile',
-              }),
-              eventStore,
-            ),
-          ).rejects.toMatchObject({
-            code: 'CONFLICT',
-            reasonCode: 'PERSISTENCE_CONFLICT',
-            status: 409,
-          });
-          const [confirmationAfterStaleIntegration] = await transaction
-            .select({ status: humanConfirmationRecords.status })
-            .from(humanConfirmationRecords)
-            .where(eq(humanConfirmationRecords.id, confirmationId))
-            .limit(1);
-          expect(confirmationAfterStaleIntegration?.status).toBe('issued');
-          await transaction
-            .update(channelConfigurations)
-            .set({
-              enabled: true,
-              statusId: pushStatus.id,
-              statusLabel: pushStatus.value.label,
-              changedAt: fixtureTime,
-            })
-            .where(eq(channelConfigurations.integrationId, 'expo-push'));
-
-          const allClearIdempotencyKey = `issue77-real-all-clear-${suffix}`;
-          const allClear = await executeEventCapability(
-            'all-clear-event',
-            { eventId, lifecyclePreviewId: firstPreview.id },
-            confirmedHumanMutationInvocation({
-              idempotencyKey: allClearIdempotencyKey,
-              confirmationId,
-              requestId: actionRequestId,
-              source: 'mobile',
-            }),
-            eventStore,
-          );
-          expect(allClear.event).toMatchObject({
-            id: eventId,
-            status: 'all-clear',
-            kind: 'incident',
-            templateMode: 'real',
-            rosterPopulation: 'staff',
-          });
-          expect(allClear.transition).toMatchObject({
-            transition: 'all-clear',
-            source: 'mobile',
-            confirmationId,
-            consequenceDigest: firstPreview.consequenceDigest,
-            requestId: actionRequestId,
-          });
-          if (allClear.transition.transition !== 'all-clear') {
-            throw new Error('The real staff transition was not all-clear.');
-          }
-          expect(allClear.transition.notificationAuthorization).toMatchObject({
-            kind: 'human-confirmed-lifecycle',
-            purpose: 'all-clear',
-            actionIds: ['all-clear', 'send-real-notification'],
-            confirmationId,
-            consequenceDigest: firstPreview.consequenceDigest,
-            requestId: actionRequestId,
-          });
-          const allClearIntent = allClear.notificationIntent;
-          if (allClearIntent === null) {
-            throw new Error('The real staff all-clear omitted its intent.');
-          }
-          expect(allClearIntent).toMatchObject({
-            eventId,
-            eventKind: 'incident',
-            templateMode: 'real',
-            purpose: 'all-clear',
-            rosterPopulation: 'staff',
-            authorization: {
-              kind: 'human-confirmed-lifecycle',
-              confirmationId,
-              consequenceDigest: firstPreview.consequenceDigest,
-            },
-          });
-          expect(
-            allClearIntent.channels.every(
-              (channel) =>
-                channel.renderedMessage.classificationMarker === 'INCIDENT' &&
-                channel.integrationStatus.label === 'live-verified',
-            ),
-          ).toBe(true);
-          expect(allClear.journalEntries.map(systemJournalCode)).toContain(
-            'all-clear-issued',
-          );
-          expect(
-            allClear.journalEntries.every((entry) => entry.source === 'mobile'),
-          ).toBe(true);
-
-          const replay = await executeEventCapability(
-            'all-clear-event',
-            { eventId, lifecyclePreviewId: firstPreview.id },
-            humanMutationInvocation(
-              allClearIdempotencyKey,
-              DISTRICT_SCOPE,
-              'mobile',
-            ),
-            eventStore,
-          );
-          expect(replay).toEqual(allClear);
-
-          const [consumedConfirmation] = await transaction
-            .select()
-            .from(humanConfirmationRecords)
-            .where(eq(humanConfirmationRecords.id, confirmationId))
-            .limit(1);
-          expect(consumedConfirmation).toMatchObject({
-            status: 'consumed',
-            consumedForRequestId: actionRequestId,
-            expiredAt: null,
-          });
-          expect(consumedConfirmation?.consumedAt).not.toBeNull();
-          const persistedTransitions = await transaction
-            .select({
-              confirmationId: eventTransitions.confirmationId,
-              confirmationStatus: eventTransitions.confirmationStatus,
-              consequenceDigest: eventTransitions.consequenceDigest,
-              requestId: eventTransitions.requestId,
-            })
-            .from(eventTransitions)
-            .where(
-              and(
-                eq(eventTransitions.eventId, eventId),
-                eq(eventTransitions.transition, 'all-clear'),
-              ),
-            );
-          expect(persistedTransitions).toEqual([
-            {
-              confirmationId,
-              confirmationStatus: 'consumed',
-              consequenceDigest: firstPreview.consequenceDigest,
-              requestId: actionRequestId,
-            },
-          ]);
-          const persistedIntents = await transaction
-            .select({ id: notificationIntents.id })
-            .from(notificationIntents)
-            .where(eq(notificationIntents.eventId, eventId));
-          expect(persistedIntents).toHaveLength(1);
-          const persistedOutbox = await transaction
-            .select({
-              id: outbox.id,
-              intentId: outbox.intentId,
-              status: outbox.status,
-              attempts: outbox.attempts,
-              lockedUntil: outbox.lockedUntil,
-              publishedAt: outbox.publishedAt,
-              failedAt: outbox.failedAt,
-            })
-            .from(outbox)
-            .where(eq(outbox.eventId, eventId));
-          expect(persistedOutbox).toEqual([
-            {
-              id: expect.any(String),
-              intentId: allClearIntent.id,
-              status: 'pending',
-              attempts: 0,
-              lockedUntil: null,
-              publishedAt: null,
-              failedAt: null,
-            },
-          ]);
-          expect(
-            await transaction
-              .select({ id: dispatchBatches.id })
-              .from(dispatchBatches)
-              .where(eq(dispatchBatches.eventId, eventId)),
-          ).toEqual([]);
-          expect(
-            await transaction
-              .select({ id: channelAttempts.id })
-              .from(channelAttempts)
-              .where(eq(channelAttempts.eventId, eventId)),
-          ).toEqual([]);
-          expect(
-            await transaction
-              .select({ id: deliveryEvidence.id })
-              .from(deliveryEvidence)
-              .where(eq(deliveryEvidence.intentId, allClearIntent.id)),
-          ).toEqual([]);
-
-          expect(EVENT_CONFIRMATION_PHRASES.close).toBe('CLOSE EVENT');
-          const closeRequestId = randomUUID();
-          const issuedClose = await journalRuntime.issueHumanConfirmation({
-            authenticated,
-            eventId,
-            action: 'close',
-            lifecyclePreviewId: null,
-            confirmationPhrase: EVENT_CONFIRMATION_PHRASES.close,
-            requestId: closeRequestId,
-            now: new Date(),
-          });
-          if (issuedClose.confirmationId === null) {
-            throw new Error(
-              'The mobile real-event close omitted confirmation.',
-            );
-          }
-          const closeConfirmationId = issuedClose.confirmationId;
-          const [closeConfirmationBeforeUse] = await transaction
-            .select()
-            .from(humanConfirmationRecords)
-            .where(eq(humanConfirmationRecords.id, closeConfirmationId))
-            .limit(1);
-          if (closeConfirmationBeforeUse === undefined) {
-            throw new Error('The mobile close confirmation was not persisted.');
-          }
-          const closeConfirmationActions = await transaction
-            .select({ actionId: humanConfirmationActions.actionId })
-            .from(humanConfirmationActions)
-            .where(
-              eq(humanConfirmationActions.confirmationId, closeConfirmationId),
-            );
-          expect(closeConfirmationBeforeUse).toMatchObject({
-            capabilityId: 'close-event',
-            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
-            confirmedByUserId: HUMAN_ACTOR.userId,
-            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
-            status: 'issued',
-            consumedAt: null,
-            consumedForRequestId: null,
-            expiredAt: null,
-          });
-          expect(
-            closeConfirmationActions.map(({ actionId }) => actionId),
-          ).toEqual(['close-real-event']);
-
-          const closeIdempotencyKey = `issue77-real-close-${suffix}`;
-          const closed = await executeEventCapability(
-            'close-event',
-            { eventId },
-            confirmedHumanMutationInvocation({
-              idempotencyKey: closeIdempotencyKey,
-              confirmationId: closeConfirmationId,
-              requestId: closeRequestId,
-              source: 'mobile',
-            }),
-            eventStore,
-          );
-          expect(closed.event).toMatchObject({
-            id: eventId,
-            status: 'closed',
-            kind: 'incident',
-            templateMode: 'real',
-            rosterPopulation: 'staff',
-          });
-          expect(closed.transition).toMatchObject({
-            transition: 'close',
-            source: 'mobile',
-            confirmationId: closeConfirmationId,
-            consequenceDigest: closeConfirmationBeforeUse.consequenceDigest,
-            requestId: closeRequestId,
-          });
-          expect(closed.notificationIntent).toBeNull();
-          expect(closed.journalEntries).toHaveLength(1);
-          expect(closed.journalEntries[0]).toMatchObject({
-            source: 'mobile',
-            payload: { code: 'event-closed' },
-          });
-
-          const closeReplay = await executeEventCapability(
-            'close-event',
-            { eventId },
-            humanMutationInvocation(
-              closeIdempotencyKey,
-              DISTRICT_SCOPE,
-              'mobile',
-            ),
-            eventStore,
-          );
-          expect(closeReplay).toEqual(closed);
-
-          const [consumedCloseConfirmation] = await transaction
-            .select()
-            .from(humanConfirmationRecords)
-            .where(eq(humanConfirmationRecords.id, closeConfirmationId))
-            .limit(1);
-          expect(consumedCloseConfirmation).toMatchObject({
-            status: 'consumed',
-            consumedForRequestId: closeRequestId,
-            expiredAt: null,
-          });
-          expect(consumedCloseConfirmation?.consumedAt).not.toBeNull();
-          expect(
-            await transaction
-              .select({
-                confirmationId: eventTransitions.confirmationId,
-                confirmationStatus: eventTransitions.confirmationStatus,
-                source: eventTransitions.source,
-                requestId: eventTransitions.requestId,
-              })
-              .from(eventTransitions)
-              .where(
-                and(
-                  eq(eventTransitions.eventId, eventId),
-                  eq(eventTransitions.transition, 'close'),
-                ),
-              ),
-          ).toEqual([
-            {
-              confirmationId: closeConfirmationId,
-              confirmationStatus: 'consumed',
-              source: 'mobile',
-              requestId: closeRequestId,
-            },
-          ]);
-          expect(
-            await transaction
-              .select({
-                id: notificationIntents.id,
-                purpose: notificationIntents.purpose,
-              })
-              .from(notificationIntents)
-              .where(eq(notificationIntents.eventId, eventId)),
-          ).toEqual([{ id: allClearIntent.id, purpose: 'all-clear' }]);
-          expect(
-            await transaction
-              .select({ intentId: outbox.intentId, purpose: outbox.purpose })
-              .from(outbox)
-              .where(eq(outbox.eventId, eventId)),
-          ).toEqual([{ intentId: allClearIntent.id, purpose: 'all-clear' }]);
-        } finally {
-          for (const configuration of originalConfigurations) {
-            await transaction
-              .update(channelConfigurations)
-              .set({
-                enabled: configuration.enabled,
-                statusId: configuration.statusId,
-                statusLabel: configuration.statusLabel,
-                changedAt: configuration.changedAt,
-              })
-              .where(
-                eq(
-                  channelConfigurations.integrationId,
-                  configuration.integrationId,
-                ),
-              );
-          }
-        }
-        throw rollbackFixture;
+      expect(EVENT_CONFIRMATION_PHRASES['all-clear']).toBe('ALL CLEAR');
+      await expect(
+        journalRuntime.issueHumanConfirmation({
+          authenticated,
+          eventId,
+          action: 'all-clear',
+          lifecyclePreviewId: firstPreview.id,
+          confirmationPhrase: 'ALL CLEAR ',
+          requestId: randomUUID(),
+          now: new Date(),
+        }),
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        status: 400,
       });
-    } catch (error) {
-      if (error !== rollbackFixture) {
-        throw error;
+      const rejectedPhraseRows = await fixtureDatabase
+        .select({ id: humanConfirmationRecords.id })
+        .from(humanConfirmationRecords)
+        .where(
+          and(
+            eq(humanConfirmationRecords.confirmedByUserId, HUMAN_ACTOR.userId),
+            eq(humanConfirmationRecords.capabilityId, 'all-clear-event'),
+          ),
+        );
+      expect(rejectedPhraseRows).toEqual([]);
+
+      const actionRequestId = randomUUID();
+      const issued = await journalRuntime.issueHumanConfirmation({
+        authenticated,
+        eventId,
+        action: 'all-clear',
+        lifecyclePreviewId: firstPreview.id,
+        confirmationPhrase: EVENT_CONFIRMATION_PHRASES['all-clear'],
+        requestId: actionRequestId,
+        now: new Date(),
+      });
+      if (issued.confirmationId === null) {
+        throw new Error('The real staff all-clear omitted confirmation.');
+      }
+      const confirmationId = issued.confirmationId;
+      const [confirmationBeforeUse] = await fixtureDatabase
+        .select()
+        .from(humanConfirmationRecords)
+        .where(eq(humanConfirmationRecords.id, confirmationId))
+        .limit(1);
+      if (confirmationBeforeUse === undefined) {
+        throw new Error('The issued confirmation was not persisted.');
+      }
+      const confirmationActionRows = await fixtureDatabase
+        .select({ actionId: humanConfirmationActions.actionId })
+        .from(humanConfirmationActions)
+        .where(eq(humanConfirmationActions.confirmationId, confirmationId));
+      expect(confirmationBeforeUse).toMatchObject({
+        capabilityId: 'all-clear-event',
+        connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+        confirmedByUserId: HUMAN_ACTOR.userId,
+        confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+        consequenceDigest: firstPreview.consequenceDigest,
+        status: 'issued',
+        consumedAt: null,
+        consumedForRequestId: null,
+        expiredAt: null,
+      });
+      expect(
+        confirmationActionRows.map(({ actionId }) => actionId).sort(),
+      ).toEqual(['all-clear', 'send-real-notification']);
+      expect(
+        confirmationBeforeUse.expiresAt.getTime() -
+          confirmationBeforeUse.issuedAt.getTime(),
+      ).toBeLessThanOrEqual(HUMAN_CONFIRMATION_MAX_AGE_SECONDS * 1_000);
+      expect(confirmationBeforeUse.expiresAt.getTime()).toBeLessThanOrEqual(
+        Date.parse(firstPreview.expiresAt),
+      );
+      expect(confirmationBeforeUse.expiresAt.getTime()).toBeGreaterThan(
+        confirmationBeforeUse.issuedAt.getTime(),
+      );
+
+      const bindingCases = [
+        {
+          name: 'user',
+          lifecyclePreviewId: firstPreview.id,
+          invocation: confirmedHumanMutationInvocation({
+            idempotencyKey: `issue77-real-wrong-user-${suffix}`,
+            confirmationId,
+            source: 'mobile',
+            actor: {
+              kind: 'human',
+              userId: randomUUID(),
+              sessionId: HUMAN_ACTOR.sessionId,
+            },
+          }),
+        },
+        {
+          name: 'session',
+          lifecyclePreviewId: firstPreview.id,
+          invocation: confirmedHumanMutationInvocation({
+            idempotencyKey: `issue77-real-wrong-session-${suffix}`,
+            confirmationId,
+            source: 'mobile',
+            actor: {
+              kind: 'human',
+              userId: HUMAN_ACTOR.userId,
+              sessionId: randomUUID(),
+            },
+          }),
+        },
+        {
+          name: 'connectivity epoch',
+          lifecyclePreviewId: firstPreview.id,
+          invocation: confirmedHumanMutationInvocation({
+            idempotencyKey: `issue77-real-wrong-epoch-${suffix}`,
+            confirmationId,
+            source: 'mobile',
+            connectivityEpochId: randomUUID(),
+          }),
+        },
+        {
+          name: 'consequence digest',
+          lifecyclePreviewId: secondPreview.id,
+          invocation: confirmedHumanMutationInvocation({
+            idempotencyKey: `issue77-real-wrong-digest-${suffix}`,
+            confirmationId,
+            source: 'mobile',
+          }),
+        },
+      ] as const;
+      for (const bindingCase of bindingCases) {
+        await expect(
+          executeEventCapability(
+            'all-clear-event',
+            {
+              eventId,
+              lifecyclePreviewId: bindingCase.lifecyclePreviewId,
+            },
+            bindingCase.invocation,
+            eventStore,
+          ),
+          bindingCase.name,
+        ).rejects.toMatchObject({
+          code: 'FORBIDDEN',
+          reasonCode: 'CONFIRMATION_INVALID',
+          status: 403,
+        });
+      }
+      const [confirmationAfterBindingFailures] = await fixtureDatabase
+        .select({ status: humanConfirmationRecords.status })
+        .from(humanConfirmationRecords)
+        .where(eq(humanConfirmationRecords.id, confirmationId))
+        .limit(1);
+      expect(confirmationAfterBindingFailures?.status).toBe('issued');
+
+      const expiredConfirmationId = randomUUID();
+      const expiredIssuedAt = new Date(fixtureTime.getTime() - 6 * 60_000);
+      const expiredAt = new Date(fixtureTime.getTime() - 60_000);
+      await fixtureDatabase.insert(humanConfirmationRecords).values({
+        id: expiredConfirmationId,
+        capabilityId: 'all-clear-event',
+        connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+        confirmedByUserId: HUMAN_ACTOR.userId,
+        confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+        consequenceDigest: firstPreview.consequenceDigest,
+        issuedAt: expiredIssuedAt,
+        expiresAt: expiredAt,
+        status: 'issued',
+        consumedAt: null,
+        consumedForRequestId: null,
+        expiredAt: null,
+      });
+      await fixtureDatabase.insert(humanConfirmationActions).values([
+        { confirmationId: expiredConfirmationId, actionId: 'all-clear' },
+        {
+          confirmationId: expiredConfirmationId,
+          actionId: 'send-real-notification',
+        },
+      ]);
+      await expect(
+        executeEventCapability(
+          'all-clear-event',
+          { eventId, lifecyclePreviewId: firstPreview.id },
+          confirmedHumanMutationInvocation({
+            idempotencyKey: `issue77-real-expired-${suffix}`,
+            confirmationId: expiredConfirmationId,
+            source: 'mobile',
+          }),
+          eventStore,
+        ),
+      ).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+        reasonCode: 'CONFIRMATION_INVALID',
+        status: 403,
+      });
+
+      const pushStatus = liveStatuses.find(
+        (status) => status.value.integrationId === 'expo-push',
+      );
+      if (pushStatus === undefined) {
+        throw new Error('The live push fixture is unavailable.');
+      }
+      const newerPushStatusId = randomUUID();
+      const newerObservedAt = new Date(fixtureTime.getTime() - 1_000);
+      await fixtureDatabase.insert(integrationStatuses).values({
+        id: newerPushStatusId,
+        integrationId: 'expo-push',
+        label: 'live-verified',
+        verifiedAt,
+        verifiedByUserId: HUMAN_ACTOR.userId,
+        authorizationReference: 'synthetic-issue77-newer-test-authorization',
+        reasonCode: null,
+        observedAt: newerObservedAt,
+      });
+      await fixtureDatabase
+        .update(channelConfigurations)
+        .set({
+          enabled: true,
+          statusId: newerPushStatusId,
+          statusLabel: 'live-verified',
+          changedAt: newerObservedAt,
+        })
+        .where(eq(channelConfigurations.integrationId, 'expo-push'));
+      await expect(
+        executeEventCapability(
+          'all-clear-event',
+          { eventId, lifecyclePreviewId: firstPreview.id },
+          confirmedHumanMutationInvocation({
+            idempotencyKey: `issue77-real-stale-integration-${suffix}`,
+            confirmationId,
+            source: 'mobile',
+          }),
+          eventStore,
+        ),
+      ).rejects.toMatchObject({
+        code: 'CONFLICT',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 409,
+      });
+      const [confirmationAfterStaleIntegration] = await fixtureDatabase
+        .select({ status: humanConfirmationRecords.status })
+        .from(humanConfirmationRecords)
+        .where(eq(humanConfirmationRecords.id, confirmationId))
+        .limit(1);
+      expect(confirmationAfterStaleIntegration?.status).toBe('issued');
+      await fixtureDatabase
+        .update(channelConfigurations)
+        .set({
+          enabled: true,
+          statusId: pushStatus.id,
+          statusLabel: pushStatus.value.label,
+          changedAt: fixtureTime,
+        })
+        .where(eq(channelConfigurations.integrationId, 'expo-push'));
+
+      const allClearIdempotencyKey = `issue77-real-all-clear-${suffix}`;
+      const allClear = await executeEventCapability(
+        'all-clear-event',
+        { eventId, lifecyclePreviewId: firstPreview.id },
+        confirmedHumanMutationInvocation({
+          idempotencyKey: allClearIdempotencyKey,
+          confirmationId,
+          requestId: actionRequestId,
+          source: 'mobile',
+        }),
+        eventStore,
+      );
+      expect(allClear.event).toMatchObject({
+        id: eventId,
+        status: 'all-clear',
+        kind: 'incident',
+        templateMode: 'real',
+        rosterPopulation: 'staff',
+      });
+      expect(allClear.transition).toMatchObject({
+        transition: 'all-clear',
+        source: 'mobile',
+        confirmationId,
+        consequenceDigest: firstPreview.consequenceDigest,
+        requestId: actionRequestId,
+      });
+      if (allClear.transition.transition !== 'all-clear') {
+        throw new Error('The real staff transition was not all-clear.');
+      }
+      expect(allClear.transition.notificationAuthorization).toMatchObject({
+        kind: 'human-confirmed-lifecycle',
+        purpose: 'all-clear',
+        actionIds: ['all-clear', 'send-real-notification'],
+        confirmationId,
+        consequenceDigest: firstPreview.consequenceDigest,
+        requestId: actionRequestId,
+      });
+      const allClearIntent = allClear.notificationIntent;
+      if (allClearIntent === null) {
+        throw new Error('The real staff all-clear omitted its intent.');
+      }
+      expect(allClearIntent).toMatchObject({
+        eventId,
+        eventKind: 'incident',
+        templateMode: 'real',
+        purpose: 'all-clear',
+        rosterPopulation: 'staff',
+        authorization: {
+          kind: 'human-confirmed-lifecycle',
+          confirmationId,
+          consequenceDigest: firstPreview.consequenceDigest,
+        },
+      });
+      expect(
+        allClearIntent.channels.every(
+          (channel) =>
+            channel.renderedMessage.classificationMarker === 'INCIDENT' &&
+            channel.integrationStatus.label === 'live-verified',
+        ),
+      ).toBe(true);
+      expect(allClear.journalEntries.map(systemJournalCode)).toContain(
+        'all-clear-issued',
+      );
+      expect(
+        allClear.journalEntries.every((entry) => entry.source === 'mobile'),
+      ).toBe(true);
+
+      const replay = await executeEventCapability(
+        'all-clear-event',
+        { eventId, lifecyclePreviewId: firstPreview.id },
+        humanMutationInvocation(
+          allClearIdempotencyKey,
+          DISTRICT_SCOPE,
+          'mobile',
+        ),
+        eventStore,
+      );
+      expect(replay).toEqual(allClear);
+
+      const [consumedConfirmation] = await fixtureDatabase
+        .select()
+        .from(humanConfirmationRecords)
+        .where(eq(humanConfirmationRecords.id, confirmationId))
+        .limit(1);
+      expect(consumedConfirmation).toMatchObject({
+        status: 'consumed',
+        consumedForRequestId: actionRequestId,
+        expiredAt: null,
+      });
+      expect(consumedConfirmation?.consumedAt).not.toBeNull();
+      const persistedTransitions = await fixtureDatabase
+        .select({
+          confirmationId: eventTransitions.confirmationId,
+          confirmationStatus: eventTransitions.confirmationStatus,
+          consequenceDigest: eventTransitions.consequenceDigest,
+          requestId: eventTransitions.requestId,
+        })
+        .from(eventTransitions)
+        .where(
+          and(
+            eq(eventTransitions.eventId, eventId),
+            eq(eventTransitions.transition, 'all-clear'),
+          ),
+        );
+      expect(persistedTransitions).toEqual([
+        {
+          confirmationId,
+          confirmationStatus: 'consumed',
+          consequenceDigest: firstPreview.consequenceDigest,
+          requestId: actionRequestId,
+        },
+      ]);
+      const persistedIntents = await fixtureDatabase
+        .select({ id: notificationIntents.id })
+        .from(notificationIntents)
+        .where(eq(notificationIntents.eventId, eventId));
+      expect(persistedIntents).toHaveLength(1);
+      const persistedOutbox = await fixtureDatabase
+        .select({
+          id: outbox.id,
+          intentId: outbox.intentId,
+          status: outbox.status,
+          attempts: outbox.attempts,
+          lockedUntil: outbox.lockedUntil,
+          publishedAt: outbox.publishedAt,
+          failedAt: outbox.failedAt,
+        })
+        .from(outbox)
+        .where(eq(outbox.eventId, eventId));
+      expect(persistedOutbox).toEqual([
+        {
+          id: expect.any(String),
+          intentId: allClearIntent.id,
+          status: 'pending',
+          attempts: 0,
+          lockedUntil: null,
+          publishedAt: null,
+          failedAt: null,
+        },
+      ]);
+      expect(
+        await fixtureDatabase
+          .select({ id: dispatchBatches.id })
+          .from(dispatchBatches)
+          .where(eq(dispatchBatches.eventId, eventId)),
+      ).toEqual([]);
+      expect(
+        await fixtureDatabase
+          .select({ id: channelAttempts.id })
+          .from(channelAttempts)
+          .where(eq(channelAttempts.eventId, eventId)),
+      ).toEqual([]);
+      expect(
+        await fixtureDatabase
+          .select({ id: deliveryEvidence.id })
+          .from(deliveryEvidence)
+          .where(eq(deliveryEvidence.intentId, allClearIntent.id)),
+      ).toEqual([]);
+
+      expect(EVENT_CONFIRMATION_PHRASES.close).toBe('CLOSE EVENT');
+      const closeRequestId = randomUUID();
+      const issuedClose = await journalRuntime.issueHumanConfirmation({
+        authenticated,
+        eventId,
+        action: 'close',
+        lifecyclePreviewId: null,
+        confirmationPhrase: EVENT_CONFIRMATION_PHRASES.close,
+        requestId: closeRequestId,
+        now: new Date(),
+      });
+      if (issuedClose.confirmationId === null) {
+        throw new Error('The mobile real-event close omitted confirmation.');
+      }
+      const closeConfirmationId = issuedClose.confirmationId;
+      const [closeConfirmationBeforeUse] = await fixtureDatabase
+        .select()
+        .from(humanConfirmationRecords)
+        .where(eq(humanConfirmationRecords.id, closeConfirmationId))
+        .limit(1);
+      if (closeConfirmationBeforeUse === undefined) {
+        throw new Error('The mobile close confirmation was not persisted.');
+      }
+      const closeConfirmationActions = await fixtureDatabase
+        .select({ actionId: humanConfirmationActions.actionId })
+        .from(humanConfirmationActions)
+        .where(
+          eq(humanConfirmationActions.confirmationId, closeConfirmationId),
+        );
+      expect(closeConfirmationBeforeUse).toMatchObject({
+        capabilityId: 'close-event',
+        connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+        confirmedByUserId: HUMAN_ACTOR.userId,
+        confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+        status: 'issued',
+        consumedAt: null,
+        consumedForRequestId: null,
+        expiredAt: null,
+      });
+      expect(closeConfirmationActions.map(({ actionId }) => actionId)).toEqual([
+        'close-real-event',
+      ]);
+
+      const closeIdempotencyKey = `issue77-real-close-${suffix}`;
+      const closed = await executeEventCapability(
+        'close-event',
+        { eventId },
+        confirmedHumanMutationInvocation({
+          idempotencyKey: closeIdempotencyKey,
+          confirmationId: closeConfirmationId,
+          requestId: closeRequestId,
+          source: 'mobile',
+        }),
+        eventStore,
+      );
+      expect(closed.event).toMatchObject({
+        id: eventId,
+        status: 'closed',
+        kind: 'incident',
+        templateMode: 'real',
+        rosterPopulation: 'staff',
+      });
+      expect(closed.transition).toMatchObject({
+        transition: 'close',
+        source: 'mobile',
+        confirmationId: closeConfirmationId,
+        consequenceDigest: closeConfirmationBeforeUse.consequenceDigest,
+        requestId: closeRequestId,
+      });
+      expect(closed.notificationIntent).toBeNull();
+      expect(closed.journalEntries).toHaveLength(1);
+      expect(closed.journalEntries[0]).toMatchObject({
+        source: 'mobile',
+        payload: { code: 'event-closed' },
+      });
+
+      const closeReplay = await executeEventCapability(
+        'close-event',
+        { eventId },
+        humanMutationInvocation(closeIdempotencyKey, DISTRICT_SCOPE, 'mobile'),
+        eventStore,
+      );
+      expect(closeReplay).toEqual(closed);
+
+      const [consumedCloseConfirmation] = await fixtureDatabase
+        .select()
+        .from(humanConfirmationRecords)
+        .where(eq(humanConfirmationRecords.id, closeConfirmationId))
+        .limit(1);
+      expect(consumedCloseConfirmation).toMatchObject({
+        status: 'consumed',
+        consumedForRequestId: closeRequestId,
+        expiredAt: null,
+      });
+      expect(consumedCloseConfirmation?.consumedAt).not.toBeNull();
+      expect(
+        await fixtureDatabase
+          .select({
+            confirmationId: eventTransitions.confirmationId,
+            confirmationStatus: eventTransitions.confirmationStatus,
+            source: eventTransitions.source,
+            requestId: eventTransitions.requestId,
+          })
+          .from(eventTransitions)
+          .where(
+            and(
+              eq(eventTransitions.eventId, eventId),
+              eq(eventTransitions.transition, 'close'),
+            ),
+          ),
+      ).toEqual([
+        {
+          confirmationId: closeConfirmationId,
+          confirmationStatus: 'consumed',
+          source: 'mobile',
+          requestId: closeRequestId,
+        },
+      ]);
+      expect(
+        await fixtureDatabase
+          .select({
+            id: notificationIntents.id,
+            purpose: notificationIntents.purpose,
+          })
+          .from(notificationIntents)
+          .where(eq(notificationIntents.eventId, eventId)),
+      ).toEqual([{ id: allClearIntent.id, purpose: 'all-clear' }]);
+      expect(
+        await fixtureDatabase
+          .select({ intentId: outbox.intentId, purpose: outbox.purpose })
+          .from(outbox)
+          .where(eq(outbox.eventId, eventId)),
+      ).toEqual([{ intentId: allClearIntent.id, purpose: 'all-clear' }]);
+    } finally {
+      for (const configuration of originalConfigurations) {
+        await fixtureDatabase
+          .update(channelConfigurations)
+          .set({
+            enabled: configuration.enabled,
+            statusId: configuration.statusId,
+            statusLabel: configuration.statusLabel,
+            changedAt: configuration.changedAt,
+          })
+          .where(
+            eq(
+              channelConfigurations.integrationId,
+              configuration.integrationId,
+            ),
+          );
       }
     }
   });

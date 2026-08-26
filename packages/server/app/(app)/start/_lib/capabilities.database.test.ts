@@ -28,6 +28,7 @@ import {
 } from '../../../../db/schema';
 import { migrateDatabase } from '../../../../drizzle/migrate';
 import {
+  closeAndDropDisposableDatabase,
   createDisposableDatabase,
   type DisposableDatabase,
 } from '../../../../lib/testing/database';
@@ -49,47 +50,25 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
-async function closeAndDropRosterTestDatabase(
-  close: (() => Promise<void>) | undefined,
-  drop: (() => Promise<void>) | undefined,
-): Promise<void> {
-  const errors: unknown[] = [];
-  for (const operation of [close, drop]) {
-    if (operation === undefined) continue;
-    try {
-      await operation();
-    } catch (error) {
-      errors.push(error);
-    }
-  }
-  if (errors.length === 1) {
-    throw errors[0];
-  }
-  if (errors.length > 1) {
-    throw new AggregateError(
-      errors,
-      'The roster hydration test database cleanup failed.',
-    );
-  }
-}
-
 describe('start-flow roster test cleanup', () => {
   test('attempts the exact drop after close failure and retains both errors', async () => {
     const operations: string[] = [];
     const closeError = new Error('Synthetic close failure.');
     const dropError = new Error('Synthetic drop failure.');
+    const disposable: DisposableDatabase = {
+      url: 'postgres://localhost/synthetic_test',
+      name: 'synthetic_test',
+      async drop(): Promise<void> {
+        operations.push('drop');
+        throw dropError;
+      },
+    };
     let thrown: unknown;
     try {
-      await closeAndDropRosterTestDatabase(
-        async () => {
-          operations.push('close');
-          throw closeError;
-        },
-        async () => {
-          operations.push('drop');
-          throw dropError;
-        },
-      );
+      await closeAndDropDisposableDatabase(async () => {
+        operations.push('close');
+        throw closeError;
+      }, disposable);
     } catch (error) {
       thrown = error;
     }
@@ -128,11 +107,11 @@ describeWithDatabase('start-flow roster hydration', () => {
     const disposable = isolatedDatabase;
     connection = undefined;
     isolatedDatabase = undefined;
-    await closeAndDropRosterTestDatabase(
+    await closeAndDropDisposableDatabase(
       openConnection === undefined
         ? undefined
         : async () => openConnection.close(),
-      disposable === undefined ? undefined : () => disposable.drop(),
+      disposable,
     );
   });
 

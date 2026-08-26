@@ -35,6 +35,55 @@ Last consolidated from retained evidence: **2026-08-25**.
 | GuardDuty Malware Protection for S3  | `configured-unverified` | CDK defines the scoped plan and fail-closed tag boundary; no active-plan readback or controlled scan is retained.                                                                                                                                                          |
 | OpenStreetMap raster tiles           | `configured-unverified` | The optional read-only configuration is source-defined; no live availability claim is retained.                                                                                                                                                                            |
 
+## Records-retention review
+
+<!-- psd-eoc:records-retention-review-status:start -->
+
+The following official sources were rechecked on 2026-08-26:
+
+- [Local Government Common Records Retention Schedule (CORE)](https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF):
+  version 5.0, approved and effective October 2, 2024.
+- [Public Schools (K-12) Records Retention Schedule](https://www.sos.wa.gov/sites/default/files/2026-06/Public-Schools-%28K-12%29-Records-Retention-Schedule.PDF):
+  version 9.1, approved and effective June 3, 2026.
+- [Washington State Archives school and ESD schedule index](https://www.sos.wa.gov/archives/help-government-agencies/managing-school-and-esd-records):
+  identifies those two versions as the current schedules used together.
+
+CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions. They are future
+change inputs only until the Local Records Committee approves them and the
+official index replaces the current versions. Do not commit schedule PDFs to
+the repository.
+
+These current schedule entries are candidates for records-officer review, not
+repository-owned classifications:
+
+<!-- docs-contract:records-retention-candidates:start -->
+
+| Content and context                                                                                 | Candidate series    | Current minimum/action                                                                                                                                               | Source designation |
+| --------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| Emergency-drill or occupational-safety-program administration                                       | `GS2017-016 Rev. 0` | Retain for 3 years after the end of the calendar year and until no longer needed for agency business, then destroy; non-archival.                                    | OPR                |
+| Routine/minor emergency response with minimal assistance or disruption                              | `GS2012-025 Rev. 1` | Retain for 6 years after the matter is resolved or recovery is complete, then destroy; non-archival.                                                                 | OPR                |
+| Uncommon/major response, including emergency-operations-center activities and communications        | `GS50-18-29 Rev. 2` | Retain for 6 years after the matter is resolved or recovery is complete, then transfer to Washington State Archives for appraisal and selective retention; archival. | OPR                |
+| Security incidents or data/privacy breaches, including investigation and notification documentation | `GS2010-008 Rev. 2` | Retain for 6 years after the matter is resolved, then destroy; non-archival.                                                                                         | OFM                |
+| School safety plans, only if the product actually owns that content                                 | `SD2011-153 Rev. 1` | Retain for 6 years after obsolete or superseded, then destroy; non-archival.                                                                                         | OPR                |
+
+<!-- docs-contract:records-retention-candidates:end -->
+
+- Official sources last rechecked: `2026-08-26`.
+- Controlled mapping review status: `pending`.
+- Controlled mapping review date: `not completed`.
+- Controlled mapping inventory coverage: `not completed`.
+- Controlled mapping ambiguity status: `not completed`.
+
+The tenant-neutral inventory and durable boundaries are recorded in
+[Architecture and contributing](ARCHITECTURE.md#records-retention-classification);
+the current source versions and aggregate evidence are retained in this
+section. The tenant's row-level DAN decisions and private evidence belong only
+in its controlled operations record. No completed records-officer review or
+ambiguity guidance has been supplied for this aggregate status. Until it is,
+retain every product record and do not enable disposition automation.
+
+<!-- psd-eoc:records-retention-review-status:end -->
+
 The pre-consolidation register and its detailed dated observations are
 preserved in the [historical readiness snapshot](archive/evidence/readiness-register-2026-08-25.md).
 The append-only deployment ledger is
