@@ -510,7 +510,7 @@ describe('mobile distribution configuration', () => {
       '| `blocked`',
     );
     expect(rowFor('Play app content and store record')).toContain(
-      '4/11 setup tasks complete',
+      '6/11 setup tasks complete',
     );
 
     expect(rows.filter((line) => line.includes('| EAS Build'))).toHaveLength(1);
