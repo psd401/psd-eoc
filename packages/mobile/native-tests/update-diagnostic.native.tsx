@@ -24,13 +24,15 @@ const mockUpdateConstants: {
   updateId: null,
   runtimeVersion: '',
   channel: '',
-  applicationId: 'net.psd401.eoc',
+  applicationId: 'org.example.eoc',
   applicationVersion: '1.0.2',
   nativeBuildVersion: '3',
 };
 
 let mockExpoConfig: unknown = {
   version: '1.0.2',
+  ios: { bundleIdentifier: 'org.example.eoc' },
+  android: { package: 'org.example.eoc' },
   runtimeVersion: { policy: 'appVersion' },
   updates: {
     enabled: false,
@@ -131,6 +133,7 @@ function validEmbeddedOnlyConstants(): ReadOnlyUpdateConstants {
     configuredCheckAutomatically: 'NEVER',
     configuredUpdateUrl: undefined,
     configuredApplicationVersion: '1.0.2',
+    configuredApplicationId: 'org.example.eoc',
     configuredRuntimeVersion: { policy: 'appVersion' },
   };
 }
@@ -147,12 +150,14 @@ describe('authenticated release diagnostic', () => {
       updateId: null,
       runtimeVersion: '',
       channel: '',
-      applicationId: 'net.psd401.eoc',
+      applicationId: 'org.example.eoc',
       applicationVersion: '1.0.2',
       nativeBuildVersion: '3',
     });
     mockExpoConfig = {
       version: '1.0.2',
+      ios: { bundleIdentifier: 'org.example.eoc' },
+      android: { package: 'org.example.eoc' },
       runtimeVersion: { policy: 'appVersion' },
       updates: {
         enabled: false,
@@ -171,7 +176,7 @@ describe('authenticated release diagnostic', () => {
       screen.getByLabelText('Evidence status: Identity available'),
     ).toBeTruthy();
     expect(
-      screen.getByLabelText('Application ID: net.psd401.eoc'),
+      screen.getByLabelText('Application ID: org.example.eoc'),
     ).toBeTruthy();
     expect(screen.getByLabelText('Application version: 1.0.2')).toBeTruthy();
     expect(screen.getByLabelText('Native build version: 3')).toBeTruthy();
@@ -236,6 +241,10 @@ describe('authenticated release diagnostic', () => {
       [
         'configured version mismatch',
         { configuredApplicationVersion: '1.0.0' },
+      ],
+      [
+        'configured application ID mismatch',
+        { configuredApplicationId: 'org.example.other' },
       ],
       [
         'runtime policy mismatch',
@@ -352,6 +361,7 @@ describe('authenticated release diagnostic', () => {
     expect(executableSource).toContain(
       "import Constants from 'expo-constants';",
     );
+    expect(executableSource).not.toContain('net.psd401.eoc');
     expect(executableSource).not.toMatch(
       /checkForUpdateAsync|fetchUpdateAsync|reloadAsync|readLogEntriesAsync|setExtraParamAsync|setUpdateRequestHeadersOverride|setUpdateURLAndRequestHeadersOverride|requestAuthenticated|executeCapability|\bfetch\s*\(|Linking\.openURL/iu,
     );

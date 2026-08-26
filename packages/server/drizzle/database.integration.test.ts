@@ -6,11 +6,20 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { NotificationOutboxMessageSchema } from '@psd-eoc/contracts';
+import { randomUUID } from 'node:crypto';
+import {
+  DeliveryEvidenceSchema,
+  DispatchBatchSchema,
+  EmailBatchResolutionPageSchema,
+  EmailRetryResolutionSchema,
+  NotificationOutboxMessageSchema,
+  SesSendLedgerClaimSchema,
+} from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  type Database,
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../db/client';
@@ -21,6 +30,11 @@ import {
   createDisposableDatabase,
   type DisposableDatabase,
 } from '../lib/testing/database';
+import { createDrizzleSesWebhookStore } from '../app/api/webhooks/ses/runtime';
+import { createDrizzleDeliveryEvidenceStore } from '../app/api/internal/delivery-state/runtime';
+import { createDrizzleAttemptExecutionStore } from '../lib/notify/attempt-execution-store';
+import { createDrizzleEmailRuntimeStore } from '../lib/notify/email-runtime-store';
+import { deliveryTestEndpointReferenceDigest } from '../lib/testing/e2e-delivery';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -434,6 +448,8 @@ type PostgresTransaction = Parameters<
  */
 async function insertDeliveryTestStructuralFixture(
   transaction: PostgresTransaction,
+  dispatchCreatedAt: Date | string = '2026-08-10T16:06:30.000Z',
+  endpointReferenceDigest: string = 'e'.repeat(64),
 ): Promise<void> {
   for (const statement of syntheticAdminEvidencePrerequisites) {
     await transaction.execute(statement);
@@ -673,7 +689,7 @@ async function insertDeliveryTestStructuralFixture(
         '00000000-0000-4000-8000-000000030003'::uuid,
         'staff'::roster_population,
         null,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         '00000000-0000-4000-8000-000000030011'::uuid,
         '00000000-0000-4000-8000-000000026001'::uuid,
         '00000000-0000-4000-8000-000000026004'::uuid,
@@ -806,7 +822,7 @@ async function insertDeliveryTestStructuralFixture(
         repeat('d', 64),
         '00000000-0000-4000-8000-000000030010'::uuid,
         1,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         '2026-08-10T16:05:00.000Z'::timestamptz,
         '2026-08-10T16:10:00.000Z'::timestamptz
       )
@@ -881,7 +897,7 @@ async function insertDeliveryTestStructuralFixture(
         ),
         '00000000-0000-4000-8000-000000030010'::uuid,
         1,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         '2026-08-10T16:06:00.000Z'::timestamptz
       )
     `,
@@ -990,7 +1006,18 @@ async function insertDeliveryTestStructuralFixture(
             'renderedMessage', channel.rendered_message,
             'integrationStatus', jsonb_build_object(
               'integrationId', channel.integration_id,
-              'label', channel.integration_label::text
+              'label', channel.integration_label::text,
+              'verifiedAt', '2026-08-10T16:02:00.000Z',
+              'verifiedByUserId',
+                '00000000-0000-4000-8000-000000026001',
+              'authorizationReference', case channel.channel
+                when 'push' then
+                  'synthetic-product-owner-push-live-verification'
+                when 'email' then
+                  'synthetic-product-owner-email-live-verification'
+              end,
+              'reasonCode', null,
+              'observedAt', '2026-08-10T16:02:00.000Z'
             )
           ) order by channel.sequence
         ) as channels
@@ -1030,7 +1057,7 @@ async function insertDeliveryTestStructuralFixture(
         channel.integration_label,
         channel.sequence,
         channel.endpoint_count,
-        '2026-08-10T16:06:30.000Z'::timestamptz
+        ${dispatchCreatedAt}::timestamptz
       from outbox
       join notification_intent_channels as channel
         on channel.intent_id = outbox.intent_id
@@ -1050,7 +1077,7 @@ async function insertDeliveryTestStructuralFixture(
         '00000000-0000-4000-8000-000000030032'::uuid,
         '00000000-0000-4000-8000-000000030010'::uuid,
         1,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         repeat('d', 64),
         '00000000-0000-4000-8000-000000030041'::uuid,
         'consumed'::human_confirmation_status,
@@ -1650,6 +1677,43 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         )
     `);
     expect(discriminatorCount[0]?.count).toBeGreaterThanOrEqual(12);
+  });
+
+  test('defers retained channel-history scans while enforcing replacement checks', async () => {
+    const db = databaseConnection().db;
+    const constraints = await db.execute<{
+      constraint_name: string;
+      table_name: string;
+      validated: boolean;
+    }>(sql`
+      select
+        relation.relname as table_name,
+        constraint_record.conname as constraint_name,
+        constraint_record.convalidated as validated
+      from pg_catalog.pg_constraint as constraint_record
+      join pg_catalog.pg_class as relation
+        on relation.oid = constraint_record.conrelid
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public'
+        and constraint_record.conname in (
+          'outbox_channel_plan_shape',
+          'delivery_test_reports_channels_shape'
+        )
+      order by relation.relname
+    `);
+    expect([...constraints]).toEqual([
+      {
+        table_name: 'delivery_test_reports',
+        constraint_name: 'delivery_test_reports_channels_shape',
+        validated: false,
+      },
+      {
+        table_name: 'outbox',
+        constraint_name: 'outbox_channel_plan_shape',
+        validated: false,
+      },
+    ]);
   });
 
   test('installs strict SMS lifecycle provenance and database-issued ordering', async () => {
@@ -5613,6 +5677,127 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     }
   });
 
+  test('keeps SES provider-I/O claims durable, narrowly writable, and append-only', async () => {
+    const db = databaseConnection().db;
+    const [privileges] = await db.execute<{
+      canSelect: boolean;
+      canInsert: boolean;
+      canDelete: boolean;
+      canCompleteOutcome: boolean;
+      canRewriteFingerprint: boolean;
+    }>(sql`
+      select
+        has_table_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'SELECT'
+        ) as "canSelect",
+        has_table_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'INSERT'
+        ) as "canInsert",
+        has_table_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'DELETE'
+        ) as "canDelete",
+        has_column_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'outcome', 'UPDATE'
+        ) as "canCompleteOutcome",
+        has_column_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io',
+          'request_fingerprint', 'UPDATE'
+        ) as "canRewriteFingerprint"
+    `);
+    expect(privileges).toEqual({
+      canSelect: true,
+      canInsert: true,
+      canDelete: false,
+      canCompleteOutcome: true,
+      canRewriteFingerprint: false,
+    });
+
+    const rollbackProbe = new Error('rollback SES provider-I/O proof');
+    try {
+      await db.transaction(async (transaction) => {
+        await insertDeliveryTestStructuralFixture(transaction);
+        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+        await transaction.execute(sql`
+          insert into ses_email_provider_io (
+            attempt_id, request_fingerprint, claim_token
+          ) values (
+            '00000000-0000-4000-8000-000000030091'::uuid,
+            repeat('a', 64),
+            '00000000-0000-4000-8000-000000030092'::uuid
+          )
+        `);
+        const webhookStore = createDrizzleSesWebhookStore(
+          transaction as unknown as Database,
+        );
+        const attempt = await webhookStore.loadAttempt(
+          '00000000-0000-4000-8000-000000030091',
+        );
+        if (attempt === null) {
+          throw new Error('The synthetic SES attempt was not retained.');
+        }
+        await expect(
+          webhookStore.reconcileProviderIo(
+            attempt,
+            'synthetic-provider-reference',
+            '00000000-0000-4000-8000-000000030093',
+          ),
+        ).rejects.toThrow('The SES callback could not be persisted safely.');
+        await webhookStore.reconcileProviderIo(
+          attempt,
+          'synthetic-provider-reference',
+          '00000000-0000-4000-8000-000000030092',
+        );
+        await expect(
+          webhookStore.reconcileProviderIo(
+            attempt,
+            'conflicting-provider-reference',
+            '00000000-0000-4000-8000-000000030092',
+          ),
+        ).rejects.toThrow('The SES callback could not be persisted safely.');
+        const [retained] = await transaction.execute<{
+          state: string;
+          fingerprint: string;
+        }>(sql`
+          select
+            outcome ->> 'state' as state,
+            request_fingerprint as fingerprint
+          from ses_email_provider_io
+          where attempt_id =
+            '00000000-0000-4000-8000-000000030091'::uuid
+        `);
+        expect(retained).toEqual({
+          state: 'provider-accepted',
+          fingerprint: 'a'.repeat(64),
+        });
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+          await transaction.execute(sql`
+            insert into ses_email_provider_io (
+              attempt_id, request_fingerprint
+            ) values (
+              '00000000-0000-4000-8000-000000030091'::uuid,
+              repeat('b', 64)
+            )
+          `);
+          await transaction.execute(sql`
+            delete from ses_email_provider_io
+            where attempt_id =
+              '00000000-0000-4000-8000-000000030091'::uuid
+          `);
+        }),
+      /SES provider I\/O truth is append-only/u,
+    );
+  });
+
   test('reserves +999 SMS destinations for synthetic mock fixtures', async () => {
     const db = databaseConnection().db;
     await expectConstraintViolation(
@@ -5698,6 +5883,725 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       if (error !== rollbackProbe) throw error;
     }
   });
+
+  test.each([
+    {
+      authorizationReference:
+        'synthetic-product-owner-controlled-canary-approval',
+      channel: 'sms',
+      eligibilityFactId: '00000000-0000-4000-8000-000000279002',
+      endpointId: '00000000-0000-4000-8000-000000279001',
+      integrationId: 'aws-eum-sms',
+      integrationStatusId: '00000000-0000-4000-8000-000000279005',
+      providerId: 'aws-eum-sms',
+      recipientId: '00000000-0000-4000-8000-000000030004',
+    },
+    {
+      authorizationReference: 'synthetic-product-owner-delivery-test-approval',
+      channel: 'email',
+      eligibilityFactId: '00000000-0000-4000-8000-000000030013',
+      endpointId: '00000000-0000-4000-8000-000000030007',
+      integrationId: 'ses-email',
+      integrationStatusId: '00000000-0000-4000-8000-000000030051',
+      providerId: 'aws-ses-v2',
+      recipientId: '00000000-0000-4000-8000-000000030005',
+    },
+  ] as const)(
+    'persists one controlled $channel canary from approved target through outbox and report truth',
+    async ({
+      authorizationReference,
+      channel,
+      eligibilityFactId,
+      endpointId,
+      integrationId,
+      integrationStatusId,
+      providerId,
+      recipientId,
+    }) => {
+      const db = databaseConnection().db;
+      const endpointReferenceDigest = deliveryTestEndpointReferenceDigest([
+        { recipientId, endpointId, channel },
+      ]);
+      const rollbackProbe = new Error(
+        `rollback controlled ${channel} canary proof`,
+      );
+      try {
+        await db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          if (channel === 'sms') {
+            await transaction.execute(sql`
+          insert into roster_endpoints (
+            id, roster_snapshot_id, recipient_id, population, channel,
+            status, captured_at, platform, token, email, phone_number
+          ) values (
+            ${endpointId}::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            ${recipientId}::uuid,
+            'staff'::roster_population,
+            ${channel}::notification_channel,
+            'active'::endpoint_status,
+            '2026-08-10T16:01:00.000Z'::timestamptz,
+            null,
+            null,
+            null,
+            '+12025550199'
+          )
+        `);
+            await transaction.execute(sql`
+          insert into delivery_test_canary_eligibility_facts (
+            id, supersedes_fact_id, facility_id, roster_snapshot_id,
+            roster_population, recipient_id, endpoint_id, channel, decision,
+            opted_in_at, decided_at, decided_by_user_id,
+            decided_with_session_id, authorization_reference
+          ) values (
+            ${eligibilityFactId}::uuid,
+            null,
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            ${recipientId}::uuid,
+            ${endpointId}::uuid,
+            ${channel}::notification_channel,
+            'approved-synthetic-canary',
+            '2026-08-10T15:00:00.000Z'::timestamptz,
+            '2026-08-10T16:03:00.000Z'::timestamptz,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            '00000000-0000-4000-8000-000000026004'::uuid,
+            ${authorizationReference}
+          )
+        `);
+          }
+          await transaction.execute(sql`
+          insert into delivery_test_target_set_versions (
+            id, version, facility_id, roster_snapshot_id, roster_population,
+            supersedes_version_id, endpoint_reference_digest,
+            idempotency_request_id, approved_by_user_id,
+            approved_with_session_id, approved_at, created_at
+          ) values (
+            '00000000-0000-4000-8000-000000279003'::uuid,
+            2,
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            '00000000-0000-4000-8000-000000030010'::uuid,
+            ${endpointReferenceDigest},
+            '00000000-0000-4000-8000-000000279004'::uuid,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            '00000000-0000-4000-8000-000000026004'::uuid,
+            '2026-08-10T16:04:00.000Z'::timestamptz,
+            '2026-08-10T16:03:00.000Z'::timestamptz
+          )
+        `);
+          await transaction.execute(sql`
+          insert into delivery_test_target_endpoints (
+            target_set_version_id, target_set_version, eligibility_fact_id,
+            roster_snapshot_id, roster_population, recipient_id, endpoint_id,
+            channel, attestation, opted_in_at, attested_at,
+            attested_by_user_id, authorization_reference
+          ) values (
+            '00000000-0000-4000-8000-000000279003'::uuid,
+            2,
+            ${eligibilityFactId}::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            ${recipientId}::uuid,
+            ${endpointId}::uuid,
+            ${channel}::notification_channel,
+            'approved-synthetic-canary',
+            '2026-08-10T15:00:00.000Z'::timestamptz,
+            '2026-08-10T16:03:00.000Z'::timestamptz,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            ${authorizationReference}
+          )
+        `);
+          await transaction.execute(
+            sql`set constraints "delivery_test_target_sets_complete_guard" immediate`,
+          );
+          await transaction.execute(
+            sql`set constraints "delivery_test_target_sets_complete_guard" deferred`,
+          );
+          if (channel === 'sms') {
+            await transaction.execute(sql`
+          insert into integration_statuses (
+            id, integration_id, label, verified_at, verified_by_user_id,
+            authorization_reference, reason_code, observed_at
+          ) values (
+            ${integrationStatusId}::uuid,
+            ${integrationId},
+            'live-verified'::integration_truth_label,
+            '2026-08-10T16:02:00.000Z'::timestamptz,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            'synthetic-product-owner-controlled-canary-live-verification',
+            null,
+            '2026-08-10T16:02:00.000Z'::timestamptz
+          )
+        `);
+          }
+          await transaction.execute(sql`
+          insert into human_confirmation_records (
+            id, capability_id, connectivity_epoch_id, confirmed_by_user_id,
+            confirmed_with_session_id, consequence_digest, issued_at,
+            expires_at, status, consumed_at, consumed_for_request_id,
+            expired_at
+          ) values (
+            '00000000-0000-4000-8000-000000279006'::uuid,
+            'start-event'::mutation_capability,
+            '00000000-0000-4000-8000-000000030040'::uuid,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            '00000000-0000-4000-8000-000000026004'::uuid,
+            repeat('a', 64),
+            '2026-08-10T16:04:00.000Z'::timestamptz,
+            '2026-08-10T16:09:00.000Z'::timestamptz,
+            'consumed'::human_confirmation_status,
+            '2026-08-10T16:06:00.000Z'::timestamptz,
+            '00000000-0000-4000-8000-000000279007'::uuid,
+            null
+          )
+        `);
+          await transaction.execute(sql`
+          insert into human_confirmation_actions (confirmation_id, action_id)
+          values (
+            '00000000-0000-4000-8000-000000279006'::uuid,
+            'send-real-notification'::human_only_action
+          )
+        `);
+          await transaction.execute(sql`
+          insert into activation_previews (
+            id, facility_id, kind, template_mode, event_type_version_id,
+            roster_snapshot_id, roster_population, recipient_count, channels,
+            send_readiness, blocking_reason_codes, active_event_ids,
+            consequence_digest, delivery_test_target_set_id,
+            delivery_test_target_set_version,
+            delivery_test_endpoint_reference_digest, created_at, expires_at
+          ) values (
+            '00000000-0000-4000-8000-000000279008'::uuid,
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            'drill'::event_kind,
+            'drill'::template_mode,
+            '00000000-0000-4000-8000-000000000201'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            1,
+            '[]'::jsonb,
+            'ready',
+            '[]'::jsonb,
+            '[]'::jsonb,
+            repeat('a', 64),
+            '00000000-0000-4000-8000-000000279003'::uuid,
+            2,
+            ${endpointReferenceDigest},
+            '2026-08-10T16:05:00.000Z'::timestamptz,
+            '2026-08-10T16:10:00.000Z'::timestamptz
+          )
+        `);
+          await transaction.execute(sql`
+          insert into events (
+            id, facility_id, kind, template_mode, event_type_version_id,
+            status, roster_snapshot_id, roster_population, created_by,
+            created_at, activated_at, all_clear_at, reactivated_at, closed_at,
+            correction_of_event_id, correction_reason,
+            activation_authorization
+          ) values (
+            '00000000-0000-4000-8000-000000279009'::uuid,
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            'drill'::event_kind,
+            'drill'::template_mode,
+            '00000000-0000-4000-8000-000000000201'::uuid,
+            'active'::event_status,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            jsonb_build_object(
+              'kind', 'human',
+              'userId', '00000000-0000-4000-8000-000000026001',
+              'sessionId', '00000000-0000-4000-8000-000000026004'
+            ),
+            '2026-08-10T16:05:00.000Z'::timestamptz,
+            '2026-08-10T16:06:00.000Z'::timestamptz,
+            null,
+            null,
+            null,
+            null,
+            null,
+            jsonb_build_object(
+              'kind', 'human-confirmed',
+              'activationPreviewId',
+                '00000000-0000-4000-8000-000000279008',
+              'preparedActivationId', null,
+              'confirmationId', '00000000-0000-4000-8000-000000279006',
+              'consequenceDigest', repeat('a', 64),
+              'requestId', '00000000-0000-4000-8000-000000279007'
+            )
+          )
+        `);
+          await transaction.execute(sql`
+          insert into notification_intents (
+            id, event_id, event_kind, template_mode, purpose,
+            event_type_version_id, roster_snapshot_id, roster_population,
+            created_by, source, request_id, "authorization",
+            delivery_test_target_set_id, delivery_test_target_set_version,
+            delivery_test_endpoint_reference_digest, created_at
+          ) values (
+            '00000000-0000-4000-8000-000000279010'::uuid,
+            '00000000-0000-4000-8000-000000279009'::uuid,
+            'drill'::event_kind,
+            'drill'::template_mode,
+            'activation'::notification_purpose,
+            '00000000-0000-4000-8000-000000000201'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            jsonb_build_object(
+              'kind', 'human',
+              'userId', '00000000-0000-4000-8000-000000026001',
+              'sessionId', '00000000-0000-4000-8000-000000026004'
+            ),
+            'web'::invocation_source,
+            '00000000-0000-4000-8000-000000279007'::uuid,
+            jsonb_build_object(
+              'kind', 'human-confirmed',
+              'activationPreviewId',
+                '00000000-0000-4000-8000-000000279008',
+              'preparedActivationId', null,
+              'confirmationId', '00000000-0000-4000-8000-000000279006',
+              'consequenceDigest', repeat('a', 64),
+              'requestId', '00000000-0000-4000-8000-000000279007'
+            ),
+            '00000000-0000-4000-8000-000000279003'::uuid,
+            2,
+            ${endpointReferenceDigest},
+            '2026-08-10T16:06:00.000Z'::timestamptz
+          )
+        `);
+          await transaction.execute(sql`
+          insert into notification_intent_channels (
+            intent_id, sequence, channel, event_kind, template_mode, purpose,
+            roster_population, classification_marker, endpoint_count,
+            rendered_message, integration_status_id, integration_id,
+            integration_label
+          ) values (
+            '00000000-0000-4000-8000-000000279010'::uuid,
+            1,
+            ${channel}::notification_channel,
+            'drill'::event_kind,
+            'drill'::template_mode,
+            'activation'::notification_purpose,
+            'staff'::roster_population,
+            'DRILL'::classification_marker,
+            1,
+            jsonb_build_object(
+              'channel', ${channel}::text,
+              'eventKind', 'drill',
+              'templateMode', 'drill',
+              'purpose', 'activation',
+              'classificationMarker', 'DRILL',
+              'body', '[DRILL] One approved controlled canary endpoint.'
+            ),
+            ${integrationStatusId}::uuid,
+            ${integrationId},
+            'live-verified'::integration_truth_label
+          )
+        `);
+          await transaction.execute(sql`
+          insert into outbox (
+            id, message_version, intent_id, event_id, event_kind,
+            template_mode, purpose, event_type_version_id,
+            roster_snapshot_id, roster_population, request_id,
+            "authorization", channels, message, status, attempts,
+            available_at, locked_until, published_at, failed_at,
+            last_error_code, created_at
+          )
+          select
+            '00000000-0000-4000-8000-000000279011'::uuid,
+            1,
+            intent.id,
+            intent.event_id,
+            intent.event_kind,
+            intent.template_mode,
+            intent.purpose,
+            intent.event_type_version_id,
+            intent.roster_snapshot_id,
+            intent.roster_population,
+            intent.request_id,
+            intent."authorization",
+            planned.channels,
+            jsonb_build_object(
+              'version', 1,
+              'outboxId', '00000000-0000-4000-8000-000000279011',
+              'intentId', intent.id::text,
+              'eventId', intent.event_id::text,
+              'eventKind', intent.event_kind::text,
+              'templateMode', intent.template_mode::text,
+              'purpose', intent.purpose::text,
+              'eventTypeVersion', jsonb_build_object(
+                'id', intent.event_type_version_id::text,
+                'templateMode', intent.template_mode::text
+              ),
+              'rosterSnapshotId', intent.roster_snapshot_id::text,
+              'rosterPopulation', intent.roster_population::text,
+              'requestId', intent.request_id::text,
+              'authorization', intent."authorization",
+              'deliveryTest', jsonb_build_object(
+                'purpose', 'monthly-live-delivery-test',
+                'targetSet', jsonb_build_object(
+                  'id', intent.delivery_test_target_set_id::text,
+                  'version', intent.delivery_test_target_set_version
+                ),
+                'endpointReferenceDigest',
+                  intent.delivery_test_endpoint_reference_digest
+              ),
+              'channels', planned.channels,
+              'createdAt', intent.created_at
+            ),
+            'pending'::outbox_status,
+            0,
+            intent.created_at,
+            null,
+            null,
+            null,
+            null,
+            intent.created_at
+          from notification_intents as intent
+          cross join lateral (
+            select jsonb_agg(
+              jsonb_build_object(
+                'channel', channel.channel::text,
+                'endpointCount', channel.endpoint_count,
+                'renderedMessage', channel.rendered_message,
+                'integrationStatus', jsonb_build_object(
+                  'integrationId', channel.integration_id,
+                  'label', channel.integration_label::text
+                )
+              ) order by channel.sequence
+            ) as channels
+            from notification_intent_channels as channel
+            where channel.intent_id = intent.id
+          ) as planned
+          where intent.id = '00000000-0000-4000-8000-000000279010'::uuid
+        `);
+          await expectConstraintViolation(
+            () =>
+              transaction.transaction(async (probe) => {
+                await probe.execute(sql`
+                insert into outbox (
+                  id, message_version, intent_id, event_id, event_kind,
+                  template_mode, purpose, event_type_version_id,
+                  roster_snapshot_id, roster_population, request_id,
+                  "authorization", channels, message, status, attempts,
+                  available_at, locked_until, published_at, failed_at,
+                  last_error_code, created_at
+                )
+                select
+                  id,
+                  message_version,
+                  intent_id,
+                  event_id,
+                  event_kind,
+                  template_mode,
+                  purpose,
+                  event_type_version_id,
+                  roster_snapshot_id,
+                  roster_population,
+                  request_id,
+                  "authorization",
+                  '[]'::jsonb,
+                  jsonb_set(message, '{channels}', '[]'::jsonb),
+                  status,
+                  attempts,
+                  available_at,
+                  locked_until,
+                  published_at,
+                  failed_at,
+                  last_error_code,
+                  created_at
+                from outbox
+                where id = '00000000-0000-4000-8000-000000279011'::uuid
+              `);
+              }),
+            'outbox_channel_plan_shape',
+          );
+          await transaction.execute(sql`
+          insert into dispatch_batches (
+            id, outbox_id, intent_id, event_id, event_kind, template_mode,
+            purpose, event_type_version_id, roster_snapshot_id,
+            roster_population, request_id, "authorization", channel,
+            rendered_message, integration_status_id, integration_id,
+            integration_label, sequence, endpoint_count, created_at
+          )
+          select
+            '00000000-0000-4000-8000-000000279012'::uuid,
+            outbox.id,
+            outbox.intent_id,
+            outbox.event_id,
+            outbox.event_kind,
+            outbox.template_mode,
+            outbox.purpose,
+            outbox.event_type_version_id,
+            outbox.roster_snapshot_id,
+            outbox.roster_population,
+            outbox.request_id,
+            outbox."authorization",
+            channel.channel,
+            channel.rendered_message,
+            channel.integration_status_id,
+            channel.integration_id,
+            channel.integration_label,
+            channel.sequence,
+            channel.endpoint_count,
+            '2026-08-10T16:06:30.000Z'::timestamptz
+          from outbox
+          join notification_intent_channels as channel
+            on channel.intent_id = outbox.intent_id
+          where outbox.id = '00000000-0000-4000-8000-000000279011'::uuid
+        `);
+          await transaction.execute(sql`
+          insert into delivery_test_runs (
+            id, activation_preview_id, event_id, notification_intent_id,
+            target_set_version_id, target_set_version,
+            endpoint_reference_digest, consequence_digest, confirmation_id,
+            confirmation_status, request_id, started_by_user_id,
+            started_with_session_id, started_at
+          ) values (
+            '00000000-0000-4000-8000-000000279013'::uuid,
+            '00000000-0000-4000-8000-000000279008'::uuid,
+            '00000000-0000-4000-8000-000000279009'::uuid,
+            '00000000-0000-4000-8000-000000279010'::uuid,
+            '00000000-0000-4000-8000-000000279003'::uuid,
+            2,
+            ${endpointReferenceDigest},
+            repeat('a', 64),
+            '00000000-0000-4000-8000-000000279006'::uuid,
+            'consumed'::human_confirmation_status,
+            '00000000-0000-4000-8000-000000279007'::uuid,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            '00000000-0000-4000-8000-000000026004'::uuid,
+            '2026-08-10T16:06:00.000Z'::timestamptz
+          )
+        `);
+          await transaction.execute(sql`
+          insert into channel_attempts (
+            id, batch_id, intent_id, event_id, event_kind, template_mode,
+            purpose, event_type_version_id, roster_snapshot_id,
+            roster_population, recipient_id, endpoint_id, channel,
+            attempt_number, attempted_at
+          ) values (
+            '00000000-0000-4000-8000-000000279014'::uuid,
+            '00000000-0000-4000-8000-000000279012'::uuid,
+            '00000000-0000-4000-8000-000000279010'::uuid,
+            '00000000-0000-4000-8000-000000279009'::uuid,
+            'drill'::event_kind,
+            'drill'::template_mode,
+            'activation'::notification_purpose,
+            '00000000-0000-4000-8000-000000000201'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            ${recipientId}::uuid,
+            ${endpointId}::uuid,
+            ${channel}::notification_channel,
+            1,
+            '2026-08-10T16:06:31.000Z'::timestamptz
+          )
+        `);
+          await transaction.execute(sql`
+          insert into delivery_evidence (
+            id, subject_kind, subject_id, intent_id, attempt_id, sequence,
+            previous_evidence_id, state, recorded_at, provider,
+            provider_reference, proof, reason_code, diagnostic_digest
+          ) values
+          (
+            '00000000-0000-4000-8000-000000279015'::uuid,
+            'attempt'::delivery_evidence_subject_kind,
+            '00000000-0000-4000-8000-000000279014'::uuid,
+            null,
+            '00000000-0000-4000-8000-000000279014'::uuid,
+            1,
+            null,
+            'attempted'::delivery_truth_state,
+            '2026-08-10T16:06:31.100Z'::timestamptz,
+            null,
+            null,
+            null,
+            null,
+            null
+          ),
+          (
+            '00000000-0000-4000-8000-000000279016'::uuid,
+            'attempt'::delivery_evidence_subject_kind,
+            '00000000-0000-4000-8000-000000279014'::uuid,
+            null,
+            '00000000-0000-4000-8000-000000279014'::uuid,
+            2,
+            '00000000-0000-4000-8000-000000279015'::uuid,
+            'provider-accepted'::delivery_truth_state,
+            '2026-08-10T16:06:31.700Z'::timestamptz,
+            ${providerId},
+            ${`synthetic-provider-reference:${channel}:1`},
+            null,
+            null,
+            null
+          )
+        `);
+          if (channel === 'email') {
+            const webhookStore = createDrizzleSesWebhookStore(
+              transaction as unknown as Database,
+            );
+            const attempt = await webhookStore.loadAttempt(
+              '00000000-0000-4000-8000-000000279014',
+            );
+            if (attempt === null) {
+              throw new Error('The controlled email attempt was not retained.');
+            }
+            const accepted = DeliveryEvidenceSchema.parse({
+              id: '00000000-0000-4000-8000-000000279016',
+              subject: { kind: 'attempt', attemptId: attempt.id },
+              sequence: 2,
+              previousEvidenceId: '00000000-0000-4000-8000-000000279015',
+              state: 'provider-accepted',
+              recordedAt: '2026-08-10T16:06:31.700Z',
+              provider: providerId,
+              providerReference: `synthetic-provider-reference:${channel}:1`,
+              proof: null,
+              reasonCode: null,
+              diagnosticDigest: null,
+            });
+            await webhookStore.reprojectDeliveryTestReport(attempt, accepted);
+
+            const deliveredInput = {
+              subject: { kind: 'attempt' as const, attemptId: attempt.id },
+              state: 'delivered' as const,
+              provider: providerId,
+              providerReference: accepted.providerReference,
+              proof: {
+                kind: 'provider-delivery-receipt' as const,
+                provider: providerId,
+                receiptId: 'synthetic-controlled-email-delivery-receipt',
+                deliveredAt: new Date().toISOString(),
+              },
+              reasonCode: null,
+              diagnosticDigest: null,
+            };
+            const delivered = await webhookStore.recordAttemptEvidence(
+              attempt,
+              deliveredInput,
+            );
+            await webhookStore.reprojectDeliveryTestReport(attempt, delivered);
+            const replayed = await webhookStore.recordAttemptEvidence(
+              attempt,
+              deliveredInput,
+            );
+            expect(replayed.id).toBe(delivered.id);
+            await webhookStore.reprojectDeliveryTestReport(attempt, replayed);
+          } else {
+            await transaction.execute(sql`
+          insert into delivery_test_reports (
+            id, run_id, run_started_at, sequence, supersedes_report_id,
+            status, channels, generated_at, finalized_by, source, reason_code
+          ) values (
+            '00000000-0000-4000-8000-000000279017'::uuid,
+            '00000000-0000-4000-8000-000000279013'::uuid,
+            '2026-08-10T16:06:00.000Z'::timestamptz,
+            1,
+            null,
+            'succeeded'::delivery_test_report_status,
+            jsonb_build_array(
+              jsonb_build_object(
+                'channel', ${channel}::text,
+                'endpointCount', 1,
+                'activationToProviderAcceptMs', 31700,
+                'latestStateCounts', jsonb_build_array(
+                  jsonb_build_object(
+                    'state', 'provider-accepted',
+                    'count', 1
+                  )
+                ),
+                'completedAt', '2026-08-10T16:06:31.700Z'
+              )
+            ),
+            '2026-08-10T16:08:00.000Z'::timestamptz,
+            jsonb_build_object(
+              'kind', 'system',
+              'serviceId', 'delivery-test-reporter'
+            ),
+            'worker'::invocation_source,
+            null
+          )
+        `);
+          }
+          const invalidReportId = randomUUID();
+          await transaction.execute(sql`
+          alter table delivery_test_reports
+            disable trigger delivery_test_reports_monotonic_insert_guard
+        `);
+          await expectConstraintViolation(
+            () =>
+              transaction.transaction(async (probe) => {
+                await probe.execute(sql`
+                insert into delivery_test_reports (
+                  id, run_id, run_started_at, sequence,
+                  supersedes_report_id, status, channels, generated_at,
+                  finalized_by, source, reason_code
+                )
+                select
+                  ${invalidReportId}::uuid,
+                  run_id,
+                  run_started_at,
+                  sequence,
+                  supersedes_report_id,
+                  status,
+                  '[]'::jsonb,
+                  generated_at,
+                  finalized_by,
+                  source,
+                  reason_code
+                from delivery_test_reports
+                where run_id =
+                  '00000000-0000-4000-8000-000000279013'::uuid
+                order by sequence desc
+                limit 1
+              `);
+              }),
+            'delivery_test_reports_channels_shape',
+          );
+          await transaction.execute(sql`
+          alter table delivery_test_reports
+            enable trigger delivery_test_reports_monotonic_insert_guard
+        `);
+          const retained = await transaction.execute<{
+            channel_count: number;
+            endpoint_count: number;
+            report_sequences: number[];
+            report_states: string[];
+          }>(sql`
+          select
+            max(jsonb_array_length(report.channels))::integer as channel_count,
+            max(jsonb_array_length(outbox.channels))::integer as endpoint_count,
+            jsonb_agg(report.sequence order by report.sequence) as report_sequences,
+            jsonb_agg(
+              report.channels -> 0 -> 'latestStateCounts' -> 0 ->> 'state'
+              order by report.sequence
+            ) as report_states
+          from delivery_test_reports as report
+          join delivery_test_runs as run on run.id = report.run_id
+          join outbox on outbox.intent_id = run.notification_intent_id
+          where report.run_id =
+            '00000000-0000-4000-8000-000000279013'::uuid
+        `);
+          expect([...retained]).toEqual([
+            {
+              channel_count: 1,
+              endpoint_count: 1,
+              report_sequences: channel === 'email' ? [1, 2] : [1],
+              report_states:
+                channel === 'email'
+                  ? ['provider-accepted', 'delivered']
+                  : ['provider-accepted'],
+            },
+          ]);
+          throw rollbackProbe;
+        });
+      } catch (error) {
+        if (error !== rollbackProbe) throw error;
+      }
+    },
+  );
 
   test('accepts a rotation-safe revoke and fresh re-approval eligibility chain', async () => {
     const db = databaseConnection().db;
@@ -6709,5 +7613,272 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect(
       northFacility?.neighborhoodMemberships[0]?.neighborhoodVersion.name,
     ).toBe('Synthetic Twin Campuses');
+  });
+
+  test('expands and retries one synthetic email attempt with durable provider fencing', async () => {
+    const db = databaseConnection().db;
+    const verificationReference =
+      'synthetic-product-owner-email-live-verification';
+    const dispatchCreatedAt = new Date(Date.now() - 5_000);
+    const endpointReferenceDigest = deliveryTestEndpointReferenceDigest([
+      {
+        recipientId: '00000000-0000-4000-8000-000000030004',
+        endpointId: '00000000-0000-4000-8000-000000030006',
+        channel: 'push',
+      },
+      {
+        recipientId: '00000000-0000-4000-8000-000000030005',
+        endpointId: '00000000-0000-4000-8000-000000030007',
+        channel: 'email',
+      },
+    ]);
+    await db.transaction(async (transaction) => {
+      await insertDeliveryTestStructuralFixture(
+        transaction,
+        dispatchCreatedAt.toISOString(),
+        endpointReferenceDigest,
+      );
+      await transaction.execute(sql`
+        update channel_configurations
+        set
+          enabled = true,
+          status_id = '00000000-0000-4000-8000-000000030051'::uuid,
+          status_label = 'live-verified'::integration_truth_label,
+          changed_at = clock_timestamp()
+        where integration_id = 'ses-email'
+      `);
+    });
+
+    const batch = DispatchBatchSchema.parse({
+      id: '00000000-0000-4000-8000-000000030035',
+      intentId: '00000000-0000-4000-8000-000000030032',
+      eventId: '00000000-0000-4000-8000-000000030030',
+      facilityId: '00000000-0000-4000-8000-000000000001',
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersion: {
+        id: '00000000-0000-4000-8000-000000000201',
+        templateMode: 'drill',
+      },
+      rosterSnapshotId: '00000000-0000-4000-8000-000000030003',
+      rosterPopulation: 'staff',
+      deliveryTest: {
+        purpose: 'monthly-live-delivery-test',
+        targetSet: {
+          id: '00000000-0000-4000-8000-000000030010',
+          version: 1,
+        },
+        endpointReferenceDigest,
+      },
+      requestId: '00000000-0000-4000-8000-000000030031',
+      authorization: {
+        kind: 'human-confirmed',
+        activationPreviewId: '00000000-0000-4000-8000-000000030020',
+        preparedActivationId: null,
+        confirmationId: '00000000-0000-4000-8000-000000030041',
+        consequenceDigest: 'd'.repeat(64),
+        requestId: '00000000-0000-4000-8000-000000030031',
+      },
+      channel: 'email',
+      renderedMessage: {
+        channel: 'email',
+        eventKind: 'drill',
+        templateMode: 'drill',
+        purpose: 'activation',
+        classificationMarker: 'DRILL',
+        subject: '[DRILL] Monthly delivery test',
+        textBody: '[DRILL] Synthetic canary only.',
+      },
+      integrationStatus: {
+        integrationId: 'ses-email',
+        label: 'live-verified',
+        verifiedAt: '2026-08-10T16:02:00.000Z',
+        verifiedByUserId: '00000000-0000-4000-8000-000000026001',
+        authorizationReference: verificationReference,
+        reasonCode: null,
+        observedAt: '2026-08-10T16:02:00.000Z',
+      },
+      sequence: 2,
+      endpointCount: 1,
+      createdAt: dispatchCreatedAt.toISOString(),
+    });
+    const deploymentAuthorization = {
+      workerEnabled: true,
+      verificationReference,
+    } as const;
+    const store = createDrizzleEmailRuntimeStore(db, {
+      deploymentAuthorization,
+    });
+    const resolutionRequest = {
+      operation: 'resolve-batch',
+      verificationReference,
+      batch,
+      enqueuedAt: new Date(dispatchCreatedAt.getTime() + 1_000).toISOString(),
+      cursor: 0,
+    } as const;
+    const firstResolution = EmailBatchResolutionPageSchema.parse(
+      await store.resolveBatch(resolutionRequest),
+    );
+    expect(firstResolution).toMatchObject({
+      nextCursor: null,
+      suppressedCount: 0,
+      items: [
+        {
+          attempt: {
+            batchId: batch.id,
+            attemptNumber: 1,
+            attemptedAt: batch.createdAt,
+            recipientId: '00000000-0000-4000-8000-000000030005',
+            endpointId: '00000000-0000-4000-8000-000000030007',
+          },
+          endpoint: {
+            id: '00000000-0000-4000-8000-000000030007',
+            channel: 'email',
+            email: 'synthetic-delivery-test-listed@example.invalid',
+          },
+        },
+      ],
+    });
+    expect(
+      EmailBatchResolutionPageSchema.parse(
+        await store.resolveBatch(resolutionRequest),
+      ),
+    ).toEqual(firstResolution);
+    const workItem = firstResolution.items[0];
+    if (workItem === undefined) {
+      throw new Error('The synthetic email attempt was not resolved.');
+    }
+
+    const evidenceStore = createDrizzleDeliveryEvidenceStore(db);
+    await evidenceStore.recordAttemptEvidence({
+      attempt: workItem.attempt,
+      evidence: {
+        subject: { kind: 'attempt', attemptId: workItem.attempt.id },
+        state: 'attempted',
+        provider: null,
+        providerReference: null,
+        proof: null,
+        reasonCode: null,
+        diagnosticDigest: null,
+      },
+    });
+    await db.execute(sql`
+      update channel_configurations
+      set enabled = false, changed_at = clock_timestamp()
+      where integration_id = 'ses-email'
+    `);
+    expect(await store.authorizeProviderSend(workItem)).toBe(false);
+    const claimRequest = {
+      operation: 'claim-provider-io',
+      verificationReference,
+      attemptId: workItem.attempt.id,
+      requestFingerprint: 'a'.repeat(64),
+      workItem,
+    } as const;
+    expect(
+      SesSendLedgerClaimSchema.parse(await store.claimProviderIo(claimRequest)),
+    ).toEqual({ kind: 'denied' });
+
+    await db.execute(sql`
+      update channel_configurations
+      set enabled = true, changed_at = clock_timestamp()
+      where integration_id = 'ses-email'
+    `);
+    expect(await store.authorizeProviderSend(workItem)).toBe(true);
+    const concurrentClaims = await Promise.all([
+      store.claimProviderIo(claimRequest),
+      createDrizzleEmailRuntimeStore(db, {
+        deploymentAuthorization,
+      }).claimProviderIo(claimRequest),
+    ]);
+    const parsedClaims = concurrentClaims.map((claim) =>
+      SesSendLedgerClaimSchema.parse(claim),
+    );
+    expect(parsedClaims.map(({ kind }) => kind).sort()).toEqual([
+      'acquired',
+      'in-progress',
+    ]);
+    const acquired = parsedClaims.find((claim) => claim.kind === 'acquired');
+    if (acquired?.kind !== 'acquired') {
+      throw new Error('The synthetic provider claim was not acquired.');
+    }
+
+    const failedOutcome = {
+      state: 'failed',
+      provider: 'aws-ses-v2',
+      providerReference: null,
+      proof: null,
+      reasonCode: 'SES_PROVIDER_RETRYABLE',
+      diagnosticDigest: null,
+    } as const;
+    const completionRequest = {
+      operation: 'complete-provider-io',
+      verificationReference,
+      attemptId: workItem.attempt.id,
+      requestFingerprint: claimRequest.requestFingerprint,
+      leaseToken: acquired.leaseToken,
+      outcome: failedOutcome,
+    } as const;
+    await store.completeProviderIo(completionRequest);
+    await store.completeProviderIo(completionRequest);
+    expect(
+      SesSendLedgerClaimSchema.parse(await store.claimProviderIo(claimRequest)),
+    ).toEqual({ kind: 'completed', outcome: failedOutcome });
+
+    const attemptExecutionStore = createDrizzleAttemptExecutionStore(db);
+    const executionFingerprint = 'synthetic-email-runtime-attempt-fingerprint';
+    const executionClaim = await attemptExecutionStore.claim({
+      attemptId: workItem.attempt.id,
+      fingerprint: executionFingerprint,
+      leaseMilliseconds: 60_000,
+    });
+    if (executionClaim.kind !== 'acquired') {
+      throw new Error('The synthetic attempt execution was not acquired.');
+    }
+    await attemptExecutionStore.complete({
+      attemptId: workItem.attempt.id,
+      fingerprint: executionFingerprint,
+      leaseToken: executionClaim.leaseToken,
+      completion: {
+        kind: 'retry',
+        outcome: failedOutcome,
+        delayMilliseconds: 1,
+        nextAttemptNumber: 2,
+        reasonCode: 'SES_PROVIDER_RETRYABLE',
+      },
+    });
+    const retry = EmailRetryResolutionSchema.parse(
+      await store.resolveRetry(workItem.attempt.id),
+    );
+    expect(retry).toMatchObject({
+      kind: 'ready',
+      workItem: {
+        batch,
+        attempt: {
+          batchId: batch.id,
+          attemptNumber: 2,
+          attemptedAt: new Date(dispatchCreatedAt.getTime() + 1).toISOString(),
+          recipientId: workItem.attempt.recipientId,
+          endpointId: workItem.attempt.endpointId,
+        },
+        endpoint: workItem.endpoint,
+      },
+    });
+    if (retry.kind !== 'ready') {
+      throw new Error('The synthetic email retry was not ready.');
+    }
+    expect(retry.workItem.attempt.id).not.toBe(workItem.attempt.id);
+
+    await db.execute(sql`
+      update channel_configurations
+      set enabled = false, changed_at = clock_timestamp()
+      where integration_id = 'ses-email'
+    `);
+    expect(
+      EmailRetryResolutionSchema.parse(
+        await store.resolveRetry(workItem.attempt.id),
+      ),
+    ).toEqual({ kind: 'ineligible' });
   });
 });

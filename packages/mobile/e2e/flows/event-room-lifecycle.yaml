@@ -53,4 +53,8 @@ tags: [issue-32, synthetic-only, event-room]
     timeout: 15000
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertNotVisible: '^REAL INCIDENT$'
+- scrollUntilVisible:
+    element:
+      text: '.*Synthetic mobile issue 32 update.*'
+    direction: UP
 - assertVisible: '.*Synthetic mobile issue 32 update.*'

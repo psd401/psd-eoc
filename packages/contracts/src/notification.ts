@@ -268,20 +268,20 @@ function addChannelPlanIssues(
       path: ['channels'],
     });
   }
-  const controlledEmailCanary =
+  const controlledSingleCanary =
     names.length === 1 &&
-    names[0] === 'email' &&
+    (names[0] === 'email' || names[0] === 'push' || names[0] === 'sms') &&
     value.channels[0]?.endpointCount === 1;
-  if (controlledEmailCanary && value.deliveryTest == null) {
+  if (controlledSingleCanary && value.deliveryTest == null) {
     context.addIssue({
       code: 'custom',
       message:
-        'A one-email plan requires exact controlled delivery-test provenance.',
+        'A single-channel canary plan requires exact controlled delivery-test provenance.',
       path: ['deliveryTest'],
     });
   }
   if (
-    !controlledEmailCanary &&
+    !controlledSingleCanary &&
     (!names.includes('push') || !names.includes('email'))
   ) {
     context.addIssue({
@@ -335,9 +335,39 @@ const ControlledEmailCanaryNotificationPlanSchema = z
   })
   .readonly();
 
+const ControlledPushCanaryNotificationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'push' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled push canary plan must contain exactly one push endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
+const ControlledSmsCanaryNotificationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary plan must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 const NotificationChannelPlanSchema = z.union([
   MultiChannelNotificationPlanSchema,
   ControlledEmailCanaryNotificationPlanSchema,
+  ControlledPushCanaryNotificationPlanSchema,
+  ControlledSmsCanaryNotificationPlanSchema,
 ]);
 
 function addNotificationAuthorizationIssues(
@@ -1052,6 +1082,34 @@ const ControlledEmailCanaryDispatchBatchListSchema = z
   })
   .readonly();
 
+const ControlledPushCanaryDispatchBatchListSchema = z
+  .tuple([DispatchBatchSchema])
+  .superRefine(([batch], context) => {
+    if (batch.channel !== 'push' || batch.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled push canary dispatch must contain exactly one push endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
+const ControlledSmsCanaryDispatchBatchListSchema = z
+  .tuple([DispatchBatchSchema])
+  .superRefine(([batch], context) => {
+    if (batch.channel !== 'sms' || batch.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled SMS canary dispatch must contain exactly one SMS endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const DispatchOutboxResultSchema = z
   .object({
     facilityId: FacilityIdSchema,
@@ -1059,6 +1117,8 @@ export const DispatchOutboxResultSchema = z
     batches: z.union([
       MultiChannelDispatchBatchListSchema,
       ControlledEmailCanaryDispatchBatchListSchema,
+      ControlledPushCanaryDispatchBatchListSchema,
+      ControlledSmsCanaryDispatchBatchListSchema,
     ]),
   })
   .strict()

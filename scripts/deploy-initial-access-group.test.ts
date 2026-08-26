@@ -160,6 +160,70 @@ describe('initial access group deployment preflight', () => {
 });
 
 describe('supported deployment workflow', () => {
+  test('fails closed on absent or padded SMS carrier configuration', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+
+    for (const secret of [
+      'SMS_ORIGINATION_IDENTITY_ARN',
+      'SMS_HELP_MESSAGE',
+      'SMS_STOP_MESSAGE',
+    ]) {
+      expect(workflow).toContain(
+        `${secret}: \${{ secrets.${secret} || 'UNCONFIGURED' }}`,
+      );
+    }
+    expect(workflow).toContain('-z "$SMS_HELP_MESSAGE"');
+    expect(workflow).toContain('-z "$SMS_STOP_MESSAGE"');
+    expect(workflow).toContain('${#SMS_HELP_MESSAGE} -gt 160');
+    expect(workflow).toContain('${#SMS_STOP_MESSAGE} -gt 160');
+    expect(workflow).toContain('"$SMS_HELP_MESSAGE" =~ ^[[:space:]]');
+    expect(workflow).toContain('"$SMS_STOP_MESSAGE" =~ [[:space:]]$');
+  });
+
+  test('preserves every active SMS setting while staging migrations', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    const stage = workflow.slice(
+      workflow.indexOf(
+        '- name: Stage the bootstrap task without changing the live service',
+      ),
+      workflow.indexOf('- name: Run database migrations'),
+    );
+
+    expect(stage).toContain(
+      '$STACK_NAME:EnableAwsEumSmsWorker=$PREVIOUS_SMS_ENABLED',
+    );
+    expect(stage).toContain(
+      '$STACK_NAME:ProvisionAwsEumSmsResources=$PREVIOUS_SMS_PROVISIONED',
+    );
+    expect(stage).toContain('--previous-parameters true');
+    const cutover = workflow.slice(
+      workflow.indexOf('- name: Deploy the application'),
+      workflow.indexOf(
+        '- name: Verify the service is running the deployed image',
+      ),
+    );
+    expect(cutover).toContain(
+      '$STACK_NAME:EnableAwsEumSmsWorker=$SMS_WORKER_ENABLED',
+    );
+    expect(
+      workflow.match(
+        /\$STACK_NAME:EnableAwsEumSmsWorker=\$SMS_WORKER_ENABLED/gu,
+      ),
+    ).toHaveLength(1);
+    for (const parameter of [
+      'SmsRegistrationVerificationReference',
+      'SmsOriginationIdentityArn',
+      'SmsDestinationCountryCode',
+      'SmsHelpMessage',
+      'SmsStopMessage',
+    ]) {
+      expect(stage).not.toContain(`$STACK_NAME:${parameter}=`);
+      expect(
+        workflow.match(new RegExp(`\\$STACK_NAME:${parameter}=`, 'gu')),
+      ).toHaveLength(1);
+    }
+  });
+
   test('preflights before build and forwards every parameter in both CDK phases', async () => {
     const workflow = await Bun.file(WORKFLOW).text();
     const preflight = workflow.indexOf(
@@ -232,6 +296,52 @@ describe('supported deployment workflow', () => {
     );
     expect(workflow).toContain(
       '::error::The current commit does not have a bootstrap image in the repository',
+    );
+  });
+
+  test('stages email enablement only after the compatible app and disables it for rollback', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    expect(
+      workflow.match(
+        /\$STACK_NAME:EnableEmailWorker=\$(?:staged_email_enabled|target_email_enabled)/gu,
+      ),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /\$STACK_NAME:SesCredentialVerificationReference=\$(?:staged_ses_reference|target_ses_reference)/gu,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).toContain(
+      'staged_email_enabled="$PREVIOUS_EMAIL_ENABLED"',
+    );
+    expect(workflow).toContain(
+      'staged_ses_reference="$PREVIOUS_SES_REFERENCE"',
+    );
+    expect(
+      workflow.match(/if \[\[ -n "\$\{ROLLBACK_DIGEST:-\}" \]\]; then/gu)
+        ?.length ?? 0,
+    ).toBeGreaterThanOrEqual(2);
+    expect(workflow).toContain("staged_email_enabled='false'");
+    expect(workflow).toContain("target_email_enabled='false'");
+    expect(workflow).toContain("staged_ses_reference='UNVERIFIED'");
+    expect(workflow).toContain("target_ses_reference='UNVERIFIED'");
+    expect(workflow).toContain(
+      'ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}',
+    );
+    expect(workflow).toContain('if [[ -z "$ROLLBACK_IMAGE_DIGEST" ]]; then');
+    expect(workflow).toContain(
+      'SES_CREDENTIAL_VERIFICATION_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$',
+    );
+  });
+
+  test('normalizes absent legacy email parameters before the first staged deploy', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    expect(workflow).toContain(
+      `if [[ "$previous_ses_reference" != 'UNVERIFIED' && ! "$previous_ses_reference" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$ ]]; then`,
+    );
+    expect(workflow).toContain("previous_ses_reference='UNVERIFIED'");
+    expect('None').not.toMatch(
+      /^(?:UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$/u,
     );
   });
 });

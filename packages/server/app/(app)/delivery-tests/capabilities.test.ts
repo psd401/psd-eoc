@@ -90,7 +90,7 @@ class FakeSelectQuery implements PromiseLike<readonly FakeRow[]> {
 
 const STARTED_AT = new Date('2026-08-13T18:00:00.000Z');
 
-describe('controlled email canary target mode', () => {
+describe('controlled single-channel canary target modes', () => {
   const email = Object.freeze({
     recipientId: '10000000-0000-4000-8000-000000000001',
     endpointId: '10000000-0000-4000-8000-000000000002',
@@ -100,6 +100,11 @@ describe('controlled email canary target mode', () => {
     recipientId: '10000000-0000-4000-8000-000000000003',
     endpointId: '10000000-0000-4000-8000-000000000004',
     channel: 'push' as const,
+  });
+  const sms = Object.freeze({
+    recipientId: '10000000-0000-4000-8000-000000000005',
+    endpointId: '10000000-0000-4000-8000-000000000006',
+    channel: 'sms' as const,
   });
 
   test('requires the discriminated mode to resolve to exactly one email endpoint', () => {
@@ -117,6 +122,38 @@ describe('controlled email canary target mode', () => {
       deliveryTestTargetModeMatches({ mode: 'controlled-email-canary' }, [
         email,
         push,
+      ]),
+    ).toBe(false);
+  });
+
+  test('requires the push mode to resolve to exactly one push endpoint', () => {
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [push]),
+    ).toBe(true);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [
+        email,
+      ]),
+    ).toBe(false);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [
+        email,
+        push,
+      ]),
+    ).toBe(false);
+  });
+
+  test('requires the SMS mode to resolve to exactly one SMS endpoint', () => {
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-sms-canary' }, [sms]),
+    ).toBe(true);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-sms-canary' }, [push]),
+    ).toBe(false);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-sms-canary' }, [
+        email,
+        sms,
       ]),
     ).toBe(false);
   });
@@ -420,6 +457,158 @@ describe('delivery-test report capability', () => {
 
     expect(replayedProjection).toEqual(failedReport);
     expect(persistedReports).toHaveLength(3);
+  });
+
+  test('finalizes one controlled email canary after provider acceptance', async () => {
+    const ids = Object.freeze({
+      activationPreview: randomUUID(),
+      attempt: randomUUID(),
+      batch: randomUUID(),
+      confirmation: randomUUID(),
+      endpoint: randomUUID(),
+      event: randomUUID(),
+      facility: randomUUID(),
+      intent: randomUUID(),
+      recipient: randomUUID(),
+      request: randomUUID(),
+      run: randomUUID(),
+      session: randomUUID(),
+      targetSet: randomUUID(),
+      user: randomUUID(),
+    });
+    const targets = Object.freeze([
+      Object.freeze({
+        recipientId: ids.recipient,
+        endpointId: ids.endpoint,
+        channel: 'email' as const,
+      }),
+    ]);
+    const run: typeof deliveryTestRuns.$inferSelect = {
+      id: ids.run,
+      activationPreviewId: ids.activationPreview,
+      eventId: ids.event,
+      notificationIntentId: ids.intent,
+      targetSetVersionId: ids.targetSet,
+      targetSetVersion: 1,
+      endpointReferenceDigest: deliveryTestEndpointReferenceDigest(targets),
+      consequenceDigest: 'a'.repeat(64),
+      confirmationId: ids.confirmation,
+      confirmationStatus: 'consumed',
+      requestId: ids.request,
+      startedByUserId: ids.user,
+      startedWithSessionId: ids.session,
+      startedAt: STARTED_AT,
+    };
+    const persistedReports: Array<typeof deliveryTestReports.$inferSelect> = [];
+    const rowsFor = (
+      source: unknown,
+      selection: unknown,
+    ): readonly FakeRow[] => {
+      if (source === deliveryTestRuns) {
+        if (
+          typeof selection === 'object' &&
+          selection !== null &&
+          'id' in selection
+        ) {
+          return [{ id: run.id }];
+        }
+        return [{ run, facilityId: ids.facility }];
+      }
+      if (source === deliveryTestTargetEndpoints) return targets;
+      if (source === dispatchBatches) {
+        return [
+          {
+            id: ids.batch,
+            intentId: ids.intent,
+            channel: 'email',
+            endpointCount: 1,
+          },
+        ];
+      }
+      if (source === channelAttempts) {
+        return [
+          {
+            id: ids.attempt,
+            batchId: ids.batch,
+            intentId: ids.intent,
+            recipientId: ids.recipient,
+            endpointId: ids.endpoint,
+            channel: 'email',
+            attemptNumber: 1,
+            attemptedAt: new Date('2026-08-13T18:00:00.500Z'),
+          },
+        ];
+      }
+      if (source === deliveryEvidence) {
+        return [
+          {
+            attemptId: ids.attempt,
+            sequence: 1,
+            state: 'attempted',
+            recordedAt: new Date('2026-08-13T18:00:01.000Z'),
+          },
+          {
+            attemptId: ids.attempt,
+            sequence: 2,
+            state: 'provider-accepted',
+            recordedAt: new Date('2026-08-13T18:00:02.000Z'),
+          },
+        ];
+      }
+      if (source === deliveryTestReports) {
+        return [...persistedReports].reverse();
+      }
+      throw new Error('The fake email finalizer received an unexpected table.');
+    };
+    const database = {
+      select: (selection?: unknown) => new FakeSelectQuery(rowsFor, selection),
+      execute: async () => [],
+      insert: (table: unknown) => ({
+        values: async (value: unknown): Promise<void> => {
+          if (table !== deliveryTestReports) {
+            throw new Error('The email finalizer wrote an unexpected table.');
+          }
+          persistedReports.push(
+            value as typeof deliveryTestReports.$inferSelect,
+          );
+        },
+      }),
+    };
+
+    await expect(
+      resolveReadyDeliveryTestReportRunIdByIntent(database, ids.intent),
+    ).resolves.toBe(ids.run);
+    const report = await finalizeDeliveryTestReportRegistration.handler(
+      { runId: ids.run },
+      {
+        invocation: systemInvocation(new Date('2026-08-13T18:00:03.000Z')),
+        transaction: {
+          database,
+          readCurrentTime: async () => new Date('2026-08-13T18:00:03.000Z'),
+        } as unknown as DeliveryTestTransaction,
+        cache: new Map<string, unknown>(),
+        authorization: null,
+        resolvedFacilityId: ids.facility,
+        safetyResolution: null,
+      },
+    );
+
+    expect(report).toMatchObject({
+      runId: ids.run,
+      sequence: 1,
+      supersedesReportId: null,
+      status: 'succeeded',
+      reasonCode: null,
+      channels: [
+        {
+          channel: 'email',
+          endpointCount: 1,
+          activationToProviderAcceptMs: 2_000,
+          latestStateCounts: [{ state: 'provider-accepted', count: 1 }],
+        },
+      ],
+    });
+    expect(persistedReports).toHaveLength(1);
   });
 
   test('keeps a stable keyset snapshot when a newer report is inserted between pages', () => {

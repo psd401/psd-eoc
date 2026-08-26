@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   ChannelAttemptSchema,
   EndpointStatusRecordSchema,
+  ProviderSendOutcomeSchema,
   RecordDeliveryEvidenceInputSchema,
   RecordEndpointStatusInputSchema,
   UuidSchema,
@@ -18,7 +19,7 @@ import {
   type RecordEndpointStatusInput,
   type RegisteredCapabilityId,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, like, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, like, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -32,19 +33,32 @@ import {
   endpointStatusRecords,
   idempotencyRecords,
   notificationIntents,
+  rosterEndpoints,
+  sesEmailProviderIo,
 } from '../../../../db/schema';
+import { lockEmailEndpointPolicy } from '../../../../lib/notify/email-endpoint-policy-lock';
 import {
   DeliveryStateError,
   createDrizzleDeliveryEvidenceStore,
   type DeliveryEvidenceStore,
 } from '../../internal/delivery-state/runtime';
 import {
+  createDrizzleDeliveryTestCapabilityStore,
+  deliveryTestReportInvocationForEvidence,
+  executeFinalizeDeliveryTestReport,
+  mayFinalizeDeliveryTestReport,
+  resolveReadyDeliveryTestReportRunIdByIntent,
+} from '../../../../lib/capabilities/delivery-tests';
+import {
   SnsSignatureError,
   canonicalSnsEnvelopeDigest,
-  parseSnsEnvelope,
+  confirmSnsSubscription,
+  parseSnsCallbackEnvelope,
   parseSnsTopicArn,
   verifySnsSignature,
   type SnsNotificationEnvelope,
+  type SnsSubscriptionConfirmationEnvelope,
+  type SnsVerifiableEnvelope,
 } from '../../../../../../workers/email/sns-signature';
 import {
   SES_CONFIGURATION_SET_NAME,
@@ -102,10 +116,19 @@ export interface SesWebhookStore {
     reasonCode: string,
   ): Promise<void>;
   loadAttempt(attemptId: string): Promise<ChannelAttempt | null>;
+  reconcileProviderIo(
+    attempt: ChannelAttempt,
+    providerReference: string,
+    providerIoClaimToken: string,
+  ): Promise<void>;
   recordAttemptEvidence(
     attempt: ChannelAttempt,
     input: AttemptEvidenceInput,
   ): Promise<DeliveryEvidence>;
+  reprojectDeliveryTestReport(
+    attempt: ChannelAttempt,
+    evidence: DeliveryEvidence,
+  ): Promise<void>;
   recordEndpointStatus(
     attempt: ChannelAttempt,
     input: RecordEndpointStatusInput,
@@ -116,8 +139,9 @@ export interface SesWebhookStore {
 
 export interface SesWebhookRouteDependencies {
   readonly readExpectedTopicArn: () => string;
-  readonly verifySignature: (
-    envelope: SnsNotificationEnvelope,
+  readonly verifySignature: (envelope: SnsVerifiableEnvelope) => Promise<void>;
+  readonly confirmSubscription: (
+    envelope: SnsSubscriptionConfirmationEnvelope,
   ) => Promise<void>;
   readonly createStore: () => Promise<SesWebhookStore>;
 }
@@ -292,7 +316,7 @@ async function readBoundedJson(request: Request): Promise<unknown> {
 
 function assertSnsHeaders(
   request: Request,
-  envelope: SnsNotificationEnvelope,
+  envelope: SnsVerifiableEnvelope,
 ): void {
   if (
     request.headers.get('x-amz-sns-message-type') !== envelope.Type ||
@@ -474,6 +498,12 @@ async function executeMappedEvent(
   );
   const authorizer = createSesWebhookAuthorizer();
 
+  await store.reconcileProviderIo(
+    attempt,
+    event.mailMessageId,
+    event.providerIoClaimToken,
+  );
+
   if (event.endpointStatus !== null) {
     const endpointInput = RecordEndpointStatusInputSchema.parse(
       event.endpointStatus,
@@ -505,12 +535,22 @@ async function executeMappedEvent(
           attemptEvidenceInput(input, attempt.id),
         ),
     );
-    await invokeAuthorizedCapabilityHandler(evidenceHandler, evidenceInput, {
-      context,
-      humanActionResolutionContext: null,
-      safetyResolver: null,
-      authorizer,
-    });
+    const evidence = await invokeAuthorizedCapabilityHandler(
+      evidenceHandler,
+      evidenceInput,
+      {
+        context,
+        humanActionResolutionContext: null,
+        safetyResolver: null,
+        authorizer,
+      },
+    );
+    if (
+      attempt.deliveryTest != null &&
+      mayFinalizeDeliveryTestReport(evidence)
+    ) {
+      await store.reprojectDeliveryTestReport(attempt, evidence);
+    }
   }
 }
 
@@ -542,9 +582,9 @@ export function createSesWebhookRouteHandler(
       );
     }
 
-    let envelope: SnsNotificationEnvelope;
+    let envelope: SnsVerifiableEnvelope;
     try {
-      envelope = parseSnsEnvelope(
+      envelope = parseSnsCallbackEnvelope(
         await readBoundedJson(request),
         expectedTopicArn,
       );
@@ -579,6 +619,23 @@ export function createSesWebhookRouteHandler(
         'SNS_SIGNATURE_INVALID',
         'The SNS callback signature could not be verified.',
       );
+    }
+
+    if (envelope.Type === 'SubscriptionConfirmation') {
+      try {
+        await dependencies.confirmSubscription(envelope);
+        return new Response(null, {
+          status: 204,
+          headers: responseHeaders(),
+        });
+      } catch {
+        return errorResponse(
+          503,
+          'SNS_CONFIRMATION_UNAVAILABLE',
+          'The authenticated SNS subscription could not be confirmed.',
+          { 'Retry-After': '5' },
+        );
+      }
     }
 
     let event: ParsedSesEvent;
@@ -1015,6 +1072,26 @@ async function recordEndpointStatus(
   );
   return database.transaction(async (transaction) => {
     const query = webhookQueryDatabase(transaction);
+    const [endpoint] = await query
+      .select({ email: rosterEndpoints.email })
+      .from(rosterEndpoints)
+      .where(
+        and(
+          eq(rosterEndpoints.rosterSnapshotId, attempt.rosterSnapshotId),
+          eq(rosterEndpoints.recipientId, attempt.recipientId),
+          eq(rosterEndpoints.id, attempt.endpointId),
+          eq(rosterEndpoints.population, attempt.rosterPopulation),
+          eq(rosterEndpoints.channel, 'email'),
+        ),
+      )
+      .limit(1);
+    if (endpoint?.email === null || endpoint?.email === undefined) {
+      throw new SesWebhookPersistenceError();
+    }
+    await lockEmailEndpointPolicy(
+      transaction as unknown as Database,
+      endpoint.email,
+    );
     await query.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${id}, ${CALLBACK_LOCK_NAMESPACE}))`,
     );
@@ -1079,6 +1156,7 @@ export function createDrizzleSesWebhookStore(
 ): SesWebhookStore {
   const evidenceStore: DeliveryEvidenceStore =
     createDrizzleDeliveryEvidenceStore(database);
+  const reportStore = createDrizzleDeliveryTestCapabilityStore(database);
   return Object.freeze({
     claimCallback: (messageId: string, requestDigest: string) =>
       claimCallback(database, messageId, requestDigest),
@@ -1115,11 +1193,89 @@ export function createDrizzleSesWebhookStore(
               row.deliveryTestEndpointReferenceDigest,
           });
     },
+    async reconcileProviderIo(
+      attempt: ChannelAttempt,
+      providerReference: string,
+      providerIoClaimToken: string,
+    ): Promise<void> {
+      if (
+        attempt.channel !== 'email' ||
+        providerReference.length < 1 ||
+        providerReference.length > 500 ||
+        !UuidSchema.safeParse(providerIoClaimToken).success
+      ) {
+        throw new SesWebhookPersistenceError();
+      }
+      await database.transaction(async (transaction) => {
+        const [retained] = await transaction
+          .select()
+          .from(sesEmailProviderIo)
+          .where(eq(sesEmailProviderIo.attemptId, attempt.id))
+          .limit(1)
+          .for('update');
+        if (
+          retained === undefined ||
+          retained.claimToken !== providerIoClaimToken
+        ) {
+          throw new SesWebhookPersistenceError();
+        }
+        if (retained.outcome !== null) {
+          const outcome = ProviderSendOutcomeSchema.parse(retained.outcome);
+          if (
+            outcome.provider !== 'aws-ses-v2' ||
+            (outcome.state !== 'unknown' &&
+              (outcome.state !== 'provider-accepted' ||
+                outcome.providerReference !== providerReference))
+          ) {
+            throw new SesWebhookPersistenceError();
+          }
+          return;
+        }
+        const updated = await transaction
+          .update(sesEmailProviderIo)
+          .set({
+            outcome: {
+              state: 'provider-accepted',
+              provider: 'aws-ses-v2',
+              providerReference,
+              proof: null,
+              reasonCode: null,
+              diagnosticDigest: null,
+            },
+            completedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(sesEmailProviderIo.attemptId, attempt.id),
+              eq(sesEmailProviderIo.claimToken, providerIoClaimToken),
+              isNull(sesEmailProviderIo.outcome),
+            ),
+          )
+          .returning();
+        if (updated.length !== 1) throw new SesWebhookPersistenceError();
+      });
+    },
     recordAttemptEvidence(
       attempt: ChannelAttempt,
       input: AttemptEvidenceInput,
     ): Promise<DeliveryEvidence> {
       return evidenceStore.recordAttemptEvidence({ attempt, evidence: input });
+    },
+    async reprojectDeliveryTestReport(
+      attempt: ChannelAttempt,
+      evidence: DeliveryEvidence,
+    ): Promise<void> {
+      if (attempt.deliveryTest == null) return;
+      const runId = await resolveReadyDeliveryTestReportRunIdByIntent(
+        database,
+        attempt.intentId,
+      );
+      if (runId === null) return;
+      await executeFinalizeDeliveryTestReport(
+        { runId },
+        deliveryTestReportInvocationForEvidence(evidence),
+        reportStore,
+      );
     },
     recordEndpointStatus: (
       attempt: ChannelAttempt,
@@ -1138,6 +1294,7 @@ async function createDefaultStore(): Promise<SesWebhookStore> {
 const defaultHandler = createSesWebhookRouteHandler({
   readExpectedTopicArn,
   verifySignature: (envelope) => verifySnsSignature(envelope),
+  confirmSubscription: (envelope) => confirmSnsSubscription(envelope),
   createStore: createDefaultStore,
 });
 

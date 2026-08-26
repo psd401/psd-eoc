@@ -77,8 +77,9 @@ export class CapabilityEngineError extends Error {
     message: string,
     public readonly status: number,
     public readonly retryable = false,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
     this.name = 'CapabilityEngineError';
   }
 }
@@ -577,6 +578,7 @@ function errorForUnknownFailure(error: unknown): CapabilityEngineError {
     'The capability could not be completed.',
     500,
     true,
+    error,
   );
 }
 

@@ -45,6 +45,7 @@ import {
   createGetStaleRosterReportHandler,
   type StaleRosterAuthorizationContext,
 } from '../../packages/server/lib/roster/stale-report';
+import { createDrizzleEmailEndpointPolicyStore } from '../../packages/server/lib/notify/dispatcher';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -95,6 +96,7 @@ interface RosterFixture {
 
 async function installSingleEmailRoster(
   database: PostgresDatabase,
+  retainedEmail?: string,
 ): Promise<RosterFixture> {
   await database.execute(
     sql`select pg_advisory_xact_lock(hashtextextended('psd-eoc-roster-synthetic', 0))`,
@@ -123,7 +125,8 @@ async function installSingleEmailRoster(
   const endpointId = randomUUID();
   const capturedAt = new Date();
   capturedAt.setMilliseconds(0);
-  const email = `synthetic-ses-bounce-${endpointId}@example.invalid`;
+  const email =
+    retainedEmail ?? `synthetic-ses-bounce-${endpointId}@example.invalid`;
 
   await database.insert(rosterSnapshots).values({
     id: snapshotId,
@@ -185,6 +188,7 @@ function attemptFor(fixture: RosterFixture): ChannelAttempt {
 function bounceRequest(
   fixture: RosterFixture,
   attempt: ChannelAttempt,
+  providerIoClaimToken: string,
 ): Request {
   const messageId = randomUUID();
   const occurredAt = new Date(
@@ -206,6 +210,7 @@ function bounceRequest(
         'psd-eoc-recipient-id': [attempt.recipientId],
         'psd-eoc-template-mode': [attempt.templateMode],
         'psd-eoc-event-kind': [attempt.eventKind],
+        'psd-eoc-provider-io-claim': [providerIoClaimToken],
       },
     },
     bounce: {
@@ -308,11 +313,22 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
       const productionStore = createDrizzleSesWebhookStore(
         database as unknown as Database,
       );
+      const providerIoClaimToken = randomUUID();
       let evidenceWrites = 0;
       const store: SesWebhookStore = {
         ...productionStore,
         loadAttempt: (attemptId: string) =>
           Promise.resolve(attemptId === attempt.id ? attempt : null),
+        reconcileProviderIo(
+          loadedAttempt,
+          providerReference,
+          suppliedClaimToken,
+        ) {
+          expect(loadedAttempt).toEqual(attempt);
+          expect(providerReference).toStartWith('synthetic-ses-message-');
+          expect(suppliedClaimToken).toBe(providerIoClaimToken);
+          return Promise.resolve();
+        },
         recordAttemptEvidence(_loadedAttempt, input) {
           evidenceWrites += 1;
           return Promise.resolve(
@@ -344,9 +360,12 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
       const handler = createSesWebhookRouteHandler({
         readExpectedTopicArn: () => TOPIC_ARN,
         verifySignature: () => Promise.resolve(),
+        confirmSubscription: () => Promise.resolve(),
         createStore: () => Promise.resolve(store),
       });
-      const response = await handler(bounceRequest(fixture, attempt));
+      const response = await handler(
+        bounceRequest(fixture, attempt, providerIoClaimToken),
+      );
 
       expect(response.status).toBe(204);
       expect(evidenceWrites).toBe(1);
@@ -367,6 +386,54 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
         { recipientId: fixture.recipientId, reason: 'no-active-endpoint' },
       ]);
       expect(JSON.stringify(after)).not.toContain(fixture.email);
+    });
+  });
+
+  test('a permanently suppressed email stays blocked in a later roster snapshot', async () => {
+    await withinRollbackTransaction(async (database) => {
+      const fixture = await installSingleEmailRoster(database);
+      await database.insert(endpointStatusRecords).values({
+        id: randomUUID(),
+        rosterSnapshotId: fixture.snapshotId,
+        recipientId: fixture.recipientId,
+        endpointId: fixture.endpointId,
+        population: 'synthetic',
+        channel: 'email',
+        status: 'invalid',
+        reasonCode: 'SES_PERMANENT_BOUNCE',
+        provider: null,
+        providerReference: null,
+        providerOccurredAt: null,
+        recordedAt: new Date(fixture.capturedAt.getTime() + 1_000),
+      });
+      const replacement = await installSingleEmailRoster(
+        database,
+        fixture.email,
+      );
+
+      await expect(
+        createDrizzleEmailEndpointPolicyStore(
+          database as unknown as Database,
+        ).loadEndpointPolicy({
+          rosterSnapshotId: replacement.snapshotId,
+          rosterPopulation: 'synthetic',
+          endpointCount: 1,
+          deliveryTest: null,
+          candidates: [
+            {
+              recipientId: replacement.recipientId,
+              endpointId: replacement.endpointId,
+            },
+          ],
+        }),
+      ).resolves.toEqual([
+        {
+          recipientId: replacement.recipientId,
+          endpointId: replacement.endpointId,
+          status: 'disabled',
+          approvedForDeliveryTest: true,
+        },
+      ]);
     });
   });
 

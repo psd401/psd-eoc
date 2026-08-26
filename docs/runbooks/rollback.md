@@ -70,7 +70,8 @@ an event.
    A branch name, `latest` tag, mutable channel, or operator memory is not a
    rollback point.
 4. Define scope: server, one or more workers, infrastructure/configuration,
-   database, secret, web static assets, mobile OTA, or mobile store build.
+   database, secret, web static assets, or mobile store build. The current
+   mobile profiles are embedded-only and have no OTA rollback path.
 5. Record the expected user and delivery impact, pending work across the
    stop-start/quiescence interval, data/schema compatibility, provider changes,
    exact artifact, stop condition, and forward-recovery plan.
@@ -94,6 +95,13 @@ an event.
   contracts/schema compatibility and side-effect-free `/api/health` behavior.
 - Do not enable App Runner auto-deploy, use a mutable tag, or substitute a local
   build.
+- The supported digest rollback first scales the email send worker to zero and
+  resets its deployment verification reference while the current application
+  is still serving. The retained SNS-to-SQS callback subscription is never
+  removed. Its separately permissioned consumer stays on the current
+  callback-compatible image; if the rolled-back application cannot accept the
+  signed route, messages remain in the callback DLQ for verified redrive after
+  a compatible application is restored.
 - Verify service revision/digest, health or expected paused state, 5xx/latency,
   and database access. Resolve ambiguous activation outcomes from immutable
   evidence; never retry for the user.
@@ -108,6 +116,9 @@ an event.
   interval after rollback. Do not purge or redrive queues.
 - Verify provider-call counts, queue ages, DLQs, bounded reason codes, and
   append-only attempt/evidence transitions. `Unknown` remains unknown.
+- Re-enabling email after a rollback is a new deployment verification and a new
+  authenticated administrator action. A previous reference never authorizes an
+  older or changed runtime.
 
 ## Infrastructure or configuration rollback
 
@@ -139,14 +150,14 @@ an event.
 
 - Stop a staged store rollout in the human store console when a build is
   unsafe. Never auto-submit or make an app public as a rollback.
-- An OTA rollback may republish only an exact reviewed JavaScript-only known-
-  good update to the matching runtime after preview-channel verification. Push,
-  authentication, native/runtime, or safety-boundary changes require a new
-  store build; do not force them through OTA.
-- A store rollback uses a new reviewed build/version when Apple/Google does not
-  permit reverting installed binaries. TestFlight/Play tester changes and
-  submissions remain human provider writes that require current product-owner
-  authorization.
+- Do not publish, republish, check for, download, or route an OTA update. The
+  exact current development, preview, and production profiles are
+  embedded-only. Changing that policy requires a separately reviewed new app
+  version, signed update design, and store build.
+- Fix forward with a new reviewed app version and store build when Apple or
+  Google does not permit reverting installed binaries. TestFlight/Play tester
+  changes and submissions remain human provider writes that require current
+  product-owner authorization.
 - Verify real/drill theming, notification permissions/handling, biometric
   session behavior, and activation offline refusal on both platforms with
   synthetic non-production evidence.

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   RecordDeliveryEvidenceInputSchema,
+  UuidSchema,
   type IntegrationTruthLabel,
 } from '@psd-eoc/contracts';
 
@@ -32,6 +33,7 @@ export const SES_CORRELATION_TAG_NAMES = Object.freeze({
   recipientId: 'psd-eoc-recipient-id',
   templateMode: 'psd-eoc-template-mode',
   eventKind: 'psd-eoc-event-kind',
+  providerIoClaimToken: 'psd-eoc-provider-io-claim',
 });
 
 const SAFE_MESSAGE_ID_PATTERN = /^[A-Za-z0-9._@:/+=-]+$/u;
@@ -74,6 +76,7 @@ export interface SesV2Client {
 export interface SesSendLedgerClaimRequest {
   readonly attemptId: string;
   readonly requestFingerprint: string;
+  readonly workItem: WorkerAttemptWorkItem;
 }
 
 export interface SesSendLedgerCompleteRequest
@@ -82,12 +85,9 @@ export interface SesSendLedgerCompleteRequest
   readonly outcome: ProviderSendOutcome;
 }
 
-export interface SesSendLedgerReleaseRequest extends SesSendLedgerClaimRequest {
-  readonly leaseToken: string;
-}
-
 export type SesSendLedgerClaim =
   | Readonly<{ kind: 'acquired'; leaseToken: string }>
+  | Readonly<{ kind: 'denied' }>
   | Readonly<{ kind: 'in-progress' }>
   | Readonly<{ kind: 'conflict' }>
   | Readonly<{ kind: 'completed'; outcome: ProviderSendOutcome }>;
@@ -103,7 +103,6 @@ export interface DurableSesSendLedger {
   readonly durability: 'durable';
   claim(request: SesSendLedgerClaimRequest): Promise<SesSendLedgerClaim>;
   complete(request: SesSendLedgerCompleteRequest): Promise<void>;
-  release(request: SesSendLedgerReleaseRequest): Promise<void>;
 }
 
 export interface SesV2EmailAdapterOptions {
@@ -177,7 +176,6 @@ function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
     options.sendLedger.durability !== 'durable' ||
     typeof options.sendLedger.claim !== 'function' ||
     typeof options.sendLedger.complete !== 'function' ||
-    typeof options.sendLedger.release !== 'function' ||
     !validSesFromEmailAddress(options.fromEmailAddress)
   ) {
     throw new SesV2EmailAdapterError('INVALID_CONFIGURATION');
@@ -289,6 +287,22 @@ function buildSendInput(
   });
 }
 
+function bindProviderIoClaim(
+  input: SesV2SendEmailInput,
+  claimToken: string,
+): SesV2SendEmailInput {
+  return Object.freeze({
+    ...input,
+    EmailTags: Object.freeze([
+      ...input.EmailTags,
+      Object.freeze({
+        Name: SES_CORRELATION_TAG_NAMES.providerIoClaimToken,
+        Value: UuidSchema.parse(claimToken),
+      }),
+    ]),
+  });
+}
+
 function requestFingerprint(input: SesV2SendEmailInput): string {
   return createHash('sha256')
     .update(JSON.stringify(input), 'utf8')
@@ -385,19 +399,18 @@ function parseLedgerClaim(
   if (value.kind === 'in-progress') {
     return Object.freeze({ kind: 'in-progress' });
   }
+  if (value.kind === 'denied') {
+    return Object.freeze({ kind: 'denied' });
+  }
   if (value.kind === 'conflict') {
     return Object.freeze({ kind: 'conflict' });
   }
   if (value.kind === 'acquired') {
-    if (
-      typeof value.leaseToken !== 'string' ||
-      value.leaseToken.length < 1 ||
-      value.leaseToken.length > 512 ||
-      value.leaseToken.trim() !== value.leaseToken
-    ) {
+    const leaseToken = UuidSchema.safeParse(value.leaseToken);
+    if (!leaseToken.success) {
       throw new SesV2EmailAdapterError('INVALID_LEDGER_CLAIM');
     }
-    return Object.freeze({ kind: 'acquired', leaseToken: value.leaseToken });
+    return Object.freeze({ kind: 'acquired', leaseToken: leaseToken.data });
   }
   if (value.kind === 'completed') {
     return Object.freeze({
@@ -438,6 +451,7 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
     const claimRequest = Object.freeze({
       attemptId: workItem.attempt.id,
       requestFingerprint: requestFingerprint(input),
+      workItem,
     });
 
     let claim: SesSendLedgerClaim;
@@ -455,6 +469,12 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
     }
 
     if (claim.kind === 'completed') return claim.outcome;
+    if (claim.kind === 'denied') {
+      throw new ProviderDispatchError(
+        'SES_SEND_POLICY_DENIED',
+        'terminal-failure',
+      );
+    }
     if (claim.kind === 'in-progress') {
       return unknownOutcome('SES_SEND_ALREADY_CLAIMED');
     }
@@ -467,7 +487,9 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
 
     let outcome: ProviderSendOutcome;
     try {
-      const response = await this.#client.sendEmail(input);
+      const response = await this.#client.sendEmail(
+        bindProviderIoClaim(input, claim.leaseToken),
+      );
       const messageId = parseMessageId(response);
       outcome =
         messageId === null
@@ -479,18 +501,18 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
         error.disposition === 'safe-to-retry'
       ) {
         // The injected client may use this disposition only when it has proof
-        // that SES could not have accepted the request. Releasing the fence is
-        // therefore safe and lets the shared processor schedule its bounded
-        // retry as a new immutable attempt. If release itself fails, a stale
-        // fence can only suppress this attempt; it cannot create a duplicate.
+        // that SES could not have accepted the request. Retain that terminal
+        // attempt truth in the append-only ledger; the shared processor may
+        // schedule a new immutable attempt ID, but this attempt is never sent
+        // twice.
         try {
-          await this.#ledger.release({
+          await this.#ledger.complete({
             ...claimRequest,
             leaseToken: claim.leaseToken,
+            outcome: failedOutcome(error.code, error.diagnosticDigest),
           });
         } catch {
-          // Preserve the provider classification even when a ledger method
-          // throws before returning a promise or rejects asynchronously.
+          // The retained unfinished claim is still a no-resend fence.
         }
         throw error;
       }

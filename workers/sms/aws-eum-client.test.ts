@@ -26,6 +26,7 @@ const SEND_REQUEST = Object.freeze({
   TimeToLive: 300,
   Context: Object.freeze({
     psdAttemptId: '00000000-0000-4000-8000-000000000013',
+    psdProviderClaimToken: '00000000-0000-4000-8000-000000000014',
   }),
   DryRun: false,
   ProtectConfigurationId: 'protect-synthetic',

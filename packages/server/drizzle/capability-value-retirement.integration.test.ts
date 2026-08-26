@@ -20,6 +20,7 @@ import {
 } from 'bun:test';
 import { sql } from 'drizzle-orm';
 import { migrate as migrateWithPostgres } from 'drizzle-orm/postgres-js/migrator';
+import { MUTATION_CAPABILITY_IDS } from '@psd-eoc/contracts';
 
 import {
   executeOperationWithCleanup,
@@ -468,17 +469,10 @@ describeWithDatabase('retiring removed capability values', () => {
         const after = await enumLabels(connection.db);
         expect(after).not.toContain('set-user-roles');
         expect(after).not.toContain('set-fanout-control');
-        // `applyRetirement` runs the whole folder, and 0030 retires a third
-        // value the same way when it drops the audience layer. Naming it here
-        // keeps the assertion exact — every surviving label, in its original
-        // order — rather than loosening it to a containment check.
-        expect(after).toEqual(
-          before.filter(
-            (label) =>
-              !RETIRED_VALUES.includes(label as never) &&
-              label !== 'create-audience-config-version',
-          ),
-        );
+        // `applyRetirement` runs the whole folder, including later append-only
+        // capability additions. The final enum must match the canonical
+        // contract exactly, in order, after every retirement and addition.
+        expect(after).toEqual([...MUTATION_CAPABILITY_IDS]);
       },
     );
   });

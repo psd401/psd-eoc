@@ -108,6 +108,7 @@ import {
   StaleRosterReportSchema,
   StartEventInputSchema,
   UpdateEventTypeDraftInputSchema,
+  VerifyEmailIntegrationInputSchema,
   defineCapability,
   getEventClassificationPresentation,
   getCapabilityInvocationPolicy,
@@ -1589,6 +1590,23 @@ describe('event type, targeting, and activation contracts', () => {
         integrationId: 'expo-push',
         enabled: false,
         authorization,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      VerifyEmailIntegrationInputSchema.safeParse({
+        integrationId: 'ses-email',
+      }).success,
+    ).toBe(true);
+    expect(
+      VerifyEmailIntegrationInputSchema.safeParse({
+        integrationId: 'expo-push',
+      }).success,
+    ).toBe(false);
+    expect(
+      VerifyEmailIntegrationInputSchema.safeParse({
+        integrationId: 'ses-email',
+        verificationReference: 'client-supplied-evidence-is-forbidden',
       }).success,
     ).toBe(false);
   });

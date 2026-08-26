@@ -22,6 +22,7 @@ const TAGS = Object.freeze({
   recipientId: 'psd-eoc-recipient-id',
   templateMode: 'psd-eoc-template-mode',
   eventKind: 'psd-eoc-event-kind',
+  providerIoClaimToken: 'psd-eoc-provider-io-claim',
   configurationSet: 'ses:configuration-set',
 });
 
@@ -47,6 +48,7 @@ export interface ParsedSesEvent {
   readonly recipientId: string;
   readonly templateMode: TemplateMode;
   readonly eventKind: EventKind;
+  readonly providerIoClaimToken: string;
   readonly mailMessageId: string;
   readonly evidence: RecordDeliveryEvidenceInput | null;
   readonly endpointStatus: RecordEndpointStatusInput | null;
@@ -225,6 +227,7 @@ export function parseSesEvent(
   const endpointId = singleTag(mail.tags, TAGS.endpointId);
   const rosterSnapshotId = singleTag(mail.tags, TAGS.rosterSnapshotId);
   const recipientId = singleTag(mail.tags, TAGS.recipientId);
+  const providerIoClaimToken = singleTag(mail.tags, TAGS.providerIoClaimToken);
   const templateModeResult = TemplateModeSchema.safeParse(
     singleTag(mail.tags, TAGS.templateMode),
   );
@@ -237,6 +240,7 @@ export function parseSesEvent(
     !UuidSchema.safeParse(endpointId).success ||
     !UuidSchema.safeParse(rosterSnapshotId).success ||
     !UuidSchema.safeParse(recipientId).success ||
+    !UuidSchema.safeParse(providerIoClaimToken).success ||
     !templateModeResult.success ||
     !eventKindResult.success
   ) {
@@ -347,6 +351,7 @@ export function parseSesEvent(
     recipientId,
     templateMode: templateModeResult.data,
     eventKind: eventKindResult.data,
+    providerIoClaimToken,
     mailMessageId,
     evidence: mappedEvidence,
     endpointStatus: mappedEndpointStatus,

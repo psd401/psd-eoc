@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 import { asc, eq } from 'drizzle-orm';
 
 import {
@@ -9,16 +16,24 @@ import {
 } from '../../db/client';
 import { groupMembers, groupSources, userRoles, users } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
+import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+  type DisposableDatabase,
+} from '../testing/database';
 import { authorizeSignIn } from './sign-in-authorization';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const NOW = new Date('2026-08-19T12:00:00.000Z');
 const ADMIN_GROUP = randomUUID();
 const STAFF_GROUP = randomUUID();
 
 let connection: PostgresDatabaseConnection | undefined;
+let disposable: DisposableDatabase | undefined;
 
 function database(): PostgresDatabaseConnection['db'] {
   if (connection === undefined) throw new Error('no database');
@@ -37,20 +52,10 @@ async function rolesOf(userId: string): Promise<readonly string[]> {
 describeWithDatabase('sign-in authorization', () => {
   beforeAll(async () => {
     if (baseUrl === undefined) throw new Error('TEST_DATABASE_URL required');
-    const name = `psd_eoc_signin_${randomUUID().replaceAll('-', '')}_test`;
-    const admin = createDatabaseClient({
-      driver: 'postgres',
-      url: baseUrl,
-      maxConnections: 1,
-    });
-    if (admin.driver !== 'postgres') throw new Error('postgres required');
-    await admin.db.execute(`create database "${name}"` as never);
-    await admin.close();
-    const url = new URL(baseUrl);
-    url.pathname = `/${name}`;
+    disposable = await createDisposableDatabase('psd_eoc_signin', baseUrl);
     const opened = createDatabaseClient({
       driver: 'postgres',
-      url: url.toString(),
+      url: disposable.url,
       maxConnections: 2,
     });
     if (opened.driver !== 'postgres') throw new Error('postgres required');
@@ -101,7 +106,14 @@ describeWithDatabase('sign-in authorization', () => {
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const opened = connection;
+    const ownedDatabase = disposable;
+    connection = undefined;
+    disposable = undefined;
+    await closeAndDropDisposableDatabase(
+      opened === undefined ? undefined : () => opened.close(),
+      ownedDatabase,
+    );
   });
 
   test('creates a first-time signer with the roles their groups grant', async () => {

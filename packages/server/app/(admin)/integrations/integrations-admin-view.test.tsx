@@ -77,6 +77,12 @@ const PROPS = Object.freeze({
       changedAt: AT,
     }),
     ChannelConfigurationSchema.parse({
+      integrationId: 'ses-email',
+      enabled: false,
+      status: STATUSES[1],
+      changedAt: AT,
+    }),
+    ChannelConfigurationSchema.parse({
       integrationId: 'google-groups',
       enabled: false,
       status: STATUSES[2],
@@ -126,7 +132,7 @@ describe('integrations admin view', () => {
       `<main aria-labelledby="integrations-admin-heading" id="main-content" tabindex="-1">`,
     );
     expect(markup).toContain(
-      '<strong>Current integration state:</strong> 1 of 4 observed integrations are live-verified; 1 of 3 notification channels are enabled.',
+      '<strong>Current integration state:</strong> 1 of 4 observed integrations are live-verified; 1 of 4 notification channels are enabled.',
     );
     expect(markup).toContain(
       'Channel enablement is configuration state, not proof that a notification was sent or received.',
@@ -184,6 +190,50 @@ describe('integrations admin view', () => {
     expect(markup).toMatch(
       /name="integrationId" value="aws-eum-sms"[\s\S]*?<option disabled="" value="true">Enabled<\/option>/u,
     );
+    expect(markup).toContain('Verify and enable email');
+    expect(markup).toContain(
+      'Uses the retained, address-free SES verification reference configured on this deployment.',
+    );
+    expect(markup).toMatch(/name="intent" value="verify-email-integration"/u);
+  });
+
+  test('offers deployment re-verification only while live SES remains enabled', () => {
+    const liveEmailStatus = IntegrationStatusSchema.parse({
+      integrationId: 'ses-email',
+      label: 'live-verified',
+      verifiedAt: AT,
+      verifiedByUserId: USER_ID,
+      authorizationReference: 'ses-deployment-reference-v1',
+      reasonCode: null,
+      observedAt: AT,
+    });
+    const configuration = ChannelConfigurationSchema.parse({
+      integrationId: 'ses-email',
+      enabled: true,
+      status: liveEmailStatus,
+      changedAt: AT,
+    });
+    const enabledMarkup = render({
+      ...PROPS,
+      channelConfigurations: PROPS.channelConfigurations.map((item) =>
+        item.integrationId === 'ses-email' ? configuration : item,
+      ),
+    });
+
+    expect(enabledMarkup).toContain('Re-verify email deployment');
+    expect(enabledMarkup).toMatch(
+      /name="intent" value="verify-email-integration"/u,
+    );
+
+    const disabledMarkup = render({
+      ...PROPS,
+      channelConfigurations: PROPS.channelConfigurations.map((item) =>
+        item.integrationId === 'ses-email'
+          ? { ...configuration, enabled: false }
+          : item,
+      ),
+    });
+    expect(disabledMarkup).not.toContain('Re-verify email deployment');
   });
 
   test('renders explicit empty and unknown states', () => {

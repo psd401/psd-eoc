@@ -22,9 +22,11 @@ import {
   EXPO_DEVICE_NOT_REGISTERED_REASON,
   createDrizzlePushEndpointPolicyStore,
   executeDeviceCapability,
+  parsePushRegistrationBuildAllowlist,
   planPushTokenRegistration,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
   PushEndpointResolutionError,
+  resolvePushEndpointPage,
   resolvePushEndpoints,
   type DeviceCapabilityStore,
   type DeviceCapabilityTransaction,
@@ -53,6 +55,20 @@ const ids = {
 
 const now = new Date('2026-08-11T18:00:00.000Z');
 const token = 'ExponentPushToken[synthetic-device-001]';
+const build = Object.freeze({
+  applicationId: 'example.synthetic.eoc',
+  applicationVersion: '1.0.4',
+  nativeBuildVersion: '7',
+  expoProjectId: '00000000-0000-4000-8000-000000001299',
+  updateMode: 'embedded-only' as const,
+});
+const registrationInput = Object.freeze({
+  deviceEnrollmentId: ids.device,
+  platform: 'ios' as const,
+  provider: 'expo' as const,
+  build,
+  token,
+});
 
 const resolutionIds = Object.freeze({
   facility: '00000000-0000-4000-8000-000000001230',
@@ -387,6 +403,11 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
   };
   public endpointStatusReplay: EndpointStatusRecord | null = null;
   public endpointStatusReplayLoads = 0;
+  public registrationAuthorized = true;
+
+  public async authorizePushTokenRegistration(): Promise<boolean> {
+    return this.registrationAuthorized;
+  }
 
   public async readCurrentTime(): Promise<Date> {
     return now;
@@ -647,6 +668,28 @@ describe('pinned push endpoint resolution', () => {
     });
   });
 
+  test('pages immutable candidates before mutable eligibility filtering', async () => {
+    const { input } = deliveryTestPushResolutionInput();
+    const store = new PushPolicyStore(
+      'active',
+      new Set([ids.ordinaryEndpoint]),
+    );
+
+    await expect(resolvePushEndpointPage(input, store, 0, 1)).resolves.toEqual({
+      endpoints: [],
+      nextCursor: 1,
+    });
+    await expect(resolvePushEndpointPage(input, store, 1, 1)).resolves.toEqual({
+      endpoints: [
+        expect.objectContaining({
+          recipientId: ids.ordinaryRecipient,
+          endpoint: expect.objectContaining({ id: ids.ordinaryEndpoint }),
+        }),
+      ],
+      nextCursor: null,
+    });
+  });
+
   test('rejects a superseded target under the facility lock before exposing a token', async () => {
     const { deliveryTest, input } = deliveryTestPushResolutionInput();
     const fixture = supersededTargetDatabase({
@@ -681,7 +724,7 @@ describe('canonical device capabilities', () => {
     const { store, transaction } = testStore();
     const result = await executeDeviceCapability(
       'register-push-token',
-      { deviceEnrollmentId: ids.device, platform: 'ios', token },
+      registrationInput,
       humanInvocation(true),
       store,
     );
@@ -698,6 +741,31 @@ describe('canonical device capabilities', () => {
     expect(transaction.completed[0]?.resultReference).toBe(
       `push-registration:${ids.device}:ios`,
     );
+  });
+
+  test('denies missing, malformed, or unlisted protected build configuration', async () => {
+    expect(parsePushRegistrationBuildAllowlist(undefined)).toEqual([]);
+    expect(parsePushRegistrationBuildAllowlist('{')).toEqual([]);
+    expect(
+      parsePushRegistrationBuildAllowlist(
+        JSON.stringify([
+          { platform: 'ios', provider: 'expo', build },
+          { platform: 'ios', provider: 'expo', build },
+        ]),
+      ),
+    ).toEqual([]);
+
+    const denied = testStore();
+    denied.transaction.registrationAuthorized = false;
+    await expect(
+      executeDeviceCapability(
+        'register-push-token',
+        registrationInput,
+        humanInvocation(true),
+        denied.store,
+      ),
+    ).rejects.toMatchObject({ reasonCode: 'CAPABILITY_INVOCATION_DENIED' });
+    expect(denied.transaction.registrationActor).toBeNull();
   });
 
   test('allows only the dedicated worker to record the fixed Expo invalidation', async () => {
