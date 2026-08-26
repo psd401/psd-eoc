@@ -660,6 +660,8 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
+          PSD_EOC_PRIVACY_CONTACT_URL:
+            'https://www.example.invalid/privacy-contact',
           PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
           PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,
           GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
