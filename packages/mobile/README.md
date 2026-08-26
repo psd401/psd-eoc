@@ -41,9 +41,11 @@ The exact push-enabled build also requires `GOOGLE_SERVICES_JSON` as a
 project-scoped, production-only EAS file variable with secret visibility.
 `app.config.ts` passes that protected build-runner path to
 `android.googleServicesFile`; it never copies the Firebase file into source.
-The build fails before prebuild if registration is enabled and the file is
-missing. Development and preview builds ignore that provider file and retain
-registration disabled.
+Secret variables are deliberately unavailable when EAS resolves app config on
+the operator's machine, and the iOS build does not consume the Android file.
+The remote Android builder fails during app-config evaluation if registration
+is enabled and the file is missing. Development and preview builds ignore that
+provider file and retain registration disabled.
 
 The EAS project UUID is pinned in `app.json`. Both values are public application
 configuration and must never contain a token or credential. The `development`

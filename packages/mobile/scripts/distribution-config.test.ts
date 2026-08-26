@@ -32,7 +32,7 @@ const collectObjectKeys = (
 };
 
 describe('mobile distribution configuration', () => {
-  test('requires the protected FCM config for the exact push-enabled build', () => {
+  test('requires protected FCM config only on the remote push-enabled Android build', () => {
     const baseConfig = appConfig.expo as ExpoConfig;
 
     expect(
@@ -40,11 +40,25 @@ describe('mobile distribution configuration', () => {
         EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
       }),
     ).toEqual(baseConfig);
-    expect(() =>
+    expect(
       withPushProviderConfig(baseConfig, {
         EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
       }),
-    ).toThrow('GOOGLE_SERVICES_JSON');
+    ).toEqual(baseConfig);
+    expect(
+      withPushProviderConfig(baseConfig, {
+        EAS_BUILD: 'true',
+        EAS_BUILD_PLATFORM: 'ios',
+        EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
+      }),
+    ).toEqual(baseConfig);
+    expect(() =>
+      withPushProviderConfig(baseConfig, {
+        EAS_BUILD: 'true',
+        EAS_BUILD_PLATFORM: 'android',
+        EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
+      }),
+    ).toThrow('push-enabled Android build');
     expect(
       withPushProviderConfig(baseConfig, {
         EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
