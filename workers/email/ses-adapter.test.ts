@@ -19,7 +19,6 @@ import {
   type SesSendLedgerClaim,
   type SesSendLedgerClaimRequest,
   type SesSendLedgerCompleteRequest,
-  type SesSendLedgerReleaseRequest,
   type SesV2Client,
   type SesV2SendEmailInput,
 } from './ses-adapter';
@@ -169,10 +168,8 @@ class MemoryDurableLedger implements DurableSesSendLedger {
   public readonly entries = new Map<string, LedgerEntry>();
   public claimCalls = 0;
   public completeCalls = 0;
-  public releaseCalls = 0;
   public failClaim = false;
   public failComplete = false;
-  public failRelease: 'synchronously' | 'asynchronously' | null = null;
 
   public claim(
     request: SesSendLedgerClaimRequest,
@@ -192,7 +189,7 @@ class MemoryDurableLedger implements DurableSesSendLedger {
     }
     const entry: LedgerEntry = {
       fingerprint: request.requestFingerprint,
-      leaseToken: `durable-lease:${request.attemptId}`,
+      leaseToken: IDS.confirmation,
       outcome: null,
     };
     this.entries.set(request.attemptId, entry);
@@ -214,29 +211,6 @@ class MemoryDurableLedger implements DurableSesSendLedger {
       throw new Error('Synthetic completion conflict.');
     }
     entry.outcome = request.outcome;
-    return Promise.resolve();
-  }
-
-  public release(request: SesSendLedgerReleaseRequest): Promise<void> {
-    this.releaseCalls += 1;
-    if (this.failRelease === 'synchronously') {
-      throw new Error('Synthetic synchronous release failure.');
-    }
-    if (this.failRelease === 'asynchronously') {
-      return Promise.reject(
-        new Error('Synthetic asynchronous release failure.'),
-      );
-    }
-    const entry = this.entries.get(request.attemptId);
-    if (
-      entry === undefined ||
-      entry.fingerprint !== request.requestFingerprint ||
-      entry.leaseToken !== request.leaseToken ||
-      entry.outcome !== null
-    ) {
-      throw new Error('Synthetic release conflict.');
-    }
-    this.entries.delete(request.attemptId);
     return Promise.resolve();
   }
 }
@@ -323,6 +297,10 @@ describe('SES v2 live adapter', () => {
       { Name: SES_CORRELATION_TAG_NAMES.recipientId, Value: IDS.recipient },
       { Name: SES_CORRELATION_TAG_NAMES.templateMode, Value: 'real' },
       { Name: SES_CORRELATION_TAG_NAMES.eventKind, Value: 'incident' },
+      {
+        Name: SES_CORRELATION_TAG_NAMES.providerIoClaimToken,
+        Value: IDS.confirmation,
+      },
     ]);
     expect(app.ledger.completeCalls).toBe(1);
   });
@@ -363,7 +341,7 @@ describe('SES v2 live adapter', () => {
     expect(client.inputs).toHaveLength(1);
   });
 
-  test('a proven safe SES rejection releases its fence for bounded retry', async () => {
+  test('a proven safe SES rejection retains append-only truth for bounded retry', async () => {
     let calls = 0;
     const client = new CapturingSesClient(() => {
       calls += 1;
@@ -385,46 +363,17 @@ describe('SES v2 live adapter', () => {
         disposition: 'safe-to-retry',
       }),
     );
-    expect(app.ledger.releaseCalls).toBe(1);
-    expect(app.ledger.entries.size).toBe(0);
+    expect(app.ledger.completeCalls).toBe(1);
+    expect(app.ledger.entries.size).toBe(1);
 
     await expect(app.adapter.send(request)).resolves.toEqual(
       expect.objectContaining({
-        state: 'provider-accepted',
-        providerReference: '01000191f0a1-retry-000000',
+        state: 'failed',
+        reasonCode: 'SES_PROVIDER_THROTTLED',
       }),
     );
-    expect(client.inputs).toHaveLength(2);
+    expect(client.inputs).toHaveLength(1);
   });
-
-  test.each(['synchronously', 'asynchronously'] as const)(
-    'a ledger that fails release %s cannot replace proven retry truth',
-    async (failureMode) => {
-      const client = new CapturingSesClient(() =>
-        Promise.reject(
-          new ProviderDispatchError('SES_PROVIDER_THROTTLED', 'safe-to-retry'),
-        ),
-      );
-      const ledger = new MemoryDurableLedger();
-      ledger.failRelease = failureMode;
-      const app = adapter(client, ledger);
-
-      await expect(
-        app.adapter.send({
-          workItem: workItem(),
-          idempotencyKey: IDS.attempt,
-        }),
-      ).rejects.toEqual(
-        expect.objectContaining({
-          code: 'SES_PROVIDER_THROTTLED',
-          disposition: 'safe-to-retry',
-        }),
-      );
-      expect(ledger.releaseCalls).toBe(1);
-      expect(ledger.entries.size).toBe(1);
-      expect(client.inputs).toHaveLength(1);
-    },
-  );
 
   test('a proven terminal SES rejection is retained as failed truth', async () => {
     const diagnosticDigest = 'a'.repeat(64);
@@ -518,7 +467,6 @@ describe('SES v2 live adapter', () => {
       durability: 'durable',
       claim: () => Promise.resolve({ kind: 'conflict' }),
       complete: () => Promise.resolve(),
-      release: () => Promise.resolve(),
     };
     const emailAdapter = new SesV2EmailAdapter({
       client,
@@ -535,6 +483,34 @@ describe('SES v2 live adapter', () => {
     ).rejects.toEqual(
       expect.objectContaining({
         code: 'SES_SEND_LEDGER_CONFLICT',
+        disposition: 'terminal-failure',
+      }),
+    );
+    expect(client.inputs).toHaveLength(0);
+  });
+
+  test('ledger policy denial is terminal and never reaches SES', async () => {
+    const client = new CapturingSesClient();
+    const ledger: DurableSesSendLedger = {
+      durability: 'durable',
+      claim: () => Promise.resolve({ kind: 'denied' }),
+      complete: () => Promise.resolve(),
+    };
+    const emailAdapter = new SesV2EmailAdapter({
+      client,
+      sendLedger: ledger,
+      fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+      truthLabel: 'live-verified',
+    });
+
+    await expect(
+      emailAdapter.send({
+        workItem: workItem(),
+        idempotencyKey: IDS.attempt,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        code: 'SES_SEND_POLICY_DENIED',
         disposition: 'terminal-failure',
       }),
     );

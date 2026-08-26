@@ -11,6 +11,9 @@ import {
   DATABASE_SSL_ROOT_CERT,
   DATA_CLASSIFICATION,
   EMAIL_DEAD_LETTER_QUEUE_NAME,
+  EMAIL_CALLBACK_QUEUE_NAME,
+  EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME,
+  EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME,
   EMAIL_QUEUE_NAME,
   EMAIL_WORKER_LOG_GROUP_NAME,
   DEPLOYMENT_ENVIRONMENT,
@@ -18,7 +21,6 @@ import {
   IMAGE_DIGEST_SENTINEL,
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
-  SES_VERIFICATION_REFERENCE,
   SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME,
   SMS_RECEIPT_QUEUE_NAME,
   STACK_NAME,
@@ -594,7 +596,7 @@ describe('deployment boundary', () => {
 });
 
 describe('minimal isolated resource shape', () => {
-  it('creates one bounded native application, bootstrap, and dark provider topology', () => {
+  it('creates one bounded native application, bootstrap, and conditional provider topology', () => {
     template.resourceCountIs('AWS::ECR::Repository', 1);
     template.resourceCountIs('AWS::RDS::DBCluster', 1);
     template.resourceCountIs('AWS::RDS::DBInstance', 1);
@@ -602,22 +604,22 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::AppRunner::AutoScalingConfiguration', 1);
     template.resourceCountIs('AWS::AppRunner::VpcConnector', 1);
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 4);
-    template.resourceCountIs('AWS::ECS::Service', 2);
-    // Seven log groups: bootstrap, access sync, both dark channel workers, the
-    // Aurora failover bridge, the delivery router, and the alarm mailer.
-    template.resourceCountIs('AWS::Logs::LogGroup', 7);
-    // Eleven queues: the health queue, plus a source/dead-letter pair each for
-    // delivery, email, SMS work, SMS receipts, and push.
-    template.resourceCountIs('AWS::SQS::Queue', 11);
-    // Fifteen: the live application and bootstrap credentials, five exact
-    // internal worker-route bearers, a deny-by-default build allowlist, and the
-    // protected Expo, APNs, and FCM credential placeholders.
-    template.resourceCountIs('AWS::SecretsManager::Secret', 15);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 6);
+    template.resourceCountIs('AWS::ECS::Service', 4);
+    // Eight log groups: bootstrap/access sync, push, SMS, email send, email
+    // callback, Aurora failover, the delivery router, and the alarm mailer.
+    template.resourceCountIs('AWS::Logs::LogGroup', 8);
+    // Thirteen queues: health, source/dead-letter pairs for delivery, email,
+    // SMS work, SMS receipts, and push, plus the SES callback source/DLQ pair.
+    template.resourceCountIs('AWS::SQS::Queue', 13);
+    // Sixteen retained secrets include the live application and bootstrap
+    // credentials, six exact internal worker-route bearers, the build
+    // allowlist, and protected Expo, APNs, and FCM credential placeholders.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 16);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
-    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 0);
+    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 1);
     // Three topics: SES event evidence, and the two alarm routes.
     template.resourceCountIs('AWS::SNS::Topic', 3);
 
@@ -644,7 +646,7 @@ describe('minimal isolated resource shape', () => {
     const emailQueue = properties(queues.get(EMAIL_QUEUE_NAME) ?? {});
     expect(emailQueue.SqsManagedSseEnabled).toBe(true);
     expect(emailQueue.MessageRetentionPeriod).toBe(345_600);
-    expect(emailQueue.VisibilityTimeout).toBe(60);
+    expect(emailQueue.VisibilityTimeout).toBe(120);
     expect(emailQueue.RedrivePolicy).toEqual({
       deadLetterTargetArn: {
         'Fn::GetAtt': [expect.stringContaining('EmailDeadLetterQueue'), 'Arn'],
@@ -745,9 +747,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::Lambda::Function', 3);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
-    // Five: the database, shared bootstrap task, App Runner connector, and the
-    // two HTTPS-only channel workers. Neither worker has database ingress.
-    template.resourceCountIs('AWS::EC2::SecurityGroup', 5);
+    // Six: database, shared bootstrap task, App Runner connector, and the three
+    // HTTPS-only channel-worker groups. None has database ingress.
+    template.resourceCountIs('AWS::EC2::SecurityGroup', 6);
     const securityGroups = resourceEntries('AWS::EC2::SecurityGroup');
     const databaseSecurityGroup = securityGroups.find(([, resource]) =>
       String(properties(resource).GroupDescription).startsWith(
@@ -814,7 +816,7 @@ describe('minimal isolated resource shape', () => {
     );
     // One for the shared task group, one for the App Runner connector group,
     // and one for each isolated channel worker.
-    expect(httpsRules).toHaveLength(4);
+    expect(httpsRules).toHaveLength(5);
     for (const rule of httpsRules) {
       expect(rule.FromPort).toBe(443);
       expect(rule.ToPort).toBe(443);
@@ -860,6 +862,7 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/providers/fcm-direct',
         '/psd-eoc/workers/attempt-execution-token',
         '/psd-eoc/workers/delivery-state-token',
+        '/psd-eoc/workers/email-runtime-token',
         '/psd-eoc/workers/expo-push-runtime-token',
         '/psd-eoc/workers/push-endpoint-token',
         '/psd-eoc/workers/sms-runtime-token',
@@ -876,6 +879,7 @@ describe('minimal isolated resource shape', () => {
       '/psd-eoc/providers/fcm-direct',
       '/psd-eoc/workers/attempt-execution-token',
       '/psd-eoc/workers/delivery-state-token',
+      '/psd-eoc/workers/email-runtime-token',
       '/psd-eoc/workers/expo-push-runtime-token',
       '/psd-eoc/workers/push-endpoint-token',
       '/psd-eoc/workers/sms-runtime-token',
@@ -1115,12 +1119,14 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
         'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_DISPLAY_TIME_ZONE',
+        'PSD_EOC_EMAIL_WORKER_ENABLED',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
         'PSD_EOC_ORGANIZATION_NAME',
         'PSD_EOC_PUSH_PROVIDER_CUTOVER',
         'PSD_EOC_PRIVACY_CONTACT_URL',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
+        'PSD_EOC_SES_SNS_TOPIC_ARN',
         'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',
         'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
         'PSD_EOC_SMS_WORKER_READY',
@@ -1143,6 +1149,9 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toEqual({
       Ref: 'RuntimeDatabaseIdleTimeoutSeconds',
     });
+    expect(variables.get('PSD_EOC_EMAIL_WORKER_ENABLED')).toEqual({
+      'Fn::If': ['ShouldRunEmailWorker', 'true', 'false'],
+    });
     expect(variables.get('PSD_EOC_ORGANIZATION_NAME')).toBe(
       'Example School District',
     );
@@ -1163,9 +1172,12 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('PSD_EOC_CRITICAL_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('CriticalAlarmTopic'),
     });
-    expect(variables.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE')).toBe(
-      SES_VERIFICATION_REFERENCE,
-    );
+    expect(
+      variables.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'SesCredentialVerificationReference' });
+    expect(variables.get('PSD_EOC_SES_SNS_TOPIC_ARN')).toEqual({
+      Ref: expect.stringContaining('EmailEventsTopic'),
+    });
     expect(variables.get('PSD_EOC_SMS_DESTINATION_COUNTRY_CODE')).toEqual({
       Ref: 'SmsDestinationCountryCode',
     });
@@ -1187,6 +1199,7 @@ describe('App Runner runtime safety boundary', () => {
         'GOOGLE_OIDC_COOKIE_SECRET',
         'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
         'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+        'PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN',
         'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
         'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
         'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
@@ -1594,30 +1607,90 @@ describe('App Runner runtime safety boundary', () => {
     ).toBe(true);
   });
 
-  it('gives the dark email worker only exact queue-consumer permissions', () => {
+  it('gives the conditional email worker exact queue and SES permissions', () => {
+    const task = properties(taskDefinitionByFamily('psd-eoc-email-worker'));
+    const containers = asArray(task.ContainerDefinitions).map(asRecord);
+    expect(containers).toHaveLength(1);
+    const container = containers[0];
+    if (container === undefined) throw new Error('Missing email container.');
+    expect(container.Command).toEqual(['bun', 'workers/email/service.ts']);
+    expect(container.ReadonlyRootFilesystem).toBe(true);
+    expect(JSON.stringify(container)).not.toContain('DATABASE_');
+    expect(JSON.stringify(container)).not.toContain('EVENT_LIFECYCLE');
+    const environment = new Map(
+      asArray(container.Environment).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.Value];
+      }),
+    );
+    expect(environment.get('PSD_EOC_EMAIL_RUNTIME_MODE')).toEqual({
+      'Fn::If': ['ShouldRunEmailWorker', 'enabled', 'dark'],
+    });
+    expect(environment.get('PSD_EOC_SES_PROVIDER_AUTHORIZED')).toEqual({
+      'Fn::If': ['ShouldRunEmailWorker', 'true', 'false'],
+    });
+    expect(environment.get('PSD_EOC_SES_CREDENTIAL_STATUS')).toEqual({
+      'Fn::If': ['ShouldRunEmailWorker', 'verified', 'unverified'],
+    });
+    const injectedSecrets = new Map(
+      asArray(container.Secrets).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.ValueFrom];
+      }),
+    );
+    expect([...injectedSecrets.keys()].sort()).toEqual(
+      [
+        'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
+        'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+        'PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN',
+      ].sort(),
+    );
+
     const emailWorkerRole = roleLogicalIdForDescription(
-      'Dark live-pilot email worker',
+      'Consumes and retries only the SES email queue',
     );
     const statements = inlineStatementsForRole(emailWorkerRole);
     const actions = [...new Set(allAllowedActions(statements))].sort();
 
     expect(actions).toEqual(
       [
+        'ses:SendEmail',
+        'ses:SendRawEmail',
         'sqs:ChangeMessageVisibility',
         'sqs:DeleteMessage',
         'sqs:GetQueueAttributes',
         'sqs:GetQueueUrl',
         'sqs:ReceiveMessage',
+        'sqs:SendMessage',
       ].sort(),
     );
-    expect(actions.some((action) => action.startsWith('ses:'))).toBe(false);
     expect(actions.some((action) => action.startsWith('sns:'))).toBe(false);
     expect(actions.some((action) => action.startsWith('secretsmanager:'))).toBe(
       false,
     );
-    expect(statements).toHaveLength(1);
-    expect(statements[0]?.Resource).toEqual({
-      'Fn::GetAtt': [expect.stringContaining('EmailQueue'), 'Arn'],
+    const sesStatement = statements.find((statement) =>
+      asStringArray(statement.Action).includes('ses:SendEmail'),
+    );
+    expect(asStringArray(sesStatement?.Action).sort()).toEqual([
+      'ses:SendEmail',
+      'ses:SendRawEmail',
+    ]);
+    expect(sesStatement?.Condition).toEqual({
+      StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS },
+    });
+    const sesResources = JSON.stringify(sesStatement?.Resource);
+    expect(sesResources).toContain(
+      `configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+    );
+    expect(sesResources).toContain(`identity/${SES_IDENTITY_DOMAIN}`);
+    expect(sesResources).not.toContain('*');
+    expect(JSON.stringify(statements)).toContain('EmailQueue');
+
+    const service = resourceEntries('AWS::ECS::Service')
+      .map(([, resource]) => properties(resource))
+      .find((resource) => resource.ServiceName === 'psd-eoc-email-worker');
+    expect(service?.DesiredCount).toEqual({
+      'Fn::If': ['ShouldRunEmailWorker', 1, 0],
     });
   });
 
@@ -2039,7 +2112,7 @@ describe('protected access-membership publication boundary', () => {
 describe('alarm topic delivery', () => {
   it('deploys sanitized channel-worker metrics and alarms only with each worker', () => {
     const filters = resourceEntries('AWS::Logs::MetricFilter');
-    expect(filters).toHaveLength(8);
+    expect(filters).toHaveLength(13);
     expect(
       filters
         .map(([, resource]) => {
@@ -2057,6 +2130,31 @@ describe('alarm topic delivery', () => {
         .sort(),
     ).toEqual(
       [
+        [
+          'EmailCallbackFailureCount',
+          '{ $.event = "email-callback-message-failed" }',
+          'ShouldProvisionApplication',
+        ],
+        [
+          'EmailCallbackWorkerHeartbeat',
+          '{ $.event = "email-callback-worker-heartbeat" }',
+          'ShouldProvisionApplication',
+        ],
+        [
+          'EmailOutboxToProviderIncompleteCount',
+          '{ ($.event = "email-worker-message-failed") || ($.event = "email-worker-message-incomplete") }',
+          'ShouldRunEmailWorker',
+        ],
+        [
+          'EmailOutboxToProviderLatency',
+          '{ $.event = "email-worker-message-completed" }',
+          'ShouldRunEmailWorker',
+        ],
+        [
+          'EmailWorkerHeartbeat',
+          '{ $.event = "email-worker-heartbeat" }',
+          'ShouldRunEmailWorker',
+        ],
         [
           'OutboxToProviderIncompleteCount',
           '{ ($.event = "push-worker-message-failed") || ($.event = "push-worker-message-incomplete") }',
@@ -2153,6 +2251,32 @@ describe('alarm topic delivery', () => {
         'psd-eoc-sms-outbox-to-provider-p95',
         'psd-eoc-sms-worker-health',
         'psd-eoc-sms-worker-message-failures',
+      ].sort(),
+    );
+
+    const conditionalEmailAlarms = resourceEntries('AWS::CloudWatch::Alarm')
+      .filter(([, resource]) =>
+        String(properties(resource).AlarmName).startsWith('psd-eoc-email-'),
+      )
+      .filter(([, resource]) => resource.Condition !== undefined);
+    expect(
+      conditionalEmailAlarms
+        .map(([, resource]) => {
+          expect([
+            'ShouldRunEmailWorker',
+            'ShouldProvisionApplication',
+          ]).toContain(String(resource.Condition));
+          const alarm = properties(resource);
+          expect(String(alarm.AlarmDescription)).toContain('Runbook: https://');
+          return alarm.AlarmName;
+        })
+        .sort(),
+    ).toEqual(
+      [
+        'psd-eoc-email-callback-failures',
+        'psd-eoc-email-callback-worker-health',
+        'psd-eoc-email-provider-incomplete',
+        'psd-eoc-email-worker-health',
       ].sort(),
     );
   });
@@ -2333,20 +2457,55 @@ describe('configured-unverified provider readiness boundary', () => {
       'psd-eoc-sms-delivery-events',
       'psd-eoc-sms-opt-out-reconciliation',
     ]);
-    // Exactly one Lambda consumer exists, and it is the router. Both channel
-    // services are present for review but resolve to zero unless their exact
-    // protected conditions are true.
+    // Exactly one Lambda consumer exists, and it is the router. Provider send
+    // services are conditional; the durable email callback service follows the
+    // application so suppression evidence can still be ingested while sending
+    // is dark.
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 1);
-    template.resourceCountIs('AWS::ECS::Service', 2);
-    const pushService = properties(
-      resourceEntries('AWS::ECS::Service').find(
-        ([, resource]) =>
-          properties(resource).ServiceName === 'psd-eoc-expo-push-worker',
-      )?.[1] ?? {},
+    template.resourceCountIs('AWS::ECS::Service', 4);
+    const services = resourceEntries('AWS::ECS::Service').map(([, resource]) =>
+      properties(resource),
     );
-    expect(pushService.DesiredCount).toEqual({
+    const pushService = services.find(
+      (service) => service.ServiceName === 'psd-eoc-expo-push-worker',
+    );
+    expect(pushService?.DesiredCount).toEqual({
       'Fn::If': ['ShouldRunExpoPushWorker', 1, 0],
     });
+    const emailService = services.find(
+      (service) => service.ServiceName === 'psd-eoc-email-worker',
+    );
+    expect(emailService?.DesiredCount).toEqual({
+      'Fn::If': ['ShouldRunEmailWorker', 1, 0],
+    });
+    const callbackService = services.find(
+      (service) => service.ServiceName === 'psd-eoc-email-callback-worker',
+    );
+    expect(callbackService?.DesiredCount).toEqual({
+      'Fn::If': ['ShouldProvisionApplication', 1, 0],
+    });
+    const smsService = services.find(
+      (service) => service.ServiceName === 'psd-eoc-aws-eum-sms-worker',
+    );
+    expect(smsService?.DesiredCount).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 1, 0],
+    });
+    const callbackRole = roleLogicalIdForDescription(
+      'Consumes only the durable SES callback queue',
+    );
+    expect(
+      [
+        ...new Set(allAllowedActions(inlineStatementsForRole(callbackRole))),
+      ].sort(),
+    ).toEqual(
+      [
+        'sqs:ChangeMessageVisibility',
+        'sqs:DeleteMessage',
+        'sqs:GetQueueAttributes',
+        'sqs:GetQueueUrl',
+        'sqs:ReceiveMessage',
+      ].sort(),
+    );
     const smsRules = resourceEntries('AWS::Events::Rule')
       .map(([, resource]) => properties(resource))
       .filter((rule) => String(rule.Name).startsWith('psd-eoc-sms-'));
@@ -2367,7 +2526,7 @@ describe('configured-unverified provider readiness boundary', () => {
       resourceEntries('AWS::SNS::Subscription')
         .map(([, resource]) => String(properties(resource).Protocol))
         .sort(),
-    ).toEqual(['lambda', 'lambda', 'sms', 'sms']);
+    ).toEqual(['lambda', 'lambda', 'sms', 'sms', 'sqs']);
     expect(
       Object.values(resources).some((resource) =>
         String(asRecord(resource).Type).startsWith('Custom::'),
@@ -2378,42 +2537,48 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedTemplate).not.toContain('aws-data-api');
     expect(serializedTemplate).not.toContain('DATABASE_RESOURCE_ARN');
     expect(serializedTemplate).not.toContain('DATABASE_SECRET_ARN');
-    // ses:SendEmail exists exactly once, on the alarm mailer, and is confined by
-    // condition to the operational alarm sender. That is not the staff
-    // notification path: the mailer has no roster, no database, no recipient
-    // from a snapshot, and cannot send as the notification address. Nothing
-    // else in the stack may send mail at all, and SendRawEmail exists nowhere.
-    expect(serializedTemplate).not.toContain('ses:SendRawEmail');
+    // SES send authority exists only on the alarm mailer and isolated email
+    // worker. App Runner remains unable to send directly.
     const sesSenders = resourceEntries('AWS::IAM::Policy').filter(
       ([, resource]) =>
         JSON.stringify(properties(resource).PolicyDocument).includes(
           'ses:SendEmail',
         ),
     );
-    expect(sesSenders).toHaveLength(1);
-    const sesStatement = asArray(
-      asRecord(properties(asRecord(sesSenders[0]?.[1])).PolicyDocument)
-        .Statement,
-    )
-      .map(asRecord)
-      .find((statement) =>
-        asStringArray(statement.Action).includes('ses:SendEmail'),
-      );
-    expect(sesStatement?.Condition).toEqual({
-      StringEquals: {
-        'ses:FromAddress': `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
-      },
-    });
-    expect(JSON.stringify(sesSenders[0]?.[1])).toContain('AlarmMailer');
+    expect(sesSenders).toHaveLength(2);
+    const senderConditions = sesSenders.map(
+      ([, resource]) =>
+        asArray(asRecord(properties(resource).PolicyDocument).Statement)
+          .map(asRecord)
+          .find((statement) =>
+            asStringArray(statement.Action).includes('ses:SendEmail'),
+          )?.Condition,
+    );
+    expect(senderConditions).toEqual(
+      expect.arrayContaining([
+        {
+          StringEquals: {
+            'ses:FromAddress': `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
+          },
+        },
+        { StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS } },
+      ]),
+    );
+    const runtimeRole = roleLogicalIdForServicePrincipal(
+      'tasks.apprunner.amazonaws.com',
+    );
+    expect(
+      allAllowedActions(inlineStatementsForRole(runtimeRole)),
+    ).not.toContain('ses:SendEmail');
     expect(serializedTemplate).not.toContain('controlled-recipient');
   });
 
-  it('configures the importable SES evidence path dark and records the external destination boundary', () => {
+  it('enables the SES configuration set and wires encrypted signed evidence', () => {
     const configurationSetResource = onlyResource('AWS::SES::ConfigurationSet');
     const configurationSet = properties(configurationSetResource);
     expect(configurationSet.Name).toBe(SES_CONFIGURATION_SET_NAME);
     expect(configurationSet.SendingOptions).toEqual({
-      SendingEnabled: false,
+      SendingEnabled: true,
     });
     expect(configurationSet.ReputationOptions).toEqual({
       ReputationMetricsEnabled: true,
@@ -2421,7 +2586,133 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(configurationSetResource.DeletionPolicy).toBe('Retain');
     expect(configurationSetResource.UpdateReplacePolicy).toBe('Retain');
 
-    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 0);
+    const eventDestination = properties(
+      onlyResource('AWS::SES::ConfigurationSetEventDestination'),
+    );
+    expect(eventDestination.ConfigurationSetName).toEqual({
+      Ref: expect.stringContaining('EmailConfigurationSet'),
+    });
+    expect(eventDestination.EventDestination).toEqual(
+      expect.objectContaining({
+        Enabled: true,
+        MatchingEventTypes: [
+          'SEND',
+          'DELIVERY',
+          'BOUNCE',
+          'COMPLAINT',
+          'REJECT',
+        ],
+        Name: SES_EVENT_DESTINATION_NAME,
+        SnsDestination: {
+          TopicARN: { Ref: expect.stringContaining('EmailEventsTopic') },
+        },
+      }),
+    );
+
+    const queueSubscriptionResource = resourceEntries(
+      'AWS::SNS::Subscription',
+    ).find(([, resource]) => properties(resource).Protocol === 'sqs')?.[1];
+    if (queueSubscriptionResource === undefined) {
+      throw new Error('Missing durable SES callback subscription.');
+    }
+    const queueSubscription = properties(queueSubscriptionResource);
+    expect(JSON.stringify(queueSubscription.Endpoint)).toContain(
+      'EmailCallbackQueue',
+    );
+    expect(JSON.stringify(queueSubscription.TopicArn)).toContain(
+      'EmailEventsTopic',
+    );
+    expect(queueSubscription.RawMessageDelivery).toBe(false);
+
+    const callbackQueueResource = resourceEntries('AWS::SQS::Queue').find(
+      ([, resource]) =>
+        properties(resource).QueueName === EMAIL_CALLBACK_QUEUE_NAME,
+    )?.[1];
+    if (callbackQueueResource === undefined) {
+      throw new Error('Missing durable callback queue.');
+    }
+    expect(properties(callbackQueueResource).RedrivePolicy).toEqual({
+      deadLetterTargetArn: {
+        'Fn::GetAtt': [
+          expect.stringContaining('EmailCallbackDeadLetterQueue'),
+          'Arn',
+        ],
+      },
+      maxReceiveCount: 5,
+    });
+    expect(callbackQueueResource.DeletionPolicy).toBe('Retain');
+    expect(callbackQueueResource.UpdateReplacePolicy).toBe('Retain');
+
+    const callbackDeadLetterQueueResource = resourceEntries(
+      'AWS::SQS::Queue',
+    ).find(
+      ([, resource]) =>
+        properties(resource).QueueName ===
+        EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME,
+    )?.[1];
+    if (callbackDeadLetterQueueResource === undefined) {
+      throw new Error('Missing callback dead-letter queue.');
+    }
+    const callbackRedriveAllowPolicy = asRecord(
+      properties(callbackDeadLetterQueueResource).RedriveAllowPolicy,
+    );
+    expect(callbackRedriveAllowPolicy.redrivePermission).toBe('byQueue');
+    expect(asArray(callbackRedriveAllowPolicy.sourceQueueArns)).toHaveLength(1);
+    expect(
+      JSON.stringify(callbackRedriveAllowPolicy.sourceQueueArns),
+    ).toContain(
+      `:sqs:${AWS_REGION}:${AWS_ACCOUNT}:${EMAIL_CALLBACK_QUEUE_NAME}`,
+    );
+    expect(callbackDeadLetterQueueResource.DeletionPolicy).toBe('Retain');
+    expect(callbackDeadLetterQueueResource.UpdateReplacePolicy).toBe('Retain');
+    expect(
+      resourceEntries('AWS::CloudWatch::Alarm').some(
+        ([, resource]) =>
+          properties(resource).AlarmName === 'psd-eoc-email-callback-dlq-depth',
+      ),
+    ).toBe(true);
+    expect(
+      resourceEntries('AWS::CloudWatch::Alarm').some(
+        ([, resource]) =>
+          properties(resource).AlarmName ===
+          'psd-eoc-email-callback-worker-health',
+      ),
+    ).toBe(true);
+
+    const callbackTask = properties(
+      taskDefinitionByFamily('psd-eoc-email-callback-worker'),
+    );
+    const callbackContainer = asArray(callbackTask.ContainerDefinitions)
+      .map(asRecord)
+      .find((container) => container.Name === 'ses-email-callback-worker');
+    if (callbackContainer === undefined) {
+      throw new Error('Missing email callback worker container.');
+    }
+    expect(callbackContainer.Command).toEqual([
+      'bun',
+      'workers/email/callback-service.ts',
+    ]);
+    expect(JSON.stringify(callbackContainer.Image)).toContain(
+      'BootstrapImageDigest',
+    );
+    expect(JSON.stringify(callbackContainer.LogConfiguration)).toContain(
+      'EmailCallbackWorkerLogGroup',
+    );
+    expect(
+      resourceEntries('AWS::Logs::LogGroup').some(
+        ([, resource]) =>
+          properties(resource).LogGroupName ===
+          EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME,
+      ),
+    ).toBe(true);
+    const callbackService = resourceEntries('AWS::ECS::Service')
+      .map(([, resource]) => properties(resource))
+      .find(
+        (resource) => resource.ServiceName === 'psd-eoc-email-callback-worker',
+      );
+    expect(callbackService?.DesiredCount).toEqual({
+      'Fn::If': ['ShouldProvisionApplication', 1, 0],
+    });
 
     const topicResource = asRecord(
       resourceEntries('AWS::SNS::Topic').find(
@@ -2523,11 +2814,20 @@ describe('configured-unverified provider readiness boundary', () => {
         'DeployedAppImageDigest',
         'DeployedAppSourceSha',
         'EmailChannelState',
+        'EmailCallbackDeadLetterQueueArn',
+        'EmailCallbackQueueArn',
+        'EmailCallbackQueueUrl',
+        'EmailCallbackWorkerLogGroupName',
+        'EmailCallbackWorkerServiceArn',
         'EmailDeadLetterQueueArn',
         'EmailQueueArn',
         'EmailQueueUrl',
+        'EmailWorkerDeploymentState',
         'EmailWorkerLogGroupName',
         'EmailWorkerRoleArn',
+        'EmailWorkerServiceArn',
+        'EmailWorkerTaskDefinitionArn',
+        'EmailWorkerTaskExecutionRoleArn',
         'EnvironmentName',
         'ExpectedAwsAccountAlias',
         'ExpoAccessTokenSecretArn',
@@ -2572,12 +2872,22 @@ describe('configured-unverified provider readiness boundary', () => {
       SES_EVENT_DESTINATION_NAME,
     );
     expect(asRecord(outputs.SesEmailEventDestinationManagement).Value).toBe(
-      'external-readback',
+      'cloudformation',
     );
-    expect(asRecord(outputs.SesIntegrationTruth).Value).toBe(
-      'configured-unverified',
-    );
-    expect(asRecord(outputs.EmailChannelState).Value).toBe('disabled');
+    expect(asRecord(outputs.SesIntegrationTruth).Value).toEqual({
+      'Fn::If': [
+        'ShouldRunEmailWorker',
+        'configured-awaiting-human-verification',
+        'configured-unverified',
+      ],
+    });
+    expect(asRecord(outputs.EmailChannelState).Value).toEqual({
+      'Fn::If': [
+        'ShouldRunEmailWorker',
+        'awaiting-human-verification',
+        'disabled',
+      ],
+    });
     expect(asRecord(outputs.BootstrapCandidateImageDigest).Value).toEqual({
       Ref: 'BootstrapImageDigest',
     });

@@ -18,6 +18,11 @@ import {
 import { groupMembers, groupSources } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+  type DisposableDatabase,
+} from '../testing/database';
+import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from './session-cookie';
@@ -35,7 +40,7 @@ const ADMIN_EMAIL = 'round-trip-admin@example.invalid';
 const STAFF_EMAIL = 'round-trip-staff@example.invalid';
 
 let connection: PostgresDatabaseConnection | undefined;
-let databaseName = '';
+let disposable: DisposableDatabase | undefined;
 
 function database(): PostgresDatabaseConnection['db'] {
   if (connection === undefined) {
@@ -120,23 +125,10 @@ describeWithDatabase('sign-in to session round trip', () => {
     if (baseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required.');
     }
-    databaseName = `psd_eoc_roundtrip_${randomUUID().replaceAll('-', '')}_test`;
-    const admin = createDatabaseClient({
-      driver: 'postgres',
-      url: baseUrl,
-      maxConnections: 1,
-    });
-    if (admin.driver !== 'postgres') {
-      throw new Error('The direct PostgreSQL driver is required.');
-    }
-    await admin.db.execute(`create database "${databaseName}"` as never);
-    await admin.close();
-
-    const url = new URL(baseUrl);
-    url.pathname = `/${databaseName}`;
+    disposable = await createDisposableDatabase('psd_eoc_roundtrip', baseUrl);
     const opened = createDatabaseClient({
       driver: 'postgres',
-      url: url.toString(),
+      url: disposable.url,
       maxConnections: 4,
     });
     if (opened.driver !== 'postgres') {
@@ -147,20 +139,14 @@ describeWithDatabase('sign-in to session round trip', () => {
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const opened = connection;
+    const ownedDatabase = disposable;
     connection = undefined;
-    if (baseUrl === undefined || databaseName === '') return;
-    const admin = createDatabaseClient({
-      driver: 'postgres',
-      url: baseUrl,
-      maxConnections: 1,
-    });
-    if (admin.driver === 'postgres') {
-      await admin.db.execute(
-        `drop database if exists "${databaseName}" (force)` as never,
-      );
-    }
-    await admin.close();
+    disposable = undefined;
+    await closeAndDropDisposableDatabase(
+      opened === undefined ? undefined : () => opened.close(),
+      ownedDatabase,
+    );
   });
 
   test('a session keeps the roles the signer’s groups granted', async () => {

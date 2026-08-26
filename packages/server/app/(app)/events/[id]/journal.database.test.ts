@@ -2029,6 +2029,8 @@ describeWithDatabase('event journal database guarantees', () => {
           status: 'active',
           capturedAt: fixtureTime,
           platform: 'ios',
+          provider: 'expo',
+          serviceEnvironment: 'production',
           token: `synthetic-unroutable:issue77-${suffix}`,
           email: null,
           phoneNumber: null,

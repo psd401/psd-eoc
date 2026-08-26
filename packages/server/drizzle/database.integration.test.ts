@@ -6,11 +6,18 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { NotificationOutboxMessageSchema } from '@psd-eoc/contracts';
+import {
+  DispatchBatchSchema,
+  EmailBatchResolutionPageSchema,
+  EmailRetryResolutionSchema,
+  NotificationOutboxMessageSchema,
+  SesSendLedgerClaimSchema,
+} from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  type Database,
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../db/client';
@@ -26,6 +33,11 @@ import {
   createDisposableDatabase,
   type DisposableDatabase,
 } from '../lib/testing/database';
+import { createDrizzleSesWebhookStore } from '../app/api/webhooks/ses/runtime';
+import { createDrizzleDeliveryEvidenceStore } from '../app/api/internal/delivery-state/runtime';
+import { createDrizzleAttemptExecutionStore } from '../lib/notify/attempt-execution-store';
+import { createDrizzleEmailRuntimeStore } from '../lib/notify/email-runtime-store';
+import { deliveryTestEndpointReferenceDigest } from '../lib/testing/e2e-delivery';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -75,7 +87,7 @@ describe('direct push migration safety', () => {
   test('does not transfer Expo authorization or enable mobile push', async () => {
     const migration = await Bun.file(
       new URL(
-        './migrations/0033_direct_push_registration.sql',
+        './migrations/0034_direct_push_registration.sql',
         import.meta.url,
       ),
     ).text();
@@ -102,6 +114,10 @@ describe('direct push migration safety', () => {
     );
     expect(migration).toContain(
       'ENABLE TRIGGER "roster_endpoints_immutable_guard"',
+    );
+    expect(migration).toContain('"roster_endpoints"."provider" is not null');
+    expect(migration).toContain(
+      '"roster_endpoints"."service_environment" is not null',
     );
     expect(migration).toContain('delivery_evidence_provider_time');
     expect(migration).toContain('delivery_evidence_apns_unregistered_time');
@@ -229,11 +245,11 @@ describeWithDatabase('direct push migration upgrade', () => {
         return tag;
       });
       const directMigrationIndex = migrationTags.indexOf(
-        '0033_direct_push_registration',
+        '0034_direct_push_registration',
       );
       expect(directMigrationIndex).toBeGreaterThan(0);
       expect(migrationTags[directMigrationIndex - 1]).toBe(
-        '0032_woozy_stardust',
+        '0033_complex_amazoness',
       );
       for (const tag of migrationTags.slice(0, directMigrationIndex)) {
         await applySqlMigrationFile(opened.db, `${tag}.sql`);
@@ -325,7 +341,7 @@ describeWithDatabase('direct push migration upgrade', () => {
 
       await applySqlMigrationFile(
         opened.db,
-        '0033_direct_push_registration.sql',
+        '0034_direct_push_registration.sql',
       );
 
       const [after] = await opened.db.execute<{
@@ -846,6 +862,8 @@ type PostgresTransaction = Parameters<
  */
 async function insertDeliveryTestStructuralFixture(
   transaction: PostgresTransaction,
+  dispatchCreatedAt: Date | string = '2026-08-10T16:06:30.000Z',
+  endpointReferenceDigest: string = 'e'.repeat(64),
 ): Promise<void> {
   for (const statement of syntheticAdminEvidencePrerequisites) {
     await transaction.execute(statement);
@@ -990,7 +1008,8 @@ async function insertDeliveryTestStructuralFixture(
     sql`
       insert into roster_endpoints (
         id, roster_snapshot_id, recipient_id, population, channel, status,
-        captured_at, platform, token, email, phone_number
+        captured_at, platform, provider, service_environment, token, email,
+        phone_number
       ) values
       (
         '00000000-0000-4000-8000-000000030006'::uuid,
@@ -1001,6 +1020,8 @@ async function insertDeliveryTestStructuralFixture(
         'active'::endpoint_status,
         '2026-08-10T16:01:00.000Z'::timestamptz,
         'ios'::push_platform,
+        'expo',
+        'production',
         'synthetic-unroutable:delivery-test-listed-push',
         null,
         null
@@ -1015,6 +1036,8 @@ async function insertDeliveryTestStructuralFixture(
         '2026-08-10T16:01:00.000Z'::timestamptz,
         null,
         null,
+        null,
+        null,
         'synthetic-delivery-test-listed@example.invalid',
         null
       ),
@@ -1027,6 +1050,8 @@ async function insertDeliveryTestStructuralFixture(
         'active'::endpoint_status,
         '2026-08-10T16:01:00.000Z'::timestamptz,
         'android'::push_platform,
+        'expo',
+        'production',
         'synthetic-unroutable:delivery-test-unlisted-push',
         null,
         null
@@ -1085,7 +1110,7 @@ async function insertDeliveryTestStructuralFixture(
         '00000000-0000-4000-8000-000000030003'::uuid,
         'staff'::roster_population,
         null,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         '00000000-0000-4000-8000-000000030011'::uuid,
         '00000000-0000-4000-8000-000000026001'::uuid,
         '00000000-0000-4000-8000-000000026004'::uuid,
@@ -1218,7 +1243,7 @@ async function insertDeliveryTestStructuralFixture(
         repeat('d', 64),
         '00000000-0000-4000-8000-000000030010'::uuid,
         1,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         '2026-08-10T16:05:00.000Z'::timestamptz,
         '2026-08-10T16:10:00.000Z'::timestamptz
       )
@@ -1293,7 +1318,7 @@ async function insertDeliveryTestStructuralFixture(
         ),
         '00000000-0000-4000-8000-000000030010'::uuid,
         1,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         '2026-08-10T16:06:00.000Z'::timestamptz
       )
     `,
@@ -1402,7 +1427,18 @@ async function insertDeliveryTestStructuralFixture(
             'renderedMessage', channel.rendered_message,
             'integrationStatus', jsonb_build_object(
               'integrationId', channel.integration_id,
-              'label', channel.integration_label::text
+              'label', channel.integration_label::text,
+              'verifiedAt', '2026-08-10T16:02:00.000Z',
+              'verifiedByUserId',
+                '00000000-0000-4000-8000-000000026001',
+              'authorizationReference', case channel.channel
+                when 'push' then
+                  'synthetic-product-owner-push-live-verification'
+                when 'email' then
+                  'synthetic-product-owner-email-live-verification'
+              end,
+              'reasonCode', null,
+              'observedAt', '2026-08-10T16:02:00.000Z'
             )
           ) order by channel.sequence
         ) as channels
@@ -1442,7 +1478,7 @@ async function insertDeliveryTestStructuralFixture(
         channel.integration_label,
         channel.sequence,
         channel.endpoint_count,
-        '2026-08-10T16:06:30.000Z'::timestamptz
+        ${dispatchCreatedAt}::timestamptz
       from outbox
       join notification_intent_channels as channel
         on channel.intent_id = outbox.intent_id
@@ -1462,7 +1498,7 @@ async function insertDeliveryTestStructuralFixture(
         '00000000-0000-4000-8000-000000030032'::uuid,
         '00000000-0000-4000-8000-000000030010'::uuid,
         1,
-        repeat('e', 64),
+        ${endpointReferenceDigest},
         repeat('d', 64),
         '00000000-0000-4000-8000-000000030041'::uuid,
         'consumed'::human_confirmation_status,
@@ -2062,6 +2098,50 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         )
     `);
     expect(discriminatorCount[0]?.count).toBeGreaterThanOrEqual(12);
+  });
+
+  test('rejects push roster snapshots without exact provider metadata', async () => {
+    const db = databaseConnection().db;
+    const invalidMetadata = [
+      {
+        id: '00000000-0000-4000-8000-000000043091',
+        provider: null,
+        serviceEnvironment: 'production',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000043092',
+        provider: 'expo',
+        serviceEnvironment: null,
+      },
+    ] as const;
+    for (const candidate of invalidMetadata) {
+      await expectPostgresRejection(async () => {
+        await db.transaction(async (transaction) => {
+          await transaction.execute(
+            sql`set local session_replication_role = replica`,
+          );
+          await transaction.execute(sql`
+              insert into roster_endpoints (
+                id, roster_snapshot_id, recipient_id, population, channel,
+                status, captured_at, platform, provider, service_environment,
+                token
+              ) values (
+                ${candidate.id}::uuid,
+                '00000000-0000-4000-8000-000000000041'::uuid,
+                '00000000-0000-4000-8000-000000000050'::uuid,
+                'synthetic'::roster_population,
+                'push'::notification_channel,
+                'active'::endpoint_status,
+                '2026-08-26T12:00:00.000Z'::timestamptz,
+                'ios'::push_platform,
+                ${candidate.provider},
+                ${candidate.serviceEnvironment},
+                'synthetic-unroutable:missing-provider-metadata'
+              )
+            `);
+        });
+      }, /roster_endpoints_valid_variant/u);
+    }
   });
 
   test('defers retained channel-history scans while enforcing replacement checks', async () => {
@@ -6064,6 +6144,127 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     }
   });
 
+  test('keeps SES provider-I/O claims durable, narrowly writable, and append-only', async () => {
+    const db = databaseConnection().db;
+    const [privileges] = await db.execute<{
+      canSelect: boolean;
+      canInsert: boolean;
+      canDelete: boolean;
+      canCompleteOutcome: boolean;
+      canRewriteFingerprint: boolean;
+    }>(sql`
+      select
+        has_table_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'SELECT'
+        ) as "canSelect",
+        has_table_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'INSERT'
+        ) as "canInsert",
+        has_table_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'DELETE'
+        ) as "canDelete",
+        has_column_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io', 'outcome', 'UPDATE'
+        ) as "canCompleteOutcome",
+        has_column_privilege(
+          'psd_eoc_app', 'public.ses_email_provider_io',
+          'request_fingerprint', 'UPDATE'
+        ) as "canRewriteFingerprint"
+    `);
+    expect(privileges).toEqual({
+      canSelect: true,
+      canInsert: true,
+      canDelete: false,
+      canCompleteOutcome: true,
+      canRewriteFingerprint: false,
+    });
+
+    const rollbackProbe = new Error('rollback SES provider-I/O proof');
+    try {
+      await db.transaction(async (transaction) => {
+        await insertDeliveryTestStructuralFixture(transaction);
+        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+        await transaction.execute(sql`
+          insert into ses_email_provider_io (
+            attempt_id, request_fingerprint, claim_token
+          ) values (
+            '00000000-0000-4000-8000-000000030091'::uuid,
+            repeat('a', 64),
+            '00000000-0000-4000-8000-000000030092'::uuid
+          )
+        `);
+        const webhookStore = createDrizzleSesWebhookStore(
+          transaction as unknown as Database,
+        );
+        const attempt = await webhookStore.loadAttempt(
+          '00000000-0000-4000-8000-000000030091',
+        );
+        if (attempt === null) {
+          throw new Error('The synthetic SES attempt was not retained.');
+        }
+        await expect(
+          webhookStore.reconcileProviderIo(
+            attempt,
+            'synthetic-provider-reference',
+            '00000000-0000-4000-8000-000000030093',
+          ),
+        ).rejects.toThrow('The SES callback could not be persisted safely.');
+        await webhookStore.reconcileProviderIo(
+          attempt,
+          'synthetic-provider-reference',
+          '00000000-0000-4000-8000-000000030092',
+        );
+        await expect(
+          webhookStore.reconcileProviderIo(
+            attempt,
+            'conflicting-provider-reference',
+            '00000000-0000-4000-8000-000000030092',
+          ),
+        ).rejects.toThrow('The SES callback could not be persisted safely.');
+        const [retained] = await transaction.execute<{
+          state: string;
+          fingerprint: string;
+        }>(sql`
+          select
+            outcome ->> 'state' as state,
+            request_fingerprint as fingerprint
+          from ses_email_provider_io
+          where attempt_id =
+            '00000000-0000-4000-8000-000000030091'::uuid
+        `);
+        expect(retained).toEqual({
+          state: 'provider-accepted',
+          fingerprint: 'a'.repeat(64),
+        });
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+          await transaction.execute(sql`
+            insert into ses_email_provider_io (
+              attempt_id, request_fingerprint
+            ) values (
+              '00000000-0000-4000-8000-000000030091'::uuid,
+              repeat('b', 64)
+            )
+          `);
+          await transaction.execute(sql`
+            delete from ses_email_provider_io
+            where attempt_id =
+              '00000000-0000-4000-8000-000000030091'::uuid
+          `);
+        }),
+      /SES provider I\/O truth is append-only/u,
+    );
+  });
+
   test('reserves +999 SMS destinations for synthetic mock fixtures', async () => {
     const db = databaseConnection().db;
     await expectConstraintViolation(
@@ -7757,5 +7958,272 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect(
       northFacility?.neighborhoodMemberships[0]?.neighborhoodVersion.name,
     ).toBe('Synthetic Twin Campuses');
+  });
+
+  test('expands and retries one synthetic email attempt with durable provider fencing', async () => {
+    const db = databaseConnection().db;
+    const verificationReference =
+      'synthetic-product-owner-email-live-verification';
+    const dispatchCreatedAt = new Date(Date.now() - 5_000);
+    const endpointReferenceDigest = deliveryTestEndpointReferenceDigest([
+      {
+        recipientId: '00000000-0000-4000-8000-000000030004',
+        endpointId: '00000000-0000-4000-8000-000000030006',
+        channel: 'push',
+      },
+      {
+        recipientId: '00000000-0000-4000-8000-000000030005',
+        endpointId: '00000000-0000-4000-8000-000000030007',
+        channel: 'email',
+      },
+    ]);
+    await db.transaction(async (transaction) => {
+      await insertDeliveryTestStructuralFixture(
+        transaction,
+        dispatchCreatedAt.toISOString(),
+        endpointReferenceDigest,
+      );
+      await transaction.execute(sql`
+        update channel_configurations
+        set
+          enabled = true,
+          status_id = '00000000-0000-4000-8000-000000030051'::uuid,
+          status_label = 'live-verified'::integration_truth_label,
+          changed_at = clock_timestamp()
+        where integration_id = 'ses-email'
+      `);
+    });
+
+    const batch = DispatchBatchSchema.parse({
+      id: '00000000-0000-4000-8000-000000030035',
+      intentId: '00000000-0000-4000-8000-000000030032',
+      eventId: '00000000-0000-4000-8000-000000030030',
+      facilityId: '00000000-0000-4000-8000-000000000001',
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersion: {
+        id: '00000000-0000-4000-8000-000000000201',
+        templateMode: 'drill',
+      },
+      rosterSnapshotId: '00000000-0000-4000-8000-000000030003',
+      rosterPopulation: 'staff',
+      deliveryTest: {
+        purpose: 'monthly-live-delivery-test',
+        targetSet: {
+          id: '00000000-0000-4000-8000-000000030010',
+          version: 1,
+        },
+        endpointReferenceDigest,
+      },
+      requestId: '00000000-0000-4000-8000-000000030031',
+      authorization: {
+        kind: 'human-confirmed',
+        activationPreviewId: '00000000-0000-4000-8000-000000030020',
+        preparedActivationId: null,
+        confirmationId: '00000000-0000-4000-8000-000000030041',
+        consequenceDigest: 'd'.repeat(64),
+        requestId: '00000000-0000-4000-8000-000000030031',
+      },
+      channel: 'email',
+      renderedMessage: {
+        channel: 'email',
+        eventKind: 'drill',
+        templateMode: 'drill',
+        purpose: 'activation',
+        classificationMarker: 'DRILL',
+        subject: '[DRILL] Monthly delivery test',
+        textBody: '[DRILL] Synthetic canary only.',
+      },
+      integrationStatus: {
+        integrationId: 'ses-email',
+        label: 'live-verified',
+        verifiedAt: '2026-08-10T16:02:00.000Z',
+        verifiedByUserId: '00000000-0000-4000-8000-000000026001',
+        authorizationReference: verificationReference,
+        reasonCode: null,
+        observedAt: '2026-08-10T16:02:00.000Z',
+      },
+      sequence: 2,
+      endpointCount: 1,
+      createdAt: dispatchCreatedAt.toISOString(),
+    });
+    const deploymentAuthorization = {
+      workerEnabled: true,
+      verificationReference,
+    } as const;
+    const store = createDrizzleEmailRuntimeStore(db, {
+      deploymentAuthorization,
+    });
+    const resolutionRequest = {
+      operation: 'resolve-batch',
+      verificationReference,
+      batch,
+      enqueuedAt: new Date(dispatchCreatedAt.getTime() + 1_000).toISOString(),
+      cursor: 0,
+    } as const;
+    const firstResolution = EmailBatchResolutionPageSchema.parse(
+      await store.resolveBatch(resolutionRequest),
+    );
+    expect(firstResolution).toMatchObject({
+      nextCursor: null,
+      suppressedCount: 0,
+      items: [
+        {
+          attempt: {
+            batchId: batch.id,
+            attemptNumber: 1,
+            attemptedAt: batch.createdAt,
+            recipientId: '00000000-0000-4000-8000-000000030005',
+            endpointId: '00000000-0000-4000-8000-000000030007',
+          },
+          endpoint: {
+            id: '00000000-0000-4000-8000-000000030007',
+            channel: 'email',
+            email: 'synthetic-delivery-test-listed@example.invalid',
+          },
+        },
+      ],
+    });
+    expect(
+      EmailBatchResolutionPageSchema.parse(
+        await store.resolveBatch(resolutionRequest),
+      ),
+    ).toEqual(firstResolution);
+    const workItem = firstResolution.items[0];
+    if (workItem === undefined) {
+      throw new Error('The synthetic email attempt was not resolved.');
+    }
+
+    const evidenceStore = createDrizzleDeliveryEvidenceStore(db);
+    await evidenceStore.recordAttemptEvidence({
+      attempt: workItem.attempt,
+      evidence: {
+        subject: { kind: 'attempt', attemptId: workItem.attempt.id },
+        state: 'attempted',
+        provider: null,
+        providerReference: null,
+        proof: null,
+        reasonCode: null,
+        diagnosticDigest: null,
+      },
+    });
+    await db.execute(sql`
+      update channel_configurations
+      set enabled = false, changed_at = clock_timestamp()
+      where integration_id = 'ses-email'
+    `);
+    expect(await store.authorizeProviderSend(workItem)).toBe(false);
+    const claimRequest = {
+      operation: 'claim-provider-io',
+      verificationReference,
+      attemptId: workItem.attempt.id,
+      requestFingerprint: 'a'.repeat(64),
+      workItem,
+    } as const;
+    expect(
+      SesSendLedgerClaimSchema.parse(await store.claimProviderIo(claimRequest)),
+    ).toEqual({ kind: 'denied' });
+
+    await db.execute(sql`
+      update channel_configurations
+      set enabled = true, changed_at = clock_timestamp()
+      where integration_id = 'ses-email'
+    `);
+    expect(await store.authorizeProviderSend(workItem)).toBe(true);
+    const concurrentClaims = await Promise.all([
+      store.claimProviderIo(claimRequest),
+      createDrizzleEmailRuntimeStore(db, {
+        deploymentAuthorization,
+      }).claimProviderIo(claimRequest),
+    ]);
+    const parsedClaims = concurrentClaims.map((claim) =>
+      SesSendLedgerClaimSchema.parse(claim),
+    );
+    expect(parsedClaims.map(({ kind }) => kind).sort()).toEqual([
+      'acquired',
+      'in-progress',
+    ]);
+    const acquired = parsedClaims.find((claim) => claim.kind === 'acquired');
+    if (acquired?.kind !== 'acquired') {
+      throw new Error('The synthetic provider claim was not acquired.');
+    }
+
+    const failedOutcome = {
+      state: 'failed',
+      provider: 'aws-ses-v2',
+      providerReference: null,
+      proof: null,
+      reasonCode: 'SES_PROVIDER_RETRYABLE',
+      diagnosticDigest: null,
+    } as const;
+    const completionRequest = {
+      operation: 'complete-provider-io',
+      verificationReference,
+      attemptId: workItem.attempt.id,
+      requestFingerprint: claimRequest.requestFingerprint,
+      leaseToken: acquired.leaseToken,
+      outcome: failedOutcome,
+    } as const;
+    await store.completeProviderIo(completionRequest);
+    await store.completeProviderIo(completionRequest);
+    expect(
+      SesSendLedgerClaimSchema.parse(await store.claimProviderIo(claimRequest)),
+    ).toEqual({ kind: 'completed', outcome: failedOutcome });
+
+    const attemptExecutionStore = createDrizzleAttemptExecutionStore(db);
+    const executionFingerprint = 'synthetic-email-runtime-attempt-fingerprint';
+    const executionClaim = await attemptExecutionStore.claim({
+      attemptId: workItem.attempt.id,
+      fingerprint: executionFingerprint,
+      leaseMilliseconds: 60_000,
+    });
+    if (executionClaim.kind !== 'acquired') {
+      throw new Error('The synthetic attempt execution was not acquired.');
+    }
+    await attemptExecutionStore.complete({
+      attemptId: workItem.attempt.id,
+      fingerprint: executionFingerprint,
+      leaseToken: executionClaim.leaseToken,
+      completion: {
+        kind: 'retry',
+        outcome: failedOutcome,
+        delayMilliseconds: 1,
+        nextAttemptNumber: 2,
+        reasonCode: 'SES_PROVIDER_RETRYABLE',
+      },
+    });
+    const retry = EmailRetryResolutionSchema.parse(
+      await store.resolveRetry(workItem.attempt.id),
+    );
+    expect(retry).toMatchObject({
+      kind: 'ready',
+      workItem: {
+        batch,
+        attempt: {
+          batchId: batch.id,
+          attemptNumber: 2,
+          attemptedAt: new Date(dispatchCreatedAt.getTime() + 1).toISOString(),
+          recipientId: workItem.attempt.recipientId,
+          endpointId: workItem.attempt.endpointId,
+        },
+        endpoint: workItem.endpoint,
+      },
+    });
+    if (retry.kind !== 'ready') {
+      throw new Error('The synthetic email retry was not ready.');
+    }
+    expect(retry.workItem.attempt.id).not.toBe(workItem.attempt.id);
+
+    await db.execute(sql`
+      update channel_configurations
+      set enabled = false, changed_at = clock_timestamp()
+      where integration_id = 'ses-email'
+    `);
+    expect(
+      EmailRetryResolutionSchema.parse(
+        await store.resolveRetry(workItem.attempt.id),
+      ),
+    ).toEqual({ kind: 'ineligible' });
   });
 });
