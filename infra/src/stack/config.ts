@@ -262,7 +262,14 @@ export function readDeploymentIdentity(node: {
     'psdEoc:privacyContactUrl',
     /^https:\/\/[^\s?#]+$/u,
   );
-  const parsedPrivacyContactUrl = new URL(privacyContactUrl);
+  let parsedPrivacyContactUrl: URL;
+  try {
+    parsedPrivacyContactUrl = new URL(privacyContactUrl);
+  } catch {
+    throw new Error(
+      'CDK context psdEoc:privacyContactUrl must be a valid HTTPS URL.',
+    );
+  }
   const privacyContactHostname = parsedPrivacyContactUrl.hostname
     .toLowerCase()
     .replace(/^\[|\]$/gu, '');
