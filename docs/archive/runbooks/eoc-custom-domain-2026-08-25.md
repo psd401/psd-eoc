@@ -3,7 +3,7 @@
 ## Purpose and fixed boundary
 
 This runbook recovers public TLS for the exact live App Runner service without
-allowing GitHub Actions to change DNS. The fixed provider boundary is:
+allowing application deployment to change DNS. The fixed provider boundary is:
 
 - AWS account `338414773271` (`psd401`), region `us-west-2`;
 - App Runner service
@@ -19,7 +19,7 @@ and `54.221.139.169`, and presents a certificate for
 `smartsites.parentsquare.com`. Treat that observation as stale until it is
 re-read immediately before a district DNS change.
 
-The workflow does not call Route53, access a district DNS server, disassociate
+This procedure does not call Route53, access a district DNS server, disassociate
 a domain, enable `www`, change IAM, or mutate OAuth, access, recipients,
 messaging providers, notifications, or application data. Never execute or
 adapt `/private/tmp/psd-eoc-domain-apply.sh`; its Route53 zone is not
@@ -38,7 +38,7 @@ $ curl https://eoc.psd401.net/api/health
 {"status":"ok"}
 ```
 
-The one-time association workflow that performed this handoff has been removed
+The one-time association tooling that performed this handoff has been removed
 now that its job is done. If the domain ever needs to be re-associated, use the
 AWS console or `aws apprunner associate-custom-domain` against the service ARN
 in the `APP_RUNNER_SERVICE_ARN` repository variable. Route53 and the district's
@@ -130,7 +130,7 @@ Only after the district confirms the DNS change may the following checks be
 used as live evidence. Never use `curl -k`, `openssl -verify 0`, a hosts-file
 override, or an alternate resolver to manufacture a pass.
 
-1. Re-run the protected workflow in `inspect-only` mode. Require the exact
+1. Re-run the read-only inspection. Require the exact
    service and domain, `EnableWWWSubdomain=false`, every validation CNAME, and
    App Runner status `ACTIVE`.
 2. From the district network, query both authoritative servers and require the
@@ -172,10 +172,10 @@ passing mock is not enough.
   validation records through district DNS review. Re-running association is
   not a retry mechanism.
 - If App Runner reports a failed, deleting, duplicate, or foreign association,
-  stop. This workflow has no disassociate or replacement path.
+  stop. This procedure has no disassociate or replacement path.
 - If TLS becomes valid but application health fails, keep the certificate
   records and investigate the App Runner service. Do not point traffic at a
   different unreviewed target.
 - Any DNS rollback is a separately reviewed district DNS change based on the
-  pre-change record capture. It is not performed by GitHub Actions or AWS
-  Route53.
+  pre-change record capture. It is not performed by application deployment or
+  AWS Route53.

@@ -41,10 +41,10 @@ boundary bypass is **SEV-0**.
 
 ## Recover and verify
 
-- Fix or roll back only the proven failure through the normal OIDC workflow.
+- Fix or roll back only the proven failure through direct `cdk deploy`.
   To stop the worker, first establish a quiescence fence and reconcile retained
-  and in-flight attempts, then set the protected enablement variable to
-  `false`. Never purge, redrive, or replay queue items to clear the alarm.
+  and in-flight attempts, then set `EnableExpoPushWorker=false`. Never purge,
+  redrive, or replay queue items to clear the alarm.
 - Confirm exactly one reviewed task becomes healthy, sanitized heartbeats
   resume, queue age declines through normal processing, DLQ depth does not
   rise, and append-only attempt/receipt evidence remains consistent.

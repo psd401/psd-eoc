@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -24,6 +25,15 @@ const retentionDocumentPaths = [
   'docs/INTEGRATIONS.md',
   'docs/runbooks/go-live.md',
 ] as const;
+
+function markdownFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    if (['.git', '.next', 'node_modules'].includes(entry.name)) return [];
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return markdownFiles(path);
+    return entry.isFile() && entry.name.endsWith('.md') ? [path] : [];
+  });
+}
 
 function retentionDocumentationFixture(
   prefix: string,
@@ -78,6 +88,48 @@ afterEach(() => {
 describe('documentation contract', () => {
   test('keeps the repository documentation synchronized', () => {
     expect(verifyDocumentation()).toEqual([]);
+  });
+
+  test('forbids repository-hosted deployment workflows', () => {
+    const repository = join(import.meta.dir, '..');
+    const workflows = join(repository, '.github', 'workflows');
+    const workflowFiles = readdirSync(workflows).filter((file) =>
+      /\.ya?ml$/u.test(file),
+    );
+
+    for (const file of workflowFiles) {
+      expect(file.toLowerCase()).not.toContain('deploy');
+      const workflow = readFileSync(join(workflows, file), 'utf8').replaceAll(
+        /\\\r?\n/gu,
+        ' ',
+      );
+      expect(workflow).not.toMatch(/\bcdk\b[\s\S]{0,500}\bdeploy\b/iu);
+      expect(workflow).not.toMatch(
+        /aws cloudformation (?:create-stack|deploy|execute-change-set|update-stack)/iu,
+      );
+      expect(workflow).not.toMatch(
+        /aws apprunner (?:create-service|update-service)/iu,
+      );
+      expect(workflow).not.toMatch(/\b(?:docker push|aws ecr put-image)\b/iu);
+    }
+
+    const prohibitedDocumentation = [
+      /\.github\/workflows\/deploy/iu,
+      /\bAWS_DEPLOY_[A-Z0-9_]+\b/u,
+      /\bActions\s*→\s*Deploy\b/iu,
+      /\bGitHub Actions OIDC\b/iu,
+      /\bGitHub OIDC (?:deploy|deployment|role)\b/iu,
+      /\bnormal OIDC workflow\b/iu,
+      /\bsupported `Deploy` workflow\b/iu,
+      /(?:\bissue\s+|\[)#31\b/iu,
+      /^\s*31\.\s+Failure drills\b/imu,
+    ];
+    for (const file of markdownFiles(repository)) {
+      const contents = readFileSync(file, 'utf8');
+      for (const pattern of prohibitedDocumentation) {
+        expect(contents).not.toMatch(pattern);
+      }
+    }
   });
 
   test('maps every monitoring alarm anchor to a current procedure', () => {

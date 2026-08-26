@@ -18,8 +18,8 @@ The requested deployment target and the supposed approved target shared one trus
 
 ## Solution
 
-Keep clone and synthesis inputs in portable repository configuration, but make every write-capable automatic production entrypoint compare the selected account, region, application origin, and provider identity with independently protected workflow values before synthesis or mutation.
+Keep clone and synthesis inputs portable, but allow production writes only from a direct, locally authenticated `cdk deploy`. Before synthesis or mutation, compare the selected account, region, application origin, and provider identity with the locally supplied deployment target and fail closed on a mismatch. Never add an automatic production entrypoint.
 
 ## Prevention
 
-Test that every protected-identity mismatch fails closed, keep alternate-tenant synthesis outside protected deploy mode, and never describe a self-comparison as a production authorization boundary.
+Test that every protected-identity mismatch fails closed, keep alternate-tenant synthesis outside deployment mode, and never describe a self-comparison as a production authorization boundary.

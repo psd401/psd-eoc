@@ -14,7 +14,7 @@ never application literals.
   ownership, capability execution, contracts-first changes, and append-only
   data.
 - [Configuration and deployment](docs/CONFIGURATION.md) indexes the tenant
-  manifest and protected GitHub deployment inputs.
+  manifest and direct CDK parameters.
 - [Operational readiness](docs/INTEGRATIONS.md) is the only current source for
   deployed-stack, DNS, OIDC, alarm, provider, and mobile readiness.
 - [Runbooks](docs/runbooks/README.md) contain stable procedures and always

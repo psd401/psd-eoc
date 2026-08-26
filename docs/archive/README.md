@@ -1,8 +1,9 @@
 # Historical archive
 
 Documents under this directory preserve planning context, completed work
-ledgers, superseded procedures, and one-off evidence. They are intentionally
-unchanged historical records. Their commands, status labels, paths, and design
+ledgers, superseded procedures, and one-off evidence. Obsolete repository-hosted
+deployment instructions have been removed so archived text cannot be mistaken
+for a supported path. Remaining commands, status labels, paths, and design
 claims are not current instructions.
 
 Use the current sources instead:

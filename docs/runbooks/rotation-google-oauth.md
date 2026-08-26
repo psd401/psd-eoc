@@ -41,7 +41,7 @@ rollback path there and in the protected environment.
 4. Deploy the exact reviewed application configuration so new instances read
    the replacement through `GOOGLE_OAUTH_CONFIG`. Supply only the no-default
    complete ARN parameter for the retained secret; never delete or recreate it.
-   Use only the supported GitHub Actions/OIDC deployment path in
+   Use only direct `cdk deploy` as described in
    [CONFIGURATION.md](../CONFIGURATION.md).
 5. In isolated non-production, verify one new staff-context synthetic sign-in,
    hosted-domain/group denial, CSRF/session handling, and that an existing

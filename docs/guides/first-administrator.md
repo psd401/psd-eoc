@@ -34,45 +34,30 @@ membership — that is the whole design.
 
 ## Configure it
 
-Open the repository's **Settings → Environments → production** page. Add the
-initial group with the same GitHub configuration surface the supported
-`Deploy` workflow reads:
+Supply the initial group directly to `cdk deploy` with these CloudFormation
+parameters:
 
-| GitHub setting               | Kind                           | Example value                                                |
-| ---------------------------- | ------------------------------ | ------------------------------------------------------------ |
-| `INITIAL_ACCESS_GROUP_ID`    | Environment variable           | `groups/03x8tuzt4fpsm6y` (the leading `groups/` is optional) |
-| `INITIAL_ACCESS_GROUP_EMAIL` | Environment secret             | `eoc-administrators@yourdistrict.org`                        |
-| `INITIAL_ACCESS_GROUP_NAME`  | Environment variable, optional | `System administrators`                                      |
+| CDK parameter             | Required                 | Example value                                                |
+| ------------------------- | ------------------------ | ------------------------------------------------------------ |
+| `InitialAccessGroupId`    | With email               | `groups/03x8tuzt4fpsm6y` (the leading `groups/` is optional) |
+| `InitialAccessGroupEmail` | With ID                  | `eoc-administrators@yourdistrict.org`                        |
+| `InitialAccessGroupName`  | No; defaults when absent | `System administrators`                                      |
 
-Set both the ID and email or neither. A name alone is also incomplete. The
-workflow validates this before it builds an image or runs CDK, names the
-missing setting, and never prints the configured email. The optional name
-defaults to `Administrators` when omitted.
-
-The workflow passes these settings to the stack's `InitialAccessGroupId`,
-`InitialAccessGroupEmail`, and `InitialAccessGroupName` parameters. The email
-parameter is `NoEcho`. The bootstrap task receives the corresponding
-`PSD_EOC_INITIAL_ACCESS_GROUP_*` environment variables; operators do not set
-those task variables separately.
+Set both the ID and email or neither. A name alone is incomplete. The stack
+rejects partial configuration and never includes the `NoEcho` email parameter
+in diagnostics. The bootstrap task receives the corresponding
+`PSD_EOC_INITIAL_ACCESS_GROUP_*` values; operators do not set those task values
+separately.
 
 ## Deploy
 
-Run the repository's `Deploy` workflow once, either by merging the configured
-commit to `main` or with **Actions → Deploy → Run workflow**. There is no
-separate bootstrap command and no database insert in the normal first-run
-path. The workflow stages the task definition, runs migrations and bootstrap,
-and only then promotes the application image.
-
-The Actions job summary reports one of these outcomes without the group email:
-
-- `created on this deploy`
-- `already existed; no access history changed`
-- `intentionally omitted`
+From `infra`, run direct `cdk deploy PsdEoc` with the parameters above and the
+other required parameters in [CONFIGURATION.md](../CONFIGURATION.md). There is
+no repository configuration or alternate deployment path.
 
 This step only ever acts when the deployment has **no** access group at all —
 not "none active", not "none matching". Once your district has configured
-access, the settings are inert and can be left in place or removed. Removing
-all three makes the next deploy pass explicit empty parameters, but it does not
+access, the parameters are inert and may be omitted. Empty values do not
 change, replace, or remove any group or membership row.
 
 ## Wait for the first membership sync
@@ -124,8 +109,8 @@ Check, in this order:
    without waiting on a provider change.
 
 If this is a fresh installation and there is no access group, correct the
-GitHub settings and run `Deploy` again; the create-only bootstrap remains the
-supported recovery path. If a group already exists, the bootstrap deliberately
+direct CDK parameters and run `cdk deploy` again; the create-only bootstrap
+remains the supported recovery path. If a group already exists, the bootstrap deliberately
 will not supersede it. Treat that as an access-configuration incident, preserve
 the existing rows and task logs, and repair the existing configuration through
 the database administration process instead of inserting a competing group.

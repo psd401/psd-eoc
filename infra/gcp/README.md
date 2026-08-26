@@ -4,7 +4,7 @@ This directory owns the Google Cloud identity and read-only Groups
 configuration used by a deployment. Current Google OIDC and Groups readiness
 lives only in the
 [operational readiness register](../../docs/INTEGRATIONS.md). The portable AWS,
-tenant, and workflow inputs are indexed in
+tenant, and direct deployment parameters are indexed in
 [CONFIGURATION.md](../../docs/CONFIGURATION.md).
 
 ## Source boundaries

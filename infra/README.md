@@ -1,7 +1,7 @@
 # PSD EOC infrastructure
 
 `infra` owns the AWS CDK stack and credential-free synthesis checks. Tenant
-context, protected workflow inputs, and current CloudFormation parameters are
+context and current CloudFormation parameters are
 indexed in [docs/CONFIGURATION.md](../docs/CONFIGURATION.md). Current deployed
 resource and provider state lives only in the
 [operational readiness register](../docs/INTEGRATIONS.md).
@@ -21,12 +21,11 @@ It performs no AWS, Google, DNS, store, or notification-provider call.
 
 ## Deployment
 
-The supported production path is `.github/workflows/deploy.yml` with GitHub
-OIDC. A normal run selects a commit and leaves `rollback_image_digest` empty.
-The workflow validates protected configuration, builds and publishes the
-immutable image, stages the current bootstrap image, applies forward-only
-migrations, updates the application, and verifies the deployed digest and
-health. Manual `cdk deploy` commands are not maintained or supported.
+Deployment has one path: run `cdk deploy PsdEoc` from this directory with a
+locally authenticated, short-lived AWS session and the required parameters in
+[docs/CONFIGURATION.md](../docs/CONFIGURATION.md). GitHub Actions, repository
+environments, repository variables, repository secrets, and GitHub OIDC roles
+are not deployment surfaces.
 
 ## Alarm response runbooks
 

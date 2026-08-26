@@ -24,13 +24,13 @@ region, sender domain, secret references, and deployment inputs come from
 2. Use read-only inventory first. Verify account sending state, identity,
    DKIM, MAIL FROM, configuration-set binding, worker permission, and event
    evidence independently.
-3. Apply infrastructure only through the supported GitHub Actions/OIDC path in
+3. Apply infrastructure only through direct `cdk deploy` as described in
    [CONFIGURATION.md](../CONFIGURATION.md). Do not create parallel identities,
    zones, configuration sets, or manual send permissions.
 4. Keep `EMAIL_WORKER_ENABLED=false` and the SES verification reference at
    `UNVERIFIED` until sender, production access, signed callback, suppression,
-   queue/DLQ, and alarm evidence is retained. Then set the protected deployment
-   inputs together and deploy the reviewed image. The encrypted SNS topic feeds
+   queue/DLQ, and alarm evidence is retained. Then set the direct CDK
+   parameters together and deploy the reviewed image. The encrypted SNS topic feeds
    a retained callback queue; its separately permissioned consumer uses the
    current callback-compatible image and has no provider-send authority.
 5. In the running application, an authenticated administrator selects
