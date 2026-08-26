@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   DeliveryTestCanaryEligibilityFactSchema,
   DeliveryTestTargetSetVersionSchema,
+  IdempotencyKeySchema,
   MonthlyDeliveryTestReportPageSchema,
   MonthlyDeliveryTestReportSchema,
   SecurityAuditEntrySchema,
@@ -14,6 +15,7 @@ import {
   type DeliveryTestChannelReport,
   type DeliveryTestCanaryEligibilityFact,
   type DeliveryTestTargetSetVersion,
+  type DeliveryEvidence,
   type MonthlyDeliveryTestReport,
   type MonthlyDeliveryTestReportPage,
   type NotificationChannel,
@@ -98,6 +100,52 @@ import {
   type AdminCapabilityTransaction,
 } from './admin';
 import { loadRosterSnapshot } from './start';
+
+export const DELIVERY_TEST_REPORT_WORKER_SERVICE_ID =
+  'notification-delivery-worker' as const;
+
+/**
+ * Correlates report idempotency to the immutable evidence fact. Every evidence
+ * ingestion path uses this invocation so provider callbacks and worker
+ * writeback cannot leave different report projections for the same fact.
+ */
+export function deliveryTestReportInvocationForEvidence(
+  evidence: DeliveryEvidence,
+): TrustedCapabilityInvocation {
+  return Object.freeze({
+    actor: Object.freeze({
+      kind: 'system' as const,
+      serviceId: DELIVERY_TEST_REPORT_WORKER_SERVICE_ID,
+    }),
+    source: 'worker' as const,
+    scope: Object.freeze({
+      facilityScope: Object.freeze({ kind: 'district' as const }),
+    }),
+    requestId: randomUUID(),
+    serverTime: new Date(dateIso(evidence.recordedAt)),
+    connectivityEpochId: null,
+    mutation: Object.freeze({
+      idempotencyKey: IdempotencyKeySchema.parse(
+        `delivery-test-report:${evidence.id}`,
+      ),
+      transport: Object.freeze({ kind: 'worker-execution' as const }),
+      humanConfirmationId: null,
+    }),
+  });
+}
+
+/** Provider facts that can make an exact pinned target projection terminal. */
+export function mayFinalizeDeliveryTestReport(
+  evidence: DeliveryEvidence,
+): boolean {
+  return (
+    evidence.state === 'provider-accepted' ||
+    evidence.state === 'delivered' ||
+    evidence.state === 'failed' ||
+    evidence.state === 'expired' ||
+    evidence.state === 'unknown'
+  );
+}
 
 export const DELIVERY_TEST_PRODUCT_OWNER_USER_ID_ENV =
   'PSD_EOC_PRODUCT_OWNER_USER_ID' as const;
@@ -1650,10 +1698,13 @@ async function deriveReportProjection(
       }),
     ];
   });
-  const controlledSmsCanary =
-    targetRows.length === 1 && targetRows[0]?.channel === 'sms';
+  // Every controlled canary mode is exactly one pinned endpoint. The target
+  // set capability validates the channel-specific discriminator when the
+  // immutable version is created; report projection must preserve the same
+  // singleton contract for email, push, and SMS.
+  const controlledCanary = targetRows.length === 1;
   if (
-    !controlledSmsCanary &&
+    !controlledCanary &&
     (channels.length < 2 ||
       !channels.some((channel) => channel.channel === 'push') ||
       !channels.some((channel) => channel.channel === 'email'))
