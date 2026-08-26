@@ -12,9 +12,18 @@ export function withPushProviderConfig(
 
   const googleServicesFile = environment.GOOGLE_SERVICES_JSON?.trim();
   if (!googleServicesFile) {
-    throw new Error(
-      'GOOGLE_SERVICES_JSON must be a protected EAS file variable for the push-enabled build.',
-    );
+    // Secret EAS variables are unavailable while the CLI evaluates config on
+    // the operator's machine. Enforce the credential only where EAS exposes
+    // it and Android will consume it, without coupling the iOS build to FCM.
+    if (
+      environment.EAS_BUILD === 'true' &&
+      environment.EAS_BUILD_PLATFORM === 'android'
+    ) {
+      throw new Error(
+        'GOOGLE_SERVICES_JSON must be a protected EAS file variable for the push-enabled Android build.',
+      );
+    }
+    return config;
   }
 
   return {
