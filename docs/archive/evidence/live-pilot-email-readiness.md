@@ -93,7 +93,7 @@ Issue #204 does not add:
   the access roster as a notification list;
 - an activation, real incident, notification, all-clear, event close, or
   offline deferred action;
-- a workflow edit, deployment, provider call, configuration mutation, or test
+- a deployment, provider call, configuration mutation, or test
   send; or
 - student data or a weakening of server-side authorization, real/drill truth,
   append-only evidence, or human confirmation.
@@ -101,7 +101,7 @@ Issue #204 does not add:
 ## Activation blockers and next change
 
 Email activation is a separate issue and pull request after ownership is clear
-for the protected workflow and the durable send/evidence path. That change must
+for the direct CDK parameters and the durable send/evidence path. That change must
 provide and verify all of the following before it may request a controlled
 test:
 

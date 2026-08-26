@@ -200,11 +200,6 @@ Goal: complete issue #29 (monitoring, alarms, 1-minute canary) then #30
 ```
 
 ```
-Goal: complete issue #31 (failure drills with recorded evidence). Divergent
-behavior gets a ticket, not a shrug.
-```
-
-```
 Goal: complete issue #32 (Playwright+axe web suites, Maestro mobile suites).
 ```
 

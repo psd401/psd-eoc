@@ -78,10 +78,9 @@ an event.
 6. Obtain product-owner approval for the exact production change. A previous
    go-live approval does not authorize a later rollback.
 7. Have a second responder compare the deployed and target digests/versions to
-   the approved change record. Apply through the approved deployment or
-   configuration surface.
-   Server/infrastructure rollback uses the GitHub Actions `Deploy` workflow and
-   immutable digest described in [CONFIGURATION.md](../CONFIGURATION.md).
+   the approved change record. Server/infrastructure rollback uses direct
+   `cdk deploy` with the immutable digest described in
+   [CONFIGURATION.md](../CONFIGURATION.md).
 8. Verify read-only health or the expected paused state, safety invariants,
    metrics, logs, queue/outbox state, and append-only evidence. Do not send a
    live notification as a smoke test.

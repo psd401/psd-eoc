@@ -107,7 +107,7 @@ Carries forward the Maps safety-charter patterns: deny-by-default server-side au
 | SMS       | AWS End User Messaging SMS; 10DLC registration day 1; toll-free interim          | D-013; same carrier queue regardless of vendor                                                                    |
 | DB/ORM    | Aurora PG + Drizzle migrations                                                   | Maps convention                                                                                                   |
 | MCP       | `packages/mcp` over capability layer                                             | Agent-native requirement                                                                                          |
-| Infra     | AWS CDK v2 (`infra/`), GitHub Actions OIDC deploy                                | Maps convention, no static keys                                                                                   |
+| Infra     | AWS CDK v2 (`infra/`), direct locally authenticated `cdk deploy`                  | One deployment path; no repository deployment configuration                                                       |
 | Tests     | `node --test` (server/contracts), Playwright + axe (web), Maestro smoke (mobile) | Maps convention; a11y = WCAG 2.2 AA                                                                               |
 
 ## 4. Monorepo layout (parallel-agent collision map)
@@ -139,7 +139,7 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 1. **Scaffold monorepo** — Bun workspaces, TS strict, ESLint/Prettier, CI (check gate: format/lint/typecheck/test), PR template, CODEOWNERS.
 2. **Safety charter** — `AGENTS.md` + `SECURITY.md`: human-only actions, live-action gate, synthetic-data rule, truth labels, no-student-data, production-change authority.
 3. **Contracts v1** — Zod: identity/session, facility/neighborhood, group/roster snapshot, event type (versioned, real-vs-drill), event lifecycle + journal entries, notification intent/attempt/delivery-truth states, capability envelope + human-only action registry, API error model.
-4. **Infra baseline** — CDK: Aurora (no pause, multi-AZ), S3 media, SQS + DLQ, App Runner (min 2), Secrets, SES identity, CloudWatch skeleton, GitHub OIDC deploy role.
+4. **Infra baseline** — CDK: Aurora (no pause, multi-AZ), S3 media, SQS + DLQ, App Runner (min 2), Secrets, SES identity, and CloudWatch skeleton. Deploy only with direct `cdk deploy`.
 5. **DB schema + migrations** — Drizzle from contracts; append-only journal tables; outbox table.
 
 ### Phase 1 — Identity & access (parallel after 3/5)
@@ -181,7 +181,6 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 
 29. Monitoring: CloudWatch alarms → team notification, dashboards, shallow canary.
 30. Monthly live end-to-end delivery test harness (controlled recipients) + latency measurement vs SLO.
-31. Failure drills: kill worker mid-send, DB failover, Google-outage login, duplicate-delivery reconciliation — documented evidence.
 32. E2E: Playwright + axe (WCAG 2.2 AA on activation/event/all-clear paths); Maestro smoke on both platforms.
 33. TestFlight + Android distribution pipeline; enrollment/install guide for staff.
 34. Runbooks (per §12 failure list), on-call escalation matrix, go-live/rollback checklist.
