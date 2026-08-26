@@ -187,7 +187,7 @@ describe('documentation contract', () => {
     expect(validateRecordsRetentionDocumentation(root)).toEqual([]);
   });
 
-  test('rejects duplicate, invalid, stale, or inconsistent review evidence', () => {
+  test('rejects duplicate, invalid, future, or inconsistent review evidence', () => {
     const cases = [
       {
         name: 'duplicate-marker',
@@ -199,6 +199,7 @@ describe('documentation contract', () => {
               )
             : contents,
         message: 'expected one bounded records-retention review-status section',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
         name: 'duplicate-status',
@@ -209,7 +210,24 @@ describe('documentation contract', () => {
                 '- Controlled mapping review status: `pending`.\n- Controlled mapping review status: `reviewed`.',
               )
             : contents,
-        message: 'mapping status must occur once',
+        message:
+          'records-retention mapping status must occur once and be pending or reviewed',
+        file: 'docs/INTEGRATIONS.md',
+      },
+      {
+        name: 'status-outside-bounds',
+        transform: (path: string, contents: string): string =>
+          path === 'docs/INTEGRATIONS.md'
+            ? contents
+                .replace('- Controlled mapping review status: `pending`.\n', '')
+                .replace(
+                  '<!-- psd-eoc:records-retention-review-status:end -->',
+                  '<!-- psd-eoc:records-retention-review-status:end -->\n\n- Controlled mapping review status: `pending`.',
+                )
+            : contents,
+        message:
+          'records-retention mapping status must occur once and be pending or reviewed',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
         name: 'invalid-date',
@@ -229,7 +247,9 @@ describe('documentation contract', () => {
                   'Records-officer review and ambiguity guidance have been supplied for this aggregate status.',
                 )
             : contents,
-        message: 'status, date, and evidence are inconsistent',
+        message:
+          'records-retention mapping status, date, and evidence are inconsistent',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
         name: 'source-date-drift',
@@ -241,14 +261,24 @@ describe('documentation contract', () => {
               )
             : contents,
         message:
-          'official-source dates are invalid, stale, duplicated, or inconsistent',
+          'records-retention official-source dates are invalid, future-dated, duplicated, or inconsistent',
+        file: 'docs/INTEGRATIONS.md',
       },
       {
-        name: 'stale-source-date',
+        name: 'future-source-date',
         transform: (_path: string, contents: string): string =>
-          contents.replaceAll('2026-08-25', '2026-08-24'),
+          contents
+            .replace(
+              'official sources were rechecked on 2026-08-25',
+              'official sources were rechecked on 9999-12-31',
+            )
+            .replace(
+              'Official sources last rechecked: `2026-08-25`.',
+              'Official sources last rechecked: `9999-12-31`.',
+            ),
         message:
-          'official-source dates are invalid, stale, duplicated, or inconsistent',
+          'records-retention official-source dates are invalid, future-dated, duplicated, or inconsistent',
+        file: 'docs/INTEGRATIONS.md',
       },
     ];
 
@@ -257,11 +287,12 @@ describe('documentation contract', () => {
         `psd-eoc-retention-${scenario.name}-`,
         scenario.transform,
       );
-      expect(
-        validateRecordsRetentionDocumentation(root).some((error) =>
-          error.message.includes(scenario.message),
-        ),
-      ).toBe(true);
+      expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+        expect.objectContaining({
+          file: scenario.file,
+          message: scenario.message,
+        }),
+      );
     }
   });
 
@@ -273,7 +304,9 @@ describe('documentation contract', () => {
           path === 'docs/ARCHITECTURE.md'
             ? contents.replace('GS2017-016 Rev. 0', 'missing candidate')
             : contents,
-        message: 'GS2017-016 Rev. 0',
+        message:
+          'records-retention guidance is missing required statement: GS2017-016 Rev. 0',
+        file: 'docs/ARCHITECTURE.md',
       },
       {
         name: 'source',
@@ -284,7 +317,9 @@ describe('documentation contract', () => {
                 'missing-CORE.PDF',
               )
             : contents,
-        message: 'missing official source',
+        message:
+          'records-retention guidance is missing official source: https://www.sos.wa.gov/sites/default/files/2025-06/local-government-common-records-retention-schedule-CORE.PDF',
+        file: 'docs/ARCHITECTURE.md',
       },
       {
         name: 'override',
@@ -295,7 +330,9 @@ describe('documentation contract', () => {
                 'closed request',
               )
             : contents,
-        message: 'active public-records request',
+        message:
+          'records-retention guidance is missing required statement: active public-records request',
+        file: 'docs/ARCHITECTURE.md',
       },
       {
         name: 'draft-current',
@@ -306,7 +343,9 @@ describe('documentation contract', () => {
                 'CORE v5.1 and K-12 v9.2 are current',
               )
             : contents,
-        message: 'non-authoritative draft revisions',
+        message:
+          'records-retention guidance is missing required statement: CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
+        file: 'docs/ARCHITECTURE.md',
       },
       {
         name: 'policy',
@@ -317,7 +356,9 @@ describe('documentation contract', () => {
                 '`automated-disposition: enabled`',
               )
             : contents,
-        message: 'records-retention policy differs',
+        message:
+          'records-retention policy differs: documented=automated-disposition: enabled,deletion: prohibited,down-migrations: prohibited,lifecycle-rules: prohibited,purge: prohibited,record-retention: all,retention-timers: prohibited actual=automated-disposition: prohibited,deletion: prohibited,down-migrations: prohibited,lifecycle-rules: prohibited,purge: prohibited,record-retention: all,retention-timers: prohibited',
+        file: 'docs/ARCHITECTURE.md',
       },
       {
         name: 'go-live',
@@ -328,19 +369,27 @@ describe('documentation contract', () => {
                 'allows a later disposition design',
               )
             : contents,
-        message: 'go-live procedure is missing the retention boundary',
+        message:
+          'go-live procedure is missing the retention boundary: blocks any later disposition design',
+        file: 'docs/runbooks/go-live.md',
       },
-      {
-        name: 'contradiction',
+      ...[
+        'Administrators may purge all retained event records at any time.',
+        'Deletion is permitted after export.',
+        'Operators can dispose of audit records.',
+      ].map((authorization, index) => ({
+        name: `authorization-${String(index)}`,
         transform: (path: string, contents: string): string =>
-          path === 'docs/INTEGRATIONS.md'
+          path === 'docs/ARCHITECTURE.md'
             ? contents.replace(
-                '<!-- psd-eoc:records-retention-review-status:end -->',
-                'Do not retain every product record; disposition automation is now enabled.\n\n<!-- psd-eoc:records-retention-review-status:end -->',
+                '<!-- psd-eoc:records-retention:end -->',
+                `${authorization}\n\n<!-- psd-eoc:records-retention:end -->`,
               )
             : contents,
-        message: 'contradicts the retain-everything policy',
-      },
+        message:
+          'records-retention guidance contains conflicting disposition authorization',
+        file: 'docs/ARCHITECTURE.md',
+      })),
     ];
 
     for (const scenario of cases) {
@@ -348,11 +397,12 @@ describe('documentation contract', () => {
         `psd-eoc-retention-${scenario.name}-`,
         scenario.transform,
       );
-      expect(
-        validateRecordsRetentionDocumentation(root).some((error) =>
-          error.message.includes(scenario.message),
-        ),
-      ).toBe(true);
+      expect(validateRecordsRetentionDocumentation(root)).toContainEqual(
+        expect.objectContaining({
+          file: scenario.file,
+          message: scenario.message,
+        }),
+      );
     }
   });
 

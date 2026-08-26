@@ -99,9 +99,9 @@ drills and unroutable fixtures remain safe for automated tests.
 
 <!-- psd-eoc:records-retention:start -->
 
-The product retains records; it does not decide when a district may dispose of
-them. The repository defines the content inventory and safety boundary below.
-Each deploying district owns the authoritative classification in its
+The product retains records; disposition authority belongs to the deploying
+district. The repository defines the content inventory and safety boundary
+below. Each deploying district owns the authoritative classification in its
 district-controlled operations record, reviewed by its records officer.
 
 The following official sources were rechecked on 2026-08-25:
@@ -223,7 +223,11 @@ remain unchanged.
 
 - `record-retention: all`
 - `automated-disposition: prohibited`
+- `deletion: prohibited`
 - `down-migrations: prohibited`
+- `lifecycle-rules: prohibited`
+- `purge: prohibited`
+- `retention-timers: prohibited`
 
 <!-- docs-contract:records-retention-policy:end -->
 

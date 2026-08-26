@@ -398,11 +398,13 @@ const RECORDS_RETENTION_SOURCE_URLS = Object.freeze([
 
 const RECORDS_RETENTION_POLICY = Object.freeze([
   'automated-disposition: prohibited',
+  'deletion: prohibited',
   'down-migrations: prohibited',
+  'lifecycle-rules: prohibited',
+  'purge: prohibited',
   'record-retention: all',
+  'retention-timers: prohibited',
 ]);
-
-const MINIMUM_RECORDS_RETENTION_SOURCE_CHECK_DATE = '2026-08-25';
 
 function recordsRetentionError(
   file: string,
@@ -451,6 +453,17 @@ function uniqueCapture(contents: string, pattern: RegExp): string | undefined {
   return matches.length === 1 ? matches[0]?.[1] : undefined;
 }
 
+function uniqueBoundedCapture(
+  document: string,
+  section: string,
+  pattern: RegExp,
+): string | undefined {
+  const value = uniqueCapture(section, pattern);
+  return value !== undefined && uniqueCapture(document, pattern) === value
+    ? value
+    : undefined;
+}
+
 function isRealIsoDate(value: string | undefined): value is string {
   if (value === undefined || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00.000Z`);
@@ -466,6 +479,7 @@ function isRealIsoDate(value: string | undefined): value is string {
  */
 export function validateRecordsRetentionDocumentation(
   repositoryRoot: string,
+  validationDate = new Date(),
 ): DocumentationError[] {
   const architectureFile = 'docs/ARCHITECTURE.md';
   const integrationsFile = 'docs/INTEGRATIONS.md';
@@ -480,6 +494,7 @@ export function validateRecordsRetentionDocumentation(
   );
   const goLive = readFileSync(join(repositoryRoot, goLiveFile), 'utf8');
   const normalizedGoLive = normalizedDocumentationText(goLive);
+  const validationDateIso = validationDate.toISOString().slice(0, 10);
   const errors: DocumentationError[] = [];
 
   const architectureStart = '<!-- psd-eoc:records-retention:start -->';
@@ -540,15 +555,16 @@ export function validateRecordsRetentionDocumentation(
     'records-retention-classes',
     'records-retention-policy',
   ]) {
+    const contractStart = `<!-- docs-contract:${contract}:start -->`;
+    const contractEnd = `<!-- docs-contract:${contract}:end -->`;
     if (
-      occurrenceCount(
-        architecture,
-        `<!-- docs-contract:${contract}:start -->`,
-      ) !== 1 ||
-      occurrenceCount(
-        architecture,
-        `<!-- docs-contract:${contract}:end -->`,
-      ) !== 1
+      boundedDocumentationSection(
+        retentionGuidance,
+        contractStart,
+        contractEnd,
+      ) === null ||
+      currentMarkerCount(contractStart) !== 1 ||
+      currentMarkerCount(contractEnd) !== 1
     ) {
       errors.push(
         recordsRetentionError(
@@ -561,7 +577,7 @@ export function validateRecordsRetentionDocumentation(
   }
 
   const documentedClasses = extractContractList(
-    architecture,
+    retentionGuidance,
     'records-retention-classes',
   );
   if (
@@ -578,7 +594,7 @@ export function validateRecordsRetentionDocumentation(
   }
 
   const documentedPolicy = extractContractList(
-    architecture,
+    retentionGuidance,
     'records-retention-policy',
   );
   if (
@@ -641,7 +657,6 @@ export function validateRecordsRetentionDocumentation(
     'active public-records request',
     'archival appraisal',
     'district-controlled operations record',
-    'This guidance authorizes none of the following: deletion, purge, a retention timer, a lifecycle rule, a down migration, or automated disposition',
     'CORE v5.1 and K-12 v9.2 are non-authoritative draft revisions',
   ]) {
     if (!normalizedArchitecture.includes(required)) {
@@ -655,20 +670,24 @@ export function validateRecordsRetentionDocumentation(
     }
   }
 
-  const architectureSourceCheckDate = uniqueCapture(
+  const architectureSourceCheckDate = uniqueBoundedCapture(
+    architecture,
     retentionGuidance,
     /official sources were rechecked on (\d{4}-\d{2}-\d{2}):/giu,
   );
-  const status = uniqueCapture(
+  const status = uniqueBoundedCapture(
     integrations,
+    retentionReview,
     /^- Controlled mapping review status: `([^`]+)`\.$/gmu,
   );
-  const reviewDate = uniqueCapture(
+  const reviewDate = uniqueBoundedCapture(
     integrations,
+    retentionReview,
     /^- Controlled mapping review date: `([^`]+)`\.$/gmu,
   );
-  const sourceCheckDate = uniqueCapture(
+  const sourceCheckDate = uniqueBoundedCapture(
     integrations,
+    retentionReview,
     /^- Official sources last rechecked: `(\d{4}-\d{2}-\d{2})`\.$/gmu,
   );
   if (status !== 'pending' && status !== 'reviewed') {
@@ -685,8 +704,7 @@ export function validateRecordsRetentionDocumentation(
     (status === 'pending' && reviewDate === 'not completed') ||
     (status === 'reviewed' &&
       isRealIsoDate(reviewDate) &&
-      isRealIsoDate(sourceCheckDate) &&
-      reviewDate >= sourceCheckDate);
+      reviewDate <= validationDateIso);
   const pendingEvidence = normalizedIntegrations.includes(
     'No completed records-officer review or ambiguity guidance has been supplied',
   );
@@ -708,14 +726,15 @@ export function validateRecordsRetentionDocumentation(
   if (
     !isRealIsoDate(architectureSourceCheckDate) ||
     !isRealIsoDate(sourceCheckDate) ||
-    architectureSourceCheckDate < MINIMUM_RECORDS_RETENTION_SOURCE_CHECK_DATE ||
+    architectureSourceCheckDate > validationDateIso ||
+    sourceCheckDate > validationDateIso ||
     architectureSourceCheckDate !== sourceCheckDate
   ) {
     errors.push(
       recordsRetentionError(
         integrationsFile,
         integrations,
-        'records-retention official-source dates are invalid, stale, duplicated, or inconsistent',
+        'records-retention official-source dates are invalid, future-dated, duplicated, or inconsistent',
         reviewStart,
       ),
     );
@@ -732,16 +751,16 @@ export function validateRecordsRetentionDocumentation(
   }
 
   const normalizedRetentionDocuments = `${normalizedArchitecture} ${normalizedIntegrations} ${normalizedGoLive}`;
-  for (const contradiction of [
-    /\bdo not retain every product record\b/iu,
-    /\b(?:automated disposition|disposition automation) (?:is|becomes|remains)(?: now)? (?:enabled|allowed|authorized)\b/iu,
+  for (const unauthorizedDisposition of [
+    /\b(?:may|can|will|must|should|(?:is|are) (?:allowed|authorized|permitted) to) (?!not\b)(?:[a-z-]+ ){0,6}(?:delete|purge|dispose|destroy|enable (?:a )?(?:lifecycle rule|retention timer)|run (?:a )?down migration)\b/iu,
+    /\b(?:deletion|purging|purge|disposition|destruction|lifecycle rules?|retention timers?|down migrations?)\b(?: [a-z-]+){0,6} (?:is|are|becomes|remains)? ?(?:enabled|allowed|authorized|permitted|required)\b/iu,
   ]) {
-    if (contradiction.test(normalizedRetentionDocuments)) {
+    if (unauthorizedDisposition.test(normalizedRetentionDocuments)) {
       errors.push(
         recordsRetentionError(
           architectureFile,
           architecture,
-          'records-retention guidance contradicts the retain-everything policy',
+          'records-retention guidance contains conflicting disposition authorization',
         ),
       );
     }
