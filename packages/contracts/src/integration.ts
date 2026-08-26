@@ -31,6 +31,17 @@ export const IntegrationIdSchema = z
 /** Stable external-integration identifier inferred from its schema. */
 export type IntegrationId = z.infer<typeof IntegrationIdSchema>;
 
+/** Exact non-secret verification-reference grammar shared by every runtime. */
+export const INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE =
+  '[A-Za-z0-9][A-Za-z0-9._:-]{15,254}' as const;
+
+/** Non-secret retained proof reference for provider activation. */
+export const IntegrationVerificationReferenceSchema = z
+  .string()
+  .regex(
+    new RegExp(`^${INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE}$`, 'u'),
+  );
+
 /**
  * Owns one truthful integration-status record. Verification timestamps exist
  * only for live-verified integrations; blocked integrations carry a bounded
@@ -190,14 +201,16 @@ export type IntegrationChannelChangeAuthorization = z.infer<
  * Owns an administrative channel enablement request. Provider credentials
  * never enter caller input. A pre-issued, non-secret authorization artifact is
  * optional at this outer boundary because mocked changes require none; the
- * capability layer verifies its authorizer and status claims against immutable
- * database evidence and consumes it fail-closed for every live provider change.
+ * one initial mobile-push activation instead accepts a bounded retained
+ * verification reference and atomically records live truth. The capability
+ * layer verifies every path against immutable database evidence.
  */
 export const SetChannelEnabledInputSchema = z
   .object({
     integrationId: IntegrationIdSchema,
     enabled: z.boolean(),
     authorization: IntegrationChannelChangeAuthorizationSchema.nullable(),
+    verificationReference: IntegrationVerificationReferenceSchema.optional(),
   })
   .strict()
   .superRefine((input, context) => {
@@ -221,6 +234,19 @@ export const SetChannelEnabledInputSchema = z
         message:
           'Channel-change authorization must name the requested enabled state.',
         path: ['authorization', 'desiredEnabled'],
+      });
+    }
+    if (
+      input.verificationReference !== undefined &&
+      (input.integrationId !== 'mobile-push' ||
+        !input.enabled ||
+        input.authorization !== null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Initial verification can only enable mobile-push without a separate authorization artifact.',
+        path: ['verificationReference'],
       });
     }
   })

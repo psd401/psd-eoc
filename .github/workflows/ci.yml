@@ -175,6 +175,9 @@ jobs:
       - name: Run issue 278 provider-free lifecycle verification
         run: bun run test:e2e:issue-278
 
+      - name: Run issue 43 direct-push cutover verification
+        run: bun run test:e2e:issue-43
+
       - name: Synthesize a second-district infrastructure configuration
         run: bun run --cwd infra synth:example
 
@@ -346,7 +349,7 @@ jobs:
 
   native-e2e:
     name: Opt-in native E2E
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mobile-e2e')
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'mobile-e2e') || contains(github.event.pull_request.labels.*.name, 'direct-push-cutover'))
     uses: ./.github/workflows/mobile-e2e.yml
     permissions:
       contents: read

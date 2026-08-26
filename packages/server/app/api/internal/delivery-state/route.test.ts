@@ -213,6 +213,7 @@ function evidenceRow(
     recordedAt: new Date('2026-08-13T16:00:01.000Z'),
     provider: null,
     providerReference: null,
+    providerOccurredAt: null,
     proof: null,
     reasonCode: null,
     diagnosticDigest: null,

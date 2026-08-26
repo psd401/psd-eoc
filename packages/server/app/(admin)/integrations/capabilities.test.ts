@@ -11,10 +11,12 @@ import {
 import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import {
   SMS_INTEGRATION_ID,
+  assertExactDirectPushVerificationReference,
   assertChannelChangeAllowed,
   liveChannelChangeAuthorizationCommitment,
   liveChannelChangeConsequenceDigest,
   liveChannelChangeRequestDigest,
+  readDirectPushVerificationReference,
 } from './capabilities';
 
 const AT = '2026-08-10T12:00:00.000Z';
@@ -108,6 +110,62 @@ describe('integration channel administration boundary', () => {
         409,
       );
     }
+  });
+
+  test('allows only initial mobile-push verification to cross from configured to live', () => {
+    const directVerification = SetChannelEnabledInputSchema.parse({
+      integrationId: 'mobile-push',
+      enabled: true,
+      authorization: null,
+      verificationReference: 'issue-43-direct-push-proof-001',
+    });
+    expect(() =>
+      assertChannelChangeAllowed(
+        directVerification,
+        status('mobile-push', 'configured-unverified'),
+      ),
+    ).not.toThrow();
+    for (const label of ['mocked', 'live-verified'] as const) {
+      expectAdminError(
+        () =>
+          assertChannelChangeAllowed(
+            directVerification,
+            status('mobile-push', label),
+          ),
+        409,
+      );
+    }
+  });
+
+  test('binds initial direct-push verification to protected deployment truth', () => {
+    const expected = 'issue-43-direct-push-proof-001';
+    expect(
+      readDirectPushVerificationReference({
+        PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE: expected,
+      }),
+    ).toBe(expected);
+    for (const value of [undefined, 'UNVERIFIED', 'issue-43/proof']) {
+      expect(
+        readDirectPushVerificationReference({
+          PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE: value,
+        }),
+      ).toBeNull();
+    }
+    expect(() =>
+      assertExactDirectPushVerificationReference(expected, expected),
+    ).not.toThrow();
+    expectAdminError(
+      () =>
+        assertExactDirectPushVerificationReference(
+          'issue-43-direct-push-proof-002',
+          expected,
+        ),
+      409,
+    );
+    expectAdminError(
+      () => assertExactDirectPushVerificationReference(expected, null),
+      409,
+    );
   });
 
   test('requires a pre-issued artifact for every live change', () => {

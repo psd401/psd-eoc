@@ -39,6 +39,7 @@ class NativePort implements PushNativePort {
   public expoInputs: Array<{
     projectId: string;
     devicePushToken: NativePushToken;
+    serviceEnvironment: 'development' | 'production';
   }> = [];
   public settingsCalls = 0;
   public listener: ((token: NativePushToken) => Promise<void>) | null = null;
@@ -62,14 +63,19 @@ class NativePort implements PushNativePort {
     this.deviceTokenCalls += 1;
     return NATIVE_TOKEN;
   }
+  public async getServiceEnvironment(): Promise<'production'> {
+    return 'production';
+  }
   public async getExpoPushToken(input: {
     projectId: string;
     devicePushToken: NativePushToken;
+    serviceEnvironment: 'development' | 'production';
     signal: AbortSignal;
   }): Promise<string> {
     this.expoInputs.push({
       projectId: input.projectId,
       devicePushToken: input.devicePushToken,
+      serviceEnvironment: input.serviceEnvironment,
     });
     return EXPO_TOKEN;
   }
@@ -96,6 +102,8 @@ function session() {
       return PushTokenRegistrationReceiptSchema.parse({
         deviceEnrollmentId: DEVICE_ID,
         platform: 'ios',
+        provider: input.provider,
+        serviceEnvironment: input.serviceEnvironment,
         status: 'registered',
       });
     },
@@ -198,7 +206,7 @@ describe('push registration controller', () => {
     expect(controller.getSnapshot().phase).toBe('registered');
   });
 
-  test('shows explanation before the only permission request and registers only the Expo token', async () => {
+  test('registers native APNs and Expo fallback only after explanation and permission', async () => {
     const native = new NativePort('undetermined');
     const currentSession = session();
     const controller = enabledController(native);
@@ -213,20 +221,23 @@ describe('push registration controller', () => {
     await controller.requestPermission();
     expect(native.permissionRequests).toBe(1);
     expect(native.expoInputs).toEqual([
-      { projectId: PROJECT_ID, devicePushToken: NATIVE_TOKEN },
+      {
+        projectId: PROJECT_ID,
+        devicePushToken: NATIVE_TOKEN,
+        serviceEnvironment: 'production',
+      },
     ]);
     expect(currentSession.registrations).toEqual([
       {
         deviceEnrollmentId: DEVICE_ID,
         platform: 'ios',
-        provider: 'expo',
+        provider: 'apns',
+        serviceEnvironment: 'production',
         build: BUILD,
-        token: EXPO_TOKEN,
+        token: NATIVE_TOKEN.data,
+        expoFallbackToken: EXPO_TOKEN,
       },
     ]);
-    expect(JSON.stringify(currentSession.registrations)).not.toContain(
-      NATIVE_TOKEN.data,
-    );
     expect(controller.getSnapshot()).toEqual({
       phase: 'registered',
       platform: 'ios',
@@ -269,8 +280,15 @@ describe('push registration controller', () => {
     expect(native.expoInputs.at(-1)).toEqual({
       projectId: PROJECT_ID,
       devicePushToken: rotated,
+      serviceEnvironment: 'production',
     });
-    expect(currentSession.registrations.at(-1)?.token).toBe(EXPO_TOKEN);
+    expect(currentSession.registrations.at(-1)).toEqual(
+      expect.objectContaining({
+        provider: 'apns',
+        token: rotated.data,
+        expoFallbackToken: EXPO_TOKEN,
+      }),
+    );
   });
 
   test('aborts in-flight Expo acquisition when authenticated auth goes offline', async () => {
@@ -499,6 +517,8 @@ describe('push registration controller', () => {
         return PushTokenRegistrationReceiptSchema.parse({
           deviceEnrollmentId: OTHER_DEVICE_ID,
           platform: 'ios',
+          provider: input.provider,
+          serviceEnvironment: input.serviceEnvironment,
           status: 'registered',
         });
       },
@@ -513,6 +533,31 @@ describe('push registration controller', () => {
       phase: 'error',
       message: expect.stringContaining('inconsistent'),
     });
+  });
+
+  test('clears prior cleanup evidence before an uncertain atomic mutation', async () => {
+    const native = new NativePort('denied');
+    const currentSession = session();
+    const uncertainSession: PushRegistrationSession = {
+      ...currentSession.binding,
+      async register(input) {
+        currentSession.registrations.push(input);
+        throw new Error('synthetic uncertain registration');
+      },
+    };
+    const controller = enabledController(native);
+
+    await controller.start();
+    await controller.reconcile(uncertainSession);
+    expect(currentSession.unregistrations).toHaveLength(1);
+
+    native.permission = 'granted';
+    await controller.retry();
+    expect(currentSession.registrations).toHaveLength(1);
+
+    native.permission = 'denied';
+    await controller.retry();
+    expect(currentSession.unregistrations).toHaveLength(2);
   });
 
   test('does not confirm cleanup from another device receipt', async () => {

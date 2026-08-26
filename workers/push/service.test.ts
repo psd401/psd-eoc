@@ -23,6 +23,7 @@ const ENABLED_ENVIRONMENT = Object.freeze({
   PSD_EOC_EXPO_PUSH_RUNTIME_MODE: 'enabled',
   PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN: TOKEN,
   PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN: TOKEN,
+  PSD_EOC_PUSH_PROVIDER_CUTOVER: '{"version":1,"ios":"expo","android":"expo"}',
   PSD_EOC_SERVICE_ORIGIN: 'https://eoc.example.invalid',
   PUSH_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/push',
 });
@@ -58,7 +59,94 @@ describe('Expo push service configuration', () => {
       endpointWorkerToken: TOKEN,
       pushRuntimeToken: TOKEN,
       verificationReference: 'eas:build:proof-278',
+      cutover: { version: 1, ios: 'expo', android: 'expo' },
+      direct: null,
     });
+    expect(
+      readExpoPushServiceConfiguration({
+        ...ENABLED_ENVIRONMENT,
+        PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE: 'v1',
+      }).verificationReference,
+    ).toBe('v1');
+  });
+
+  test('requires exact direct credentials before a direct platform cutover', () => {
+    expect(() =>
+      readExpoPushServiceConfiguration({
+        ...ENABLED_ENVIRONMENT,
+        PSD_EOC_PUSH_PROVIDER_CUTOVER:
+          '{"version":1,"ios":"direct","android":"expo"}',
+      }),
+    ).toThrow(expect.objectContaining({ code: 'FEATURE_DISABLED' }));
+
+    const directEnvironment = {
+      ...ENABLED_ENVIRONMENT,
+      APNS_CREDENTIAL_STATUS: 'verified',
+      APNS_ENVIRONMENT: 'production',
+      APNS_KEY_ID: 'KEYID12345',
+      APNS_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${'A'.repeat(128)}\n-----END PRIVATE KEY-----\n`,
+      APNS_TEAM_ID: 'TEAMID1234',
+      APNS_TOPIC: 'org.example.eoc',
+      FCM_CLIENT_EMAIL: 'push-sender@example-project.iam.gserviceaccount.com',
+      FCM_CREDENTIAL_STATUS: 'verified',
+      FCM_ENVIRONMENT: 'production',
+      FCM_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${'B'.repeat(128)}\n-----END PRIVATE KEY-----\n`,
+      FCM_PROJECT_ID: 'example-project',
+      PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE:
+        'direct:credential-proof-43',
+      PSD_EOC_DIRECT_PUSH_PROVIDER_AUTHORIZED: 'true',
+      PSD_EOC_IOS_BUNDLE_ID: 'org.example.eoc',
+      PSD_EOC_PUSH_PROVIDER_CUTOVER:
+        '{"version":1,"ios":"direct","android":"direct"}',
+    } as const;
+    expect(readExpoPushServiceConfiguration(directEnvironment)).toMatchObject({
+      cutover: { version: 1, ios: 'direct', android: 'direct' },
+      direct: {
+        verificationReference: 'direct:credential-proof-43',
+        apns: { topic: 'org.example.eoc', environment: 'production' },
+        fcm: { projectId: 'example-project', environment: 'production' },
+      },
+    });
+    expect(
+      readExpoPushServiceConfiguration(directEnvironment).direct,
+    ).toMatchObject({
+      apns: {
+        privateKey: directEnvironment.APNS_PRIVATE_KEY.slice(0, -1),
+      },
+      fcm: {
+        privateKey: directEnvironment.FCM_PRIVATE_KEY.slice(0, -1),
+      },
+    });
+    expect(() =>
+      readExpoPushServiceConfiguration({
+        ...directEnvironment,
+        PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE: 'short',
+      }),
+    ).toThrow(expect.objectContaining({ code: 'FEATURE_DISABLED' }));
+    expect(() =>
+      readExpoPushServiceConfiguration({
+        ...directEnvironment,
+        APNS_CREDENTIAL_STATUS: 'UNCONFIGURED',
+      }),
+    ).toThrow(expect.objectContaining({ code: 'FEATURE_DISABLED' }));
+    expect(() =>
+      readExpoPushServiceConfiguration({
+        ...directEnvironment,
+        FCM_PRIVATE_KEY: `${directEnvironment.FCM_PRIVATE_KEY}\n`,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIGURATION' }));
+    for (const privateKey of [
+      directEnvironment.FCM_PRIVATE_KEY.replace('BBBB', 'BB\0BB'),
+      directEnvironment.FCM_PRIVATE_KEY.replace('BBBB', 'BB\tBB'),
+      directEnvironment.FCM_PRIVATE_KEY.replace('BBBB', 'BB\u007fBB'),
+    ]) {
+      expect(() =>
+        readExpoPushServiceConfiguration({
+          ...directEnvironment,
+          FCM_PRIVATE_KEY: privateKey,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIGURATION' }));
+    }
   });
 
   test('refuses unsafe origins, queues, and short worker credentials', () => {

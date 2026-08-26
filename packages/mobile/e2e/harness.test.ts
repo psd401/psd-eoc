@@ -170,6 +170,9 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain('await openIosDevelopmentClient');
     expect(runner).toContain('iOS mobile E2E cannot skip the native build');
     expect(runner).not.toContain('http://10.0.2.2:8081');
+    expect(runner.indexOf('const childEnvironment')).toBeLessThan(
+      runner.indexOf('requireSyntheticMobileE2E(childEnvironment)'),
+    );
 
     const workflow = await Bun.file(
       resolve(mobileRoot, '../../.github/workflows/mobile-e2e.yml'),

@@ -1,8 +1,11 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   ChannelConfigurationSchema,
   IntegrationChannelChangeAuthorizationSchema,
   IntegrationIdSchema,
   IntegrationHealthSchema,
+  IntegrationVerificationReferenceSchema,
   type Actor,
   type CapabilityInput,
   type ChannelConfiguration,
@@ -40,6 +43,35 @@ import {
 } from '../../../lib/capabilities/admin';
 
 export const SMS_INTEGRATION_ID = 'aws-eum-sms' as const;
+export const MOBILE_PUSH_INTEGRATION_ID = 'mobile-push' as const;
+export const DIRECT_PUSH_VERIFICATION_REFERENCE_ENV =
+  'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE' as const;
+
+/** Reads the exact non-secret deployment reference that authorizes activation. */
+export function readDirectPushVerificationReference(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string | null {
+  const value = environment[DIRECT_PUSH_VERIFICATION_REFERENCE_ENV];
+  return value !== undefined &&
+    value !== 'UNVERIFIED' &&
+    IntegrationVerificationReferenceSchema.safeParse(value).success
+    ? value
+    : null;
+}
+
+/** Refuses caller-supplied proof that is not bound to this deployment. */
+export function assertExactDirectPushVerificationReference(
+  supplied: string,
+  expected: string | null,
+): void {
+  if (expected === null || supplied !== expected) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'Direct push verification does not match the protected deployment reference.',
+      409,
+    );
+  }
+}
 
 interface ChannelConfigurationState {
   readonly enabled: boolean;
@@ -156,6 +188,12 @@ export function assertChannelChangeAllowed(
   input: SetChannelEnabledInput,
   status: IntegrationStatus,
 ): void {
+  const initialMobileVerification =
+    input.integrationId === MOBILE_PUSH_INTEGRATION_ID &&
+    input.enabled &&
+    input.verificationReference !== undefined &&
+    input.authorization === null &&
+    status.label === 'configured-unverified';
   if (input.enabled && input.integrationId === SMS_INTEGRATION_ID) {
     throw new AdminCapabilityError(
       'CONFLICT',
@@ -170,14 +208,29 @@ export function assertChannelChangeAllowed(
       409,
     );
   }
-  if (input.enabled && status.label === 'configured-unverified') {
+  if (input.verificationReference !== undefined && !initialMobileVerification) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'Direct push verification is allowed only for the initial configured mobile-push activation.',
+      409,
+    );
+  }
+  if (
+    input.enabled &&
+    status.label === 'configured-unverified' &&
+    !initialMobileVerification
+  ) {
     throw new AdminCapabilityError(
       'CONFLICT',
       'An unverified integration cannot be enabled.',
       409,
     );
   }
-  if (status.label === 'live-verified' && input.authorization === null) {
+  if (
+    status.label === 'live-verified' &&
+    input.authorization === null &&
+    !initialMobileVerification
+  ) {
     throw new AdminCapabilityError(
       'FORBIDDEN',
       'Fresh product-owner authorization is required for this live channel change.',
@@ -478,138 +531,196 @@ async function loadChannelConfiguration(
       });
 }
 
-export const setChannelEnabledRegistration: ServerCapabilityRegistration<
+export function createSetChannelEnabledRegistration(
+  directPushVerificationReference:
+    | string
+    | null = readDirectPushVerificationReference(),
+): ServerCapabilityRegistration<
   'set-channel-enabled',
   AdminCapabilityTransaction
-> = {
-  id: 'set-channel-enabled',
-  async resolveFacilityId(_input, context) {
-    requireAdminCapabilityAuthorization(
-      context.invocation.actor,
-      context.transaction,
-    );
-    return null;
-  },
-  async handler(input, context) {
-    await lockIntegrationChange(context.transaction, input.integrationId);
-    const previousConfiguration = await lockChannelConfigurationState(
-      context.transaction,
-      input.integrationId,
-    );
-    const status = await latestStatusForChange(
-      context.transaction,
-      input.integrationId,
-    );
-    if (status === null) {
-      throw new AdminCapabilityError(
-        'NOT_FOUND',
-        'The integration status was not found.',
-        404,
+> {
+  return {
+    id: 'set-channel-enabled',
+    async resolveFacilityId(_input, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
       );
-    }
-    assertChannelChangeAllowed(input, statusFromRow(status));
-
-    const changedAt = await readCapabilityTime(context);
-    if (status.label === 'live-verified') {
-      if (input.authorization === null) throw invalidLiveAuthorization();
-      const commitment = assertExactLiveAuthorization({
-        actor: context.invocation.actor,
-        authorization: input.authorization,
-        status,
-        previousConfiguration,
-        consumedAt: changedAt,
-      });
-      if (context.invocation.actor.kind !== 'human') {
-        throw invalidLiveAuthorization();
+      return null;
+    },
+    async handler(input, context) {
+      await lockIntegrationChange(context.transaction, input.integrationId);
+      const previousConfiguration = await lockChannelConfigurationState(
+        context.transaction,
+        input.integrationId,
+      );
+      let status = await latestStatusForChange(
+        context.transaction,
+        input.integrationId,
+      );
+      if (status === null) {
+        throw new AdminCapabilityError(
+          'NOT_FOUND',
+          'The integration status was not found.',
+          404,
+        );
       }
-      const [consumed] = await context.transaction.database
-        .insert(integrationChannelChangeAuthorizations)
-        .values({
-          reference: input.authorization.reference,
-          authorizationCommitment: commitment,
-          integrationStatusId: status.id,
-          integrationId: input.integrationId,
-          statusLabel: 'live-verified',
-          desiredEnabled: input.enabled,
-          requestDigest: input.authorization.requestDigest,
-          consequenceDigest: input.authorization.consequenceDigest,
-          authorizedByUserId: input.authorization.authorizedByUserId,
-          authorizedWithSessionId: input.authorization.authorizedWithSessionId,
-          issuedAt: new Date(input.authorization.issuedAt),
-          expiresAt: new Date(input.authorization.expiresAt),
-          consumedByUserId: context.invocation.actor.userId,
-          consumedWithSessionId: context.invocation.actor.sessionId,
-          consumedRequestId: context.invocation.requestId,
+      assertChannelChangeAllowed(input, statusFromRow(status));
+
+      const changedAt = await readCapabilityTime(context);
+      const initialMobileVerification =
+        input.integrationId === MOBILE_PUSH_INTEGRATION_ID &&
+        input.enabled &&
+        input.verificationReference !== undefined &&
+        input.authorization === null &&
+        status.label === 'configured-unverified';
+      if (initialMobileVerification) {
+        assertExactDirectPushVerificationReference(
+          input.verificationReference,
+          directPushVerificationReference,
+        );
+        if (context.invocation.actor.kind !== 'human') {
+          throw new AdminCapabilityError(
+            'FORBIDDEN',
+            'A human district administrator must record direct push verification.',
+            403,
+          );
+        }
+        const [verifiedStatus] = await context.transaction.database
+          .insert(integrationStatuses)
+          .values({
+            id: randomUUID(),
+            integrationId: MOBILE_PUSH_INTEGRATION_ID,
+            label: 'live-verified',
+            verifiedAt: changedAt,
+            verifiedByUserId: context.invocation.actor.userId,
+            authorizationReference: input.verificationReference,
+            reasonCode: null,
+            observedAt: changedAt,
+          })
+          .returning({
+            id: integrationStatuses.id,
+            integrationId: integrationStatuses.integrationId,
+            label: integrationStatuses.label,
+            verifiedAt: integrationStatuses.verifiedAt,
+            verifiedByUserId: integrationStatuses.verifiedByUserId,
+            authorizationReference: integrationStatuses.authorizationReference,
+            reasonCode: integrationStatuses.reasonCode,
+            observedAt: integrationStatuses.observedAt,
+          });
+        if (verifiedStatus === undefined) {
+          throw new AdminCapabilityError(
+            'INTERNAL_ERROR',
+            'The direct push verification could not be recorded.',
+            500,
+          );
+        }
+        status = verifiedStatus;
+      } else if (status.label === 'live-verified') {
+        if (input.authorization === null) throw invalidLiveAuthorization();
+        const commitment = assertExactLiveAuthorization({
+          actor: context.invocation.actor,
+          authorization: input.authorization,
+          status,
+          previousConfiguration,
           consumedAt: changedAt,
-        })
-        .onConflictDoNothing()
-        .returning({ id: integrationChannelChangeAuthorizations.id });
-      if (consumed === undefined) throw invalidLiveAuthorization();
-    }
-    await context.transaction.database
-      .insert(channelConfigurations)
-      .values({
-        integrationId: input.integrationId,
-        enabled: input.enabled,
-        statusId: status.id,
-        statusLabel: status.label,
-        changedAt,
-      })
-      .onConflictDoUpdate({
-        target: channelConfigurations.integrationId,
-        set: {
+        });
+        if (context.invocation.actor.kind !== 'human') {
+          throw invalidLiveAuthorization();
+        }
+        const [consumed] = await context.transaction.database
+          .insert(integrationChannelChangeAuthorizations)
+          .values({
+            reference: input.authorization.reference,
+            authorizationCommitment: commitment,
+            integrationStatusId: status.id,
+            integrationId: input.integrationId,
+            statusLabel: 'live-verified',
+            desiredEnabled: input.enabled,
+            requestDigest: input.authorization.requestDigest,
+            consequenceDigest: input.authorization.consequenceDigest,
+            authorizedByUserId: input.authorization.authorizedByUserId,
+            authorizedWithSessionId:
+              input.authorization.authorizedWithSessionId,
+            issuedAt: new Date(input.authorization.issuedAt),
+            expiresAt: new Date(input.authorization.expiresAt),
+            consumedByUserId: context.invocation.actor.userId,
+            consumedWithSessionId: context.invocation.actor.sessionId,
+            consumedRequestId: context.invocation.requestId,
+            consumedAt: changedAt,
+          })
+          .onConflictDoNothing()
+          .returning({ id: integrationChannelChangeAuthorizations.id });
+        if (consumed === undefined) throw invalidLiveAuthorization();
+      }
+      await context.transaction.database
+        .insert(channelConfigurations)
+        .values({
+          integrationId: input.integrationId,
           enabled: input.enabled,
           statusId: status.id,
           statusLabel: status.label,
           changedAt,
-        },
-      });
-    const result = await loadChannelConfiguration(
-      context.transaction,
-      input.integrationId,
-    );
-    if (result === null) {
-      throw new AdminCapabilityError(
-        'INTERNAL_ERROR',
-        'The channel configuration could not be reloaded.',
-        500,
+        })
+        .onConflictDoUpdate({
+          target: channelConfigurations.integrationId,
+          set: {
+            enabled: input.enabled,
+            statusId: status.id,
+            statusLabel: status.label,
+            changedAt,
+          },
+        });
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        input.integrationId,
       );
-    }
-    return result;
-  },
-  resultReference: channelResultReference,
-  async loadReplay(resultReference, context) {
-    const parsed = parseChannelResultReference(resultReference);
-    const result = await loadChannelConfiguration(
-      context.transaction,
-      parsed.integrationId,
-    );
-    if (result === null) {
-      throw new AdminCapabilityError(
-        'NOT_FOUND',
-        'The previous channel configuration is unavailable.',
-        404,
+      if (result === null) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The channel configuration could not be reloaded.',
+          500,
+        );
+      }
+      return result;
+    },
+    resultReference: channelResultReference,
+    async loadReplay(resultReference, context) {
+      const parsed = parseChannelResultReference(resultReference);
+      const result = await loadChannelConfiguration(
+        context.transaction,
+        parsed.integrationId,
       );
-    }
-    if (digestCapabilityValue(result) !== parsed.outputDigest) {
-      throw new AdminCapabilityError(
-        'CONFLICT',
-        'The original channel result is no longer reconstructable; replay was refused rather than returning changed data.',
-        409,
+      if (result === null) {
+        throw new AdminCapabilityError(
+          'NOT_FOUND',
+          'The previous channel configuration is unavailable.',
+          404,
+        );
+      }
+      if (digestCapabilityValue(result) !== parsed.outputDigest) {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'The original channel result is no longer reconstructable; replay was refused rather than returning changed data.',
+          409,
+        );
+      }
+      return result;
+    },
+    resolveReplayFacilityId(resultReference, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
       );
-    }
-    return result;
-  },
-  resolveReplayFacilityId(resultReference, context) {
-    requireAdminCapabilityAuthorization(
-      context.invocation.actor,
-      context.transaction,
-    );
-    parseChannelResultReference(resultReference);
-    return null;
-  },
-  replayFacilityId: () => null,
-};
+      parseChannelResultReference(resultReference);
+      return null;
+    },
+    replayFacilityId: () => null,
+  };
+}
+
+export const setChannelEnabledRegistration =
+  createSetChannelEnabledRegistration();
 
 /** Executes the canonical health query and captures its typed channel projection. */
 export async function executeIntegrationHealthProjection(input: {
@@ -652,6 +763,7 @@ export function executeSetChannelEnabledCapability(input: {
   readonly command: CapabilityInput<'set-channel-enabled'>;
   readonly metadata: AdminMutationMetadata;
   readonly store?: AdminCapabilityStore;
+  readonly directPushVerificationReference?: string | null;
 }): Promise<ChannelConfiguration> {
   const store =
     input.store ??
@@ -660,7 +772,11 @@ export function executeSetChannelEnabledCapability(input: {
       input.authenticated,
     );
   return executeAdminMutationCapability(
-    setChannelEnabledRegistration,
+    input.directPushVerificationReference === undefined
+      ? setChannelEnabledRegistration
+      : createSetChannelEnabledRegistration(
+          input.directPushVerificationReference,
+        ),
     input.command,
     input.authenticated,
     store,

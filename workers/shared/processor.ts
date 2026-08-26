@@ -28,7 +28,7 @@ import {
 
 const SAFE_PROVIDER_PATTERN = /^[a-z0-9]+(?:[a-z0-9._-]*[a-z0-9])?$/u;
 
-export type ProviderSendOutcome =
+export type ProviderSendOutcome = (
   | Readonly<{
       state: 'provider-accepted';
       provider: string;
@@ -52,7 +52,9 @@ export type ProviderSendOutcome =
       proof: null;
       reasonCode: string;
       diagnosticDigest: string | null;
-    }>;
+    }>
+) &
+  Readonly<{ providerOccurredAt?: string }>;
 
 export interface ProviderSendRequest {
   readonly workItem: WorkerAttemptWorkItem;
@@ -278,6 +280,9 @@ function parseProviderOutcome(
     proof: parsed.data.proof,
     reasonCode: parsed.data.reasonCode,
     diagnosticDigest: parsed.data.diagnosticDigest,
+    ...(parsed.data.providerOccurredAt === undefined
+      ? {}
+      : { providerOccurredAt: parsed.data.providerOccurredAt }),
   }) as ProviderSendOutcome;
 }
 

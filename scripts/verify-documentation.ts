@@ -1016,7 +1016,7 @@ function verifyContracts(repositoryRoot: string): DocumentationError[] {
   compareNames(
     errors,
     extractContractList(configuration, 'workflow-vars'),
-    captured(/\$\{\{\s*vars\.([A-Z0-9_]+)(?:\s*\|\|[^}]*)?\s*\}\}/gu),
+    captured(/\$\{\{\s*vars\.([A-Z0-9_]+)/gu),
     'deploy workflow variable names',
   );
   compareNames(

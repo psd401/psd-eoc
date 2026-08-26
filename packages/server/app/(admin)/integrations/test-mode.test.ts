@@ -72,6 +72,8 @@ const SYNTHETIC_SNAPSHOT = RosterSnapshotSchema.parse({
           status: 'active',
           capturedAt: AT,
           platform: 'ios',
+          provider: 'expo',
+          serviceEnvironment: 'production',
           token: 'synthetic-unroutable:test-recipient',
         },
         {
@@ -223,6 +225,8 @@ describe('admin test-mode audience resolution', () => {
       status: 'active',
       capturedAt: AT,
       platform: 'ios',
+      provider: 'expo',
+      serviceEnvironment: 'production',
       token: 'ExponentPushToken[routable-fixture]',
     });
   });

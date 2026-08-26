@@ -32,6 +32,7 @@ import {
   type RosterGroupFailure,
   type RosterGroupSourceRef,
   type RosterPopulation,
+  type PushProviderCutover,
   type RosterSourceConfiguration,
   type RosterSourceConfigurationRef,
   type RosterSyncResult,
@@ -39,6 +40,11 @@ import {
 } from '@psd-eoc/contracts';
 
 import { staffRosterEmail } from '../config/staff-email';
+import {
+  parsePushProviderCutover,
+  PUSH_PROVIDER_CUTOVER_ENV,
+  selectedPushProvider,
+} from '../push-provider-cutover';
 import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
@@ -135,6 +141,8 @@ export interface RosterGroupsAdapter {
 export interface RosterLocalPushEndpoint {
   readonly id: string;
   readonly platform: 'ios' | 'android';
+  readonly provider: 'expo' | 'apns' | 'fcm';
+  readonly serviceEnvironment: 'development' | 'production';
   readonly token: string;
 }
 
@@ -706,6 +714,10 @@ function buildRecipients(
           Object.freeze({
             id: UuidSchema.parse(endpoint.id),
             platform: z.enum(['ios', 'android']).parse(endpoint.platform),
+            provider: z.enum(['expo', 'apns', 'fcm']).parse(endpoint.provider),
+            serviceEnvironment: z
+              .enum(['development', 'production'])
+              .parse(endpoint.serviceEnvironment),
             token: z.string().trim().min(16).max(4_096).parse(endpoint.token),
           }),
         ),
@@ -758,6 +770,8 @@ function buildRecipients(
             status: 'active',
             capturedAt,
             platform: endpoint.platform,
+            provider: endpoint.provider,
+            serviceEnvironment: endpoint.serviceEnvironment,
             token: endpoint.token,
           }),
         ),
@@ -2086,6 +2100,8 @@ function endpointInsertValue(
       return {
         ...common,
         platform: endpoint.platform,
+        provider: endpoint.provider,
+        serviceEnvironment: endpoint.serviceEnvironment,
         token: endpoint.token,
         email: null,
         phoneNumber: null,
@@ -2094,6 +2110,8 @@ function endpointInsertValue(
       return {
         ...common,
         platform: null,
+        provider: null,
+        serviceEnvironment: null,
         token: null,
         email: endpoint.email,
         phoneNumber: null,
@@ -2102,6 +2120,8 @@ function endpointInsertValue(
       return {
         ...common,
         platform: null,
+        provider: null,
+        serviceEnvironment: null,
         token: null,
         email: null,
         phoneNumber: endpoint.phoneNumber,
@@ -2112,6 +2132,9 @@ function endpointInsertValue(
 /** Production Drizzle persistence adapter with atomic snapshot publication. */
 export function createDrizzleRosterSyncStore(
   database: Database,
+  pushProviderCutover: PushProviderCutover | null = parsePushProviderCutover(
+    process.env[PUSH_PROVIDER_CUTOVER_ENV],
+  ),
 ): RosterSyncStore {
   async function loadConfiguration(
     reference: RosterSourceConfigurationRef,
@@ -2214,6 +2237,8 @@ export function createDrizzleRosterSyncStore(
       Readonly<{
         googleSubject: string;
         platform: 'ios' | 'android';
+        provider: 'expo' | 'apns' | 'fcm';
+        serviceEnvironment: 'development' | 'production';
         token: string;
       }>
     >();
@@ -2233,6 +2258,8 @@ export function createDrizzleRosterSyncStore(
           Object.freeze({
             googleSubject: recipient.googleSubject,
             platform: endpoint.platform,
+            provider: endpoint.provider,
+            serviceEnvironment: endpoint.serviceEnvironment,
             token: endpoint.token,
           }),
         );
@@ -2338,6 +2365,8 @@ export function createDrizzleRosterSyncStore(
       Readonly<{
         deviceEnrollmentId: string;
         platform: 'ios' | 'android' | 'web';
+        provider: string;
+        serviceEnvironment: string;
         token: string;
       }>
     >();
@@ -2348,6 +2377,8 @@ export function createDrizzleRosterSyncStore(
           id: devicePushTokenRegistrations.id,
           deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
           platform: devicePushTokenRegistrations.platform,
+          provider: devicePushTokenRegistrations.provider,
+          serviceEnvironment: devicePushTokenRegistrations.serviceEnvironment,
           token: devicePushTokenRegistrations.token,
         })
         .from(devicePushTokenRegistrations)
@@ -2360,6 +2391,8 @@ export function createDrizzleRosterSyncStore(
           Object.freeze({
             deviceEnrollmentId: row.deviceEnrollmentId,
             platform: row.platform,
+            provider: row.provider,
+            serviceEnvironment: row.serviceEnvironment,
             token: row.token,
           }),
         ),
@@ -2399,6 +2432,8 @@ export function createDrizzleRosterSyncStore(
           enrollment.revokedAt !== null ||
           googleSubjects.get(enrollment.userId) !== endpoint.googleSubject ||
           registration.platform !== endpoint.platform ||
+          registration.provider !== endpoint.provider ||
+          registration.serviceEnvironment !== endpoint.serviceEnvironment ||
           registration.token !== endpoint.token ||
           unregisteredIds.has(id)
         );
@@ -2518,6 +2553,12 @@ export function createDrizzleRosterSyncStore(
     async loadLocalContacts(
       identityKeys: readonly string[],
     ): Promise<readonly RosterLocalContact[]> {
+      if (pushProviderCutover === null) {
+        throw new RosterSyncError(
+          'LOCAL_CONTACT_CAPTURE_INVALID',
+          'Roster publication requires an exact push-provider cutover.',
+        );
+      }
       if (identityKeys.length === 0) {
         return Object.freeze([]);
       }
@@ -2605,8 +2646,13 @@ export function createDrizzleRosterSyncStore(
           const pushRows = await transaction
             .select({
               id: devicePushTokenRegistrations.id,
+              deviceEnrollmentId:
+                devicePushTokenRegistrations.deviceEnrollmentId,
               googleSubject: users.googleSubject,
               platform: devicePushTokenRegistrations.platform,
+              provider: devicePushTokenRegistrations.provider,
+              serviceEnvironment:
+                devicePushTokenRegistrations.serviceEnvironment,
               token: devicePushTokenRegistrations.token,
             })
             .from(devicePushTokenRegistrations)
@@ -2633,12 +2679,70 @@ export function createDrizzleRosterSyncStore(
                 isNull(users.disabledAt),
               ),
             );
+          const registrationsByDevicePlatform = new Map<
+            string,
+            typeof pushRows
+          >();
           for (const row of pushRows) {
             const contact = contactMap.get(row.googleSubject);
             if (contact !== undefined && row.platform !== 'web') {
+              const selectionKey = `${row.deviceEnrollmentId}:${row.platform}`;
+              const registrations =
+                registrationsByDevicePlatform.get(selectionKey) ?? [];
+              registrationsByDevicePlatform.set(selectionKey, [
+                ...registrations,
+                row,
+              ]);
+            }
+          }
+          for (const registrations of registrationsByDevicePlatform.values()) {
+            const first = registrations[0];
+            if (first === undefined || first.platform === 'web') continue;
+            if (pushProviderCutover === null) {
+              throw new RosterSyncError(
+                'LOCAL_CONTACT_CAPTURE_INVALID',
+                'Push registrations require an exact provider cutover.',
+              );
+            }
+            const platform = first.platform;
+            const selectedProvider = selectedPushProvider(
+              pushProviderCutover,
+              platform,
+            );
+            const selected = registrations.filter(
+              (registration) => registration.provider === selectedProvider,
+            );
+            if (selected.length > 1) {
+              throw new RosterSyncError(
+                'LOCAL_CONTACT_CAPTURE_INVALID',
+                'A device had ambiguous active push-provider registrations.',
+              );
+            }
+            if (selected.length === 0) {
+              throw new RosterSyncError(
+                'DIRECT_PUSH_COVERAGE_INCOMPLETE',
+                'Push-provider cutover requires complete paired endpoint coverage.',
+              );
+            }
+            const row = selected[0];
+            if (row !== undefined) {
+              const contact = contactMap.get(row.googleSubject);
+              if (contact === undefined) continue;
+              if (
+                contact.pushEndpoints.some((endpoint) => endpoint.id === row.id)
+              ) {
+                throw new RosterSyncError(
+                  'LOCAL_CONTACT_CAPTURE_INVALID',
+                  'A device had ambiguous active push-provider registrations.',
+                );
+              }
               contact.pushEndpoints.push({
                 id: row.id,
-                platform: row.platform,
+                platform,
+                provider: z.enum(['expo', 'apns', 'fcm']).parse(row.provider),
+                serviceEnvironment: z
+                  .enum(['development', 'production'])
+                  .parse(row.serviceEnvironment),
                 token: row.token,
               });
             }

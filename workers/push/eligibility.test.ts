@@ -44,6 +44,8 @@ describe('push endpoint send eligibility client', () => {
       recipientId: item.attempt.recipientId,
       endpointId: item.attempt.endpointId,
       platform: item.endpoint.platform,
+      provider: item.endpoint.provider,
+      serviceEnvironment: item.endpoint.serviceEnvironment,
       tokenDigest: createHash('sha256')
         .update(item.endpoint.token, 'utf8')
         .digest('hex'),

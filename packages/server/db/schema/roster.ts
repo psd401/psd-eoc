@@ -556,6 +556,8 @@ export const rosterEndpoints = pgTable(
     status: endpointStatusEnum('status').notNull(),
     capturedAt: occurredAt('captured_at').notNull(),
     platform: pushPlatformEnum('platform'),
+    provider: varchar('provider', { length: 32 }),
+    serviceEnvironment: varchar('service_environment', { length: 32 }),
     token: text('token'),
     email: varchar('email', { length: 320 }),
     phoneNumber: varchar('phone_number', { length: 16 }),
@@ -597,6 +599,13 @@ export const rosterEndpoints = pgTable(
       sql`(
         ${table.channel} = 'push'
         and ${table.platform} is not null
+        and ${table.provider} in ('expo', 'apns', 'fcm')
+        and ${table.serviceEnvironment} in ('development', 'production')
+        and (
+          ${table.provider} = 'expo'
+          or (${table.provider} = 'apns' and ${table.platform} = 'ios')
+          or (${table.provider} = 'fcm' and ${table.platform} = 'android')
+        )
         and ${table.token} is not null
         and length(btrim(${table.token})) between 16 and 4096
         and ${table.email} is null
@@ -604,12 +613,16 @@ export const rosterEndpoints = pgTable(
       ) or (
         ${table.channel} = 'email'
         and ${table.platform} is null
+        and ${table.provider} is null
+        and ${table.serviceEnvironment} is null
         and ${table.token} is null
         and ${table.email} is not null
         and ${table.phoneNumber} is null
       ) or (
         ${table.channel} = 'sms'
         and ${table.platform} is null
+        and ${table.provider} is null
+        and ${table.serviceEnvironment} is null
         and ${table.token} is null
         and ${table.email} is null
         and ${table.phoneNumber} is not null

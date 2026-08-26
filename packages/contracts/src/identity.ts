@@ -5,6 +5,11 @@ import { ActorSchema, ConnectivityEpochIdSchema } from './capability';
 import { FacilityScopeSchema } from './facility';
 import { AccessGroupSourceRefSchema, type AccessGroupSourceRef } from './group';
 import {
+  PushProviderSchema,
+  PushServiceEnvironmentSchema,
+  pushProviderMatchesPlatform,
+} from './roster';
+import {
   hasUniqueStrings,
   isAtOrAfter,
   RoleSchema,
@@ -1121,10 +1126,25 @@ export type NativePushBuildIdentity = z.infer<
 export const PushRegistrationBuildAuthorizationSchema = z
   .object({
     platform: z.enum(['ios', 'android']),
-    provider: z.literal('expo'),
+    provider: PushProviderSchema,
+    serviceEnvironment: PushServiceEnvironmentSchema,
     build: NativePushBuildIdentitySchema,
   })
   .strict()
+  .superRefine((authorization, context) => {
+    if (
+      !pushProviderMatchesPlatform(
+        authorization.provider,
+        authorization.platform,
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Push provider is incompatible with the native platform.',
+        path: ['provider'],
+      });
+    }
+  })
   .readonly();
 
 /** Protected push-registration build authorization inferred from its schema. */
@@ -1141,11 +1161,46 @@ export const RegisterPushTokenInputSchema = z
   .object({
     deviceEnrollmentId: DeviceEnrollmentIdSchema,
     platform: z.enum(['ios', 'android']),
-    provider: z.literal('expo'),
+    provider: PushProviderSchema,
+    serviceEnvironment: PushServiceEnvironmentSchema,
     build: NativePushBuildIdentitySchema,
     token: z.string().trim().min(16).max(4_096),
+    /** Expo fallback rotated atomically with the direct-provider token. */
+    expoFallbackToken: z.string().trim().min(16).max(4_096).optional(),
   })
   .strict()
+  .superRefine((registration, context) => {
+    if (
+      !pushProviderMatchesPlatform(registration.provider, registration.platform)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Push provider is incompatible with the native platform.',
+        path: ['provider'],
+      });
+    }
+    if (
+      registration.expoFallbackToken !== undefined &&
+      registration.provider === 'expo'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'An Expo fallback requires a direct native provider.',
+        path: ['expoFallbackToken'],
+      });
+    }
+    if (
+      registration.provider !== 'expo' &&
+      registration.expoFallbackToken === undefined
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A direct native provider requires an Expo fallback in the same registration generation.',
+        path: ['expoFallbackToken'],
+      });
+    }
+  })
   .readonly();
 
 /** Native push-token registration input inferred from its schema. */
@@ -1158,6 +1213,8 @@ export const PushTokenRegistrationReceiptSchema = z
   .object({
     deviceEnrollmentId: DeviceEnrollmentIdSchema,
     platform: z.enum(['ios', 'android']),
+    provider: PushProviderSchema,
+    serviceEnvironment: PushServiceEnvironmentSchema,
     status: z.literal('registered'),
   })
   .strict()
