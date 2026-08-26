@@ -36,6 +36,14 @@ Push registration uses one non-secret public build switch:
   allows permission checks and Expo token acquisition. Missing, malformed, or
   any other value fails closed.
 
+The exact push-enabled build also requires `GOOGLE_SERVICES_JSON` as a
+project-scoped, production-only EAS file variable with secret visibility.
+`app.config.ts` passes that protected build-runner path to
+`android.googleServicesFile`; it never copies the Firebase file into source.
+The build fails before prebuild if registration is enabled and the file is
+missing. Development and preview builds ignore that provider file and retain
+registration disabled.
+
 The EAS project UUID is pinned in `app.json`. Both values are public application
 configuration and must never contain a token or credential. The `development`
 and `preview` EAS profiles explicitly force the switch to `false`; only the

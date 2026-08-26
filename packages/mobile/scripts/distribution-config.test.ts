@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { ExpoConfig } from 'expo/config';
 
 import appConfig from '../app.json';
+import { withPushProviderConfig } from '../app.config';
 import easConfig from '../eas.json';
 import packageManifest from '../package.json';
 
@@ -30,6 +32,27 @@ const collectObjectKeys = (
 };
 
 describe('mobile distribution configuration', () => {
+  test('requires the protected FCM config for the exact push-enabled build', () => {
+    const baseConfig = appConfig.expo as ExpoConfig;
+
+    expect(
+      withPushProviderConfig(baseConfig, {
+        EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
+      }),
+    ).toEqual(baseConfig);
+    expect(() =>
+      withPushProviderConfig(baseConfig, {
+        EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
+      }),
+    ).toThrow('GOOGLE_SERVICES_JSON');
+    expect(
+      withPushProviderConfig(baseConfig, {
+        EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
+        GOOGLE_SERVICES_JSON: '/protected/google-services.json',
+      }).android?.googleServicesFile,
+    ).toBe('/protected/google-services.json');
+  });
+
   test('uses remote, monotonically increasing store build numbers', () => {
     expect(easConfig.cli.appVersionSource).toBe('remote');
     expect(easConfig.cli.requireCommit).toBe(true);
