@@ -754,8 +754,13 @@ describe('minimal isolated resource shape', () => {
       `:sqs:${AWS_REGION}:${AWS_ACCOUNT}:${EMAIL_QUEUE_NAME}`,
     );
 
-    for (const queue of queues.values()) {
-      expect(queue.DeletionPolicy).toBe('Retain');
+    for (const [name, queue] of queues) {
+      expect(queue.DeletionPolicy).toBe(
+        name === EMAIL_CALLBACK_QUEUE_NAME ||
+          name === EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME
+          ? 'RetainExceptOnCreate'
+          : 'Retain',
+      );
       expect(queue.UpdateReplacePolicy).toBe('Retain');
     }
   });
@@ -939,6 +944,11 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/workers/sms-runtime-token',
       ].sort(),
     );
+    const retainExceptOnCreate = new Set([
+      '/psd-eoc/providers/apns-direct',
+      '/psd-eoc/providers/fcm-direct',
+      '/psd-eoc/workers/email-runtime-token',
+    ]);
     for (const name of [
       '/psd-eoc/api-salt',
       '/psd-eoc/database/admin',
@@ -960,7 +970,9 @@ describe('minimal isolated resource shape', () => {
       const secret = properties(resource ?? {});
       expect(secret.GenerateSecretString).toBeDefined();
       expect(secret).not.toHaveProperty('SecretString');
-      expect(resource?.DeletionPolicy).toBe('Retain');
+      expect(resource?.DeletionPolicy).toBe(
+        retainExceptOnCreate.has(name) ? 'RetainExceptOnCreate' : 'Retain',
+      );
       expect(resource?.UpdateReplacePolicy).toBe('Retain');
     }
 
@@ -1928,6 +1940,19 @@ describe('one-off native bootstrap boundary', () => {
     expect(emailLogGroup.RetentionInDays).toBe(14);
     expect(emailLogGroupResource?.DeletionPolicy).toBe('Retain');
     expect(emailLogGroupResource?.UpdateReplacePolicy).toBe('Retain');
+
+    const callbackLogGroupResource = resourceEntries(
+      'AWS::Logs::LogGroup',
+    ).find(
+      ([, resource]) =>
+        properties(resource).LogGroupName ===
+        EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME,
+    )?.[1];
+    expect(callbackLogGroupResource).toBeDefined();
+    expect(callbackLogGroupResource?.DeletionPolicy).toBe(
+      'RetainExceptOnCreate',
+    );
+    expect(callbackLogGroupResource?.UpdateReplacePolicy).toBe('Retain');
   });
 
   it('blocks every image consumer on one successful CloudFormation bootstrap', () => {
@@ -2920,7 +2945,7 @@ describe('configured-unverified provider readiness boundary', () => {
       },
       maxReceiveCount: 5,
     });
-    expect(callbackQueueResource.DeletionPolicy).toBe('Retain');
+    expect(callbackQueueResource.DeletionPolicy).toBe('RetainExceptOnCreate');
     expect(callbackQueueResource.UpdateReplacePolicy).toBe('Retain');
 
     const callbackDeadLetterQueueResource = resourceEntries(
@@ -2943,7 +2968,9 @@ describe('configured-unverified provider readiness boundary', () => {
     ).toContain(
       `:sqs:${AWS_REGION}:${AWS_ACCOUNT}:${EMAIL_CALLBACK_QUEUE_NAME}`,
     );
-    expect(callbackDeadLetterQueueResource.DeletionPolicy).toBe('Retain');
+    expect(callbackDeadLetterQueueResource.DeletionPolicy).toBe(
+      'RetainExceptOnCreate',
+    );
     expect(callbackDeadLetterQueueResource.UpdateReplacePolicy).toBe('Retain');
     expect(
       resourceEntries('AWS::CloudWatch::Alarm').some(
