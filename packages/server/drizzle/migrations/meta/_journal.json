@@ -218,6 +218,13 @@
       "when": 1787492542195,
       "tag": "0030_retire_audience_configurations",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1787492542196,
+      "tag": "0031_restore_notification_intent_runtime_grant",
+      "breakpoints": true
     }
   ]
 }

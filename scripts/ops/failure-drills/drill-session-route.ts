@@ -40,6 +40,24 @@ const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1_000;
 
+type SyntheticSessionFixtureStage =
+  | 'prepare-access-group'
+  | 'authorize-sign-in'
+  | 'persist-session'
+  | 'enable-channels'
+  | 'create-activation-preview'
+  | 'start-event';
+
+class SyntheticSessionFixtureError extends Error {
+  public constructor(
+    public readonly stage: SyntheticSessionFixtureStage,
+    options: ErrorOptions,
+  ) {
+    super('The synthetic session fixture could not be prepared.', options);
+    this.name = 'SyntheticSessionFixtureError';
+  }
+}
+
 function invocation(
   userId: string,
   sessionId: string,
@@ -66,6 +84,7 @@ async function issueSyntheticSessionAndEvent() {
   if (connection.driver !== 'postgres') {
     throw new Error('The synthetic drill requires native PostgreSQL.');
   }
+  let stage: SyntheticSessionFixtureStage = 'prepare-access-group';
   try {
     const now = new Date();
     const email = 'operator@example.invalid';
@@ -90,6 +109,7 @@ async function issueSyntheticSessionAndEvent() {
       .insert(groupMembers)
       .values({ capturedAt: now, email, groupSourceId: ACCESS_GROUP_ID })
       .onConflictDoNothing();
+    stage = 'authorize-sign-in';
     const authorization = await authorizeSignIn(connection.db, {
       checkedAt: now,
       displayName: 'Synthetic Failure Drill Operator',
@@ -110,6 +130,7 @@ async function issueSyntheticSessionAndEvent() {
       responseDigest,
       subjectDigest: digestWebSessionCredential(user.googleSubject),
     });
+    stage = 'persist-session';
     const session = await createDrizzleInitialWebSessionStore(
       connection.db,
     ).persist({
@@ -140,6 +161,7 @@ async function issueSyntheticSessionAndEvent() {
       requestId: randomUUID(),
       user,
     });
+    stage = 'enable-channels';
     await connection.db
       .update(channelConfigurations)
       .set({ changedAt: now, enabled: true })
@@ -149,6 +171,7 @@ async function issueSyntheticSessionAndEvent() {
           'ses-email',
         ]),
       );
+    stage = 'create-activation-preview';
     const trusted = invocation(
       session.user.id,
       session.session.id,
@@ -170,6 +193,7 @@ async function issueSyntheticSessionAndEvent() {
       trusted,
       createDrizzleStartFlowCapabilityStore(connection.db),
     );
+    stage = 'start-event';
     const started = await executeEventCapability(
       'start-event',
       {
@@ -202,6 +226,8 @@ async function issueSyntheticSessionAndEvent() {
       csrf: createCsrfToken(),
       eventId: started.event.id,
     };
+  } catch (error) {
+    throw new SyntheticSessionFixtureError(stage, { cause: error });
   } finally {
     await connection.close();
   }
@@ -234,10 +260,23 @@ export async function POST(request: Request): Promise<Response> {
       { headers, status: 201 },
     );
   } catch (error) {
+    const fixtureError =
+      error instanceof SyntheticSessionFixtureError ? error : undefined;
+    const cause = fixtureError?.cause;
     console.error(
       JSON.stringify({
         kind: 'failure-drill-session-refused',
         reason: error instanceof Error ? error.message : 'unknown-error',
+        stage: fixtureError?.stage ?? 'request-boundary',
+        causeName: cause instanceof Error ? cause.name : 'unknown-error',
+        causeCode:
+          cause !== null && typeof cause === 'object' && 'code' in cause
+            ? String(cause.code)
+            : null,
+        causeReasonCode:
+          cause !== null && typeof cause === 'object' && 'reasonCode' in cause
+            ? String(cause.reasonCode)
+            : null,
       }),
     );
     return Response.json(
