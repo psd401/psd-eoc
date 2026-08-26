@@ -50,6 +50,9 @@ import {
   DATABASE_IDENTIFIER,
   DATA_CLASSIFICATION,
   EMAIL_DEAD_LETTER_QUEUE_NAME,
+  EMAIL_CALLBACK_QUEUE_NAME,
+  EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME,
+  EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME,
   EMAIL_QUEUE_NAME,
   DELIVERY_DEAD_LETTER_QUEUE_NAME,
   DELIVERY_QUEUE_MAX_RECEIVES,
@@ -68,7 +71,6 @@ import {
   IMAGE_DIGEST_SENTINEL,
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
-  SES_VERIFICATION_REFERENCE,
   readDeploymentIdentity,
   readFacilityContext,
   readSyntheticGroupContext,
@@ -272,6 +274,25 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    const enableEmailWorker = new CfnParameter(this, 'EnableEmailWorker', {
+      allowedValues: ['false', 'true'],
+      default: 'false',
+      description:
+        'Scale the isolated SES email worker from zero to one only after the sender, callback, and integration truth reference are verified.',
+      type: 'String',
+    });
+    const sesCredentialVerificationReference = new CfnParameter(
+      this,
+      'SesCredentialVerificationReference',
+      {
+        allowedPattern: '^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
+        default: 'UNVERIFIED',
+        description:
+          'Address-free reference to retained SES identity, production-access, callback, and suppression verification evidence.',
+        maxLength: 255,
+        type: 'String',
+      },
+    );
     const bootstrapImageDigest = new CfnParameter(
       this,
       'BootstrapImageDigest',
@@ -438,6 +459,13 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldRunEmailWorker = new CfnCondition(
+      this,
+      'ShouldRunEmailWorker',
+      {
+        expression: Fn.conditionEquals(enableEmailWorker.valueAsString, 'true'),
+      },
+    );
     new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
       assertions: [
         {
@@ -549,6 +577,33 @@ export class PsdEocStack extends Stack {
       ],
       ruleCondition: Fn.conditionEquals(
         provisionAwsEumSmsResources.valueAsString,
+        'true',
+      ),
+    });
+    new CfnRule(this, 'EmailWorkerRequiresLiveApplicationAndEvidence', {
+      assertions: [
+        {
+          assert: Fn.conditionAnd(
+            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                sesCredentialVerificationReference.valueAsString,
+                'UNVERIFIED',
+              ),
+            ),
+            Fn.conditionNot(
+              Fn.conditionEquals(
+                appImageDigest.valueAsString,
+                IMAGE_DIGEST_SENTINEL,
+              ),
+            ),
+          ),
+          assertDescription:
+            'EnableEmailWorker=true requires the live application, a reviewed image digest, and retained SES/callback verification evidence.',
+        },
+      ],
+      ruleCondition: Fn.conditionEquals(
+        enableEmailWorker.valueAsString,
         'true',
       ),
     });
@@ -800,6 +855,20 @@ export class PsdEocStack extends Stack {
         secretName: `${SECRET_PREFIX}/workers/expo-push-runtime-token`,
       },
     );
+    const emailRuntimeWorkerSecret = new secretsmanager.Secret(
+      this,
+      'EmailRuntimeWorkerSecret',
+      {
+        description:
+          'Generated bearer for SES provider claims, retry resolution, and final-send authorization.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/workers/email-runtime-token`,
+      },
+    );
     const smsRuntimeWorkerSecret = new secretsmanager.Secret(
       this,
       'SmsRuntimeWorkerSecret',
@@ -1000,7 +1069,7 @@ export class PsdEocStack extends Stack {
       queueName: EMAIL_QUEUE_NAME,
       removalPolicy: RemovalPolicy.RETAIN,
       retentionPeriod: Duration.days(4),
-      visibilityTimeout: Duration.seconds(60),
+      visibilityTimeout: Duration.seconds(120),
     });
     // One queue pair per channel, plus the delivery queue an authorized
     // notification batch lands on before it is split across channels. Email's
@@ -1240,10 +1309,19 @@ export class PsdEocStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       retention: logs.RetentionDays.TWO_WEEKS,
     });
+    const emailCallbackWorkerLogGroup = new logs.LogGroup(
+      this,
+      'EmailCallbackWorkerLogGroup',
+      {
+        logGroupName: EMAIL_CALLBACK_WORKER_LOG_GROUP_NAME,
+        removalPolicy: RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.TWO_WEEKS,
+      },
+    );
     const emailWorkerRole = new iam.Role(this, 'EmailWorkerRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       description:
-        'Dark live-pilot email worker; consumes only its queue and has no SES send authority.',
+        'Consumes and retries only the SES email queue and sends through one configured sender and configuration set.',
     });
     iam.Grant.addToPrincipal({
       actions: [
@@ -1268,6 +1346,28 @@ export class PsdEocStack extends Stack {
         service: 'ses',
       },
       this,
+    );
+    const emailIdentityArn = Arn.format(
+      {
+        account,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        partition,
+        region,
+        resource: 'identity',
+        resourceName: sesIdentityDomain,
+        service: 'ses',
+      },
+      this,
+    );
+    emailWorkerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+        conditions: {
+          StringEquals: { 'ses:FromAddress': sesFromAddress },
+        },
+        resources: [emailIdentityArn, emailConfigurationSetArn],
+        sid: 'SendOnlyConfiguredSesEmail',
+      }),
     );
     const emailEventsKey = new kms.Key(this, 'EmailEventsKey', {
       description:
@@ -1298,11 +1398,46 @@ export class PsdEocStack extends Stack {
           reputationMetricsEnabled: true,
         },
         sendingOptions: {
-          sendingEnabled: false,
+          sendingEnabled: true,
         },
       },
     );
     emailConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const emailCallbackSourceQueueIdentity = sqs.Queue.fromQueueArn(
+      this,
+      'EmailCallbackRedriveSourceQueue',
+      this.formatArn({
+        resource: EMAIL_CALLBACK_QUEUE_NAME,
+        service: 'sqs',
+      }),
+    );
+    const emailCallbackDeadLetterQueue = new sqs.Queue(
+      this,
+      'EmailCallbackDeadLetterQueue',
+      {
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+        queueName: EMAIL_CALLBACK_DEAD_LETTER_QUEUE_NAME,
+        redriveAllowPolicy: {
+          redrivePermission: sqs.RedrivePermission.BY_QUEUE,
+          sourceQueues: [emailCallbackSourceQueueIdentity],
+        },
+        retentionPeriod: Duration.days(14),
+      },
+    );
+    emailCallbackDeadLetterQueue.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const emailCallbackQueue = new sqs.Queue(this, 'EmailCallbackQueue', {
+      deadLetterQueue: {
+        maxReceiveCount: EMAIL_QUEUE_MAX_RECEIVES,
+        queue: emailCallbackDeadLetterQueue,
+      },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      queueName: EMAIL_CALLBACK_QUEUE_NAME,
+      retentionPeriod: Duration.days(14),
+      visibilityTimeout: Duration.minutes(2),
+    });
+    emailCallbackQueue.applyRemovalPolicy(RemovalPolicy.RETAIN);
     const emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
       displayName: 'PSD EOC live-pilot SES event evidence',
       enforceSSL: true,
@@ -1324,6 +1459,50 @@ export class PsdEocStack extends Stack {
         sid: 'AllowSesConfigurationSetEvents',
       }),
     );
+    emailCallbackQueue.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['sqs:SendMessage'],
+        conditions: {
+          ArnEquals: { 'aws:SourceArn': emailEventsTopic.topicArn },
+        },
+        principals: [new iam.ServicePrincipal('sns.amazonaws.com')],
+        resources: [emailCallbackQueue.queueArn],
+        sid: 'AllowOnlySesEventTopicDelivery',
+      }),
+    );
+    const emailEventsQueueSubscription = new sns.CfnSubscription(
+      this,
+      'EmailEventsQueueSubscription',
+      {
+        endpoint: emailCallbackQueue.queueArn,
+        protocol: 'sqs',
+        rawMessageDelivery: false,
+        topicArn: emailEventsTopic.topicArn,
+      },
+    );
+    emailEventsQueueSubscription.addResourceDependency(
+      emailCallbackQueue.node.defaultChild as sqs.CfnQueue,
+    );
+    const emailEventDestination = new ses.CfnConfigurationSetEventDestination(
+      this,
+      'EmailConfigurationSetEventDestination',
+      {
+        configurationSetName: emailConfigurationSet.ref,
+        eventDestination: {
+          enabled: true,
+          matchingEventTypes: [
+            'SEND',
+            'DELIVERY',
+            'BOUNCE',
+            'COMPLAINT',
+            'REJECT',
+          ],
+          name: SES_EVENT_DESTINATION_NAME,
+          snsDestination: { topicArn: emailEventsTopic.topicArn },
+        },
+      },
+    );
+    emailEventDestination.addResourceDependency(emailConfigurationSet);
 
     const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
@@ -1897,6 +2076,242 @@ export class PsdEocStack extends Stack {
       0,
     ) as unknown as number;
 
+    const emailWorkerSecurityGroup = new ec2.SecurityGroup(
+      this,
+      'EmailWorkerSecurityGroup',
+      {
+        allowAllOutbound: false,
+        description:
+          'HTTPS-only egress for the isolated SES email worker; no database route.',
+        securityGroupName: 'psd-eoc-email-worker',
+        vpc: network as unknown as ec2.IVpc,
+      },
+    );
+    emailWorkerSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS to the server, SES, ECR, logs, Secrets Manager, and SQS through NAT.',
+    );
+    const emailWorkerTaskExecutionRole = new iam.Role(
+      this,
+      'EmailWorkerTaskExecutionRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Pulls the reviewed image and injects only email worker route credentials.',
+      },
+    );
+    const emailWorkerTaskDefinition = new ecs.FargateTaskDefinition(
+      this,
+      'EmailWorkerTaskDefinition',
+      {
+        cpu: 256,
+        executionRole: emailWorkerTaskExecutionRole,
+        family: 'psd-eoc-email-worker',
+        memoryLimitMiB: 512,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.X86_64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+        taskRole: emailWorkerRole,
+      },
+    );
+    emailWorkerTaskDefinition.addVolume({ name: 'email-worker-tmp' });
+    const emailWorkerContainer = emailWorkerTaskDefinition.addContainer(
+      'ses-email-worker',
+      {
+        command: ['bun', 'workers/email/service.ts'],
+        environment: {
+          AWS_REGION: region,
+          EMAIL_QUEUE_ARN: emailQueue.queueArn,
+          EMAIL_QUEUE_URL: emailQueue.queueUrl,
+          NODE_ENV: 'production',
+          PSD_EOC_EMAIL_RUNTIME_MODE: Fn.conditionIf(
+            shouldRunEmailWorker.logicalId,
+            'enabled',
+            'dark',
+          ).toString(),
+          PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
+          PSD_EOC_SES_CREDENTIAL_STATUS: Fn.conditionIf(
+            shouldRunEmailWorker.logicalId,
+            'verified',
+            'unverified',
+          ).toString(),
+          PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE:
+            sesCredentialVerificationReference.valueAsString,
+          PSD_EOC_SES_FROM_ADDRESS: sesFromAddress,
+          PSD_EOC_SES_PROVIDER_AUTHORIZED: Fn.conditionIf(
+            shouldRunEmailWorker.logicalId,
+            'true',
+            'false',
+          ).toString(),
+          SOURCE_SHA: sourceSha.valueAsString,
+          TMPDIR: '/tmp',
+        },
+        essential: true,
+        image: ecs.ContainerImage.fromRegistry(
+          Fn.join('', [
+            imageRepository.repositoryUri,
+            '@',
+            appImageDigest.valueAsString,
+          ]),
+        ),
+        logging: ecs.LogDrivers.awsLogs({
+          logGroup: emailWorkerLogGroup,
+          streamPrefix: 'ses-email-worker',
+        }),
+        readonlyRootFilesystem: true,
+        secrets: {
+          PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            attemptExecutionWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_DELIVERY_STATE_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            deliveryStateWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+          PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN: ecs.Secret.fromSecretsManager(
+            emailRuntimeWorkerSecret as unknown as secretsmanager.ISecret,
+          ),
+        },
+      },
+    );
+    emailWorkerContainer.addMountPoints({
+      containerPath: '/tmp',
+      readOnly: false,
+      sourceVolume: 'email-worker-tmp',
+    });
+    imageRepository.grantPull(emailWorkerTaskExecutionRole);
+    for (const secret of [
+      attemptExecutionWorkerSecret,
+      deliveryStateWorkerSecret,
+      emailRuntimeWorkerSecret,
+    ]) {
+      secret.grantRead(emailWorkerTaskExecutionRole);
+    }
+    emailQueue.grantConsumeMessages(emailWorkerRole);
+    emailQueue.grantSendMessages(emailWorkerRole);
+    const emailWorkerService = new ecs.FargateService(
+      this,
+      'EmailWorkerService',
+      {
+        assignPublicIp: false,
+        cluster: bootstrapCluster as unknown as ecs.ICluster,
+        circuitBreaker: { rollback: true },
+        desiredCount: 0,
+        enableExecuteCommand: false,
+        maxHealthyPercent: 200,
+        minHealthyPercent: 100,
+        securityGroups: [emailWorkerSecurityGroup],
+        serviceName: 'psd-eoc-email-worker',
+        taskDefinition: emailWorkerTaskDefinition,
+        vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
+      },
+    );
+    const emailWorkerCfnService = emailWorkerService.node
+      .defaultChild as ecs.CfnService;
+    emailWorkerCfnService.desiredCount = Fn.conditionIf(
+      shouldRunEmailWorker.logicalId,
+      1,
+      0,
+    ) as unknown as number;
+
+    const emailCallbackWorkerRole = new iam.Role(
+      this,
+      'EmailCallbackWorkerRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Consumes only the durable SES callback queue and forwards signed envelopes to the application verifier.',
+      },
+    );
+    const emailCallbackWorkerExecutionRole = new iam.Role(
+      this,
+      'EmailCallbackWorkerExecutionRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Pulls the current callback-compatible image without notification-provider authority.',
+      },
+    );
+    const emailCallbackWorkerTaskDefinition = new ecs.FargateTaskDefinition(
+      this,
+      'EmailCallbackWorkerTaskDefinition',
+      {
+        cpu: 256,
+        executionRole: emailCallbackWorkerExecutionRole,
+        family: 'psd-eoc-email-callback-worker',
+        memoryLimitMiB: 512,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.X86_64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+        taskRole: emailCallbackWorkerRole,
+      },
+    );
+    emailCallbackWorkerTaskDefinition.addVolume({
+      name: 'email-callback-worker-tmp',
+    });
+    const emailCallbackWorkerContainer =
+      emailCallbackWorkerTaskDefinition.addContainer(
+        'ses-email-callback-worker',
+        {
+          command: ['bun', 'workers/email/callback-service.ts'],
+          environment: {
+            AWS_REGION: region,
+            EMAIL_CALLBACK_QUEUE_URL: emailCallbackQueue.queueUrl,
+            NODE_ENV: 'production',
+            PSD_EOC_EMAIL_CALLBACK_RUNTIME_MODE: 'enabled',
+            PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
+            PSD_EOC_SES_SNS_TOPIC_ARN: emailEventsTopic.topicArn,
+            SOURCE_SHA: bootstrapSourceSha.valueAsString,
+            TMPDIR: '/tmp',
+          },
+          essential: true,
+          image: ecs.ContainerImage.fromRegistry(
+            Fn.join('', [
+              imageRepository.repositoryUri,
+              '@',
+              bootstrapImageDigest.valueAsString,
+            ]),
+          ),
+          logging: ecs.LogDrivers.awsLogs({
+            logGroup: emailCallbackWorkerLogGroup,
+            streamPrefix: 'ses-email-callback-worker',
+          }),
+          readonlyRootFilesystem: true,
+        },
+      );
+    emailCallbackWorkerContainer.addMountPoints({
+      containerPath: '/tmp',
+      readOnly: false,
+      sourceVolume: 'email-callback-worker-tmp',
+    });
+    imageRepository.grantPull(emailCallbackWorkerExecutionRole);
+    emailCallbackQueue.grantConsumeMessages(emailCallbackWorkerRole);
+    const emailCallbackWorkerService = new ecs.FargateService(
+      this,
+      'EmailCallbackWorkerService',
+      {
+        assignPublicIp: false,
+        cluster: bootstrapCluster as unknown as ecs.ICluster,
+        circuitBreaker: { rollback: true },
+        desiredCount: 0,
+        enableExecuteCommand: false,
+        maxHealthyPercent: 200,
+        minHealthyPercent: 100,
+        securityGroups: [emailWorkerSecurityGroup],
+        serviceName: 'psd-eoc-email-callback-worker',
+        taskDefinition: emailCallbackWorkerTaskDefinition,
+        vpcSubnets: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
+      },
+    );
+    const emailCallbackWorkerCfnService = emailCallbackWorkerService.node
+      .defaultChild as ecs.CfnService;
+    emailCallbackWorkerCfnService.desiredCount = Fn.conditionIf(
+      shouldProvisionApplication.logicalId,
+      1,
+      0,
+    ) as unknown as number;
+
     const accessSyncTaskExecutionRole = new iam.Role(
       this,
       'AccessSyncTaskExecutionRole',
@@ -2061,6 +2476,7 @@ export class PsdEocStack extends Stack {
       attemptExecutionWorkerSecret.grantRead(runtimeRole),
       pushEndpointWorkerSecret.grantRead(runtimeRole),
       expoPushRuntimeWorkerSecret.grantRead(runtimeRole),
+      emailRuntimeWorkerSecret.grantRead(runtimeRole),
       smsRuntimeWorkerSecret.grantRead(runtimeRole),
       pushRegistrationBuildAllowlistSecret.grantRead(runtimeRole),
       iam.Grant.addToPrincipal({
@@ -2181,6 +2597,10 @@ export class PsdEocStack extends Stack {
                   value: expoPushRuntimeWorkerSecret.secretArn,
                 },
                 {
+                  name: 'PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN',
+                  value: emailRuntimeWorkerSecret.secretArn,
+                },
+                {
                   name: 'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
                   value: smsRuntimeWorkerSecret.secretArn,
                 },
@@ -2276,7 +2696,19 @@ export class PsdEocStack extends Stack {
                 },
                 {
                   name: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
-                  value: SES_VERIFICATION_REFERENCE,
+                  value: sesCredentialVerificationReference.valueAsString,
+                },
+                {
+                  name: 'PSD_EOC_EMAIL_WORKER_ENABLED',
+                  value: Fn.conditionIf(
+                    shouldRunEmailWorker.logicalId,
+                    'true',
+                    'false',
+                  ).toString(),
+                },
+                {
+                  name: 'PSD_EOC_SES_SNS_TOPIC_ARN',
+                  value: emailEventsTopic.topicArn,
                 },
                 {
                   name: 'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
@@ -2332,7 +2764,7 @@ export class PsdEocStack extends Stack {
 
     // Alarms. Until the canary and the metrics collector have the credentials
     // they need, only infrastructure publishers and metrics conditionally
-    // paired with the Expo and SMS workers are deployed; see infrastructure
+    // paired with the channel workers are deployed; see infrastructure
     // monitoring.
     configureInfrastructureMonitoring(this, {
       applicationCondition: shouldProvisionApplication,
@@ -2346,6 +2778,10 @@ export class PsdEocStack extends Stack {
       database,
       displayTimeZone: deploymentIdentity.displayTimeZone,
       delivery: queuePairs.Delivery,
+      emailCallbackDeadLetterQueue,
+      emailCallbackWorkerLogGroup,
+      emailWorkerCondition: shouldRunEmailWorker,
+      emailWorkerLogGroup,
       smsReceipt: queuePairs.SmsReceipt,
       operationsAlarmTopic,
       operationsKey,
@@ -2453,11 +2889,42 @@ export class PsdEocStack extends Stack {
     new CfnOutput(this, 'EmailDeadLetterQueueArn', {
       value: emailDeadLetterQueue.queueArn,
     });
+    new CfnOutput(this, 'EmailCallbackQueueArn', {
+      value: emailCallbackQueue.queueArn,
+    });
+    new CfnOutput(this, 'EmailCallbackQueueUrl', {
+      value: emailCallbackQueue.queueUrl,
+    });
+    new CfnOutput(this, 'EmailCallbackDeadLetterQueueArn', {
+      value: emailCallbackDeadLetterQueue.queueArn,
+    });
     new CfnOutput(this, 'EmailWorkerRoleArn', {
       value: emailWorkerRole.roleArn,
     });
     new CfnOutput(this, 'EmailWorkerLogGroupName', {
       value: emailWorkerLogGroup.logGroupName,
+    });
+    new CfnOutput(this, 'EmailWorkerTaskDefinitionArn', {
+      value: emailWorkerTaskDefinition.taskDefinitionArn,
+    });
+    new CfnOutput(this, 'EmailWorkerServiceArn', {
+      value: emailWorkerService.serviceArn,
+    });
+    new CfnOutput(this, 'EmailWorkerTaskExecutionRoleArn', {
+      value: emailWorkerTaskExecutionRole.roleArn,
+    });
+    new CfnOutput(this, 'EmailCallbackWorkerServiceArn', {
+      value: emailCallbackWorkerService.serviceArn,
+    });
+    new CfnOutput(this, 'EmailCallbackWorkerLogGroupName', {
+      value: emailCallbackWorkerLogGroup.logGroupName,
+    });
+    new CfnOutput(this, 'EmailWorkerDeploymentState', {
+      value: Fn.conditionIf(
+        shouldRunEmailWorker.logicalId,
+        'enabled',
+        'dark-scaled-to-zero',
+      ).toString(),
     });
     new CfnOutput(this, 'PushQueueArn', {
       value: queuePairs.Push.queue.queueArn,
@@ -2500,18 +2967,7 @@ export class PsdEocStack extends Stack {
       value: 'mocked',
     });
     new CfnOutput(this, 'SesIdentityArn', {
-      value: Arn.format(
-        {
-          account,
-          arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          partition,
-          region,
-          resource: 'identity',
-          resourceName: sesIdentityDomain,
-          service: 'ses',
-        },
-        this,
-      ),
+      value: emailIdentityArn,
     });
     new CfnOutput(this, 'SesIdentityDomain', {
       value: sesIdentityDomain,
@@ -2532,13 +2988,21 @@ export class PsdEocStack extends Stack {
       value: SES_EVENT_DESTINATION_NAME,
     });
     new CfnOutput(this, 'SesEmailEventDestinationManagement', {
-      value: 'external-readback',
+      value: 'cloudformation',
     });
     new CfnOutput(this, 'SesIntegrationTruth', {
-      value: 'configured-unverified',
+      value: Fn.conditionIf(
+        shouldRunEmailWorker.logicalId,
+        'configured-awaiting-human-verification',
+        'configured-unverified',
+      ).toString(),
     });
     new CfnOutput(this, 'EmailChannelState', {
-      value: 'disabled',
+      value: Fn.conditionIf(
+        shouldRunEmailWorker.logicalId,
+        'awaiting-human-verification',
+        'disabled',
+      ).toString(),
     });
     new CfnOutput(this, 'RuntimeRoleArn', {
       value: runtimeRole.roleArn,

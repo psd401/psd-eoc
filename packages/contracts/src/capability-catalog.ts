@@ -123,6 +123,7 @@ import {
   GetIntegrationHealthInputSchema,
   IntegrationHealthSchema,
   SetChannelEnabledInputSchema,
+  VerifyEmailIntegrationInputSchema,
   ChannelConfigurationSchema,
 } from './integration';
 import {
@@ -1325,6 +1326,15 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     inputSchema: SetChannelEnabledInputSchema,
     outputSchema: ChannelConfigurationSchema,
   }),
+  'verify-email-integration': canonicalCapability({
+    id: 'verify-email-integration',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
+    inputSchema: VerifyEmailIntegrationInputSchema,
+    outputSchema: ChannelConfigurationSchema,
+    mutationOrderAfter: 'set-channel-enabled',
+  }),
   'create-activation-preview': canonicalCapability({
     id: 'create-activation-preview',
     operation: 'query',
@@ -1648,7 +1658,7 @@ const AGENT_API_CAPABILITY_METADATA = Object.freeze({
     operation: 'mutation',
     safetyEffect: 'none',
     invocationPolicy: humanWebAdministrationInvocationPolicy,
-    mutationOrderAfter: 'set-channel-enabled',
+    mutationOrderAfter: 'verify-email-integration',
   }),
   'revoke-agent-api-key': Object.freeze({
     id: 'revoke-agent-api-key',
