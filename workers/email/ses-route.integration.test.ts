@@ -78,6 +78,12 @@ async function withinRollbackTransaction(
 ): Promise<void> {
   try {
     await databaseConnection().db.transaction(async (transaction) => {
+      // The stale-roster report resolves the latest complete snapshot. Keep
+      // that meaning fixed for this rollback-scoped fixture even while the
+      // full gate runs other database suites in parallel.
+      await transaction.execute(
+        sql`set transaction isolation level repeatable read`,
+      );
       await operation(transaction as unknown as PostgresDatabase);
       throw TEST_ROLLBACK;
     });
