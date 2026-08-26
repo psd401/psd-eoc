@@ -15,12 +15,21 @@
  *
  * Usage: bun scripts/test.ts [--shards N] [extra bun test args]
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import postgres from 'postgres';
 
 import { requireSyntheticTestDatabaseUrl } from '../packages/server/lib/testing/database';
+import './test-preload';
 
 export const ROOT = new URL('..', import.meta.url).pathname;
 // `scripts` is here because leaving it out meant a colocated test could be
@@ -259,32 +268,60 @@ export async function runTestSuite(arguments_: string[]): Promise<number> {
   }
 
   const started = Date.now();
-  const results = await Promise.all(
-    shards.map(async (shardFiles, index) => {
-      const environment: Record<string, string> = {
-        ...process.env,
-      } as Record<string, string>;
-      if (baseDatabaseUrl !== undefined) {
-        const url = new URL(baseDatabaseUrl);
-        url.pathname = `/${shardDatabases[index] ?? ''}`;
-        environment.TEST_DATABASE_URL = url.toString();
-        environment.DATABASE_URL = url.toString();
-      }
-      const child = Bun.spawn({
-        cmd: [process.execPath, 'test', ...passthrough, ...shardFiles],
-        cwd: ROOT,
-        env: environment,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      return { index, stdout, stderr, exitCode };
-    }),
+  // Bun 1.2.23 loses stdout and stderr from nested subprocesses when a test
+  // preload is active. The orchestrator has already applied the synthetic
+  // environment above, so its shards use a temporary external config without
+  // a preload. Keeping that config outside the repository is important: Bun
+  // otherwise merges it with the root bunfig and preserves the problematic
+  // preload.
+  const shardConfigDirectory = mkdtempSync(
+    join(tmpdir(), 'psd-eoc-test-shards-'),
   );
+  const shardConfig = join(shardConfigDirectory, 'bunfig.toml');
+  writeFileSync(shardConfig, '[install]\nexact = true\n', 'utf8');
+  let results: {
+    readonly index: number;
+    readonly stdout: string;
+    readonly stderr: string;
+    readonly exitCode: number;
+  }[];
+  try {
+    results = await Promise.all(
+      shards.map(async (shardFiles, index) => {
+        const environment: Record<string, string> = {
+          ...process.env,
+        } as Record<string, string>;
+        if (baseDatabaseUrl !== undefined) {
+          const url = new URL(baseDatabaseUrl);
+          url.pathname = `/${shardDatabases[index] ?? ''}`;
+          environment.TEST_DATABASE_URL = url.toString();
+          environment.DATABASE_URL = url.toString();
+        }
+        const child = Bun.spawn({
+          cmd: [
+            process.execPath,
+            'test',
+            '--config',
+            shardConfig,
+            ...passthrough,
+            ...shardFiles,
+          ],
+          cwd: ROOT,
+          env: environment,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { index, stdout, stderr, exitCode };
+      }),
+    );
+  } finally {
+    rmSync(shardConfigDirectory, { force: true, recursive: true });
+  }
 
   let unexpectedSkipCount = 0;
   for (const { index, stdout, stderr, exitCode } of results) {

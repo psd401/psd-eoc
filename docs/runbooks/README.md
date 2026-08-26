@@ -41,6 +41,7 @@ EOC is not a 911 service.
 | Aurora                        | [Capacity](alarm-aurora-capacity.md), [failover](alarm-aurora-failover.md)                                                                                                        |
 | Queues and dead letters       | [Queue age](alarm-sqs-age.md), [common DLQ](alarm-sqs-dlq.md), [delivery](alarm-dlq-delivery.md), [push](alarm-dlq-push.md), [email](alarm-dlq-email.md), [SMS](alarm-dlq-sms.md) |
 | Application data paths        | [Stuck outbox](alarm-outbox-stuck.md), [stale roster](alarm-roster-stale.md)                                                                                                      |
+| Expo push worker              | [Worker health and receipt polling](alarm-push-worker-health.md), [provider handoff](provider-expo.md)                                                                            |
 | Monitoring publishers         | [Metrics collector](alarm-metrics-collector.md), [monthly delivery test](alarm-monthly-delivery-test.md), [shallow canary](alarm-canary-failure.md)                               |
 
 ## Provider and roster response

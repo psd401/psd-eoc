@@ -33,7 +33,7 @@
     "test:bun": "bun test && bun run native-config:check",
     "test:native": "jest --config jest.config.cjs --runInBand",
     "e2e": "bun e2e/run.ts",
-    "e2e:verify": "bun test e2e",
+    "e2e:verify": "bun test e2e src/lib/push/app-state-readiness.test.ts src/lib/push/notification-content.test.ts src/lib/push/registration-controller.test.ts src/lib/push/response-controller.test.ts",
     "native-config:check": "bun scripts/verify-event-room-native-config.ts && bun scripts/verify-push-native-config.ts",
     "native-config:push:check": "bun scripts/verify-push-native-config.ts",
     "expo:check": "expo install --check",

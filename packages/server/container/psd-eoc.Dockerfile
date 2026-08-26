@@ -10,9 +10,11 @@ COPY package.json bun.lock tsconfig.base.json ./
 COPY patches ./patches
 COPY packages/contracts/package.json packages/contracts/tsconfig.json packages/contracts/
 COPY packages/server/package.json packages/server/tsconfig.json packages/server/
+COPY workers/package.json workers/tsconfig.json workers/
 
-# This image intentionally contains only the server and its contracts workspace.
-RUN bun -e 'const path = "/app/package.json"; const manifest = await Bun.file(path).json(); manifest.workspaces = ["packages/contracts", "packages/server"]; await Bun.write(path, `${JSON.stringify(manifest)}\n`);'
+# The immutable image also runs the separately permissioned push task. Its ECS
+# role and command remain distinct from App Runner even though the bytes match.
+RUN bun -e 'const path = "/app/package.json"; const manifest = await Bun.file(path).json(); manifest.workspaces = ["packages/contracts", "packages/server", "workers"]; await Bun.write(path, `${JSON.stringify(manifest)}\n`);'
 RUN bun install --lockfile-only
 
 FROM manifests AS build
@@ -24,7 +26,27 @@ RUN bun install --frozen-lockfile
 
 COPY packages/contracts/src packages/contracts/src
 COPY packages/server packages/server
-COPY workers/email/aws-arn.ts workers/email/ses-events.ts workers/email/sns-signature.ts workers/email/
+# Copy only the transitive source closure of the push worker entry point. This
+# keeps test fixtures and unrelated channel workers out of the production image.
+COPY workers/shared/attempt.ts workers/shared/attempt.ts
+COPY workers/shared/attempt-execution-client.ts workers/shared/attempt-execution-client.ts
+COPY workers/shared/batch-message.ts workers/shared/batch-message.ts
+COPY workers/shared/delivery-state-client.ts workers/shared/delivery-state-client.ts
+COPY workers/shared/processor.ts workers/shared/processor.ts
+COPY workers/shared/retry.ts workers/shared/retry.ts
+COPY workers/email/aws-arn.ts workers/email/aws-arn.ts
+COPY workers/email/ses-events.ts workers/email/ses-events.ts
+COPY workers/email/sns-signature.ts workers/email/sns-signature.ts
+COPY workers/push/adapter.ts workers/push/adapter.ts
+COPY workers/push/eligibility.ts workers/push/eligibility.ts
+COPY workers/push/invalidation.ts workers/push/invalidation.ts
+COPY workers/push/protocol.ts workers/push/protocol.ts
+COPY workers/push/receipt-lifecycle.ts workers/push/receipt-lifecycle.ts
+COPY workers/push/runtime.ts workers/push/runtime.ts
+COPY workers/push/service.ts workers/push/service.ts
+COPY workers/push/state-client.ts workers/push/state-client.ts
+COPY workers/push/transport.ts workers/push/transport.ts
+COPY workers/push/worker.ts workers/push/worker.ts
 
 RUN bun run --cwd packages/server build
 
@@ -57,6 +79,7 @@ COPY --from=build --chown=bun:bun /app/packages/contracts/src ./packages/contrac
 # PostgreSQL bootstrap task. Keep the reviewed bootstrap source, migrations,
 # and pinned RDS CA bundle beside the built Next application.
 COPY --from=build --chown=bun:bun /app/packages/server ./packages/server
+COPY --from=build --chown=bun:bun /app/workers ./workers
 
 USER bun
 

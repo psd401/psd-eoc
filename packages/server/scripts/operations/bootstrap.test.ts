@@ -606,7 +606,7 @@ describe('bootstrap coordinator', () => {
 });
 
 describe('immutable server image contract', () => {
-  test('pins the Bun base, reviewed source SHA, non-root runtime, and server-only workspace', async () => {
+  test('pins the Bun base, reviewed source SHA, non-root runtime, and bounded workspaces', async () => {
     const dockerfile = await Bun.file(
       new URL('../../container/psd-eoc.Dockerfile', import.meta.url),
     ).text();
@@ -615,7 +615,7 @@ describe('immutable server image contract', () => {
     );
     expect(dockerfile).toContain("'^[0-9a-f]{40}$'");
     expect(dockerfile).toContain(
-      'manifest.workspaces = ["packages/contracts", "packages/server"]',
+      'manifest.workspaces = ["packages/contracts", "packages/server", "workers"]',
     );
     expect(dockerfile).toContain(
       'RUN bun install --frozen-lockfile --production',
