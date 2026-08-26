@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "cdk deploy --output ../node_modules/.cache/psd-eoc-cdk.out",
+    "deploy": "PSD_EOC_ENFORCE_DEPLOYMENT_TARGET=true cdk deploy --output ../node_modules/.cache/psd-eoc-cdk.out",
     "synth": "cdk synth --quiet --no-lookups --strict --no-notices --output ../node_modules/.cache/psd-eoc-cdk.out",
     "synth:example": "bun bin/synthesize-example.ts",
     "test": "bun test",

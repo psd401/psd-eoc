@@ -77,30 +77,68 @@ an event.
    exact artifact, stop condition, and forward-recovery plan.
 6. Obtain product-owner approval for the exact production change. A previous
    go-live approval does not authorize a later rollback.
-7. Have a second responder compare the deployed and target digests/versions to
-   the approved change record. Server/infrastructure rollback uses direct
-   `cdk deploy` with the immutable digest described in
-   [CONFIGURATION.md](../CONFIGURATION.md).
-8. Verify read-only health or the expected paused state, safety invariants,
-   metrics, logs, queue/outbox state, and append-only evidence. Do not send a
-   live notification as a smoke test.
-9. Keep serving and delivery runtimes paused until the reconciliation and
-   separately approved resumption procedure above is complete. Rollback success
-   is not approval to resume.
+7. Have a second responder compare the deployed and target commits, digests,
+   and versions to the approved change record. Server/infrastructure rollback
+   uses the one direct CDK command in [CONFIGURATION.md](../CONFIGURATION.md)
+   from the current reviewed commit that contains the rollback-capable
+   infrastructure. Select the older application only by its repository and
+   immutable digest; do not check out or rebuild the older application commit.
+   CDK builds the current bootstrap asset, and no separate image push or
+   migration command is allowed.
+8. For an App Runner image rollback, inspect the service status before running
+   CDK. [App Runner rejects `UpdateService` while the service is paused](https://docs.aws.amazon.com/apprunner/latest/dg/manage-pause.html).
+   Keep all
+   provider consumers and the delivery router disabled, but if App Runner is
+   paused, resume the currently deployed version and wait for `Running` before
+   the CDK update. Record the UTC start of this web-activation window and account
+   for any new intents or queue entries; do not resume delivery. If the web
+   surface cannot safely be exposed for this bounded window, do not attempt the
+   image rollback.
+9. Run the approved direct CDK phase described for the rollback type. Verify
+   read-only health, safety invariants, metrics, logs, queue/outbox state, and
+   append-only evidence. Do not send a live notification as a smoke test.
+10. If the emergency stop remains in force, pause App Runner again only after
+    CloudFormation finishes updating it and verify the paused state. Keep every
+    delivery runtime disabled until the reconciliation and separately approved
+    resumption procedure above is complete. Rollback success is not approval to
+    resume delivery.
 
 ## Server or App Runner rollback
 
-- Select the exact prior same-account ECR image by SHA-256 digest. Confirm its
-  contracts/schema compatibility and side-effect-free `/api/health` behavior.
-- Do not enable App Runner auto-deploy, use a mutable tag, or substitute a local
-  build.
-- The supported digest rollback first scales the email send worker to zero and
-  resets its deployment verification reference while the current application
-  is still serving. The retained SNS-to-SQS callback subscription is never
-  removed. Its separately permissioned consumer stays on the current
-  callback-compatible image; if the rolled-back application cannot accept the
-  signed route, messages remain in the callback DLQ for verified redrive after
-  a compatible application is restored.
+- Select the exact prior application digest and its bounded repository selector:
+  `CDK_ASSET_REPOSITORY` for a direct-CDK release or
+  `LEGACY_APPLICATION_REPOSITORY` for a transition-era release. Confirm its
+  contracts, forward-schema compatibility, and side-effect-free `/api/health`
+  behavior. Supply both rollback parameters from
+  [CONFIGURATION.md](../CONFIGURATION.md) on the direct CDK command. The stack
+  derives the reviewed source identity from immutable ECR metadata and fails
+  closed if it cannot prove exactly one commit. Do not enable App Runner
+  auto-deploy, use a mutable tag, or push an ad hoc image.
+- App Runner must be `Running` when CloudFormation updates the image. If an
+  emergency stop paused it, follow universal step 8 while keeping the router and
+  every provider-send consumer disabled; pausing App Runner is not a maintenance
+  mode in which a replacement image can be deployed.
+- Establish a persistently dark baseline from the same current reviewed
+  infrastructure commit. If the deployed stack is not already dark at that
+  revision, phase 1 leaves both rollback parameters at `CURRENT_CDK_ASSET`,
+  persists every provider-send enable as false, resets the Expo, direct-push,
+  and SES verification references, resets push cutover to all-Expo, and waits
+  for CloudFormation plus all three send services to reach zero. Phase 2 keeps
+  those values unchanged and supplies only the selected rollback repository and
+  digest. The preflight proves the previous stack state was already dark and
+  checks pre-update desired, pending, and running counts before App Runner or a
+  send service can change. A one-step rollback from provider-live state is
+  rejected; an already-dark same-revision stack already satisfies phase 1. A
+  failed phase 2 returns to that dark baseline. The retained SNS-to-SQS callback
+  subscription is never removed. If a compatible callback consumer cannot
+  remain active, its messages stay retained for verified redrive after a
+  compatible application returns.
+- A failed CloudFormation update automatically restores the previous image and
+  does not launch the previous bootstrap task during rollback. An intentional
+  rollback also keeps bootstrap, callback, and access sync on the current CDK
+  asset; only App Runner selects the older digest. If the older application is
+  not compatible with the forward-migrated database, do not force it and never
+  run a down migration; ship a forward compatibility fix instead.
 - Verify service revision/digest, health or expected paused state, 5xx/latency,
   and database access. Resolve ambiguous activation outcomes from immutable
   evidence; never retry for the user.

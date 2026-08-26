@@ -37,6 +37,9 @@
     "infra/lambda/alarm-mailer": {
       "name": "psd-eoc-alarm-mailer",
     },
+    "infra/lambda/bootstrap-deployment": {
+      "name": "psd-eoc-bootstrap-deployment",
+    },
     "infra/lambda/canary": {
       "name": "psd-eoc-one-minute-canary",
     },
@@ -1871,6 +1874,8 @@
     "psd-eoc-alarm-mailer": ["psd-eoc-alarm-mailer@workspace:infra/lambda/alarm-mailer"],
 
     "psd-eoc-aurora-failover-metric": ["psd-eoc-aurora-failover-metric@workspace:infra/lambda/failover-metric"],
+
+    "psd-eoc-bootstrap-deployment": ["psd-eoc-bootstrap-deployment@workspace:infra/lambda/bootstrap-deployment"],
 
     "psd-eoc-delivery-router": ["psd-eoc-delivery-router@workspace:infra/lambda/delivery-router"],
 

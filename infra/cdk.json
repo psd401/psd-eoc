@@ -114,6 +114,7 @@
     "psdEoc:displayTimeZone": "America/Los_Angeles",
     "psdEoc:sesFromAddress": "eoc-alerts@psd401.net",
     "psdEoc:sesIdentityDomain": "psd401.net",
+    "psdEoc:sourceRepositoryUrl": "https://github.com/psd401/psd-eoc",
     "psdEoc:facilities": [
       {
         "code": "AES",
