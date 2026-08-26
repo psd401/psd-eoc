@@ -67,6 +67,7 @@ export type AttemptExecutionClaim =
 
 export type AttemptExecutionLookup =
   | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'reclaimable' }>
   | Readonly<{ kind: 'completed'; completion: AttemptExecutionCompletion }>
   | Readonly<{ kind: 'in-progress' }>;
 
@@ -171,15 +172,25 @@ export function createDrizzleAttemptExecutionStore(
       if (row.fingerprint !== fingerprint) {
         throw new AttemptExecutionStoreError('ATTEMPT_FINGERPRINT_CONFLICT');
       }
-      // A lookup never acquires permission to call a provider, so an expired
-      // lease is still reported as in-progress here. Only `claim` may take one
-      // over.
-      return row.completion === null
+      if (row.completion !== null) {
+        return Object.freeze({
+          kind: 'completed' as const,
+          completion: readCompletion(row.completion),
+        });
+      }
+      const [lease] = await database
+        .select({
+          held: sql<boolean>`${channelAttemptExecutions.leaseExpiresAt} > clock_timestamp()`,
+        })
+        .from(channelAttemptExecutions)
+        .where(eq(channelAttemptExecutions.attemptId, attemptId))
+        .limit(1);
+      // This remains read-only: `reclaimable` authorizes adapter-ledger
+      // recovery, not a provider call. `claim` is still the sole operation
+      // allowed to replace the fencing token after recovery succeeds.
+      return lease?.held === true
         ? Object.freeze({ kind: 'in-progress' as const })
-        : Object.freeze({
-            kind: 'completed' as const,
-            completion: readCompletion(row.completion),
-          });
+        : Object.freeze({ kind: 'reclaimable' as const });
     },
 
     claim(

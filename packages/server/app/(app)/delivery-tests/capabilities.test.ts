@@ -90,7 +90,7 @@ class FakeSelectQuery implements PromiseLike<readonly FakeRow[]> {
 
 const STARTED_AT = new Date('2026-08-13T18:00:00.000Z');
 
-describe('controlled email canary target mode', () => {
+describe('controlled single-channel canary target modes', () => {
   const email = Object.freeze({
     recipientId: '10000000-0000-4000-8000-000000000001',
     endpointId: '10000000-0000-4000-8000-000000000002',
@@ -115,6 +115,23 @@ describe('controlled email canary target mode', () => {
     ).toBe(false);
     expect(
       deliveryTestTargetModeMatches({ mode: 'controlled-email-canary' }, [
+        email,
+        push,
+      ]),
+    ).toBe(false);
+  });
+
+  test('requires the push mode to resolve to exactly one push endpoint', () => {
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [push]),
+    ).toBe(true);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [
+        email,
+      ]),
+    ).toBe(false);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-push-canary' }, [
         email,
         push,
       ]),

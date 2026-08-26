@@ -36,6 +36,13 @@ const ids = {
 
 const now = new Date('2026-08-11T19:00:00.000Z');
 const token = 'ExponentPushToken[synthetic-route-device]';
+const build = Object.freeze({
+  applicationId: 'example.synthetic.eoc',
+  applicationVersion: '1.0.4',
+  nativeBuildVersion: '7',
+  expoProjectId: '00000000-0000-4000-8000-000000001299',
+  updateMode: 'embedded-only' as const,
+});
 const workerBearer = 'synthetic-push-worker-token-0000000000000001';
 
 interface ExecutionCall {
@@ -184,6 +191,8 @@ describe('authenticated human device routes', () => {
       jsonMutationRequest('/api/devices/push-token', {
         deviceEnrollmentId: ids.device,
         platform: 'ios',
+        provider: 'expo',
+        build,
         token,
       }),
       runtime,
@@ -201,7 +210,13 @@ describe('authenticated human device routes', () => {
     expect(executions).toHaveLength(2);
     expect(executions[0]).toMatchObject({
       capabilityId: 'register-push-token',
-      input: { deviceEnrollmentId: ids.device, platform: 'ios', token },
+      input: {
+        deviceEnrollmentId: ids.device,
+        platform: 'ios',
+        provider: 'expo',
+        build,
+        token,
+      },
       invocation: { actor: { sessionId: ids.session }, source: 'mobile' },
     });
     expect(executions[1]).toMatchObject({

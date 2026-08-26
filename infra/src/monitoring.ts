@@ -6,8 +6,9 @@
  *
  * `configureInfrastructureMonitoring` is what the live stack calls. It deploys
  * the alarms whose metrics AWS publishes on its own — App Runner, Aurora, and
- * every notification queue and dead-letter queue — and needs no credential
- * beyond the stack's own.
+ * every notification queue and dead-letter queue. When the protected Expo
+ * worker is enabled, it also deploys conditional log-derived worker metrics
+ * and alarms alongside their real publisher.
  *
  * `configureMonitoring` additionally deploys the one-minute canary and the
  * metrics collector, and the alarms that read what they publish. It is not
@@ -74,9 +75,159 @@ export interface MonitoringProps {
   readonly operationsAlarmTopic: sns.ITopic;
   readonly operationsKey: kms.IKey;
   readonly monitoringRunbookBaseUrl: string;
+  readonly pushWorkerCondition?: CfnCondition;
+  readonly pushWorkerLogGroup?: logs.ILogGroup;
   readonly sesIdentityDomain: string;
   /** The condition guarding App Runner, applied to anything that reads it. */
   readonly applicationCondition?: CfnCondition;
+}
+
+function configurePushWorkerMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  if (
+    props.pushWorkerLogGroup === undefined ||
+    props.pushWorkerCondition === undefined
+  ) {
+    return;
+  }
+  const definitions = [
+    {
+      id: 'PushWorkerHeartbeatMetric',
+      pattern: '{ $.event = "push-worker-heartbeat" }',
+      metricName: 'PushWorkerHeartbeat',
+      metricValue: '1',
+    },
+    {
+      id: 'PushProviderLatencyMetric',
+      pattern: '{ $.event = "push-worker-message-completed" }',
+      metricName: 'OutboxToProviderLatency',
+      metricValue: '$.durationMilliseconds',
+    },
+    {
+      id: 'PushProviderIncompleteMetric',
+      pattern:
+        '{ ($.event = "push-worker-message-failed") || ($.event = "push-worker-message-incomplete") }',
+      metricName: 'OutboxToProviderIncompleteCount',
+      metricValue: '$.count',
+    },
+    {
+      id: 'PushReceiptFailureMetric',
+      pattern: '{ $.event = "push-worker-receipts-failed" }',
+      metricName: 'PushReceiptPollFailureCount',
+      metricValue: '1',
+    },
+    {
+      id: 'PushStuckOutboxMetric',
+      pattern: '{ $.event = "push-worker-stuck-outbox-sample" }',
+      metricName: 'PushStuckOutboxCount',
+      metricValue: '$.count',
+    },
+  ] as const;
+  for (const definition of definitions) {
+    const filter = new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: props.pushWorkerLogGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: definition.metricValue,
+      unit:
+        definition.metricName === 'OutboxToProviderLatency'
+          ? cloudwatch.Unit.MILLISECONDS
+          : cloudwatch.Unit.COUNT,
+    });
+    (filter.node.defaultChild as logs.CfnMetricFilter).cfnOptions.condition =
+      props.pushWorkerCondition;
+  }
+
+  const alarmDefinitions = [
+    {
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      id: 'PushWorkerHealthAlarm',
+      metric: customMetric('PushWorkerHeartbeat', { statistic: 'Sum' }),
+      name: 'psd-eoc-push-worker-health',
+      runbookAnchor: 'runbook-expo-push-worker-health',
+      summary:
+        'The enabled Expo push worker stopped emitting sanitized heartbeats.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushStuckOutboxAlarm',
+      metric: customMetric('PushStuckOutboxCount', { statistic: 'Maximum' }),
+      name: 'psd-eoc-push-stuck-production-outbox',
+      runbookAnchor: 'runbook-stuck-outbox',
+      summary:
+        'At least one staff outbox row remained unpublished and nonterminal for one minute.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushProviderLatencyAlarm',
+      metric: customMetric('OutboxToProviderLatency', {
+        statistic: 'p95',
+        unit: cloudwatch.Unit.MILLISECONDS,
+      }),
+      name: 'psd-eoc-push-outbox-to-provider-p95',
+      runbookAnchor: 'runbook-outbox-to-provider-latency',
+      summary: 'Push outbox-to-provider p95 exceeded the five-second SLO.',
+      threshold: 5_000,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushProviderIncompleteAlarm',
+      metric: customMetric('OutboxToProviderIncompleteCount', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-push-outbox-to-provider-incomplete',
+      runbookAnchor: 'runbook-outbox-to-provider-latency',
+      summary:
+        'One or more push queue items did not complete the provider handoff.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+    {
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      id: 'PushReceiptPollFailureAlarm',
+      metric: customMetric('PushReceiptPollFailureCount', {
+        statistic: 'Sum',
+      }),
+      name: 'psd-eoc-push-receipt-poll-failures',
+      runbookAnchor: 'runbook-expo-push-worker-health',
+      summary: 'The Expo receipt poller reported a bounded processing failure.',
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  ] as const;
+  for (const definition of alarmDefinitions) {
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        definition.runbookAnchor,
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator: definition.comparisonOperator,
+      datapointsToAlarm: 2,
+      evaluationPeriods: 2,
+      metric: definition.metric,
+      threshold: definition.threshold,
+      treatMissingData: definition.treatMissingData,
+    });
+    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      props.pushWorkerCondition;
+  }
 }
 
 export interface MonitoringRuntimeParameters {
@@ -1409,8 +1560,8 @@ function publishDashboardOutputs(
  *   latency, and the monthly delivery test;
  * - Aurora replica lag, because the cluster runs a single writer with no
  *   reader, so `AuroraReplicaLagMaximum` never reports;
- * - per-channel outbox-to-provider latency, which the channel workers publish
- *   and no channel worker is deployed.
+ * - email/SMS outbox-to-provider latency, because those channel workers are
+ *   not deployed. Expo metrics are added conditionally with its worker.
  *
  * Several of those treat missing data as breaching. Deploying them against a
  * metric nobody publishes would page the operations team every minute forever,
@@ -1442,6 +1593,7 @@ export function configureInfrastructureMonitoring(
     monthlyDeliveryTestDue,
   );
   configureAlarms(scope, props, metrics, false);
+  configurePushWorkerMonitoring(scope, props);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);
 }

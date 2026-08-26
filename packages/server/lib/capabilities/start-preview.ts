@@ -215,11 +215,14 @@ export function buildActivationPreview(
   ) {
     throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
   }
-  const controlledEmailCanary =
-    evidenceValue.deliveryTestEndpointReferences?.length === 1;
+  const controlledCanaryChannel =
+    evidenceValue.deliveryTestEndpointReferences?.length === 1
+      ? evidenceValue.deliveryTestEndpointReferences[0]?.channel
+      : null;
   if (
-    controlledEmailCanary &&
-    evidenceValue.deliveryTestEndpointReferences?.[0]?.channel !== 'email'
+    controlledCanaryChannel !== null &&
+    controlledCanaryChannel !== 'email' &&
+    controlledCanaryChannel !== 'push'
   ) {
     throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
   }
@@ -260,8 +263,9 @@ export function buildActivationPreview(
     evidenceValue.channelConfigurations,
   );
   if (
-    configurations.email === undefined ||
-    (!controlledEmailCanary && configurations.push === undefined)
+    controlledCanaryChannel === null
+      ? configurations.email === undefined || configurations.push === undefined
+      : configurations[controlledCanaryChannel] === undefined
   ) {
     throw new ActivationPreviewBuildError('CHANNEL_CONFIGURATION_UNAVAILABLE');
   }
@@ -285,11 +289,13 @@ export function buildActivationPreview(
   const renderedByChannel = new Map(
     renderedMessages.map((message) => [message.channel, message]),
   );
-  const selectedChannels = controlledEmailCanary
-    ? (['email'] as const)
-    : ALL_CHANNELS.filter(
-        (channel) => channel !== 'sms' || configurations.sms?.enabled === true,
-      );
+  const selectedChannels =
+    controlledCanaryChannel !== null
+      ? ([controlledCanaryChannel] as const)
+      : ALL_CHANNELS.filter(
+          (channel) =>
+            channel !== 'sms' || configurations.sms?.enabled === true,
+        );
   const channels = selectedChannels.map((channel) => {
     const configuration = configurations[channel];
     const renderedMessage = renderedByChannel.get(channel);
@@ -312,9 +318,10 @@ export function buildActivationPreview(
   if (recipientCount === 0) {
     blockingReasonCodes.push('NO_RECIPIENTS');
   }
-  const requiredChannels = controlledEmailCanary
-    ? (['email'] as const)
-    : REQUIRED_CHANNELS;
+  const requiredChannels =
+    controlledCanaryChannel !== null
+      ? ([controlledCanaryChannel] as const)
+      : REQUIRED_CHANNELS;
   for (const channel of requiredChannels) {
     const configuration = configurations[channel];
     if (configuration?.enabled !== true) {

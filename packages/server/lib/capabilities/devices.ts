@@ -6,6 +6,7 @@ import {
   DeviceEnrollmentSchema,
   EndpointStatusSchema,
   EndpointStatusRecordSchema,
+  PushRegistrationBuildAuthorizationSchema,
   PushTokenRegistrationReceiptSchema,
   PushTokenUnregistrationReceiptSchema,
   PushEndpointSendEligibilityInputSchema,
@@ -20,6 +21,7 @@ import {
   type EndpointStatusRecord,
   type PushEndpoint,
   type PushEndpointSendEligibilityInput,
+  type PushRegistrationBuildAuthorization,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
@@ -100,6 +102,52 @@ export const PUSH_ENDPOINT_INVALIDATION_SERVICE_ID =
 export const EXPO_DEVICE_NOT_REGISTERED_REASON =
   'EXPO_DEVICE_NOT_REGISTERED' as const;
 
+/** Protected runtime allowlist for exact mobile builds permitted to register. */
+export const PUSH_REGISTRATION_BUILD_ALLOWLIST_ENV =
+  'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST' as const;
+
+const MAX_PUSH_REGISTRATION_BUILDS = 20;
+
+/** Missing or malformed protected configuration denies every registration. */
+export function parsePushRegistrationBuildAllowlist(
+  value: string | undefined,
+): readonly PushRegistrationBuildAuthorization[] {
+  if (value === undefined || value.length === 0 || value.length > 32_768) {
+    return Object.freeze([]);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return Object.freeze([]);
+  }
+  if (!Array.isArray(parsed) || parsed.length > MAX_PUSH_REGISTRATION_BUILDS) {
+    return Object.freeze([]);
+  }
+  const entries: PushRegistrationBuildAuthorization[] = [];
+  for (const entry of parsed) {
+    const result = PushRegistrationBuildAuthorizationSchema.safeParse(entry);
+    if (!result.success) return Object.freeze([]);
+    entries.push(result.data);
+  }
+  const identities = entries.map((entry) => JSON.stringify(entry));
+  if (new Set(identities).size !== identities.length) return Object.freeze([]);
+  return Object.freeze(entries);
+}
+
+/** Exact tuple comparison; no token shape or public enablement flag is trusted. */
+export function pushRegistrationBuildIsAuthorized(
+  input: CapabilityInput<'register-push-token'>,
+  allowlist: readonly PushRegistrationBuildAuthorization[],
+): boolean {
+  return allowlist.some(
+    (entry) =>
+      entry.platform === input.platform &&
+      entry.provider === input.provider &&
+      JSON.stringify(entry.build) === JSON.stringify(input.build),
+  );
+}
+
 const MAX_PUSH_ENDPOINTS = 12_000;
 
 export type PushEndpointResolutionErrorCode =
@@ -164,6 +212,11 @@ export interface ResolvedPushEndpoint {
   readonly rosterPopulation: 'staff' | 'synthetic';
   readonly recipientId: string;
   readonly endpoint: PushEndpoint;
+}
+
+export interface ResolvedPushEndpointPage {
+  readonly endpoints: readonly ResolvedPushEndpoint[];
+  readonly nextCursor: number | null;
 }
 
 interface PushEndpointSendEligibilityEvidence {
@@ -394,10 +447,19 @@ function parsePushBatch(value: unknown): DispatchBatch {
  * endpoints from the same pinned snapshot are therefore excluded on every
  * later resolution without rewriting that snapshot.
  */
-export async function resolvePushEndpoints(
+async function resolvePushEndpointContext(
   input: ResolvePushEndpointsInput,
   store: PushEndpointPolicyStore,
-): Promise<readonly ResolvedPushEndpoint[]> {
+): Promise<
+  Readonly<{
+    batch: DispatchBatch;
+    candidates: readonly Readonly<{
+      recipientId: string;
+      endpoint: PushEndpoint;
+    }>[];
+    policy: ReadonlyMap<string, ParsedPushEndpointPolicyEvidence>;
+  }>
+> {
   const batch = parsePushBatch(input.batch);
   let audience: ReturnType<typeof resolveAudience>;
   try {
@@ -456,6 +518,21 @@ export async function resolvePushEndpoints(
   if (batch.deliveryTest != null && approvedCount !== batch.endpointCount) {
     throw new PushEndpointResolutionError('PUSH_ENDPOINT_COUNT_MISMATCH');
   }
+  return Object.freeze({
+    batch,
+    candidates: Object.freeze(candidates),
+    policy,
+  });
+}
+
+function eligiblePushEndpoints(
+  batch: DispatchBatch,
+  candidates: readonly Readonly<{
+    recipientId: string;
+    endpoint: PushEndpoint;
+  }>[],
+  policy: ReadonlyMap<string, ParsedPushEndpointPolicyEvidence>,
+): readonly ResolvedPushEndpoint[] {
   return Object.freeze(
     candidates.flatMap(({ recipientId, endpoint }) => {
       const evidence = policy.get(
@@ -473,6 +550,55 @@ export async function resolvePushEndpoints(
         : [];
     }),
   );
+}
+
+export async function resolvePushEndpoints(
+  input: ResolvePushEndpointsInput,
+  store: PushEndpointPolicyStore,
+): Promise<readonly ResolvedPushEndpoint[]> {
+  const { batch, candidates, policy } = await resolvePushEndpointContext(
+    input,
+    store,
+  );
+  return eligiblePushEndpoints(batch, candidates, policy);
+}
+
+/**
+ * Pages the immutable roster candidates before applying mutable endpoint
+ * status. Invalidating an endpoint between pages therefore cannot shift the
+ * next offset and silently skip a later candidate.
+ */
+export async function resolvePushEndpointPage(
+  input: ResolvePushEndpointsInput,
+  store: PushEndpointPolicyStore,
+  cursor: number,
+  limit: number,
+): Promise<ResolvedPushEndpointPage> {
+  if (
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    cursor > MAX_PUSH_ENDPOINTS ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 500
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const { batch, candidates, policy } = await resolvePushEndpointContext(
+    input,
+    store,
+  );
+  if (cursor > candidates.length) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const selected = candidates.slice(cursor, cursor + limit);
+  return Object.freeze({
+    endpoints: eligiblePushEndpoints(batch, selected, policy),
+    nextCursor:
+      cursor + selected.length < candidates.length
+        ? cursor + selected.length
+        : null,
+  });
 }
 
 async function loadPushDeliveryTestTargets(
@@ -666,6 +792,7 @@ function normalizePushEndpointPolicyQuery(
 async function loadDrizzlePushEndpointPolicy(
   database: DeviceQueryDatabase,
   input: PushEndpointPolicyQuery,
+  pushRegistrationBuildAllowlist: readonly PushRegistrationBuildAuthorization[],
 ): Promise<readonly PushEndpointPolicyEvidence[]> {
   const query = normalizePushEndpointPolicyQuery(input);
   if (
@@ -686,6 +813,15 @@ async function loadDrizzlePushEndpointPolicy(
       registrationId: devicePushTokenRegistrations.id,
       registrationDeviceEnrollmentId:
         devicePushTokenRegistrations.deviceEnrollmentId,
+      registrationPlatform: devicePushTokenRegistrations.platform,
+      registrationProvider: devicePushTokenRegistrations.provider,
+      registrationApplicationId: devicePushTokenRegistrations.applicationId,
+      registrationApplicationVersion:
+        devicePushTokenRegistrations.applicationVersion,
+      registrationNativeBuildVersion:
+        devicePushTokenRegistrations.nativeBuildVersion,
+      registrationExpoProjectId: devicePushTokenRegistrations.expoProjectId,
+      registrationUpdateMode: devicePushTokenRegistrations.updateMode,
       registrationMatchesEndpoint: sql<boolean | null>`case
         when ${devicePushTokenRegistrations.id} is null then null
         else ${devicePushTokenRegistrations.platform}::text = ${rosterEndpoints.platform}::text
@@ -749,12 +885,37 @@ async function loadDrizzlePushEndpointPolicy(
   const effectiveStatuses = new Map<string, EndpointStatus>();
   endpointRows.forEach((endpoint) => {
     const hasRegistration = endpoint.registrationId !== null;
+    const registrationBuildAuthorized =
+      hasRegistration &&
+      (endpoint.registrationPlatform === 'ios' ||
+        endpoint.registrationPlatform === 'android') &&
+      endpoint.registrationProvider === 'expo' &&
+      endpoint.registrationApplicationId !== null &&
+      endpoint.registrationApplicationVersion !== null &&
+      endpoint.registrationNativeBuildVersion !== null &&
+      endpoint.registrationExpoProjectId !== null &&
+      endpoint.registrationUpdateMode === 'embedded-only' &&
+      pushRegistrationBuildAllowlist.some(
+        (entry) =>
+          entry.platform === endpoint.registrationPlatform &&
+          entry.provider === endpoint.registrationProvider &&
+          entry.build.applicationId === endpoint.registrationApplicationId &&
+          entry.build.applicationVersion ===
+            endpoint.registrationApplicationVersion &&
+          entry.build.nativeBuildVersion ===
+            endpoint.registrationNativeBuildVersion &&
+          entry.build.expoProjectId === endpoint.registrationExpoProjectId &&
+          entry.build.updateMode === endpoint.registrationUpdateMode,
+      );
     const hasUnregistration =
       endpoint.unregisteredRegistrationId !== null ||
       endpoint.unregisteredDeviceEnrollmentId !== null;
     if (
       (query.rosterPopulation === 'staff' && !hasRegistration) ||
       (hasRegistration && endpoint.registrationMatchesEndpoint !== true) ||
+      (query.rosterPopulation === 'staff' &&
+        hasRegistration &&
+        !registrationBuildAuthorized) ||
       (!hasRegistration &&
         (endpoint.registrationDeviceEnrollmentId !== null ||
           endpoint.registrationMatchesEndpoint !== null ||
@@ -814,11 +975,18 @@ async function loadDrizzlePushEndpointPolicy(
 /** Production token-free status overlay for pinned push endpoint resolution. */
 export function createDrizzlePushEndpointPolicyStore(
   database: Database,
+  pushRegistrationBuildAllowlist = parsePushRegistrationBuildAllowlist(
+    process.env[PUSH_REGISTRATION_BUILD_ALLOWLIST_ENV],
+  ),
 ): PushEndpointPolicyStore {
   return Object.freeze({
     loadEndpointPolicy: (query: PushEndpointPolicyQuery) =>
       database.transaction((transaction) =>
-        loadDrizzlePushEndpointPolicy(deviceQueryDatabase(transaction), query),
+        loadDrizzlePushEndpointPolicy(
+          deviceQueryDatabase(transaction),
+          query,
+          pushRegistrationBuildAllowlist,
+        ),
       ),
   });
 }
@@ -826,6 +994,7 @@ export function createDrizzlePushEndpointPolicyStore(
 async function loadDrizzlePushEndpointSendEligibility(
   database: DeviceQueryDatabase,
   input: PushEndpointSendEligibilityInput,
+  pushRegistrationBuildAllowlist: readonly PushRegistrationBuildAuthorization[],
 ): Promise<PushEndpointSendEligibilityEvidence | null> {
   const rows = await database
     .select({
@@ -858,13 +1027,17 @@ async function loadDrizzlePushEndpointSendEligibility(
   ) {
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }
-  const policy = await loadDrizzlePushEndpointPolicy(database, {
-    rosterSnapshotId: input.rosterSnapshotId,
-    rosterPopulation: input.rosterPopulation,
-    candidates: [
-      { recipientId: input.recipientId, endpointId: input.endpointId },
-    ],
-  });
+  const policy = await loadDrizzlePushEndpointPolicy(
+    database,
+    {
+      rosterSnapshotId: input.rosterSnapshotId,
+      rosterPopulation: input.rosterPopulation,
+      candidates: [
+        { recipientId: input.recipientId, endpointId: input.endpointId },
+      ],
+    },
+    pushRegistrationBuildAllowlist,
+  );
   if (policy.length !== 1) {
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }
@@ -883,6 +1056,9 @@ async function loadDrizzlePushEndpointSendEligibility(
 /** Production send-time eligibility store backed by current database truth. */
 export function createDrizzlePushEndpointSendEligibilityStore(
   database: Database,
+  pushRegistrationBuildAllowlist = parsePushRegistrationBuildAllowlist(
+    process.env[PUSH_REGISTRATION_BUILD_ALLOWLIST_ENV],
+  ),
 ): PushEndpointSendEligibilityStore {
   return Object.freeze({
     loadPushEndpointSendEligibility: (
@@ -891,6 +1067,7 @@ export function createDrizzlePushEndpointSendEligibilityStore(
       loadDrizzlePushEndpointSendEligibility(
         deviceQueryDatabase(database),
         input,
+        pushRegistrationBuildAllowlist,
       ),
   });
 }
@@ -898,6 +1075,9 @@ export function createDrizzlePushEndpointSendEligibilityStore(
 /** Device-specific persistence added to the canonical capability transaction. */
 export interface DeviceCapabilityTransaction
   extends CapabilityEngineTransaction {
+  authorizePushTokenRegistration(
+    input: CapabilityInput<'register-push-token'>,
+  ): Promise<boolean>;
   registerPushToken(
     input: CapabilityInput<'register-push-token'>,
     actor: Extract<Actor, { kind: 'human' }>,
@@ -1022,6 +1202,14 @@ const registerPushTokenRegistration: ServerCapabilityRegistration<
   id: 'register-push-token',
   resolveFacilityId: () => null,
   async handler(input, context) {
+    if (!(await context.transaction.authorizePushTokenRegistration(input))) {
+      throw new CapabilityEngineError(
+        'FORBIDDEN',
+        'CAPABILITY_INVOCATION_DENIED',
+        'Push registration is unavailable for this mobile build.',
+        403,
+      );
+    }
     return context.transaction.registerPushToken(
       input,
       requireHuman(context),
@@ -1254,6 +1442,12 @@ interface ActivePushRegistration {
   readonly id: string;
   readonly token: string;
   readonly registeredAt: Date | string;
+  readonly provider: string;
+  readonly applicationId: string | null;
+  readonly applicationVersion: string | null;
+  readonly nativeBuildVersion: string | null;
+  readonly expoProjectId: string | null;
+  readonly updateMode: string | null;
 }
 
 const MAX_ACTIVE_PUSH_REGISTRATIONS_PER_DEVICE = 100;
@@ -1554,6 +1748,12 @@ async function activePushRegistrations(
       id: devicePushTokenRegistrations.id,
       token: devicePushTokenRegistrations.token,
       registeredAt: devicePushTokenRegistrations.registeredAt,
+      provider: devicePushTokenRegistrations.provider,
+      applicationId: devicePushTokenRegistrations.applicationId,
+      applicationVersion: devicePushTokenRegistrations.applicationVersion,
+      nativeBuildVersion: devicePushTokenRegistrations.nativeBuildVersion,
+      expoProjectId: devicePushTokenRegistrations.expoProjectId,
+      updateMode: devicePushTokenRegistrations.updateMode,
     })
     .from(devicePushTokenRegistrations)
     .leftJoin(
@@ -1623,6 +1823,14 @@ async function registerPushTokenWithDatabase(
   const keptRegistration = active.find(
     (registration) => registration.id === plan.keepRegistrationId,
   );
+  const rotateDifferentBuild =
+    keptRegistration !== undefined &&
+    (keptRegistration.provider !== input.provider ||
+      keptRegistration.applicationId !== input.build.applicationId ||
+      keptRegistration.applicationVersion !== input.build.applicationVersion ||
+      keptRegistration.nativeBuildVersion !== input.build.nativeBuildVersion ||
+      keptRegistration.expoProjectId !== input.build.expoProjectId ||
+      keptRegistration.updateMode !== input.build.updateMode);
   const rotateStaleGeneration =
     priorFailure !== null &&
     keptRegistration !== undefined &&
@@ -1633,30 +1841,53 @@ async function registerPushTokenWithDatabase(
     device.id,
     [
       ...plan.unregisterRegistrationIds,
-      ...(rotateStaleGeneration && plan.keepRegistrationId !== null
+      ...((rotateStaleGeneration || rotateDifferentBuild) &&
+      plan.keepRegistrationId !== null
         ? [plan.keepRegistrationId]
         : []),
     ],
     registeredAt,
   );
-  if (plan.registrationRequired || rotateStaleGeneration) {
+  if (
+    plan.registrationRequired ||
+    rotateStaleGeneration ||
+    rotateDifferentBuild
+  ) {
     const [inserted] = await database
       .insert(devicePushTokenRegistrations)
       .values({
         deviceEnrollmentId: device.id,
         platform: device.platform,
+        provider: input.provider,
+        applicationId: input.build.applicationId,
+        applicationVersion: input.build.applicationVersion,
+        nativeBuildVersion: input.build.nativeBuildVersion,
+        expoProjectId: input.build.expoProjectId,
+        updateMode: input.build.updateMode,
         token: input.token,
         registeredAt,
       })
       .returning({
         deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
         platform: devicePushTokenRegistrations.platform,
+        provider: devicePushTokenRegistrations.provider,
+        applicationId: devicePushTokenRegistrations.applicationId,
+        applicationVersion: devicePushTokenRegistrations.applicationVersion,
+        nativeBuildVersion: devicePushTokenRegistrations.nativeBuildVersion,
+        expoProjectId: devicePushTokenRegistrations.expoProjectId,
+        updateMode: devicePushTokenRegistrations.updateMode,
         token: devicePushTokenRegistrations.token,
       });
     if (
       inserted === undefined ||
       inserted.deviceEnrollmentId !== device.id ||
       inserted.platform !== device.platform ||
+      inserted.provider !== input.provider ||
+      inserted.applicationId !== input.build.applicationId ||
+      inserted.applicationVersion !== input.build.applicationVersion ||
+      inserted.nativeBuildVersion !== input.build.nativeBuildVersion ||
+      inserted.expoProjectId !== input.build.expoProjectId ||
+      inserted.updateMode !== input.build.updateMode ||
       inserted.token !== input.token
     ) {
       throw deviceConflict(
@@ -2188,6 +2419,7 @@ async function appendCapabilityAuditEntry(
 
 function createDrizzleDeviceTransaction(
   database: DeviceQueryDatabase,
+  pushRegistrationBuildAllowlist: readonly PushRegistrationBuildAuthorization[],
 ): DeviceCapabilityTransaction {
   return {
     readCurrentTime: () => readDatabaseTime(database),
@@ -2198,6 +2430,8 @@ function createDrizzleDeviceTransaction(
     consumeHumanConfirmation: async () => false,
     appendCapabilityAudit: (event) =>
       appendCapabilityAuditEntry(database, event),
+    authorizePushTokenRegistration: async (input) =>
+      pushRegistrationBuildIsAuthorized(input, pushRegistrationBuildAllowlist),
     registerPushToken: (input, actor, registeredAt) =>
       registerPushTokenWithDatabase(database, input, actor, registeredAt),
     unregisterPushToken: (input, actor, unregisteredAt) =>
@@ -2218,6 +2452,9 @@ function createDrizzleDeviceTransaction(
 /** Creates the production one-transaction device capability persistence. */
 export function createDrizzleDeviceCapabilityStore(
   database: Database,
+  pushRegistrationBuildAllowlist = parsePushRegistrationBuildAllowlist(
+    process.env[PUSH_REGISTRATION_BUILD_ALLOWLIST_ENV],
+  ),
 ): DeviceCapabilityStore {
   return {
     transaction<Result>(
@@ -2225,7 +2462,10 @@ export function createDrizzleDeviceCapabilityStore(
     ): Promise<Result> {
       return database.transaction(async (transaction) =>
         operation(
-          createDrizzleDeviceTransaction(deviceQueryDatabase(transaction)),
+          createDrizzleDeviceTransaction(
+            deviceQueryDatabase(transaction),
+            pushRegistrationBuildAllowlist,
+          ),
         ),
       );
     },
@@ -2252,10 +2492,17 @@ export interface DeviceCapabilityRuntime {
 /** Builds a device capability runtime around one managed DB connection. */
 export function createDeviceCapabilityRuntime(
   connection: DatabaseConnection,
+  pushRegistrationBuildAllowlist = parsePushRegistrationBuildAllowlist(
+    process.env[PUSH_REGISTRATION_BUILD_ALLOWLIST_ENV],
+  ),
 ): DeviceCapabilityRuntime {
-  const store = createDrizzleDeviceCapabilityStore(connection.db);
+  const store = createDrizzleDeviceCapabilityStore(
+    connection.db,
+    pushRegistrationBuildAllowlist,
+  );
   const eligibilityStore = createDrizzlePushEndpointSendEligibilityStore(
     connection.db,
+    pushRegistrationBuildAllowlist,
   );
   return {
     store,

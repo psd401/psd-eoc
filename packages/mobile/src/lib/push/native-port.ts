@@ -1,5 +1,8 @@
 import { requireOptionalNativeModule } from 'expo';
+import * as Application from 'expo-application';
 import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
+import { NativePushBuildIdentitySchema } from '@psd-eoc/contracts';
 import {
   AndroidImportance,
   AndroidNotificationVisibility,
@@ -177,10 +180,24 @@ export function currentNativePushPlatform(): NativePushPlatform | null {
 }
 
 export function currentPushRegistrationConfiguration() {
+  const projectId =
+    Constants.expoConfig?.extra?.eas?.projectId ??
+    Constants.easConfig?.projectId;
+  const build = NativePushBuildIdentitySchema.safeParse({
+    applicationId: Application.applicationId,
+    applicationVersion: Application.nativeApplicationVersion,
+    nativeBuildVersion: Application.nativeBuildVersion,
+    expoProjectId: projectId,
+    updateMode:
+      Constants.expoConfig?.updates?.enabled === false &&
+      Updates.isEnabled === false
+        ? 'embedded-only'
+        : 'unverified',
+  });
   return parsePushRegistrationConfiguration(
     process.env.EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED,
-    Constants.expoConfig?.extra?.eas?.projectId ??
-      Constants.easConfig?.projectId,
+    projectId,
+    build.success ? build.data : null,
   );
 }
 

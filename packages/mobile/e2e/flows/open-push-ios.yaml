@@ -10,16 +10,7 @@ tags: [issue-32, synthetic-only, notification, ios]
     timeout: 15000
 - assertVisible: '.*Synthetic recipients only.*'
 - assertNotVisible: '.*\[INCIDENT\].*'
-- swipe:
-    from:
-      text: '\[DRILL\] Synthetic earthquake drill'
-    direction: RIGHT
-    duration: 700
-- runFlow:
-    when:
-      visible: 'Open'
-    commands:
-      - tapOn: 'Open'
+- tapOn: '\[DRILL\] Synthetic earthquake drill'
 - runFlow:
     when:
       visible: '\[DRILL\] Synthetic earthquake drill'

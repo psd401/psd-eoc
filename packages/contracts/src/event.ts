@@ -757,6 +757,20 @@ const ControlledEmailCanaryActivationPlanSchema = z
   })
   .readonly();
 
+const ControlledPushCanaryActivationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'push' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled push canary consequence must contain exactly one push endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const ActivationPreviewSchema = z
   .object({
     id: ActivationPreviewIdSchema,
@@ -770,6 +784,7 @@ export const ActivationPreviewSchema = z
     channels: z.union([
       MultiChannelActivationPreviewPlanSchema,
       ControlledEmailCanaryActivationPlanSchema,
+      ControlledPushCanaryActivationPlanSchema,
     ]),
     sendReadiness: z.enum(['ready', 'blocked']),
     blockingReasonCodes: z
@@ -843,12 +858,12 @@ export const ActivationPreviewSchema = z
         path: ['channels'],
       });
     }
-    const controlledEmailCanary =
+    const controlledSingleCanary =
       channelNames.length === 1 &&
-      channelNames[0] === 'email' &&
+      (channelNames[0] === 'email' || channelNames[0] === 'push') &&
       preview.channels[0]?.endpointCount === 1;
     if (
-      controlledEmailCanary &&
+      controlledSingleCanary &&
       (preview.deliveryTest == null ||
         preview.kind !== 'drill' ||
         preview.templateMode !== 'drill' ||
@@ -858,12 +873,12 @@ export const ActivationPreviewSchema = z
       context.addIssue({
         code: 'custom',
         message:
-          'A one-email consequence is limited to one delivery-test staff recipient and DRILL classification.',
+          'A single-channel consequence is limited to one delivery-test staff recipient and DRILL classification.',
         path: ['channels'],
       });
     }
     if (
-      !controlledEmailCanary &&
+      !controlledSingleCanary &&
       (!channelNames.includes('push') || !channelNames.includes('email'))
     ) {
       context.addIssue({
@@ -900,7 +915,7 @@ export const ActivationPreviewSchema = z
         : channel.integrationStatus.label === 'live-verified',
     );
     const isReady = preview.sendReadiness === 'ready';
-    const requiredChannelsHaveEndpoints = controlledEmailCanary
+    const requiredChannelsHaveEndpoints = controlledSingleCanary
       ? preview.channels[0]?.endpointCount === 1
       : preview.channels
           .filter((channel) => ['push', 'email'].includes(channel.channel))

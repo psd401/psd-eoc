@@ -1,6 +1,8 @@
 import {
+  NativePushBuildIdentitySchema,
   RegisterPushTokenInputSchema,
   UuidSchema,
+  type NativePushBuildIdentity,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisterPushTokenInput,
@@ -68,6 +70,7 @@ export interface PushRegistrationSnapshot {
 export interface PushRegistrationConfiguration {
   readonly enabled: boolean;
   readonly projectId: string | null;
+  readonly build: NativePushBuildIdentity | null;
 }
 
 interface PushRegistrationControllerDependencies {
@@ -91,11 +94,19 @@ type PushRegistrationListener = () => void;
 export function parsePushRegistrationConfiguration(
   enabledValue: string | undefined,
   projectIdValue: unknown,
+  buildIdentityValue?: unknown,
 ): PushRegistrationConfiguration {
   const parsedProjectId = UuidSchema.safeParse(projectIdValue);
+  const parsedBuild =
+    NativePushBuildIdentitySchema.safeParse(buildIdentityValue);
+  const identityMatchesProject =
+    parsedProjectId.success &&
+    parsedBuild.success &&
+    parsedBuild.data.expoProjectId === parsedProjectId.data;
   return Object.freeze({
-    enabled: enabledValue === 'true' && parsedProjectId.success,
+    enabled: enabledValue === 'true' && identityMatchesProject,
     projectId: parsedProjectId.success ? parsedProjectId.data : null,
+    build: identityMatchesProject ? parsedBuild.data : null,
   });
 }
 
@@ -296,7 +307,11 @@ export class PushRegistrationController {
   }
 
   private configurationReady(): boolean {
-    return this.configuration.enabled && this.configuration.projectId !== null;
+    return (
+      this.configuration.enabled &&
+      this.configuration.projectId !== null &&
+      this.configuration.build !== null
+    );
   }
 
   private async reconcileCurrent(
@@ -373,8 +388,8 @@ export class PushRegistrationController {
     nativeToken: NativePushToken,
   ): Promise<void> {
     if (!this.isCurrent(generation, session)) return;
-    const projectId = this.configuration.projectId;
-    if (!this.configuration.enabled || projectId === null) {
+    const { build, projectId } = this.configuration;
+    if (!this.configuration.enabled || projectId === null || build === null) {
       await this.markProviderDisabled(generation, session);
       return;
     }
@@ -412,6 +427,8 @@ export class PushRegistrationController {
       const input = RegisterPushTokenInputSchema.parse({
         deviceEnrollmentId: session.deviceEnrollmentId,
         platform: session.platform,
+        provider: 'expo',
+        build,
         token: expoToken,
       });
       const receipt = await session.register(input);

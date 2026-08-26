@@ -384,6 +384,16 @@ export const devicePushTokenRegistrations = pgTable(
     id: uuid('id').defaultRandom().primaryKey(),
     deviceEnrollmentId: uuid('device_enrollment_id').notNull(),
     platform: devicePlatformEnum('platform').notNull(),
+    provider: varchar('provider', { length: 32 }).default('expo').notNull(),
+    applicationId: varchar('application_id', { length: 255 }),
+    applicationVersion: varchar('application_version', {
+      length: 64,
+    }),
+    nativeBuildVersion: varchar('native_build_version', {
+      length: 32,
+    }),
+    expoProjectId: uuid('expo_project_id'),
+    updateMode: varchar('update_mode', { length: 32 }),
     token: text('token').notNull(),
     registeredAt: occurredAt('registered_at').defaultNow().notNull(),
   },
@@ -404,6 +414,36 @@ export const devicePushTokenRegistrations = pgTable(
     check(
       'device_push_token_registrations_native_only',
       sql`${table.platform} in ('ios', 'android')`,
+    ),
+    check(
+      'device_push_token_registrations_expo_only',
+      sql`${table.provider} = 'expo'`,
+    ),
+    check(
+      'device_push_token_registrations_application_id_format',
+      sql`${table.applicationId} ~ '^[A-Za-z0-9]+([._-][A-Za-z0-9]+)+$'`,
+    ),
+    check(
+      'device_push_token_registrations_application_version_format',
+      sql`${table.applicationVersion} ~ '^[0-9]+[.][0-9]+[.][0-9]+$'`,
+    ),
+    check(
+      'device_push_token_registrations_native_build_version_format',
+      sql`${table.nativeBuildVersion} ~ '^[1-9][0-9]{0,17}$'`,
+    ),
+    check(
+      'device_push_token_registrations_embedded_only',
+      sql`${table.updateMode} = 'embedded-only'`,
+    ),
+    check(
+      'device_push_token_registrations_build_identity_pairing',
+      sql`num_nonnulls(
+          ${table.applicationId},
+          ${table.applicationVersion},
+          ${table.nativeBuildVersion},
+          ${table.expoProjectId},
+          ${table.updateMode}
+        ) in (0, 5)`,
     ),
     check(
       'device_push_token_registrations_token_length',

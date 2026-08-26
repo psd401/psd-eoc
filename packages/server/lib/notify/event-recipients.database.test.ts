@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from 'bun:test';
 
 import {
   createDatabaseClient,
@@ -14,10 +21,17 @@ import {
   neighborhoodVersions,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
+import {
+  closeAndDropDisposableDatabase,
+  createDisposableDatabase,
+  type DisposableDatabase,
+} from '../testing/database';
 import { resolveEventRecipients } from './event-recipients';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
+
+setDefaultTimeout(30_000);
 
 const NOW = new Date('2026-08-21T12:00:00.000Z');
 const READ_RECENTLY = new Date(NOW.getTime() - 60_000);
@@ -41,7 +55,7 @@ const ACCESS_GROUP = randomUUID();
 const NEIGHBOURHOOD = randomUUID();
 
 let connection: PostgresDatabaseConnection | undefined;
-let databaseName = '';
+let disposable: DisposableDatabase | undefined;
 
 function database(): PostgresDatabaseConnection['db'] {
   if (connection === undefined) throw new Error('no database');
@@ -72,21 +86,10 @@ function buildingGroup(
 describeWithDatabase('event recipient resolution from the domain', () => {
   beforeAll(async () => {
     if (baseUrl === undefined) throw new Error('TEST_DATABASE_URL required');
-    databaseName = `psd_eoc_recipients_${randomUUID().replaceAll('-', '')}_test`;
-    const admin = createDatabaseClient({
-      driver: 'postgres',
-      url: baseUrl,
-      maxConnections: 1,
-    });
-    if (admin.driver !== 'postgres') throw new Error('postgres required');
-    await admin.db.execute(`create database "${databaseName}"` as never);
-    await admin.close();
-
-    const url = new URL(baseUrl);
-    url.pathname = `/${databaseName}`;
+    disposable = await createDisposableDatabase('psd_eoc_recipients', baseUrl);
     const opened = createDatabaseClient({
       driver: 'postgres',
-      url: url.toString(),
+      url: disposable.url,
       maxConnections: 2,
     });
     if (opened.driver !== 'postgres') throw new Error('postgres required');
@@ -180,7 +183,14 @@ describeWithDatabase('event recipient resolution from the domain', () => {
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const opened = connection;
+    const ownedDatabase = disposable;
+    connection = undefined;
+    disposable = undefined;
+    await closeAndDropDisposableDatabase(
+      opened === undefined ? undefined : () => opened.close(),
+      ownedDatabase,
+    );
   });
 
   test('a building event reaches only that school', async () => {

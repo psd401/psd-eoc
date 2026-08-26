@@ -549,7 +549,7 @@ describe('deployment boundary', () => {
 });
 
 describe('minimal isolated resource shape', () => {
-  it('creates one bounded native application, bootstrap, and dark email topology', () => {
+  it('creates one bounded native application, bootstrap, and dark provider topology', () => {
     template.resourceCountIs('AWS::ECR::Repository', 1);
     template.resourceCountIs('AWS::RDS::DBCluster', 1);
     template.resourceCountIs('AWS::RDS::DBInstance', 1);
@@ -557,17 +557,18 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::AppRunner::AutoScalingConfiguration', 1);
     template.resourceCountIs('AWS::AppRunner::VpcConnector', 1);
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
-    template.resourceCountIs('AWS::ECS::Service', 0);
-    // Five log groups: bootstrap, access sync, the Aurora failover bridge, the
-    // delivery router, and the alarm mailer.
-    template.resourceCountIs('AWS::Logs::LogGroup', 5);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 3);
+    template.resourceCountIs('AWS::ECS::Service', 1);
+    // Six log groups: bootstrap, access sync, the dark push worker, the Aurora
+    // failover bridge, the delivery router, and the alarm mailer.
+    template.resourceCountIs('AWS::Logs::LogGroup', 6);
     // Nine queues: the health queue, plus a source/dead-letter pair each for
     // delivery, email, SMS, and push.
     template.resourceCountIs('AWS::SQS::Queue', 9);
-    // Eight: the five the application has always had, one generated bearer for
-    // each internal worker route, and the bootstrap-only initial-group email.
-    template.resourceCountIs('AWS::SecretsManager::Secret', 8);
+    // Twelve: the live application and bootstrap credentials, four exact
+    // internal worker-route bearers, a deny-by-default build allowlist, and the
+    // protected Expo credential placeholder.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 12);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
@@ -682,9 +683,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::Lambda::Function', 3);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
-    // Three: the database, the shared bootstrap-task group, and the App Runner
-    // connector's own group.
-    template.resourceCountIs('AWS::EC2::SecurityGroup', 3);
+    // Four: the database, shared bootstrap task, App Runner connector, and the
+    // HTTPS-only push worker. The push worker has no database ingress rule.
+    template.resourceCountIs('AWS::EC2::SecurityGroup', 4);
     const securityGroups = resourceEntries('AWS::EC2::SecurityGroup');
     const databaseSecurityGroup = securityGroups.find(([, resource]) =>
       String(properties(resource).GroupDescription).startsWith(
@@ -749,8 +750,9 @@ describe('minimal isolated resource shape', () => {
         (rule) => rule.CidrIp === '0.0.0.0/0',
       ),
     );
-    // One for the task group, one for the App Runner connector group.
-    expect(httpsRules).toHaveLength(2);
+    // One for the shared task group, one for the App Runner connector group,
+    // and one for the isolated push worker.
+    expect(httpsRules).toHaveLength(3);
     for (const rule of httpsRules) {
       expect(rule.FromPort).toBe(443);
       expect(rule.ToPort).toBe(443);
@@ -790,8 +792,12 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/database/admin',
         '/psd-eoc/database/application',
         '/psd-eoc/google-oidc-cookie-secret',
+        '/psd-eoc/mobile/push-build-allowlist',
+        '/psd-eoc/providers/expo-access-token',
         '/psd-eoc/workers/attempt-execution-token',
         '/psd-eoc/workers/delivery-state-token',
+        '/psd-eoc/workers/expo-push-runtime-token',
+        '/psd-eoc/workers/push-endpoint-token',
       ].sort(),
     );
     for (const name of [
@@ -799,8 +805,12 @@ describe('minimal isolated resource shape', () => {
       '/psd-eoc/database/admin',
       '/psd-eoc/database/application',
       '/psd-eoc/google-oidc-cookie-secret',
+      '/psd-eoc/mobile/push-build-allowlist',
+      '/psd-eoc/providers/expo-access-token',
       '/psd-eoc/workers/attempt-execution-token',
       '/psd-eoc/workers/delivery-state-token',
+      '/psd-eoc/workers/expo-push-runtime-token',
+      '/psd-eoc/workers/push-endpoint-token',
     ]) {
       const resource = byName.get(name);
       expect(resource).toBeDefined();
@@ -810,6 +820,14 @@ describe('minimal isolated resource shape', () => {
       expect(resource?.DeletionPolicy).toBe('Retain');
       expect(resource?.UpdateReplacePolicy).toBe('Retain');
     }
+
+    const expoProviderSecret = properties(
+      byName.get('/psd-eoc/providers/expo-access-token') ?? {},
+    );
+    expect(asRecord(expoProviderSecret.GenerateSecretString)).toMatchObject({
+      GenerateStringKey: 'accessToken',
+      SecretStringTemplate: JSON.stringify({ status: 'UNCONFIGURED' }),
+    });
 
     const identity = byName.get('/psd-eoc/bootstrap/approved-identity');
     expect(identity).toBeDefined();
@@ -1063,7 +1081,10 @@ describe('App Runner runtime safety boundary', () => {
         'GOOGLE_OIDC_COOKIE_SECRET',
         'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
         'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+        'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
         'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
+        'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
+        'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST',
       ].sort(),
     );
     expect(secrets.get('GOOGLE_OAUTH_CONFIG')).toEqual({
@@ -1088,7 +1109,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('BootstrapSourceSha');
     expect(serialized).not.toContain('ApprovedGoogleSubject');
     expect(serialized).not.toContain('GOOGLE_ROSTER_CONFIG');
-    expect(serialized).not.toContain('EXPO');
+    expect(serialized).not.toContain('EXPO_ACCESS_TOKEN');
     expect(serialized).not.toContain('SES_ACCESS_KEY');
     expect(serialized).not.toContain('SES_SECRET');
     expect(serialized).not.toContain('SES_SESSION');
@@ -1096,7 +1117,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('SMS');
     expect(serialized).not.toContain('MEDIA_BUCKET');
 
-    // The application holds both internal worker bearers, because verifying a
+    // The application holds every internal worker bearer, because verifying a
     // bearer means comparing against it. That is not a provider credential and
     // is not what this list guards: the runtime still holds nothing that can
     // reach SES, SMS, Expo, or object storage. Both arrive as resolved secret
@@ -1104,10 +1125,97 @@ describe('App Runner runtime safety boundary', () => {
     for (const name of [
       'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
       'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+      'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
+      'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
     ]) {
       expect(secrets.has(name)).toBe(true);
       expect(variables.has(name)).toBe(false);
     }
+  });
+
+  it('keeps the dark push worker on exact queue and credential boundaries', () => {
+    const task = properties(taskDefinitionByFamily('psd-eoc-expo-push-worker'));
+    const containers = asArray(task.ContainerDefinitions).map(asRecord);
+    expect(containers).toHaveLength(1);
+    const container = containers[0];
+    if (container === undefined) throw new Error('Missing push container.');
+    expect(container.Command).toEqual(['bun', 'workers/push/service.ts']);
+    expect(container.ReadonlyRootFilesystem).toBe(true);
+
+    const environment = new Map(
+      asArray(container.Environment).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.Value];
+      }),
+    );
+    expect(environment.get('PSD_EOC_EXPO_PUSH_RUNTIME_MODE')).toEqual({
+      'Fn::If': ['ShouldRunExpoPushWorker', 'enabled', 'dark'],
+    });
+    expect(environment.get('PSD_EOC_EXPO_PUSH_PROVIDER_AUTHORIZED')).toEqual({
+      'Fn::If': ['ShouldRunExpoPushWorker', 'true', 'false'],
+    });
+
+    const injectedSecrets = new Map(
+      asArray(container.Secrets).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.ValueFrom];
+      }),
+    );
+    expect([...injectedSecrets.keys()].sort()).toEqual(
+      [
+        'EXPO_ACCESS_TOKEN',
+        'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
+        'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+        'PSD_EOC_EXPO_CREDENTIAL_STATUS',
+        'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
+        'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
+      ].sort(),
+    );
+    expect(JSON.stringify(container)).not.toContain('DATABASE_');
+    expect(JSON.stringify(container)).not.toContain('EVENT_LIFECYCLE');
+    expect(injectedSecrets.get('EXPO_ACCESS_TOKEN')).toEqual(
+      expect.objectContaining({
+        'Fn::Join': expect.any(Array),
+      }),
+    );
+    expect(JSON.stringify(injectedSecrets.get('EXPO_ACCESS_TOKEN'))).toContain(
+      'accessToken',
+    );
+    expect(
+      JSON.stringify(injectedSecrets.get('PSD_EOC_EXPO_CREDENTIAL_STATUS')),
+    ).toContain('status');
+
+    const taskRole = roleLogicalIdForDescription(
+      'Consumes and retries only the Expo push queue',
+    );
+    const taskStatements = inlineStatementsForRole(taskRole);
+    expect([...new Set(allAllowedActions(taskStatements))].sort()).toEqual(
+      [
+        'sqs:ChangeMessageVisibility',
+        'sqs:DeleteMessage',
+        'sqs:GetQueueAttributes',
+        'sqs:GetQueueUrl',
+        'sqs:ReceiveMessage',
+        'sqs:SendMessage',
+      ].sort(),
+    );
+    expect(JSON.stringify(taskStatements)).toContain('PushQueue');
+    expect(JSON.stringify(taskStatements)).not.toContain('DeliveryQueue');
+    expect(JSON.stringify(taskStatements)).not.toContain('EmailQueue');
+    expect(JSON.stringify(taskStatements)).not.toContain('SmsQueue');
+
+    const executionRole = roleLogicalIdForDescription(
+      'injects only Expo push worker credentials',
+    );
+    const executionStatements = inlineStatementsForRole(executionRole);
+    const secretStatement = executionStatements.find((statement) =>
+      asStringArray(statement.Action).includes('secretsmanager:GetSecretValue'),
+    );
+    expect(JSON.stringify(secretStatement?.Resource)).toContain(
+      'ExpoAccessTokenSecret',
+    );
+    expect(JSON.stringify(secretStatement?.Resource)).not.toContain('Database');
+    expect(JSON.stringify(secretStatement?.Resource)).not.toContain('Google');
   });
 
   it('gives the runtime only application, health, and alarm-read permissions', () => {
@@ -1659,6 +1767,77 @@ describe('protected access-membership publication boundary', () => {
 });
 
 describe('alarm topic delivery', () => {
+  it('deploys sanitized push worker metrics and alarms only with the worker', () => {
+    const filters = resourceEntries('AWS::Logs::MetricFilter');
+    expect(filters).toHaveLength(5);
+    expect(
+      filters
+        .map(([, resource]) => {
+          expect(resource.Condition).toBe('ShouldRunExpoPushWorker');
+          const filter = properties(resource);
+          const transformation = asRecord(
+            asArray(filter.MetricTransformations)[0],
+          );
+          expect(transformation.MetricNamespace).toBe('PSD/EOC');
+          return [transformation.MetricName, filter.FilterPattern];
+        })
+        .sort(),
+    ).toEqual(
+      [
+        [
+          'OutboxToProviderIncompleteCount',
+          '{ ($.event = "push-worker-message-failed") || ($.event = "push-worker-message-incomplete") }',
+        ],
+        [
+          'OutboxToProviderLatency',
+          '{ $.event = "push-worker-message-completed" }',
+        ],
+        [
+          'PushReceiptPollFailureCount',
+          '{ $.event = "push-worker-receipts-failed" }',
+        ],
+        [
+          'PushStuckOutboxCount',
+          '{ $.event = "push-worker-stuck-outbox-sample" }',
+        ],
+        ['PushWorkerHeartbeat', '{ $.event = "push-worker-heartbeat" }'],
+      ].sort(),
+    );
+    const serializedFilters = JSON.stringify(filters).toLowerCase();
+    for (const forbidden of [
+      'recipient',
+      'device-token',
+      'pushtoken',
+      'providerresponse',
+    ]) {
+      expect(serializedFilters).not.toContain(forbidden);
+    }
+
+    const conditionalPushAlarms = resourceEntries('AWS::CloudWatch::Alarm')
+      .filter(([, resource]) =>
+        String(properties(resource).AlarmName).startsWith('psd-eoc-push-'),
+      )
+      .filter(([, resource]) => resource.Condition !== undefined);
+    expect(
+      conditionalPushAlarms
+        .map(([, resource]) => {
+          expect(resource.Condition).toBe('ShouldRunExpoPushWorker');
+          const alarm = properties(resource);
+          expect(String(alarm.AlarmDescription)).toContain('Runbook: https://');
+          return alarm.AlarmName;
+        })
+        .sort(),
+    ).toEqual(
+      [
+        'psd-eoc-push-outbox-to-provider-incomplete',
+        'psd-eoc-push-outbox-to-provider-p95',
+        'psd-eoc-push-receipt-poll-failures',
+        'psd-eoc-push-stuck-production-outbox',
+        'psd-eoc-push-worker-health',
+      ].sort(),
+    );
+  });
+
   it('leaves the alarm topics unencrypted so a confirmation can be sent', () => {
     // Encrypted with a customer-managed key, neither topic could deliver an
     // email subscription confirmation: it was created with the right address
@@ -1801,7 +1980,7 @@ describe('delivery router boundary', () => {
 });
 
 describe('configured-unverified provider readiness boundary', () => {
-  it('creates no provider identity, DNS, media, channel worker, or custom resource', () => {
+  it('creates no provider identity, DNS, media, running channel worker, or custom resource', () => {
     for (const forbiddenType of [
       'AWS::Route53::HostedZone',
       'AWS::Route53::RecordSet',
@@ -1833,11 +2012,15 @@ describe('configured-unverified provider readiness boundary', () => {
       'psd-eoc-aurora-failover-events',
       'psd-eoc-monthly-live-delivery-test-due-reminder',
     ]);
-    // Exactly one consumer exists, and it is the router: it moves a batch from
-    // the delivery queue to a channel queue. No channel worker is deployed, so
-    // nothing yet drains a channel queue and nothing reaches a provider.
+    // Exactly one Lambda consumer exists, and it is the router. The push worker
+    // service is present for review but its desired count resolves to zero
+    // unless every protected enablement condition is true.
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 1);
-    template.resourceCountIs('AWS::ECS::Service', 0);
+    template.resourceCountIs('AWS::ECS::Service', 1);
+    const pushService = properties(onlyResource('AWS::ECS::Service'));
+    expect(pushService.DesiredCount).toEqual({
+      'Fn::If': ['ShouldRunExpoPushWorker', 1, 0],
+    });
     const mapping = properties(onlyResource('AWS::Lambda::EventSourceMapping'));
     expect(JSON.stringify(mapping.EventSourceArn)).toContain('DeliveryQueue');
     expect(mapping.FunctionResponseTypes).toEqual(['ReportBatchItemFailures']);
@@ -2012,12 +2195,24 @@ describe('configured-unverified provider readiness boundary', () => {
         'EmailWorkerRoleArn',
         'EnvironmentName',
         'ExpectedAwsAccountAlias',
+        'ExpoAccessTokenSecretArn',
         'HealthQueueArn',
         'HealthQueueUrl',
         'ImageRepositoryArn',
         'ImageRepositoryUri',
         'MonitoringDashboardName',
         'MonitoringDashboardUrl',
+        'PushDeadLetterQueueArn',
+        'PushIntegrationTruth',
+        'PushQueueArn',
+        'PushQueueUrl',
+        'PushRegistrationBuildAllowlistSecretArn',
+        'PushWorkerDeploymentState',
+        'PushWorkerLogGroupName',
+        'PushWorkerServiceArn',
+        'PushWorkerTaskDefinitionArn',
+        'PushWorkerTaskExecutionRoleArn',
+        'PushWorkerTaskRoleArn',
         'RuntimeRoleArn',
         'SesConfigurationSetName',
         'SesEmailEventDestinationManagement',

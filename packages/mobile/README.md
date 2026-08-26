@@ -37,17 +37,25 @@ Push registration uses one non-secret public build switch:
   any other value fails closed.
 
 The EAS project UUID is pinned in `app.json`. Both values are public application
-configuration and must never contain a token or credential. On every launch the
-app writes Expo's persisted automatic server-registration state to the explicit
-non-null value `{ "isEnabled": false }`. Runtime code deliberately avoids the
-`expo-notifications` package barrel because Expo 57 evaluates persisted
-auto-registration when that barrel loads. Token acquisition instead performs
-one request to the fixed Expo token endpoint only after build opt-in,
-authenticated-online session, permission, and native-token gates. That request
-has an eight-second deadline, is cancelled if authenticated state is lost, and
-never re-enables Expo's independent registration side path. Only a response
-matching Expo's strict push-token shape is posted to PSD EOC's canonical device
-capability.
+configuration and must never contain a token or credential. The `development`
+and `preview` EAS profiles explicitly force the switch to `false`; only the
+`production` profile sets it to `true`. Even that production value is not
+authorization. The app submits its platform, application ID, semantic app
+version, native build number, EAS project UUID, and embedded-only update mode,
+and the server accepts registration only when the exact tuple appears in the
+protected build allowlist documented in
+[CONFIGURATION.md](../../docs/CONFIGURATION.md#expo-push-activation-boundary).
+
+On every launch the app writes Expo's persisted automatic server-registration
+state to the explicit non-null value `{ "isEnabled": false }`. Runtime code
+deliberately avoids the `expo-notifications` package barrel because Expo 57
+evaluates persisted auto-registration when that barrel loads. Token acquisition
+instead performs one request to the fixed Expo token endpoint only after build
+opt-in, authenticated-online session, permission, native-build identity, and
+native-token gates. That request has an eight-second deadline, is cancelled if
+authenticated state is lost, and never re-enables Expo's independent
+registration side path. Only a response matching Expo's strict push-token shape
+is posted to PSD EOC's canonical device capability.
 
 Android creates `eoc-alerts` before permission/token work with maximum
 importance, default sound, vibration, and public lock-screen visibility. iOS
@@ -63,10 +71,13 @@ unlock, and routed only by the canonical event ID. Sign-out authenticates when
 locked and requires successful server revocation/push cleanup before local
 SecureStore state is removed; cleanup is never queued offline.
 
-Physical delivery remains a controlled external-integration run. The historical
-issue record is `docs/archive/evidence/issue-23-mobile-push.md`; current state is
-in `docs/INTEGRATIONS.md`. Never place push tokens, credentials, real
-recipients, or provider payloads in evidence.
+Physical delivery remains a controlled external-integration run. The activation
+record is
+[`issue-278-expo-push.md`](../../docs/archive/evidence/issue-278-expo-push.md);
+current state is in `docs/INTEGRATIONS.md`. APNs and FCM credentials, exact
+private builds, and the two physical-device drills require authenticated human
+work. Never place push tokens, credentials, real recipients, or raw provider
+payloads in evidence.
 
 ## Authentication configuration
 
