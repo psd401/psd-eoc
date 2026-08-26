@@ -342,7 +342,7 @@ jobs:
           outputs=artifacts/failure-drill/stack-outputs.json
           cluster=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapEcsClusterArn" "$outputs")
           task_definition=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".FailureDrillTaskDefinitionArn" "$outputs")
-          subnets=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapPrivateSubnetIds" "$outputs")
+          subnets=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".FailureDrillRunnerPublicSubnetIds" "$outputs")
           security_group=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".BootstrapSecurityGroupId" "$outputs")
           log_group=$(jq -er ".\"$FAILURE_DRILL_STACK_NAME\".FailureDrillLogGroupName" "$outputs")
           task_arn=$(aws ecs run-task \
@@ -352,7 +352,7 @@ jobs:
             --platform-version LATEST \
             --count 1 \
             --started-by "failure-drill-$GITHUB_RUN_ID" \
-            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=DISABLED}" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=ENABLED}" \
             --query 'tasks[0].taskArn' --output text)
           for _ in {1..160}; do
             status=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task_arn" \
@@ -499,8 +499,12 @@ jobs:
                 readback=$(aws apprunner describe-service --service-arn "$physical_id" 2>&1)
                 status=$?
                 set -e
-                [[ "$status" == "0" ]] && exists=true
-                [[ "$status" != "0" && "$readback" != *"ResourceNotFoundException"* ]] && { echo "::error::App Runner cleanup readback failed." >&2; exit 1; }
+                if ! classification=$(bun ../scripts/ops/failure-drills/finalize-evidence.ts \
+                  classify-apprunner-readback "$status" "$readback"); then
+                  echo "::error::App Runner cleanup readback failed." >&2
+                  exit 1
+                fi
+                [[ "$classification" == "present" ]] && exists=true
                 ;;
               AWS::ECR::Repository)
                 set +e
