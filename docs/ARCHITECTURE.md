@@ -166,10 +166,11 @@ names, file formats, or one blanket DAN for the database. The inventory is:
   content-addressed CSV/PDF objects. Expiration of a signed download URL does
   not dispose of its object.
 - `transport-and-operational-copies`
-Queue messages, provider callbacks, logs, backups, CI artifacts, and
-monitoring telemetry. The controlled mapping must decide which are official,
-secondary, or transitory copies; unrelated infrastructure lifecycle policies
-are outside the product-record boundary.
+  Queue messages, provider callbacks, logs, backups, CI artifacts, and
+  monitoring telemetry. The controlled mapping must decide which are official,
+  secondary, or transitory copies; unrelated infrastructure lifecycle policies
+  are outside the product-record boundary.
+
 <!-- docs-contract:records-retention-classes:end -->
 
 A single event can span lifecycle, journal, media, notification, delivery,
