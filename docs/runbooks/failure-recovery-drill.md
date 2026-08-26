@@ -17,6 +17,21 @@ service DNS, and a two-instance disposable Aurora cluster. It imports no Google
 or notification-provider credential and creates no SES configuration. Its
 CloudWatch alarms have no notification actions.
 
+## One-time account boundary
+
+Create a protected GitHub environment named `failure-drill`. Give it only the
+non-secret `AWS_ACCOUNT_ID`, `AWS_REGION`, and `AWS_DEPLOY_ROLE_ARN` variables;
+do not add or inherit environment secrets. The OIDC role's trust policy must
+allow the exact repository subject for `environment:failure-drill` alongside
+the existing production subject. Preserve the exact issuer and
+`sts.amazonaws.com` audience, and copy the existing repository subject while
+changing only its final environment name. Never replace the repository or
+environment with a wildcard.
+
+The drill entry point and the production deploy use separate concurrency
+groups. A production deployment waiting for human approval must not block a
+synthetic drill, and a long drill must not block that production approval.
+
 ## Scenarios
 
 One run executes all eight scenarios against one commit, image digest, and
