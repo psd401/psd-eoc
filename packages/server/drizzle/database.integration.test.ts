@@ -1652,6 +1652,43 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect(discriminatorCount[0]?.count).toBeGreaterThanOrEqual(12);
   });
 
+  test('defers retained channel-history scans while enforcing replacement checks', async () => {
+    const db = databaseConnection().db;
+    const constraints = await db.execute<{
+      constraint_name: string;
+      table_name: string;
+      validated: boolean;
+    }>(sql`
+      select
+        relation.relname as table_name,
+        constraint_record.conname as constraint_name,
+        constraint_record.convalidated as validated
+      from pg_catalog.pg_constraint as constraint_record
+      join pg_catalog.pg_class as relation
+        on relation.oid = constraint_record.conrelid
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public'
+        and constraint_record.conname in (
+          'outbox_channel_plan_shape',
+          'delivery_test_reports_channels_shape'
+        )
+      order by relation.relname
+    `);
+    expect([...constraints]).toEqual([
+      {
+        table_name: 'delivery_test_reports',
+        constraint_name: 'delivery_test_reports_channels_shape',
+        validated: false,
+      },
+      {
+        table_name: 'outbox',
+        constraint_name: 'outbox_channel_plan_shape',
+        validated: false,
+      },
+    ]);
+  });
+
   test('installs strict SMS lifecycle provenance and database-issued ordering', async () => {
     const db = databaseConnection().db;
     const columns = await db.execute<{
@@ -6043,6 +6080,47 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           ) as planned
           where intent.id = '00000000-0000-4000-8000-000000279010'::uuid
         `);
+        await expectConstraintViolation(
+          () =>
+            transaction.transaction(async (probe) => {
+              await probe.execute(sql`
+                insert into outbox (
+                  id, message_version, intent_id, event_id, event_kind,
+                  template_mode, purpose, event_type_version_id,
+                  roster_snapshot_id, roster_population, request_id,
+                  "authorization", channels, message, status, attempts,
+                  available_at, locked_until, published_at, failed_at,
+                  last_error_code, created_at
+                )
+                select
+                  id,
+                  message_version,
+                  intent_id,
+                  event_id,
+                  event_kind,
+                  template_mode,
+                  purpose,
+                  event_type_version_id,
+                  roster_snapshot_id,
+                  roster_population,
+                  request_id,
+                  "authorization",
+                  '[]'::jsonb,
+                  jsonb_set(message, '{channels}', '[]'::jsonb),
+                  status,
+                  attempts,
+                  available_at,
+                  locked_until,
+                  published_at,
+                  failed_at,
+                  last_error_code,
+                  created_at
+                from outbox
+                where id = '00000000-0000-4000-8000-000000279011'::uuid
+              `);
+            }),
+          'outbox_channel_plan_shape',
+        );
         await transaction.execute(sql`
           insert into dispatch_batches (
             id, outbox_id, intent_id, event_id, event_kind, template_mode,
@@ -6197,6 +6275,41 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             'worker'::invocation_source,
             null
           )
+        `);
+        await transaction.execute(sql`
+          alter table delivery_test_reports
+            disable trigger delivery_test_reports_monotonic_insert_guard
+        `);
+        await expectConstraintViolation(
+          () =>
+            transaction.transaction(async (probe) => {
+              await probe.execute(sql`
+                insert into delivery_test_reports (
+                  id, run_id, run_started_at, sequence,
+                  supersedes_report_id, status, channels, generated_at,
+                  finalized_by, source, reason_code
+                )
+                select
+                  id,
+                  run_id,
+                  run_started_at,
+                  sequence,
+                  supersedes_report_id,
+                  status,
+                  '[]'::jsonb,
+                  generated_at,
+                  finalized_by,
+                  source,
+                  reason_code
+                from delivery_test_reports
+                where id = '00000000-0000-4000-8000-000000279017'::uuid
+              `);
+            }),
+          'delivery_test_reports_channels_shape',
+        );
+        await transaction.execute(sql`
+          alter table delivery_test_reports
+            enable trigger delivery_test_reports_monotonic_insert_guard
         `);
         const retained = await transaction.execute<{
           channel_count: number;

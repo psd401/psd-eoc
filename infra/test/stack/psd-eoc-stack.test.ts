@@ -1361,9 +1361,36 @@ describe('App Runner runtime safety boundary', () => {
         properties(resource).ServiceName === 'psd-eoc-aws-eum-sms-worker',
     );
     expect(smsService).toBeDefined();
-    expect(properties(smsService?.[1] ?? {}).DesiredCount).toEqual({
+    const smsWorkerDesiredCount = properties(
+      smsService?.[1] ?? {},
+    ).DesiredCount;
+    expect(smsWorkerDesiredCount).toEqual({
       'Fn::If': ['ShouldRunAwsEumSmsWorker', 1, 0],
     });
+    const appRunnerService = properties(
+      onlyResource('AWS::AppRunner::Service'),
+    );
+    const appRunnerImage = asRecord(
+      asRecord(appRunnerService.SourceConfiguration).ImageRepository,
+    );
+    const appRunnerConfiguration = asRecord(appRunnerImage.ImageConfiguration);
+    const appRunnerEnvironment = new Map(
+      asArray(appRunnerConfiguration.RuntimeEnvironmentVariables).map(
+        (item) => {
+          const pair = asRecord(item);
+          return [String(pair.Name), pair.Value];
+        },
+      ),
+    );
+    const appRunnerSmsReadiness = appRunnerEnvironment.get(
+      'PSD_EOC_SMS_WORKER_READY',
+    );
+    expect(appRunnerSmsReadiness).toEqual({
+      'Fn::If': ['ShouldRunAwsEumSmsWorker', 'true', 'false'],
+    });
+    expect(asArray(asRecord(appRunnerSmsReadiness)['Fn::If'])[0]).toBe(
+      asArray(asRecord(smsWorkerDesiredCount)['Fn::If'])[0],
+    );
 
     const deliveryRule = resourceEntries('AWS::Events::Rule').find(
       ([, resource]) =>

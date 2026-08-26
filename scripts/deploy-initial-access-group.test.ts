@@ -196,6 +196,20 @@ describe('supported deployment workflow', () => {
       '$STACK_NAME:ProvisionAwsEumSmsResources=$PREVIOUS_SMS_PROVISIONED',
     );
     expect(stage).toContain('--previous-parameters true');
+    const cutover = workflow.slice(
+      workflow.indexOf('- name: Deploy the application'),
+      workflow.indexOf(
+        '- name: Verify the service is running the deployed image',
+      ),
+    );
+    expect(cutover).toContain(
+      '$STACK_NAME:EnableAwsEumSmsWorker=$SMS_WORKER_ENABLED',
+    );
+    expect(
+      workflow.match(
+        /\$STACK_NAME:EnableAwsEumSmsWorker=\$SMS_WORKER_ENABLED/gu,
+      ),
+    ).toHaveLength(1);
     for (const parameter of [
       'SmsRegistrationVerificationReference',
       'SmsOriginationIdentityArn',
