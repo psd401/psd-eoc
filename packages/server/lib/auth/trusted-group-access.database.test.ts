@@ -1,13 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  setDefaultTimeout,
-  test,
-} from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import {
@@ -20,8 +13,6 @@ import { decideAccess, MEMBERSHIP_FRESHNESS_MS } from './trusted-group-access';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
-
-setDefaultTimeout(30_000);
 
 const NOW = new Date('2026-08-19T12:00:00.000Z');
 const ADMIN_GROUP = randomUUID();

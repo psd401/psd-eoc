@@ -80,20 +80,17 @@ Environment secrets:
 - `OPERATIONS_ALARM_SMS_NUMBER`
 <!-- docs-contract:workflow-secrets:end -->
 
-The deploy workflow has two mutually exclusive manual inputs:
+The deploy workflow has one manual input:
 
 <!-- docs-contract:workflow-inputs:start -->
 
-- `failure_drill_run_id`
 - `rollback_image_digest`
 <!-- docs-contract:workflow-inputs:end -->
 
 Empty `rollback_image_digest` builds and deploys the selected commit. A value
 must be an existing immutable `sha256:` image digest. Rollback still uses the
 current commit's bootstrap image so forward-only migrations never run from an
-old application image. Setting `failure_drill_run_id` instead runs only the
-separately named synthetic failure-recovery workflow; it does not enter the
-production deploy job.
+old application image.
 
 ## Synthesized CloudFormation parameters
 

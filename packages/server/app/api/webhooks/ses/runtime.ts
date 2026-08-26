@@ -52,8 +52,6 @@ import {
   type ParsedSesEvent,
 } from '../../../../../../workers/email/ses-events';
 
-export { SES_CONFIGURATION_SET_NAME } from '../../../../../../workers/email/ses-events';
-
 export const SES_SNS_TOPIC_ARN_ENV = 'PSD_EOC_SES_SNS_TOPIC_ARN' as const;
 export const SES_WEBHOOK_MAX_BODY_BYTES = 512 * 1024;
 

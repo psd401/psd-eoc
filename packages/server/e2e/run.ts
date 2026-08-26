@@ -490,11 +490,6 @@ async function main(): Promise<void> {
       '.verification',
       'issue-32',
     );
-    const committedIssue31EvidenceDirectory = join(
-      REPOSITORY_ROOT,
-      '.verification',
-      'issue-31',
-    );
     const committedIssue341EvidenceDirectory = join(
       REPOSITORY_ROOT,
       '.verification',
@@ -529,11 +524,6 @@ async function main(): Promise<void> {
         ? committedIssue32EvidenceDirectory
         : join(createdStateDirectory, 'evidence-32');
     await mkdir(issue32EvidenceDirectory, { recursive: true });
-    const issue31EvidenceDirectory =
-      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
-        ? committedIssue31EvidenceDirectory
-        : join(createdStateDirectory, 'evidence-31');
-    await mkdir(issue31EvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -610,10 +600,6 @@ async function main(): Promise<void> {
       opened,
       districtAdministrator,
     );
-    // Both recovery flows only append synthetic updates and leave the drill
-    // active. Reusing this fixture keeps the all-flows records inventory
-    // stable while the issue-specific grep still exercises its own behavior.
-    const issue31EventId = issue344EventId;
     const issue32Media = await seedIssue32ReadyMedia(
       opened,
       issue32EventId,
@@ -628,7 +614,6 @@ async function main(): Promise<void> {
       join(createdStateDirectory, 'fixture.json'),
       JSON.stringify({
         eventId,
-        issue31EventId,
         issue344EventId,
         issue32EventId,
         issue32Media,
@@ -642,46 +627,45 @@ async function main(): Promise<void> {
 
     const port =
       20_000 + (Number.parseInt(randomUUID().slice(0, 4), 16) % 20_000);
-    const playwrightArguments = [
-      'bunx',
-      'playwright',
-      'test',
-      '--config',
-      join(import.meta.dir, 'playwright.config.ts'),
-    ];
-    const selectedFlow = process.env.PSD_EOC_E2E_FLOW?.trim();
-    if (selectedFlow) playwrightArguments.push('--grep', selectedFlow);
-    const child = Bun.spawn(playwrightArguments, {
-      cwd: REPOSITORY_ROOT,
-      env: {
-        ...inheritedRuntimeEnvironment(),
-        AWS_CONFIG_FILE: join(createdStateDirectory, 'no-aws-config'),
-        AWS_EC2_METADATA_DISABLED: 'true',
-        AWS_SHARED_CREDENTIALS_FILE: join(
-          createdStateDirectory,
-          'no-aws-credentials',
-        ),
-        DATABASE_DRIVER: 'postgres',
-        DATABASE_URL: disposable.url,
-        TEST_DATABASE_URL: disposable.url,
-        PSD_EOC_E2E_APP_PORT: String(port),
-        PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
-        PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
-        PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
-        PSD_EOC_E2E_ISSUE_31_EVIDENCE_DIR: issue31EvidenceDirectory,
-        PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR: issue32EvidenceDirectory,
-        PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
-        PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
-        PSD_EOC_E2E_SERVER_MODE: serverMode,
-        PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
-        PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
-        PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,
-        GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
+    const child = Bun.spawn(
+      [
+        'bunx',
+        'playwright',
+        'test',
+        '--config',
+        join(import.meta.dir, 'playwright.config.ts'),
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: {
+          ...inheritedRuntimeEnvironment(),
+          AWS_CONFIG_FILE: join(createdStateDirectory, 'no-aws-config'),
+          AWS_EC2_METADATA_DISABLED: 'true',
+          AWS_SHARED_CREDENTIALS_FILE: join(
+            createdStateDirectory,
+            'no-aws-credentials',
+          ),
+          DATABASE_DRIVER: 'postgres',
+          DATABASE_URL: disposable.url,
+          TEST_DATABASE_URL: disposable.url,
+          PSD_EOC_E2E_APP_PORT: String(port),
+          PSD_EOC_E2E_ARTIFACT_DIR: artifactDirectory,
+          PSD_EOC_E2E_STATE_DIR: createdStateDirectory,
+          PSD_EOC_E2E_EVIDENCE_DIR: evidenceDirectory,
+          PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR: issue32EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
+          PSD_EOC_E2E_SERVER_MODE: serverMode,
+          PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
+          PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
+          PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,
+          GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
+        },
+        stdin: 'inherit',
+        stdout: 'inherit',
+        stderr: 'inherit',
       },
-      stdin: 'inherit',
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
+    );
     const exitCode = await child.exited;
     if (exitCode !== 0) process.exitCode = exitCode;
     else await rm(artifactDirectory, { recursive: true, force: true });

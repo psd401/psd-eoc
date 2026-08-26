@@ -1,13 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  setDefaultTimeout,
-  test,
-} from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import {
   createDatabaseClient,
@@ -27,8 +20,6 @@ import { recipientIdForEmail, resolveEventAudience } from './event-audience';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
-
-setDefaultTimeout(30_000);
 
 const SCHOOL = randomUUID();
 const EMPTY_SCHOOL = randomUUID();

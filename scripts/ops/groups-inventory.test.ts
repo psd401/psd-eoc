@@ -6965,10 +6965,8 @@ describe('Google Groups inventory', () => {
 
   // This preserves the complete former command-line self-test in ordinary
   // discovery. A two-core CI runner needs just over one minute for the bounded
-  // subprocess, filesystem, and mapping cases together. Under the complete
-  // six-shard gate it can spend substantially longer waiting for CPU without
-  // changing the bounded work it performs.
+  // subprocess, filesystem, and mapping cases together.
   test('passes the complete synthetic safety and mapping suite', async () => {
     await runSelfTest();
-  }, 300_000);
+  }, 120_000);
 });

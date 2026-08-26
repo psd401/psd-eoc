@@ -39,9 +39,6 @@
     "test:e2e:issue-344:update-evidence": "PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
     "test:e2e:issue-32": "bun packages/server/e2e/run.ts",
     "test:e2e:issue-32:update-evidence": "PSD_EOC_E2E_SERVER_MODE=production PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
-    "test:e2e:issue-31": "bun run build && PSD_EOC_VERIFY_BUILT_PRODUCTION=true bun test scripts/ops/failure-drills/artifact-boundary.test.ts infra/test/stack/psd-eoc-stack.test.ts --test-name-pattern 'production (artifact|build|template)' && PSD_EOC_E2E_FLOW=synthetic-failure-recovery PSD_EOC_E2E_SERVER_MODE=production bun packages/server/e2e/run.ts",
-    "test:e2e:issue-31:update-evidence": "bun run build && PSD_EOC_VERIFY_BUILT_PRODUCTION=true bun test scripts/ops/failure-drills/artifact-boundary.test.ts infra/test/stack/psd-eoc-stack.test.ts --test-name-pattern 'production (artifact|build|template)' && PSD_EOC_E2E_FLOW=synthetic-failure-recovery PSD_EOC_E2E_SERVER_MODE=production PSD_EOC_E2E_UPDATE_EVIDENCE=true bun packages/server/e2e/run.ts",
-    "test:drills:issue-31": "bun scripts/ops/failure-drills/local-test-runner.ts",
     "test:e2e:mobile": "bun packages/mobile/e2e/run.ts",
     "test:e2e:mobile:verify": "bun run --cwd packages/mobile e2e:verify",
     "check": "bun run format:check && bun run lint && bun run verify:config && bun run verify:docs && bun run typecheck && bun run build && bun run test:full"

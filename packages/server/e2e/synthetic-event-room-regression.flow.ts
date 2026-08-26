@@ -21,11 +21,14 @@ test.describe('synthetic-event-room-regression', () => {
     const fixture = await readFixture();
     const eventPath = `/events/${fixture.issue344EventId}`;
     let failNextTimelineRead = false;
-    let failedReadObserved = false;
+    let observedFailedRead: (() => void) | undefined;
+    const failedRead = new Promise<void>((resolveFailure) => {
+      observedFailedRead = resolveFailure;
+    });
     await page.route(`**${eventPath}/api?*`, async (route) => {
       if (route.request().method() === 'GET' && failNextTimelineRead) {
         failNextTimelineRead = false;
-        failedReadObserved = true;
+        observedFailedRead?.();
         await route.abort('connectionfailed');
         return;
       }
@@ -46,12 +49,7 @@ test.describe('synthetic-event-room-regression', () => {
     await expect(page.getByLabel('Photo file')).toBeEnabled();
 
     failNextTimelineRead = true;
-    await expect
-      .poll(() => failedReadObserved, {
-        message: 'The timeline did not issue the injected failed read.',
-        timeout: 30_000,
-      })
-      .toBe(true);
+    await failedRead;
     await expect(
       page.getByRole('status').filter({ hasText: /Reconnecting|Offline/u }),
     ).toBeVisible({ timeout: 15_000 });
