@@ -5,8 +5,8 @@
 > references are guidance, not provider screenshots or install proof. Install
 > only when your district technology team supplies an approved test link.
 
-PSD EOC is distributed privately to approved Peninsula School District staff
-through an approved Google Play test. The first bounded pilot uses Internal
+PSD EOC is distributed privately to approved district staff through an
+approved Google Play test. The first bounded pilot uses Internal
 testing; the later durable staff path uses closed testing. Firebase App
 Distribution is a fallback only when District Technology explicitly directs
 you to it.
@@ -31,13 +31,12 @@ Installing the app does not start an incident, run a drill, or notify anyone.
    Google account if needed.
 2. Open the PSD EOC Play-test link sent through the approved district
    channel.
-3. Confirm that the page says **PSD EOC** and identifies Peninsula School
-   District. If it does not, stop and contact District Technology.
+3. Confirm that the page says **PSD EOC** and identifies your district. If it
+   does not, stop and contact District Technology.
 4. Tap **Become a tester**, then open the Google Play link and tap **Install**.
    Enrollment can take a few minutes to appear.
 5. Only after District Technology gives the separate registration confirmation
-   above, open **PSD EOC** and sign in with your approved staff account for the
-   configured hosted domain
+   above, open **PSD EOC** and sign in with your approved district staff
    account. Otherwise stop after **Install**.
 6. After that confirmation, follow the app's prompt to enroll this device and
    enable fingerprint, face, or the device's secure unlock. PSD EOC does not
@@ -89,9 +88,13 @@ above, complete these no-notification-send checks:
 2. Close PSD EOC, lock the device, unlock it normally, and reopen the app.
    Confirm the app requires the expected fingerprint, face, or device-secure
    unlock instead of asking for a PSD EOC PIN.
-3. In **Settings → Apps → PSD EOC → App info**, record the PSD EOC version.
-   Compare it with the exact version announced by District Technology. Stop if
-   it differs or no approved identity was announced.
+3. In **Settings → Apps → PSD EOC → App info**, record the PSD EOC version. In
+   PSD EOC, open **Release diagnostics** and record **Application version** and
+   **Native build version** (the Android version code). Require **Identity
+   available**, **Disabled — embedded store bundle only**, and **Embedded in
+   this installed binary**. Compare the exact app version and native build
+   version with the release announced by District Technology. Stop if either
+   differs or no approved identity was announced.
 4. Recheck the notification channel and Do Not Disturb settings above. Record
    pass/fail for the install, sign-in, authorized-site list, secure unlock, and
    settings. Do not include staff identities, message content, or device
