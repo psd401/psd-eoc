@@ -160,6 +160,56 @@ describe('initial access group deployment preflight', () => {
 });
 
 describe('supported deployment workflow', () => {
+  test('fails closed on absent or padded SMS carrier configuration', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+
+    for (const secret of [
+      'SMS_ORIGINATION_IDENTITY_ARN',
+      'SMS_HELP_MESSAGE',
+      'SMS_STOP_MESSAGE',
+    ]) {
+      expect(workflow).toContain(
+        `${secret}: \${{ secrets.${secret} || 'UNCONFIGURED' }}`,
+      );
+    }
+    expect(workflow).toContain('-z "$SMS_HELP_MESSAGE"');
+    expect(workflow).toContain('-z "$SMS_STOP_MESSAGE"');
+    expect(workflow).toContain('${#SMS_HELP_MESSAGE} -gt 160');
+    expect(workflow).toContain('${#SMS_STOP_MESSAGE} -gt 160');
+    expect(workflow).toContain('"$SMS_HELP_MESSAGE" =~ ^[[:space:]]');
+    expect(workflow).toContain('"$SMS_STOP_MESSAGE" =~ [[:space:]]$');
+  });
+
+  test('preserves every active SMS setting while staging migrations', async () => {
+    const workflow = await Bun.file(WORKFLOW).text();
+    const stage = workflow.slice(
+      workflow.indexOf(
+        '- name: Stage the bootstrap task without changing the live service',
+      ),
+      workflow.indexOf('- name: Run database migrations'),
+    );
+
+    expect(stage).toContain(
+      '$STACK_NAME:EnableAwsEumSmsWorker=$PREVIOUS_SMS_ENABLED',
+    );
+    expect(stage).toContain(
+      '$STACK_NAME:ProvisionAwsEumSmsResources=$PREVIOUS_SMS_PROVISIONED',
+    );
+    expect(stage).toContain('--previous-parameters true');
+    for (const parameter of [
+      'SmsRegistrationVerificationReference',
+      'SmsOriginationIdentityArn',
+      'SmsDestinationCountryCode',
+      'SmsHelpMessage',
+      'SmsStopMessage',
+    ]) {
+      expect(stage).not.toContain(`$STACK_NAME:${parameter}=`);
+      expect(
+        workflow.match(new RegExp(`\\$STACK_NAME:${parameter}=`, 'gu')),
+      ).toHaveLength(1);
+    }
+  });
+
   test('preflights before build and forwards every parameter in both CDK phases', async () => {
     const workflow = await Bun.file(WORKFLOW).text();
     const preflight = workflow.indexOf(
