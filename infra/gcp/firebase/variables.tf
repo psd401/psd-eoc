@@ -70,6 +70,7 @@ variable "required_services" {
     "firebase.googleapis.com",
     "firebaseinstallations.googleapis.com",
     "fcmregistrations.googleapis.com",
+    "iam.googleapis.com",
     "serviceusage.googleapis.com",
   ]
 
@@ -81,6 +82,7 @@ variable "required_services" {
       "firebase.googleapis.com",
       "firebaseinstallations.googleapis.com",
       "fcmregistrations.googleapis.com",
+      "iam.googleapis.com",
       "serviceusage.googleapis.com",
     ])
     error_message = "The isolated Firebase API allowlist cannot be widened with a variable override."

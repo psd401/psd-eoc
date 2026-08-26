@@ -8,10 +8,10 @@ run "isolated_firebase_plan" {
   command = plan
 
   variables {
-    project_id          = "example-eoc-firebase-push"
-    project_name        = "Example EOC Firebase"
-    organization_id     = "123456789012"
-    billing_account     = "ABCDEF-123456-ABCDEF"
+    project_id           = "example-eoc-firebase-push"
+    project_name         = "Example EOC Firebase"
+    organization_id      = "123456789012"
+    billing_account      = "ABCDEF-123456-ABCDEF"
     android_package_name = "org.example.eoc"
     android_display_name = "Example EOC Android"
   }
@@ -37,7 +37,7 @@ run "isolated_firebase_plan" {
   }
 
   assert {
-    condition     = length(google_project_service.required) == 6
+    condition     = length(google_project_service.required) == 7
     error_message = "The fixed Firebase API allowlist must not be widened."
   }
 

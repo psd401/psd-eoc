@@ -26,5 +26,5 @@ terraform test
 
 Never place `google-services.json`, provider credentials, Terraform state, a
 plan file, or real device tokens in this repository. Creating credentials and
-linking FCM to EAS remains a human provider-console action. Applying this root
-does not authorize a notification or prove delivery.
+linking FCM to EAS remains a protected operator action outside this Terraform
+root. Applying this root does not authorize a notification or prove delivery.
