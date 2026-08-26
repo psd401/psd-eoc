@@ -24,6 +24,7 @@ const DATABASE_NAME_PATTERN = /^psd_eoc_issue31_[a-f0-9]{32}_test$/u;
 const NON_DATABASE_TEST_FILES = Object.freeze([
   'scripts/ops/failure-drills/contract.test.ts',
   'scripts/ops/failure-drills/drill-callback-route.test.ts',
+  'scripts/ops/failure-drills/drill-session-boundary.test.ts',
   'scripts/ops/failure-drills/finalize-evidence.test.ts',
   'scripts/ops/failure-drills/artifact-boundary.test.ts',
   'scripts/ops/failure-drills/local-test-runner.test.ts',

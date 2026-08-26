@@ -349,6 +349,7 @@ async function createDeployedScenarioFixture(): Promise<DeployedScenarioFixture>
       method: 'POST',
       headers: {
         Authorization: `Bearer ${requiredEnvironment('PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN')}`,
+        Origin: applicationOrigin,
       },
     },
   );
@@ -1172,14 +1173,18 @@ async function runDeployedWorkerTermination(): Promise<ScenarioExecution> {
 async function runDeployedCallbackReplay(): Promise<ScenarioExecution> {
   const item = fixture().callbackItem;
   const callbackId = randomUUID();
+  const applicationOrigin = requiredEnvironment(
+    'PSD_EOC_FAILURE_DRILL_APP_ORIGIN',
+  );
   const beforeJournalCount = await journalCount();
   const response = await fetch(
-    `${requiredEnvironment('PSD_EOC_FAILURE_DRILL_APP_ORIGIN')}/api/failure-drills/callback`,
+    `${applicationOrigin}/api/failure-drills/callback`,
     {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${requiredEnvironment('PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN')}`,
         'Content-Type': 'application/json',
+        Origin: applicationOrigin,
       },
       body: JSON.stringify({ attemptId: item.attempt.id, callbackId }),
     },

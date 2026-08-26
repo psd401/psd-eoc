@@ -366,10 +366,11 @@ jobs:
           aws logs filter-log-events --log-group-name "$log_group" \
             --query 'events[].message' --output json \
             > artifacts/failure-drill/drill-log-messages.json
-          jq -cer '
+          manifest=$(jq -cer '
             map(fromjson? | select(.kind == "failure-drill-manifest")) |
             if length == 1 then .[0].manifest else error("expected one manifest") end
-          ' artifacts/failure-drill/drill-log-messages.json \
+          ' artifacts/failure-drill/drill-log-messages.json)
+          printf '%s\n' "$manifest" \
             > artifacts/failure-drill/manifest-pending-cleanup.json
           bun scripts/ops/failure-drills/validate-evidence.ts \
             artifacts/failure-drill/manifest-pending-cleanup.json
@@ -559,7 +560,7 @@ jobs:
         run: |
           set -euo pipefail
           input=artifacts/failure-drill/manifest-pending-cleanup.json
-          if [[ -f "$input" ]]; then
+          if [[ -s "$input" ]]; then
             bun scripts/ops/failure-drills/finalize-evidence.ts \
               "$input" artifacts/failure-drill/cleanup-observation.json \
               artifacts/failure-drill/manifest.json

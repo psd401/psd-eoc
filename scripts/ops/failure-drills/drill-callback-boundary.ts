@@ -16,6 +16,7 @@ export function authorizeSyntheticCallbackRequest(
   const region = process.env.AWS_REGION;
   const token = process.env.PSD_EOC_FAILURE_DRILL_OPERATOR_TOKEN;
   const supplied = request.headers.get('authorization');
+  const suppliedOrigin = request.headers.get('origin');
   if (
     process.env.PSD_EOC_FAILURE_DRILL_DEPLOYMENT_CLASS !== 'non-production' ||
     process.env.PSD_EOC_FAILURE_DRILL_PROVIDER_MODE !== 'mocked' ||
@@ -26,7 +27,7 @@ export function authorizeSyntheticCallbackRequest(
     region === undefined ||
     !/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u.test(region) ||
     origin === undefined ||
-    origin !== new URL(request.url).origin ||
+    suppliedOrigin !== origin ||
     !/^https:\/\/[a-z0-9][a-z0-9-]{0,62}\.[a-z0-9-]+\.awsapprunner\.com$/u.test(
       origin,
     ) ||
