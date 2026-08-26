@@ -498,6 +498,9 @@ describe('mobile distribution configuration', () => {
     expect(apple).toContain('| `configured-unverified`');
     expect(play).toContain('| `configured-unverified`');
     expect(apple).toContain('1.0.5/build 11');
+    expect(apple).toContain('assigned to the approved external group');
+    expect(apple).toContain('automatic tester notifications disabled');
+    expect(apple).toContain('`Waiting for Review`');
     expect(apple).toContain(
       'no exact 1.0.5 physical-device installation, launch, or diagnostic readback exists',
     );
