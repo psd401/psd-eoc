@@ -36,6 +36,8 @@ const NON_DATABASE_TEST_FILES = Object.freeze([
   'packages/server/lib/testing/database.test.ts',
   'packages/server/lib/roster/groups-sync.test.ts',
   'packages/server/lib/capabilities/events.test.ts',
+  'packages/server/drizzle/migration-chain.test.ts',
+  'packages/server/db/schema-enums.test.ts',
 ]);
 
 const FOCUSED_NON_DATABASE_CAPTURE_TESTS = Object.freeze([
@@ -54,6 +56,11 @@ const FOCUSED_NON_DATABASE_CAPTURE_TESTS = Object.freeze([
 ]);
 
 const FOCUSED_DATABASE_TESTS = Object.freeze([
+  Object.freeze({
+    path: 'scripts/ops/failure-drills/drill-session-route.integration.test.ts',
+    pattern: 'issues a session and starts an event from seeded mocked channels',
+    scenarioId: undefined,
+  }),
   Object.freeze({
     path: 'packages/server/lib/roster/groups-sync.integration.test.ts',
     pattern:

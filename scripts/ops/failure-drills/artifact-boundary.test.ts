@@ -22,6 +22,10 @@ const failureDrillRunner = new URL(
   './failure-drill-runner.ts',
   import.meta.url,
 );
+const failureDrillSessionRoute = new URL(
+  './drill-session-route.ts',
+  import.meta.url,
+);
 const remoteFailureDrillE2e = new URL('./remote-e2e.ts', import.meta.url);
 const productionBuild = new URL(
   '../../../packages/server/.next/server',
@@ -108,6 +112,16 @@ test('the separate synthetic artifact adds the runner and operator route at buil
     'packages/server/app/api/failure-drills/callback/drill-callback-boundary.ts',
   );
   expect(drill).toContain('org.psd-eoc.provider-mode="mocked"');
+});
+
+test('the injected Next session route exports only supported route fields', async () => {
+  const route = await readFile(failureDrillSessionRoute, 'utf8');
+  const exportedNames = [
+    ...route.matchAll(
+      /^export\s+(?:(?:async\s+)?function|const|class|type|interface)\s+([A-Za-z_$][\w$]*)/gmu,
+    ),
+  ].map((match) => match[1]);
+  expect(exportedNames).toEqual(['dynamic', 'POST']);
 });
 
 test('the drill workflow uses a fresh exact stack and receives no live secret namespace', async () => {
