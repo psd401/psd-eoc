@@ -6378,6 +6378,376 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     }
   });
 
+  test('grants provider runtimes only the durable state access they execute', async () => {
+    const db = databaseConnection().db;
+    const privileges = await db.execute<{
+      tableName: string;
+      canSelect: boolean;
+      canInsertAnyColumn: boolean;
+      canInsertWholeRow: boolean;
+      canUpdateAnyColumn: boolean;
+      canDelete: boolean;
+      canTruncate: boolean;
+      publicHasAnyPrivilege: boolean;
+    }>(sql`
+      select
+        runtime_table.table_name as "tableName",
+        has_table_privilege(
+          'psd_eoc_app', 'public.' || runtime_table.table_name, 'SELECT'
+        ) as "canSelect",
+        has_any_column_privilege(
+          'psd_eoc_app', 'public.' || runtime_table.table_name, 'INSERT'
+        ) as "canInsertAnyColumn",
+        has_table_privilege(
+          'psd_eoc_app', 'public.' || runtime_table.table_name, 'INSERT'
+        ) as "canInsertWholeRow",
+        has_any_column_privilege(
+          'psd_eoc_app', 'public.' || runtime_table.table_name, 'UPDATE'
+        ) as "canUpdateAnyColumn",
+        has_table_privilege(
+          'psd_eoc_app', 'public.' || runtime_table.table_name, 'DELETE'
+        ) as "canDelete",
+        has_table_privilege(
+          'psd_eoc_app', 'public.' || runtime_table.table_name, 'TRUNCATE'
+        ) as "canTruncate",
+        exists (
+          select 1
+          from pg_catalog.pg_class as public_table
+          join pg_catalog.pg_namespace as public_namespace
+            on public_namespace.oid = public_table.relnamespace
+          cross join lateral aclexplode(
+            coalesce(
+              public_table.relacl,
+              acldefault('r', public_table.relowner)
+            )
+          ) as public_privilege
+          where public_namespace.nspname = 'public'
+            and public_table.relname = runtime_table.table_name
+            and public_privilege.grantee = 0
+        ) as "publicHasAnyPrivilege"
+      from unnest(array[
+        'expo_push_provider_io',
+        'expo_push_receipt_polls',
+        'expo_push_retry_schedules',
+        'sms_provider_io',
+        'sms_retry_schedules'
+      ]::text[]) as runtime_table(table_name)
+      order by runtime_table.table_name
+    `);
+    expect([...privileges]).toEqual([
+      {
+        tableName: 'expo_push_provider_io',
+        canSelect: true,
+        canInsertAnyColumn: true,
+        canInsertWholeRow: false,
+        canUpdateAnyColumn: true,
+        canDelete: false,
+        canTruncate: false,
+        publicHasAnyPrivilege: false,
+      },
+      {
+        tableName: 'expo_push_receipt_polls',
+        canSelect: true,
+        canInsertAnyColumn: true,
+        canInsertWholeRow: false,
+        canUpdateAnyColumn: true,
+        canDelete: false,
+        canTruncate: false,
+        publicHasAnyPrivilege: false,
+      },
+      {
+        tableName: 'expo_push_retry_schedules',
+        canSelect: true,
+        canInsertAnyColumn: true,
+        canInsertWholeRow: false,
+        canUpdateAnyColumn: false,
+        canDelete: false,
+        canTruncate: false,
+        publicHasAnyPrivilege: false,
+      },
+      {
+        tableName: 'sms_provider_io',
+        canSelect: true,
+        canInsertAnyColumn: true,
+        canInsertWholeRow: false,
+        canUpdateAnyColumn: true,
+        canDelete: false,
+        canTruncate: false,
+        publicHasAnyPrivilege: false,
+      },
+      {
+        tableName: 'sms_retry_schedules',
+        canSelect: true,
+        canInsertAnyColumn: true,
+        canInsertWholeRow: false,
+        canUpdateAnyColumn: false,
+        canDelete: false,
+        canTruncate: false,
+        publicHasAnyPrivilege: false,
+      },
+    ]);
+
+    const [columns] = await db.execute<{
+      canCompleteExpoProvider: boolean;
+      canRewriteExpoFingerprint: boolean;
+      canInsertExpoProviderIdentity: boolean;
+      canInsertExpoProviderCompletion: boolean;
+      canLeaseExpoReceipt: boolean;
+      canRewriteExpoReceiptTarget: boolean;
+      canInsertExpoReceiptTarget: boolean;
+      canInsertExpoReceiptLease: boolean;
+      canInsertExpoRetrySource: boolean;
+      canInsertExpoRetryGeneratedId: boolean;
+      canCompleteSmsProvider: boolean;
+      canRewriteSmsFingerprint: boolean;
+      canInsertSmsProviderIdentity: boolean;
+      canInsertSmsProviderCompletion: boolean;
+      canInsertSmsRetrySource: boolean;
+      canInsertSmsRetryGeneratedId: boolean;
+    }>(sql`
+      select
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_provider_io',
+          'completion', 'UPDATE'
+        ) as "canCompleteExpoProvider",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_provider_io',
+          'work_fingerprint', 'UPDATE'
+        ) as "canRewriteExpoFingerprint",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_provider_io',
+          'attempt_id', 'INSERT'
+        ) as "canInsertExpoProviderIdentity",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_provider_io',
+          'completion', 'INSERT'
+        ) as "canInsertExpoProviderCompletion",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_receipt_polls',
+          'lease_token', 'UPDATE'
+        ) as "canLeaseExpoReceipt",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_receipt_polls',
+          'target', 'UPDATE'
+        ) as "canRewriteExpoReceiptTarget",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_receipt_polls',
+          'target', 'INSERT'
+        ) as "canInsertExpoReceiptTarget",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_receipt_polls',
+          'lease_token', 'INSERT'
+        ) as "canInsertExpoReceiptLease",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_retry_schedules',
+          'source_attempt_id', 'INSERT'
+        ) as "canInsertExpoRetrySource",
+        has_column_privilege(
+          'psd_eoc_app', 'public.expo_push_retry_schedules',
+          'next_attempt_id', 'INSERT'
+        ) as "canInsertExpoRetryGeneratedId",
+        has_column_privilege(
+          'psd_eoc_app', 'public.sms_provider_io',
+          'completion', 'UPDATE'
+        ) as "canCompleteSmsProvider",
+        has_column_privilege(
+          'psd_eoc_app', 'public.sms_provider_io',
+          'work_fingerprint', 'UPDATE'
+        ) as "canRewriteSmsFingerprint",
+        has_column_privilege(
+          'psd_eoc_app', 'public.sms_provider_io',
+          'attempt_id', 'INSERT'
+        ) as "canInsertSmsProviderIdentity",
+        has_column_privilege(
+          'psd_eoc_app', 'public.sms_provider_io',
+          'completion', 'INSERT'
+        ) as "canInsertSmsProviderCompletion",
+        has_column_privilege(
+          'psd_eoc_app', 'public.sms_retry_schedules',
+          'source_attempt_id', 'INSERT'
+        ) as "canInsertSmsRetrySource",
+        has_column_privilege(
+          'psd_eoc_app', 'public.sms_retry_schedules',
+          'next_attempt_id', 'INSERT'
+        ) as "canInsertSmsRetryGeneratedId"
+    `);
+    expect(columns).toEqual({
+      canCompleteExpoProvider: true,
+      canRewriteExpoFingerprint: false,
+      canInsertExpoProviderIdentity: true,
+      canInsertExpoProviderCompletion: false,
+      canLeaseExpoReceipt: true,
+      canRewriteExpoReceiptTarget: false,
+      canInsertExpoReceiptTarget: true,
+      canInsertExpoReceiptLease: false,
+      canInsertExpoRetrySource: true,
+      canInsertExpoRetryGeneratedId: false,
+      canCompleteSmsProvider: true,
+      canRewriteSmsFingerprint: false,
+      canInsertSmsProviderIdentity: true,
+      canInsertSmsProviderCompletion: false,
+      canInsertSmsRetrySource: true,
+      canInsertSmsRetryGeneratedId: false,
+    });
+
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+      await transaction.execute(sql`
+        select 1 from expo_push_provider_io limit 0 for update;
+        select 1 from expo_push_receipt_polls limit 0 for update;
+        select 1 from expo_push_retry_schedules limit 0;
+        select 1 from sms_provider_io limit 0 for update;
+        select 1 from sms_retry_schedules limit 0;
+        update expo_push_provider_io set completion = completion where false;
+        update expo_push_receipt_polls set lease_token = lease_token where false;
+        update sms_provider_io set completion = completion where false;
+        insert into expo_push_provider_io (attempt_id, work_fingerprint)
+          select null::uuid, null::varchar where false
+          on conflict (attempt_id) do nothing;
+        insert into expo_push_receipt_polls (
+          attempt_id, receipt_id, fingerprint, target,
+          first_poll_at, horizon_at, due_at
+        ) select
+          null::uuid, null::varchar, null::varchar, null::jsonb,
+          null::timestamptz, null::timestamptz, null::timestamptz
+        where false on conflict (attempt_id) do nothing;
+        insert into expo_push_retry_schedules (
+          source_attempt_id, source_fingerprint, receipt_id,
+          next_attempt_number, delay_milliseconds, retry_at,
+          expires_at, reason_code
+        ) select
+          null::uuid, null::varchar, null::varchar,
+          null::integer, null::integer, null::timestamptz,
+          null::timestamptz, null::varchar
+        where false on conflict (source_attempt_id) do nothing;
+        insert into sms_provider_io (attempt_id, work_fingerprint)
+          select null::uuid, null::varchar where false
+          on conflict (attempt_id) do nothing;
+        insert into sms_retry_schedules (
+          source_attempt_id, source_fingerprint, next_attempt_number,
+          delay_milliseconds, retry_at, expires_at, reason_code
+        ) select
+          null::uuid, null::varchar, null::integer,
+          null::integer, null::timestamptz, null::timestamptz, null::varchar
+        where false on conflict (source_attempt_id) do nothing;
+      `);
+    });
+
+    const rollbackProviderProof = new Error(
+      'rollback provider I/O append-only proof',
+    );
+    try {
+      await db.transaction(async (transaction) => {
+        await insertDeliveryTestStructuralFixture(transaction);
+        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+        await transaction.execute(sql`set local role "psd_eoc_app"`);
+        await transaction.execute(sql`
+          insert into expo_push_provider_io (attempt_id, work_fingerprint)
+          values (
+            '00000000-0000-4000-8000-000000030090'::uuid,
+            repeat('a', 64)
+          );
+          insert into sms_provider_io (attempt_id, work_fingerprint)
+          values (
+            '00000000-0000-4000-8000-000000030091'::uuid,
+            repeat('b', 64)
+          );
+          update expo_push_provider_io
+          set
+            completion = '{"state":"initial-expo"}'::jsonb,
+            completed_at = clock_timestamp()
+          where attempt_id =
+            '00000000-0000-4000-8000-000000030090'::uuid;
+          update sms_provider_io
+          set
+            completion = '{"state":"initial-sms"}'::jsonb,
+            completed_at = clock_timestamp()
+          where attempt_id =
+            '00000000-0000-4000-8000-000000030091'::uuid;
+        `);
+        await transaction.execute(sql`
+          do $provider_append_only$
+          begin
+            begin
+              update expo_push_provider_io
+              set completion = '{"state":"rewritten"}'::jsonb
+              where attempt_id =
+                '00000000-0000-4000-8000-000000030090'::uuid;
+              raise exception 'unexpected Expo overwrite acceptance';
+            exception when raise_exception then
+              if sqlerrm = 'unexpected Expo overwrite acceptance'
+                or sqlerrm <> 'Provider I/O truth is append-only' then
+                raise;
+              end if;
+            end;
+            begin
+              update expo_push_provider_io
+              set completion = null, completed_at = null
+              where attempt_id =
+                '00000000-0000-4000-8000-000000030090'::uuid;
+              raise exception 'unexpected Expo clear acceptance';
+            exception when raise_exception then
+              if sqlerrm = 'unexpected Expo clear acceptance'
+                or sqlerrm <> 'Provider I/O truth is append-only' then
+                raise;
+              end if;
+            end;
+            begin
+              update sms_provider_io
+              set completion = '{"state":"rewritten"}'::jsonb
+              where attempt_id =
+                '00000000-0000-4000-8000-000000030091'::uuid;
+              raise exception 'unexpected SMS overwrite acceptance';
+            exception when raise_exception then
+              if sqlerrm = 'unexpected SMS overwrite acceptance'
+                or sqlerrm <> 'Provider I/O truth is append-only' then
+                raise;
+              end if;
+            end;
+            begin
+              update sms_provider_io
+              set completion = null, completed_at = null
+              where attempt_id =
+                '00000000-0000-4000-8000-000000030091'::uuid;
+              raise exception 'unexpected SMS clear acceptance';
+            exception when raise_exception then
+              if sqlerrm = 'unexpected SMS clear acceptance'
+                or sqlerrm <> 'Provider I/O truth is append-only' then
+                raise;
+              end if;
+            end;
+          end;
+          $provider_append_only$;
+        `);
+        const [retained] = await transaction.execute<{
+          expoState: string;
+          smsState: string;
+        }>(sql`
+          select
+            (
+              select completion ->> 'state'
+              from expo_push_provider_io
+              where attempt_id =
+                '00000000-0000-4000-8000-000000030090'::uuid
+            ) as "expoState",
+            (
+              select completion ->> 'state'
+              from sms_provider_io
+              where attempt_id =
+                '00000000-0000-4000-8000-000000030091'::uuid
+            ) as "smsState"
+        `);
+        expect(retained).toEqual({
+          expoState: 'initial-expo',
+          smsState: 'initial-sms',
+        });
+        throw rollbackProviderProof;
+      });
+    } catch (error) {
+      if (error !== rollbackProviderProof) throw error;
+    }
+  });
+
   test('keeps SES provider-I/O claims durable, narrowly writable, and append-only', async () => {
     const db = databaseConnection().db;
     const [privileges] = await db.execute<{
