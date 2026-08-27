@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="13.736" timestamp="2026-08-26T23:12:09">
+    <testcase id="Issue 32 - reveal the synthetic drill notification on iOS" name="Issue 32 - reveal the synthetic drill notification on iOS" classname="Issue 32 - reveal the synthetic drill notification on iOS" file="packages/mobile/e2e/flows/reveal-push-ios.yaml" time="13.725" timestamp="2026-08-26T23:12:09" status="SUCCESS">
+      <properties>
+        <property name="tags" value="issue-32, synthetic-only, ios"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

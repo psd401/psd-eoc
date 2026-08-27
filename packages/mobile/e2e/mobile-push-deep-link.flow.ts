@@ -22,9 +22,17 @@ export async function verifyMobilePushDeepLinkFlow(): Promise<void> {
   assert(names.length === 2, 'Both platform push-open flows are required.');
   for (const name of names) {
     const flow = await Bun.file(resolve(flowRoot, name)).text();
+    const selectsDrillNotification =
+      name === 'open-push-ios.yaml'
+        ? flow.includes('start: 50%, 83%') &&
+          flow.includes('point: 15%, 83%') &&
+          flow.includes(
+            'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+          )
+        : flow.includes("'\\[DRILL\\] Synthetic earthquake drill'");
     assert(
-      flow.includes("'\\[DRILL\\] Synthetic earthquake drill'"),
-      `${name} must select the unmistakable DRILL notification.`,
+      selectsDrillNotification,
+      `${name} must open the DRILL notification.`,
     );
     assert(
       flow.includes('PSD_EOC_E2E_SYNTHETIC_ONLY'),

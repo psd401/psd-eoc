@@ -1,7 +1,7 @@
 # Issue #278 Expo Push activation evidence
 
-Status: **provider and physical-device evidence pending — Expo Push remains
-`mocked`**
+Status: **production worker enabled and native simulator proof complete —
+remote-provider and physical-device observations remain pending**
 
 This append-only record separates source verification from external facts. It
 must never contain an access token, device token, credential, raw provider
@@ -220,3 +220,57 @@ authorization, and a quiescent dark worker boundary only. It does not prove an
 Expo ticket, receipt, operating-system presentation, app tap, physical
 installation, or human observation, and it authorizes no automated
 notification.
+
+## Superseding production activation and native simulator proof — 2026-08-27 UTC
+
+The protected Expo robot access token was retained in AWS Secrets Manager with
+structured status `verified`; secret version
+`1eef3238-6d35-4d49-bb20-8b06a96c3017` is bound to credential reference
+`issue-278-provider-credentials-2026-08-26T205403Z`. No token value, device
+token, or recipient identity was read or retained.
+
+At `2026-08-27T00:41:35Z`, one locally authenticated direct CDK deployment
+completed with production stack status `UPDATE_COMPLETE`. CloudFormation read
+back `EnableExpoPushWorker=true`, the exact credential reference above,
+`PushWorkerDeploymentState=enabled`, deployed source
+`7a0164838008667e8b138197ba749c376ebaf39b`, and matching application/bootstrap
+digest
+`sha256:1f473afc9a2f19dd0bfb81f7f1c7b0b25e85c1a85b4bfbfc7af6251bbbf70492`.
+The Expo worker service was `ACTIVE` on task definition revision 7 with a
+completed primary rollout and desired/running/pending counts `1/1/0`. Through
+`2026-08-27T03:16:39Z`, its retained production log stream showed continuous
+heartbeats, zero completed receipts, and zero stuck-outbox samples, with no
+provider send recorded.
+
+The current native development clients then completed provider-free operating
+system notification drills with push registration forced off, a synthetic
+roster, and unmistakable DRILL classification:
+
+- iOS 26.5 on an iPhone 17 Pro simulator passed drill creation, local
+  notification presentation, a native Notification Center tap, exact event-room
+  routing, text update, and all-clear. Retained screenshots are
+  `.verification/issue-32/mobile-ios/ios-synthetic-push.png`
+  (`f4f2d7e220794478d6c701138df8db40692bdd7ba17cac49efbdf43473e69a48`),
+  `.verification/issue-32/mobile-ios/push-opened-event-room.png`
+  (`cb289a2d6acb8231992c07684480ade93d66f154c01f599b811488393660f167`),
+  and `.verification/issue-32/mobile-ios/ios-synthetic-all-clear.png`
+  (`8398a9a5b798f05da1873681e0c14dbd9326eb60e1fefcb547cd92732acd6420`).
+- Android 16 on the `medium_phone` API 36 emulator passed the same lifecycle.
+  The exact debug APK SHA-256 was
+  `ba4937d04e055beebb9e07d4682c2aec345c7adfb76f49d93a29d51b012f9620`.
+  Retained screenshots are
+  `.verification/issue-32/mobile-android/android-synthetic-push.png`
+  (`0dbf5d35f200d3e51161a6ea5919626f8873e7c03467e8f3356e0378fc35c41f`),
+  `.verification/issue-32/mobile-android/push-opened-event-room.png`
+  (`3d3949583b883b31ea45234203a82c6202040a5c8c5a781a181f5c181b6e3b15`),
+  and `.verification/issue-32/mobile-android/android-synthetic-all-clear.png`
+  (`f527fbf6196d9b6aa01441218ea0563789e2edc7e876330a02c6365f37c2c840`).
+
+All ten retained platform JUnit reports have zero failures: six iOS flows
+(including simulator normalization) and four Android flows. This closes the
+native presentation, tap-routing, and lifecycle implementation proof without a
+real provider or recipient. It does not claim Expo ticket acceptance, a final
+Expo receipt, installation of private-store iOS build 12 or Android code 6 on a
+physical device, or human observation. Those physical/provider rows above
+remain pending and require an authenticated human to initiate the bounded
+drill in the running app.

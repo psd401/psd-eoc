@@ -114,16 +114,13 @@ describe('issue-32 mobile E2E harness', () => {
       resolve(flowRoot, 'open-push-ios.yaml'),
     ).text();
     expect(iosNotification).toStartWith('appId: ${SYSTEM_APP_ID}\n');
-    expect(iosNotification).toContain(
-      "- tapOn: '\\[DRILL\\] Synthetic earthquake drill'",
-    );
-    expect(iosNotification.match(/direction: RIGHT/gu)).toHaveLength(2);
-    expect(iosNotification).toContain('duration: 900');
-    expect(iosNotification).toContain('duration: 1100');
-    expect(iosNotification).toContain("visible: 'Open'");
+    expect(iosNotification).toContain('start: 50%, 83%');
+    expect(iosNotification).toContain('end: 95%, 83%');
+    expect(iosNotification).toContain('point: 15%, 83%');
+    expect(iosNotification).toContain('duration: 700');
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
-    expect(iosNotification).not.toContain(
+    expect(iosNotification).toContain(
       'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
     );
     const openedEventRoom = await Bun.file(
@@ -140,9 +137,7 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosReveal).toContain('start: 25%, 1%');
     expect(iosReveal).toContain('start: 50%, 1%');
     expect(iosReveal).toContain('start: 35%, 1%');
-    expect(iosReveal).toContain(
-      "notVisible: '\\[DRILL\\] Synthetic earthquake drill'",
-    );
+    expect(iosReveal).toContain("notVisible: '.*Synthetic recipients only.*'");
     expect(iosReveal.match(/end: (25|35|50)%, (80|85|90)%/gu)).toHaveLength(3);
     const lifecycle = await Bun.file(
       resolve(flowRoot, 'event-room-lifecycle.yaml'),
@@ -185,11 +180,16 @@ describe('issue-32 mobile E2E harness', () => {
     expect(runner).toContain("'simctl', 'launch', deviceId, appId");
     expect(runner).toContain('await openIosDevelopmentClient');
     expect(runner).toContain(
-      "await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);\n    await Bun.sleep(5_000);\n    await maestro('reveal-push-ios.yaml');\n    await maestro('open-push-ios.yaml');",
+      "await maestro('reveal-push-ios.yaml');\n    await maestro('open-push-ios.yaml');",
     );
     expect(runner).not.toContain(
       "await maestro('open-push-ios.yaml');\n    await openIosDevelopmentClient",
     );
+    expect(
+      runner.match(/`\$\{identity\.appId\}\/\.MainActivity`/gu),
+    ).toHaveLength(2);
+    expect(runner).toContain("'start',\n      '-W',\n      '-n'");
+    expect(runner).not.toContain('android.intent.category.BROWSABLE');
     expect(runner).toContain("await maestro('push-opened-event-room.yaml')");
     expect(runner).toContain('iOS mobile E2E cannot skip the native build');
     expect(runner).not.toContain('http://10.0.2.2:8081');
