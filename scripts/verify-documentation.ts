@@ -214,12 +214,13 @@ function lineNumber(contents: string, offset: number): number {
   return contents.slice(0, offset).split('\n').length;
 }
 
-function currentMarkdownFiles(repositoryRoot: string): string[] {
+export function currentMarkdownFiles(repositoryRoot: string): string[] {
   const files: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (
         entry.name === '.git' ||
+        entry.name === '.terraform' ||
         entry.name === 'node_modules' ||
         entry.name === '.next'
       ) {

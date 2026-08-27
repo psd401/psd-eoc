@@ -1,0 +1,6 @@
+platform=android
+appId=net.psd401.eoc
+classification=drill
+roster=synthetic
+notification=local-provider-free
+pushRegistration=false

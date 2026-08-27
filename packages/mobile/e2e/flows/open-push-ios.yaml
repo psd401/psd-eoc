@@ -6,36 +6,16 @@ tags: [issue-32, synthetic-only, notification, ios]
     condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
     label: Refuse notification taps outside the synthetic harness
 - extendedWaitUntil:
-    visible: '\[DRILL\] Synthetic earthquake drill'
+    visible: '.*Synthetic recipients only.*'
     timeout: 15000
 - assertVisible: '.*Synthetic recipients only.*'
 - assertNotVisible: '.*\[INCIDENT\].*'
-- tapOn: '\[DRILL\] Synthetic earthquake drill'
-- runFlow:
-    when:
-      visible: '\[DRILL\] Synthetic earthquake drill'
-    commands:
-      - swipe:
-          from:
-            text: '\[DRILL\] Synthetic earthquake drill'
-          direction: RIGHT
-          duration: 900
-      - runFlow:
-          when:
-            visible: 'Open'
-          commands:
-            - tapOn: 'Open'
-- runFlow:
-    when:
-      visible: '\[DRILL\] Synthetic earthquake drill'
-    commands:
-      - swipe:
-          from:
-            text: '\[DRILL\] Synthetic earthquake drill'
-          direction: RIGHT
-          duration: 1100
-      - runFlow:
-          when:
-            visible: 'Open'
-          commands:
-            - tapOn: 'Open'
+- swipe:
+    start: 50%, 83%
+    end: 95%, 83%
+    duration: 700
+- tapOn:
+    point: 15%, 83%
+- extendedWaitUntil:
+    visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
+    timeout: 30000

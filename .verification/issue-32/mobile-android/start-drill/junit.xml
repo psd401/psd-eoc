@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="29.757" timestamp="2026-08-26T23:05:10">
+    <testcase id="Issue 32 - start the provider-free synthetic drill" name="Issue 32 - start the provider-free synthetic drill" classname="Issue 32 - start the provider-free synthetic drill" file="packages/mobile/e2e/flows/start-drill.yaml" time="29.736" timestamp="2026-08-26T23:05:10" status="SUCCESS">
+      <properties>
+        <property name="tags" value="issue-32, synthetic-only"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="28.809" timestamp="2026-08-26T23:06:12">
+    <testcase id="Issue 32 - post text and all-clear the opened drill" name="Issue 32 - post text and all-clear the opened drill" classname="Issue 32 - post text and all-clear the opened drill" file="packages/mobile/e2e/flows/event-room-lifecycle.yaml" time="28.791" timestamp="2026-08-26T23:06:12" status="SUCCESS">
+      <properties>
+        <property name="tags" value="issue-32, synthetic-only, event-room"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

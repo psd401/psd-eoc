@@ -78,6 +78,12 @@ async function withinRollbackTransaction(
 ): Promise<void> {
   try {
     await databaseConnection().db.transaction(async (transaction) => {
+      // The stale-roster report resolves the latest complete snapshot. Keep
+      // that meaning fixed for this rollback-scoped fixture even while the
+      // full gate runs other database suites in parallel.
+      await transaction.execute(
+        sql`set transaction isolation level repeatable read`,
+      );
       await operation(transaction as unknown as PostgresDatabase);
       throw TEST_ROLLBACK;
     });
@@ -350,7 +356,11 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
       };
       const generatedAt = new Date(fixture.capturedAt.getTime() + 3_000);
       const before = await staleReport(database, generatedAt);
-      expect(before.staleRecipients).toEqual([
+      expect(
+        before.staleRecipients.filter(
+          (recipient) => recipient.recipientId === fixture.recipientId,
+        ),
+      ).toEqual([
         {
           recipientId: fixture.recipientId,
           reason: 'no-active-push-endpoint',
@@ -382,7 +392,11 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
 
       const after = await staleReport(database, generatedAt);
       expect(after.status).toBe('stale');
-      expect(after.staleRecipients).toEqual([
+      expect(
+        after.staleRecipients.filter(
+          (recipient) => recipient.recipientId === fixture.recipientId,
+        ),
+      ).toEqual([
         { recipientId: fixture.recipientId, reason: 'no-active-endpoint' },
       ]);
       expect(JSON.stringify(after)).not.toContain(fixture.email);
