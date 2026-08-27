@@ -1,7 +1,7 @@
 # Issue #278 Expo Push activation evidence
 
-Status: **provider and physical-device evidence pending — Expo Push remains
-`mocked`**
+Status: **production worker enabled and native simulator proof complete —
+remote-provider and physical-device observations remain pending**
 
 This append-only record separates source verification from external facts. It
 must never contain an access token, device token, credential, raw provider
@@ -95,3 +95,182 @@ receipt; an Expo receipt is not operating-system presentation; presentation is
 not an app tap; and none of them alone proves human observation. Until both
 physical tables and prerequisites are complete, no physical-device delivery is
 claimed and no automated send is permitted.
+
+## Superseding provider-free and dark-deployment readback — 2026-08-26 UTC
+
+The earlier provider-free section's statement that final CI and two-platform
+native artifacts were pending is superseded by completed workflow run
+`32940527287` at commit `56cd9fd010b202d17349519b0b1b93b9fcd50c15`:
+
+- the authoritative repository gate and issue #278 provider-free lifecycle
+  verification passed;
+- the synthetic iOS drill lifecycle passed and retained artifact
+  `mobile-e2e-ios-32940527287-1` (`9596988305`); and
+- the synthetic Android drill lifecycle passed and retained artifact
+  `mobile-e2e-android-32940527287-1` (`9597111031`).
+
+Production deployment run `32975859074` completed from commit
+`22592929ceb6044c70a5904f06ba28f8ad2a7d2c`. It created the conditional Expo
+worker, queue/DLQ, protected secret boundaries, and alarms in dark mode with
+the worker disabled. This remains deployment-topology proof only. It does not
+prove a credentialed provider handoff, a physical-device presentation or tap,
+or human receipt, and it does not authorize an automated notification.
+
+## Superseding isolated-provider credential readback — 2026-08-26 UTC
+
+At `2026-08-26T20:54:03Z`, the dedicated Firebase project
+`eoc-push-prod-c5c14b` and its exact `net.psd401.eoc` Android app were present
+in the independent `terraform/gcp/firebase-isolated` state. The final OpenTofu
+readback reported no changes. That root enables only its fixed Firebase/FCM,
+project-management, billing, service-usage, and IAM API allowlist; it still
+declares no Google Groups access, IAM bindings, service accounts, datastore,
+hosting, or storage resources.
+
+The protected provider configuration was then retained outside the repository:
+
+- EAS production environment variable `GOOGLE_SERVICES_JSON` has immutable
+  variable ID `8226eb0b-04fb-4a10-9bee-ebeeaab4be36`, type `file`, and
+  visibility `SECRET`. Its contents were not read back or retained here.
+- EAS FCM V1 for `net.psd401.eoc` is assigned to the dedicated
+  `expo-push-delivery@eoc-push-prod-c5c14b.iam.gserviceaccount.com` identity.
+  Google IAM readback showed only
+  `roles/firebasecloudmessaging.admin` for that identity; the unrelated Play
+  submission credential was left unchanged.
+- Apple APNs key `P7TQSB2728` is production-only and topic-restricted to
+  `net.psd401.eoc`. EAS assigned that key to the same bundle identifier. No
+  other Apple service or application topic was enabled.
+
+Credential verification reference:
+`issue-278-provider-credentials-2026-08-26T205403Z`. This proves isolated
+project provisioning and token-free EAS credential assignment only. It does
+not prove an exact native build, Expo ticket, final receipt, device
+presentation, app tap, or human observation, and it authorizes no automated
+notification.
+
+## Direct-CDK dark runtime readback — 2026-08-26 UTC
+
+At `2026-08-26T23:02:27Z`, the protected production stack `PsdEoc` reached
+`UPDATE_COMPLETE` after one locally authenticated direct CDK command built and
+published the application asset, ran the native bootstrap, and completed the
+App Runner cutover. CloudFormation reported deployed source
+`a9ca6b8a75ef750db532696da12e46821a0983ad`; the application and bootstrap
+outputs both resolved to immutable digest
+`sha256:07118c896134fca7cf568313d2d4af4ccc59253fc1a16060ccfd81017882369c`.
+No GitHub environment, OIDC role, repository secret, or deployment workflow
+participated.
+
+The post-deployment push boundary remained dark and quiescent:
+
+- `EnableExpoPushWorker=false` and
+  `ExpoCredentialVerificationReference=UNVERIFIED`;
+- ECS service `psd-eoc-expo-push-worker` was active at desired/running/pending
+  `0/0/0` on task definition revision 5;
+- both `psd-eoc-push` and `psd-eoc-push-dlq` reported zero visible, in-flight,
+  and delayed messages; and
+- the protected Expo secret had only the exact `accessToken` and `status` keys,
+  with `status=UNCONFIGURED`. No token value was read or retained.
+
+Evidence reference: `issue-278-direct-cdk-dark-runtime-2026-08-26T230227Z`.
+This proves the direct-CDK deployment path, bootstrap, immutable runtime
+identity, deployed dark worker topology, and post-deployment quiescence only.
+It does not prove a credentialed Expo handoff, ticket, receipt, device
+presentation, app tap, physical installation, or human observation, and it
+authorizes no automated notification.
+
+## Exact native builds and private distribution — 2026-08-26 UTC
+
+EAS built both embedded-only 1.0.5 production artifacts from commit
+`99e478361c01c8072104c64fcd5e3ca34d008e76`:
+
+- iOS build 12 is EAS build `ca6b4b4d-5ccd-4414-a7ec-bea95ee52191`,
+  artifact
+  `https://expo.dev/artifacts/eas/o_L5fGxzFby6kLBLLiO7olJBnHROFdI5SEWeZDpN5t4.ipa`,
+  and SHA-256
+  `9c414f3384aa8e04b9dc716233fa92482f39273b0c6282e86d7c507d71115814`.
+  Exact submission `73c0a30d-23eb-46c7-bc8f-f62ea2b178cb` completed Apple
+  upload and processing. App Store Connect build
+  `43a11cd2-64de-443d-b439-eb8b32685f51` is assigned to the existing
+  `PSD EOC Testers` external group with automatic notifications disabled and
+  is waiting for beta review. The superseded build 11 was removed from review
+  before build 12 was submitted.
+- Android code 6 is EAS build `1556fd0a-f1da-4fcf-8565-caedfc4fe772`,
+  artifact
+  `https://expo.dev/artifacts/eas/8TFcecmf94GN20w6tks4luyV7OmQGt31pH670kqVjKM.aab`,
+  and SHA-256
+  `f8d5f987d2637e507dbd1d559159833723d201f854b06b9fbbb4a7f310fad2f0`.
+  Exact submission `fb278800-12bb-4807-9421-2d4595d9b695` completed and Play
+  release 4 shows code 6 active for the existing `PSD EOC initial pilot`
+  Internal testers. EAS submission `dc0a9d0d-6c98-4c03-956c-09119dcdb77f`
+  could not upload the same code a second time; Play's artifact library was
+  therefore used to save that exact code 6 in Alpha draft release 1 with the
+  same tester list and United States targeting. The Alpha draft was not rolled
+  out or sent for review.
+
+At `2026-08-26T21:37:50Z`, production stack `PsdEoc` was
+`UPDATE_COMPLETE`, `EnableExpoPushWorker` remained `false`, and both
+`psd-eoc-push` and `psd-eoc-push-dlq` reported zero visible, in-flight, and
+delayed messages. Protected allowlist version
+`765d13e0-f6ae-4c44-8e24-6df6b61d4de6` read back only exact iOS build 12 and
+Android code 6 tuples. The Expo server secret still reported status
+`UNCONFIGURED`; no token value was read or retained.
+
+Evidence reference: `issue-278-exact-builds-2026-08-26T213750Z`. This proves
+signed exact builds, private-store placement, exact registration
+authorization, and a quiescent dark worker boundary only. It does not prove an
+Expo ticket, receipt, operating-system presentation, app tap, physical
+installation, or human observation, and it authorizes no automated
+notification.
+
+## Superseding production activation and native simulator proof — 2026-08-27 UTC
+
+The protected Expo robot access token was retained in AWS Secrets Manager with
+structured status `verified`; secret version
+`1eef3238-6d35-4d49-bb20-8b06a96c3017` is bound to credential reference
+`issue-278-provider-credentials-2026-08-26T205403Z`. No token value, device
+token, or recipient identity was read or retained.
+
+At `2026-08-27T00:41:35Z`, one locally authenticated direct CDK deployment
+completed with production stack status `UPDATE_COMPLETE`. CloudFormation read
+back `EnableExpoPushWorker=true`, the exact credential reference above,
+`PushWorkerDeploymentState=enabled`, deployed source
+`7a0164838008667e8b138197ba749c376ebaf39b`, and matching application/bootstrap
+digest
+`sha256:1f473afc9a2f19dd0bfb81f7f1c7b0b25e85c1a85b4bfbfc7af6251bbbf70492`.
+The Expo worker service was `ACTIVE` on task definition revision 7 with a
+completed primary rollout and desired/running/pending counts `1/1/0`. Through
+`2026-08-27T03:16:39Z`, its retained production log stream showed continuous
+heartbeats, zero completed receipts, and zero stuck-outbox samples, with no
+provider send recorded.
+
+The current native development clients then completed provider-free operating
+system notification drills with push registration forced off, a synthetic
+roster, and unmistakable DRILL classification:
+
+- iOS 26.5 on an iPhone 17 Pro simulator passed drill creation, local
+  notification presentation, a native Notification Center tap, exact event-room
+  routing, text update, and all-clear. Retained screenshots are
+  `.verification/issue-32/mobile-ios/ios-synthetic-push.png`
+  (`f4f2d7e220794478d6c701138df8db40692bdd7ba17cac49efbdf43473e69a48`),
+  `.verification/issue-32/mobile-ios/push-opened-event-room.png`
+  (`cb289a2d6acb8231992c07684480ade93d66f154c01f599b811488393660f167`),
+  and `.verification/issue-32/mobile-ios/ios-synthetic-all-clear.png`
+  (`8398a9a5b798f05da1873681e0c14dbd9326eb60e1fefcb547cd92732acd6420`).
+- Android 16 on the `medium_phone` API 36 emulator passed the same lifecycle.
+  The exact debug APK SHA-256 was
+  `ba4937d04e055beebb9e07d4682c2aec345c7adfb76f49d93a29d51b012f9620`.
+  Retained screenshots are
+  `.verification/issue-32/mobile-android/android-synthetic-push.png`
+  (`0dbf5d35f200d3e51161a6ea5919626f8873e7c03467e8f3356e0378fc35c41f`),
+  `.verification/issue-32/mobile-android/push-opened-event-room.png`
+  (`3d3949583b883b31ea45234203a82c6202040a5c8c5a781a181f5c181b6e3b15`),
+  and `.verification/issue-32/mobile-android/android-synthetic-all-clear.png`
+  (`f527fbf6196d9b6aa01441218ea0563789e2edc7e876330a02c6365f37c2c840`).
+
+All ten retained platform JUnit reports have zero failures: six iOS flows
+(including simulator normalization) and four Android flows. This closes the
+native presentation, tap-routing, and lifecycle implementation proof without a
+real provider or recipient. It does not claim Expo ticket acceptance, a final
+Expo receipt, installation of private-store iOS build 12 or Android code 6 on a
+physical device, or human observation. Those physical/provider rows above
+remain pending and require an authenticated human to initiate the bounded
+drill in the running app.

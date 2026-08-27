@@ -11,7 +11,7 @@ tags: [issue-32, synthetic-only, ios]
     duration: 800
 - runFlow:
     when:
-      notVisible: '\[DRILL\] Synthetic earthquake drill'
+      notVisible: '.*Synthetic recipients only.*'
     commands:
       - swipe:
           start: 50%, 1%
@@ -19,13 +19,13 @@ tags: [issue-32, synthetic-only, ios]
           duration: 900
 - runFlow:
     when:
-      notVisible: '\[DRILL\] Synthetic earthquake drill'
+      notVisible: '.*Synthetic recipients only.*'
     commands:
       - swipe:
           start: 35%, 1%
           end: 35%, 90%
           duration: 1000
 - extendedWaitUntil:
-    visible: '\[DRILL\] Synthetic earthquake drill'
+    visible: '.*Synthetic recipients only.*'
     timeout: 15000
 - assertNotVisible: '.*\[INCIDENT\].*'

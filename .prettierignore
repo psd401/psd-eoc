@@ -11,3 +11,6 @@ packages/mobile/ios/
 
 # Next.js creates this production-build output during the root verification gate.
 **/.next/**
+
+# OpenTofu/Terraform provider caches are generated binaries and vendored docs.
+**/.terraform/**

@@ -456,14 +456,17 @@ export function createDrizzleExpoPushRuntimeStore(
 
     async claimProviderIo(input) {
       return database.transaction(async (transaction) => {
-        const [inserted] = await transaction
-          .insert(expoPushProviderIo)
-          .values({
-            attemptId: input.attemptId,
-            workFingerprint: input.workFingerprint,
-          })
-          .onConflictDoNothing({ target: expoPushProviderIo.attemptId })
-          .returning();
+        const [inserted] = databaseExecuteRows<{ claimToken: string }>(
+          await transaction.execute(sql`
+            insert into expo_push_provider_io (
+              attempt_id, work_fingerprint
+            ) values (
+              ${input.attemptId}::uuid, ${input.workFingerprint}
+            )
+            on conflict (attempt_id) do nothing
+            returning claim_token as "claimToken"
+          `),
+        );
         if (inserted !== undefined) {
           return Object.freeze({
             kind: 'execute' as const,
@@ -540,19 +543,29 @@ export function createDrizzleExpoPushRuntimeStore(
         await transaction.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${target.receiptId}, 278))`,
         );
-        const [inserted] = await transaction
-          .insert(expoPushReceiptPolls)
-          .values({
-            attemptId: target.attempt.id,
-            receiptId: target.receiptId,
-            fingerprint: target.fingerprint,
-            target,
-            firstPollAt,
-            horizonAt,
-            dueAt: firstPollAt,
-          })
-          .onConflictDoNothing({ target: expoPushReceiptPolls.attemptId })
-          .returning();
+        const [inserted] = databaseExecuteRows<{ attemptId: string }>(
+          await transaction.execute(sql`
+            insert into expo_push_receipt_polls (
+              attempt_id,
+              receipt_id,
+              fingerprint,
+              target,
+              first_poll_at,
+              horizon_at,
+              due_at
+            ) values (
+              ${target.attempt.id}::uuid,
+              ${target.receiptId},
+              ${target.fingerprint},
+              ${JSON.stringify(target)}::jsonb,
+              ${firstPollAt.toISOString()}::timestamptz,
+              ${horizonAt.toISOString()}::timestamptz,
+              ${firstPollAt.toISOString()}::timestamptz
+            )
+            on conflict (attempt_id) do nothing
+            returning attempt_id as "attemptId"
+          `),
+        );
         if (inserted === undefined) {
           const [existing] = await transaction
             .select()
@@ -775,8 +788,7 @@ export function createDrizzleExpoPushRuntimeStore(
           .where(
             eq(expoPushRetrySchedules.sourceAttemptId, input.sourceAttempt.id),
           )
-          .limit(1)
-          .for('update');
+          .limit(1);
         if (existing !== undefined) {
           if (!retryRequestMatches(existing, input)) {
             throw new ExpoPushRuntimeStoreError('RETRY_CONFLICT');
@@ -795,26 +807,52 @@ export function createDrizzleExpoPushRuntimeStore(
         if (notExpired?.available !== true) {
           return Object.freeze({ kind: 'expired' as const });
         }
-        const [inserted] = await transaction
-          .insert(expoPushRetrySchedules)
-          .values({
-            sourceAttemptId: input.sourceAttempt.id,
-            sourceFingerprint: input.sourceFingerprint,
-            receiptId: input.receiptId,
-            nextAttemptNumber: input.nextAttemptNumber,
-            delayMilliseconds: input.delayMilliseconds,
-            retryAt: new Date(input.retryAt),
-            expiresAt: new Date(input.expiresAt),
-            reasonCode: input.reasonCode,
-          })
-          .returning();
-        if (inserted === undefined) {
+        const [inserted] = databaseExecuteRows<{ nextAttemptId: string }>(
+          await transaction.execute(sql`
+            insert into expo_push_retry_schedules (
+              source_attempt_id,
+              source_fingerprint,
+              receipt_id,
+              next_attempt_number,
+              delay_milliseconds,
+              retry_at,
+              expires_at,
+              reason_code
+            ) values (
+              ${input.sourceAttempt.id}::uuid,
+              ${input.sourceFingerprint},
+              ${input.receiptId},
+              ${input.nextAttemptNumber},
+              ${input.delayMilliseconds},
+              ${input.retryAt}::timestamptz,
+              ${input.expiresAt}::timestamptz,
+              ${input.reasonCode}
+            )
+            on conflict (source_attempt_id) do nothing
+            returning next_attempt_id as "nextAttemptId"
+          `),
+        );
+        if (inserted !== undefined) {
+          return Object.freeze({
+            kind: 'scheduled' as const,
+            attemptId: inserted.nextAttemptId,
+            retryAt: input.retryAt,
+          });
+        }
+        const [persisted] = await transaction
+          .select()
+          .from(expoPushRetrySchedules)
+          .where(
+            eq(expoPushRetrySchedules.sourceAttemptId, input.sourceAttempt.id),
+          )
+          .limit(1);
+        if (persisted === undefined || !retryRequestMatches(persisted, input)) {
           throw new ExpoPushRuntimeStoreError('RETRY_CONFLICT');
         }
         return Object.freeze({
           kind: 'scheduled' as const,
-          attemptId: inserted.nextAttemptId,
-          retryAt: iso(inserted.retryAt),
+          attemptId: persisted.nextAttemptId,
+          retryAt: iso(persisted.retryAt),
         });
       });
     },

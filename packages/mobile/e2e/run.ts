@@ -27,6 +27,7 @@ const childEnvironment: Record<string, string | undefined> = {
   EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'issue-21',
   EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE: 'issue-32',
   MAESTRO_CLI_NO_ANALYTICS: '1',
+  MAESTRO_DRIVER_STARTUP_TIMEOUT: '120000',
   NODE_OPTIONS: '--dns-result-order=ipv4first',
   PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
   SYSTEM_APP_ID: 'com.apple.springboard',
@@ -288,7 +289,7 @@ if (skipNativeBuild) {
     ['bunx', 'expo', 'prebuild', '--platform', platform, '--no-install'],
     mobileRoot,
   );
-  await command(
+  const nativeRunArguments =
     platform === 'ios'
       ? ['bunx', 'expo', 'run:ios', '--device', deviceId, '--no-bundler']
       : [
@@ -298,9 +299,53 @@ if (skipNativeBuild) {
           '--device',
           androidExpoName ?? '',
           '--no-bundler',
-        ],
-    mobileRoot,
-  );
+        ];
+  if (platform === 'ios') {
+    // A failed Expo CLI launch must not let a prior installation satisfy the
+    // fallback check below. Remove it first so a present app proves this exact
+    // build reached the simulator.
+    await bestEffortCommand([
+      'xcrun',
+      'simctl',
+      'uninstall',
+      deviceId,
+      identity.appId,
+    ]);
+  } else {
+    await bestEffortCommand([
+      'adb',
+      '-s',
+      deviceId,
+      'uninstall',
+      identity.appId,
+    ]);
+  }
+  try {
+    await command(nativeRunArguments, mobileRoot);
+  } catch (error) {
+    if (!(error instanceof CommandExitError)) {
+      throw error;
+    }
+    try {
+      await output(
+        platform === 'ios'
+          ? [
+              'xcrun',
+              'simctl',
+              'get_app_container',
+              deviceId,
+              identity.appId,
+              'app',
+            ]
+          : ['adb', '-s', deviceId, 'shell', 'pm', 'path', identity.appId],
+      );
+    } catch {
+      throw error;
+    }
+    console.warn(
+      `Expo installed the exact ${platform} build but its post-install development URL did not open; continuing with the bounded localhost launch.`,
+    );
+  }
 }
 
 if (platform === 'ios') {
@@ -394,6 +439,21 @@ try {
     // but tolerate that simulator-level flake before starting Maestro.
     await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);
   } else {
+    // Android's development launcher records the React activity class while
+    // creating its first delegate. Start that exact activity before handing it
+    // the Metro URL so a cold process never falls back to PackageManager's
+    // inconsistent launcher lookup on hosted API 36 emulators. Keep the second
+    // intent category-free: Expo SDK 57 copies explicit categories into a null
+    // destination set while switching from the launcher to the app.
+    await deviceCommand([
+      'shell',
+      'am',
+      'start',
+      '-W',
+      '-n',
+      `${identity.appId}/.MainActivity`,
+    ]);
+    await Bun.sleep(2_000);
     await deviceCommand([
       'shell',
       'am',
@@ -402,7 +462,7 @@ try {
       'android.intent.action.VIEW',
       '-d',
       developmentUrl,
-      identity.appId,
+      `${identity.appId}/.MainActivity`,
     ]);
   }
   await Bun.sleep(5_000);
@@ -417,12 +477,6 @@ try {
   }
   await capture(`${platform}-synthetic-push`);
   if (platform === 'ios') {
-    // Keep the JavaScript session connected before consuming the native
-    // notification response. Hosted simulators can evict the development
-    // session while Notification Center is open; reconnecting after the tap
-    // would consume the response in the launcher and reset navigation home.
-    await openIosDevelopmentClient(deviceId, identity.appId, developmentUrl);
-    await Bun.sleep(5_000);
     await maestro('reveal-push-ios.yaml');
     await maestro('open-push-ios.yaml');
   } else {
