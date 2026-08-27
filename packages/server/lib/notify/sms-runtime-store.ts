@@ -23,7 +23,7 @@ import {
   type CountryCode,
 } from 'libphonenumber-js';
 
-import type { Database } from '../../db/client';
+import { databaseExecuteRows, type Database } from '../../db/client';
 import {
   channelAttempts,
   channelConfigurations,
@@ -560,14 +560,17 @@ export function createDrizzleSmsRuntimeStore(
     async claimProviderIo(input) {
       await assertSmsAttempt(database, input.attemptId);
       return database.transaction(async (transaction) => {
-        const [inserted] = await transaction
-          .insert(smsProviderIo)
-          .values({
-            attemptId: input.attemptId,
-            workFingerprint: input.workFingerprint,
-          })
-          .onConflictDoNothing({ target: smsProviderIo.attemptId })
-          .returning();
+        const [inserted] = databaseExecuteRows<{ claimToken: string }>(
+          await transaction.execute(sql`
+            insert into sms_provider_io (
+              attempt_id, work_fingerprint
+            ) values (
+              ${input.attemptId}::uuid, ${input.workFingerprint}
+            )
+            on conflict (attempt_id) do nothing
+            returning claim_token as "claimToken"
+          `),
+        );
         if (inserted !== undefined) {
           return Object.freeze({
             kind: 'acquired' as const,
@@ -650,29 +653,44 @@ export function createDrizzleSmsRuntimeStore(
         throw new SmsRuntimeStoreError('RETRY_SOURCE_CONFLICT');
       }
       return database.transaction(async (transaction) => {
-        const [inserted] = await transaction
-          .insert(smsRetrySchedules)
-          .values({
-            sourceAttemptId: input.sourceAttempt.id,
-            sourceFingerprint: input.sourceFingerprint,
-            nextAttemptNumber: input.nextAttemptNumber,
-            delayMilliseconds: input.delayMilliseconds,
-            retryAt: new Date(retryAtMilliseconds),
-            expiresAt: new Date(expiresAtMilliseconds),
-            reasonCode: input.reasonCode,
-          })
-          .onConflictDoNothing({ target: smsRetrySchedules.sourceAttemptId })
-          .returning();
-        const [persisted] =
-          inserted === undefined
-            ? await transaction
-                .select()
-                .from(smsRetrySchedules)
-                .where(
-                  eq(smsRetrySchedules.sourceAttemptId, input.sourceAttempt.id),
-                )
-                .limit(1)
-            : [inserted];
+        const [inserted] = databaseExecuteRows<{ nextAttemptId: string }>(
+          await transaction.execute(sql`
+            insert into sms_retry_schedules (
+              source_attempt_id,
+              source_fingerprint,
+              next_attempt_number,
+              delay_milliseconds,
+              retry_at,
+              expires_at,
+              reason_code
+            ) values (
+              ${input.sourceAttempt.id}::uuid,
+              ${input.sourceFingerprint},
+              ${input.nextAttemptNumber},
+              ${input.delayMilliseconds},
+              ${new Date(retryAtMilliseconds).toISOString()}::timestamptz,
+              ${new Date(expiresAtMilliseconds).toISOString()}::timestamptz,
+              ${input.reasonCode}
+            )
+            on conflict (source_attempt_id) do nothing
+            returning next_attempt_id as "nextAttemptId"
+          `),
+        );
+        if (inserted !== undefined) {
+          if (now() >= expiresAtMilliseconds) {
+            return Object.freeze({ kind: 'expired' as const });
+          }
+          return Object.freeze({
+            kind: 'scheduled' as const,
+            attemptId: inserted.nextAttemptId,
+            retryAt: new Date(retryAtMilliseconds).toISOString(),
+          });
+        }
+        const [persisted] = await transaction
+          .select()
+          .from(smsRetrySchedules)
+          .where(eq(smsRetrySchedules.sourceAttemptId, input.sourceAttempt.id))
+          .limit(1);
         if (persisted === undefined || !retryRequestMatches(persisted, input)) {
           throw new SmsRuntimeStoreError('RETRY_CONFLICT');
         }
