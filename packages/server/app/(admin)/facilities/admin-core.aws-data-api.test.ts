@@ -17,6 +17,7 @@ import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import { createDrizzleStaleRosterReportStore } from '../../../lib/roster/stale-report';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
+  ADMINISTRATOR_ENABLEMENT_REFERENCE,
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
   liveChannelChangeAuthorizationCommitment,
@@ -1030,6 +1031,24 @@ class FakeRdsDataClient {
       sql.includes('from "security_audit_entries"')
     ) {
       return { records: [], $metadata: {} };
+    }
+    if (sql.startsWith('insert into "integration_statuses"')) {
+      // Enabling a channel appends the observation naming the administrator.
+      return {
+        records: [
+          [
+            { stringValue: LIVE_STATUS_ID },
+            { stringValue: LIVE_INTEGRATION_ID },
+            { stringValue: 'live-verified' },
+            { stringValue: CLOCK_VALUE },
+            { stringValue: USER_ID },
+            { stringValue: ADMINISTRATOR_ENABLEMENT_REFERENCE },
+            { isNull: true },
+            { stringValue: CLOCK_VALUE },
+          ],
+        ],
+        $metadata: {},
+      };
     }
     if (
       sql.startsWith('set transaction isolation level') ||
@@ -2061,9 +2080,7 @@ describe('admin Aurora Data API transport regression', () => {
     ).toBe(true);
     expect(
       client.statements.some(({ sql }) =>
-        sql.startsWith(
-          'insert into "integration_channel_change_authorizations"',
-        ),
+        sql.startsWith('insert into "integration_statuses"'),
       ),
     ).toBe(true);
     expect([...executedCapabilities].sort()).toEqual(
