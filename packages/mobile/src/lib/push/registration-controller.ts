@@ -10,6 +10,64 @@ import {
   type UnregisterPushTokenInput,
 } from '@psd-eoc/contracts';
 
+type PushRegistrationStage =
+  | 'assemble'
+  | 'expo-token'
+  | 'server'
+  | 'service-environment';
+
+/** At most this much of a provider or transport error is repeated back. */
+const FAILURE_DETAIL_LIMIT = 160;
+
+function failureDetail(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  const message = error.message.trim().replace(/\s+/gu, ' ');
+  if (message.length === 0) return null;
+  return message.length > FAILURE_DETAIL_LIMIT
+    ? `${message.slice(0, FAILURE_DETAIL_LIMIT)}\u2026`
+    : message;
+}
+
+/**
+ * Names which step of registration failed, and why when that is knowable.
+ *
+ * A push token is a credential, so nothing here repeats the registration
+ * itself. The assembly stage reports only which field a schema refused, never
+ * the value it held; the other stages repeat a bounded provider or transport
+ * message, which carries no token.
+ */
+export function pushRegistrationFailureMessage(
+  stage: PushRegistrationStage,
+  error: unknown,
+): string {
+  if (stage === 'assemble') {
+    const issues = (
+      error as { issues?: readonly { path?: readonly unknown[] }[] }
+    ).issues;
+    const fields = Array.isArray(issues)
+      ? [
+          ...new Set(
+            issues.flatMap((issue) =>
+              typeof issue.path?.[0] === 'string' ? [issue.path[0]] : [],
+            ),
+          ),
+        ]
+      : [];
+    return fields.length > 0
+      ? `This device assembled a push registration PSD EOC cannot accept (${fields.join(', ')}). Contact District Technology.`
+      : 'This device assembled a push registration PSD EOC cannot accept. Contact District Technology.';
+  }
+  const detail = failureDetail(error);
+  const suffix = detail === null ? '' : ` ${detail}`;
+  if (stage === 'service-environment') {
+    return `This device could not report which push environment it runs in. Reconnect and try again.${suffix}`;
+  }
+  if (stage === 'expo-token') {
+    return `Expo did not issue a push token for this build. Reconnect and try again.${suffix}`;
+  }
+  return `PSD EOC did not accept this device\u2019s push registration. Reconnect and try again.${suffix}`;
+}
+
 export type PushPermissionStatus = 'denied' | 'granted' | 'undetermined';
 export type NativePushPlatform = 'android' | 'ios';
 
@@ -422,9 +480,16 @@ export class PushRegistrationController {
     const providerRequest = new AbortController();
     this.providerRequestAbortController?.abort();
     this.providerRequestAbortController = providerRequest;
+    // Four separate things can fail here and they need four different
+    // responses. The catch used to discard the error and say only that
+    // registration was not confirmed, so a device that could not register
+    // reported the same sentence whether Expo was unreachable, the build
+    // assembled an invalid registration, or the server refused it.
+    let stage: PushRegistrationStage = 'service-environment';
     try {
       const serviceEnvironment =
         await this.dependencies.native.getServiceEnvironment(session.platform);
+      stage = 'expo-token';
       const expoToken = await this.dependencies.native.getExpoPushToken({
         projectId,
         devicePushToken: nativeToken,
@@ -433,6 +498,7 @@ export class PushRegistrationController {
       });
       if (!this.isCurrent(generation, session)) return;
       const nativeProvider = session.platform === 'ios' ? 'apns' : 'fcm';
+      stage = 'assemble';
       const generationInput = RegisterPushTokenInputSchema.parse({
         deviceEnrollmentId: session.deviceEnrollmentId,
         platform: session.platform,
@@ -445,6 +511,7 @@ export class PushRegistrationController {
       // A failed or uncertain mutation must make the next disabled/denied
       // reconciliation retry cleanup instead of trusting an older marker.
       this.unregisteredSessionId = null;
+      stage = 'server';
       const nativeReceipt = await session.register(generationInput);
       if (!this.isCurrent(generation, session)) return;
       if (
@@ -465,11 +532,11 @@ export class PushRegistrationController {
         platform: session.platform,
         message: null,
       });
-    } catch {
+    } catch (error) {
       this.failCurrent(
         generation,
         session,
-        'PSD EOC could not confirm push registration. Reconnect and try again.',
+        pushRegistrationFailureMessage(stage, error),
       );
     } finally {
       if (this.providerRequestAbortController === providerRequest) {
