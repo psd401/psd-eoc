@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { exportPKCS8, generateKeyPair } from 'jose';
 
-import type { GoogleCloudIdentityRosterConfiguration } from '../roster/groups-sync';
+import type { GoogleCloudIdentityRosterConfiguration } from './google-roster-config';
 import {
   AccessMembershipEvaluationError,
   createGoogleAccessMembershipEvaluator,

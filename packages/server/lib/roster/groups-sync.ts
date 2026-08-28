@@ -1,9 +1,4 @@
-import {
-  createHash,
-  createPrivateKey,
-  randomUUID,
-  timingSafeEqual,
-} from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
   ActorSchema,
@@ -47,7 +42,6 @@ import {
   selectedPushProvider,
 } from '../push-provider-cutover';
 import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
-import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
@@ -73,15 +67,6 @@ import {
   users,
 } from '../../db/schema';
 
-const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
-const GOOGLE_CLOUD_IDENTITY_ENDPOINT =
-  'https://cloudidentity.googleapis.com/v1';
-const GOOGLE_GROUP_MEMBER_SCOPE =
-  'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
-const GOOGLE_ROSTER_WORKSPACE_ROLE = '_GROUPS_READER_ROLE';
-const DEFAULT_GOOGLE_TIMEOUT_MILLISECONDS = 10_000;
-const MAX_GOOGLE_RESPONSE_BYTES = 512 * 1024;
-const MAX_GROUP_PAGES = 100;
 const MAX_GROUP_MEMBERS = 1_200;
 const DEFAULT_FETCH_CONCURRENCY = 5;
 const IDEMPOTENCY_IN_PROGRESS_MAX_AGE_MILLISECONDS = 15 * 60 * 1_000;
@@ -116,28 +101,8 @@ const RosterGroupMemberSchema = z
   .strict()
   .readonly();
 
-/** Minimized, validated member facts returned by a roster source adapter. */
+/** Minimized, validated member facts for one roster source member. */
 export type RosterGroupMember = z.infer<typeof RosterGroupMemberSchema>;
-
-const RosterGroupPageSchema = z
-  .object({
-    members: z.array(RosterGroupMemberSchema).max(MAX_GROUP_MEMBERS).readonly(),
-    nextPageToken: z.string().trim().min(1).max(2_048).nullable(),
-  })
-  .strict()
-  .readonly();
-
-/** One bounded page from a Google or fail-closed synthetic source. */
-export type RosterGroupPage = z.infer<typeof RosterGroupPageSchema>;
-
-/** Read-only source adapter. Implementations never receive a write credential. */
-export interface RosterGroupsAdapter {
-  readonly truthLabel: 'mocked' | 'configured-unverified';
-  fetchPage(
-    source: GroupSource,
-    pageToken: string | null,
-  ): Promise<RosterGroupPage>;
-}
 
 /** Active local push registration that may be copied into a new snapshot. */
 export interface RosterLocalPushEndpoint {
@@ -217,6 +182,8 @@ export interface RosterSyncStore {
   reserve(
     request: RosterSyncReservationRequest,
   ): Promise<RosterSyncReservation>;
+  /** Canonical addresses curated for one roster source, ascending. */
+  loadGroupMembers(groupSourceId: string): Promise<readonly string[]>;
   loadSourceConfiguration(
     reference: RosterSourceConfigurationRef,
   ): Promise<LoadedRosterSourceConfiguration | null>;
@@ -286,7 +253,6 @@ export type RosterSyncCapabilityContext =
 
 export interface RosterSyncDependencies {
   readonly store: RosterSyncStore;
-  readonly adapter: RosterGroupsAdapter;
   readonly alerts: RosterSyncAlertSink;
   readonly now?: () => Date;
   readonly uuid?: () => string;
@@ -377,89 +343,51 @@ function validateMemberPopulation(
   }
 }
 
-async function fetchCompleteGroup(
-  adapter: RosterGroupsAdapter,
+/**
+ * Reads the people a roster source names.
+ *
+ * Membership is curated in this application, so there is no provider to page,
+ * no credential to present, and no fetch that can half-succeed. A source that
+ * is inactive is refused rather than treated as empty, because an empty source
+ * publishes a snapshot that reaches nobody.
+ */
+async function readGroupMembers(
+  store: RosterSyncStore,
   source: GroupSource,
   population: RosterPopulation,
 ): Promise<readonly RosterGroupMember[]> {
-  if (
-    adapter.truthLabel === 'mocked' &&
-    (population !== 'synthetic' || source.kind !== 'synthetic')
-  ) {
-    throw new RosterSyncError(
-      'MOCK_STAFF_ROSTER_FORBIDDEN',
-      'Mock roster data may only populate the synthetic training roster.',
-    );
-  }
   if (!source.active) {
     throw new RosterSyncError(
       'GROUP_SOURCE_INACTIVE',
       'An expected roster source is inactive.',
     );
   }
-
-  const members = new Map<string, RosterGroupMember>();
-  const seenPageTokens = new Set<string>();
-  let pageToken: string | null = null;
-
-  for (let pageNumber = 0; pageNumber < MAX_GROUP_PAGES; pageNumber += 1) {
-    const pageResult = RosterGroupPageSchema.safeParse(
-      await adapter.fetchPage(source, pageToken),
+  const rows = await store.loadGroupMembers(source.id);
+  if (rows.length > MAX_GROUP_MEMBERS) {
+    throw new RosterSyncError(
+      'GROUP_MEMBER_LIMIT_EXCEEDED',
+      'A roster source exceeded the supported member limit.',
     );
-    if (!pageResult.success) {
-      throw new RosterSyncError(
-        'GROUP_RESPONSE_INVALID',
-        'A roster source returned an invalid page.',
-      );
-    }
-
-    for (const rawMember of pageResult.data.members) {
-      const member = RosterGroupMemberSchema.parse(rawMember);
-      validateMemberPopulation(member, population);
-      const normalized = Object.freeze({
-        ...member,
-        email: member.email.toLowerCase(),
-      });
-      const existing = members.get(normalized.memberKey);
-      if (
-        existing !== undefined &&
-        stableJson(existing) !== stableJson(normalized)
-      ) {
-        throw new RosterSyncError(
-          'GROUP_MEMBER_CONFLICT',
-          'A roster source returned conflicting facts for one member.',
-        );
-      }
-      members.set(normalized.memberKey, normalized);
-      if (members.size > MAX_GROUP_MEMBERS) {
-        throw new RosterSyncError(
-          'GROUP_MEMBER_LIMIT_EXCEEDED',
-          'A roster source exceeded the supported member limit.',
-        );
-      }
-    }
-
-    const nextPageToken = pageResult.data.nextPageToken;
-    if (nextPageToken === null) {
-      return Object.freeze(
-        [...members.values()].sort((left, right) =>
-          left.memberKey.localeCompare(right.memberKey),
-        ),
-      );
-    }
-    if (seenPageTokens.has(nextPageToken) || nextPageToken === pageToken) {
-      throw new RosterSyncError(
-        'GROUP_PAGINATION_LOOP',
-        'A roster source repeated a pagination token.',
-      );
-    }
-    seenPageTokens.add(nextPageToken);
-    pageToken = nextPageToken;
   }
-
-  throw new RosterSyncError(
-    'GROUP_PAGE_LIMIT_EXCEEDED',
-    'A roster source exceeded the supported page limit.',
+  const members = new Map<string, RosterGroupMember>();
+  for (const row of rows) {
+    const email = row.trim().toLowerCase();
+    const localPart = email.slice(0, email.indexOf('@'));
+    const member = RosterGroupMemberSchema.parse({
+      // A curated source carries no provider identifier, so the canonical
+      // address is both the stable key and the only retained identity.
+      memberKey: email,
+      googleSubject: null,
+      displayName: localPart.length > 0 ? localPart : email,
+      email,
+    });
+    validateMemberPopulation(member, population);
+    members.set(member.memberKey, member);
+  }
+  return Object.freeze(
+    [...members.values()].sort((left, right) =>
+      left.memberKey.localeCompare(right.memberKey),
+    ),
   );
 }
 
@@ -991,8 +919,8 @@ export async function syncRoster(
             group: Object.freeze({
               source,
               reference,
-              members: await fetchCompleteGroup(
-                dependencies.adapter,
+              members: await readGroupMembers(
+                dependencies.store,
                 source,
                 loaded.configuration.population,
               ),
@@ -1249,782 +1177,6 @@ export function verifyRosterSyncJobToken(
     supplied.byteLength === expected.byteLength &&
     timingSafeEqual(supplied, expected)
   );
-}
-
-const GoogleCloudIdentityGroupSchema = z
-  .object({
-    name: z.string().regex(/^groups\/[A-Za-z0-9_-]+$/u),
-  })
-  .strict()
-  .readonly();
-
-// Deferred deliberately. `staffRosterEmail()` reads the configured staff
-// domain and fails closed when it is absent, and a module-scope schema would
-// run that read at import — including during `next build`, which imports every
-// route to collect page data. The image is built once and deployed by any
-// district, so it cannot require one district's domain to compile.
-const GoogleCloudIdentityEntityKeySchema = z.lazy(() =>
-  z.object({ id: staffRosterEmail() }).strict().readonly(),
-);
-
-const GoogleCloudIdentityTransitiveRoleSchema = z
-  .object({
-    role: z.enum(['OWNER', 'MANAGER', 'MEMBER']),
-  })
-  .strict()
-  .readonly();
-
-const GoogleCloudIdentityMemberRelationSchema = z
-  .object({
-    preferredMemberKey: z
-      .array(GoogleCloudIdentityEntityKeySchema)
-      .length(1)
-      .readonly(),
-    member: z.string().regex(/^(?:groups\/[A-Za-z0-9_-]+|users\/[0-9]+)$/u),
-    roles: z
-      .array(GoogleCloudIdentityTransitiveRoleSchema)
-      .min(1)
-      .max(3)
-      .readonly(),
-    relationType: z.enum(['DIRECT', 'INDIRECT', 'DIRECT_AND_INDIRECT']),
-  })
-  .strict()
-  .superRefine((relation, context) => {
-    const roles = relation.roles.map((role) => role.role);
-    if (new Set(roles).size !== roles.length) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Cloud Identity membership roles must be unique.',
-        path: ['roles'],
-      });
-    }
-  })
-  .readonly();
-
-const GoogleCloudIdentityMembersResponseSchema = z
-  .object({
-    memberships: z
-      .array(GoogleCloudIdentityMemberRelationSchema)
-      .max(MAX_GROUP_MEMBERS)
-      .optional(),
-    nextPageToken: z.string().trim().min(1).max(2_048).optional(),
-  })
-  .strict()
-  .readonly();
-
-const GoogleTokenResponseSchema = z
-  .object({
-    access_token: z.string().trim().min(16).max(8_192),
-    expires_in: z.number().int().min(60).max(3_600),
-    token_type: z.literal('Bearer'),
-    scope: z.literal(GOOGLE_GROUP_MEMBER_SCOPE).optional(),
-  })
-  .strict()
-  .readonly();
-
-const GoogleCloudIdentityCredentialSchema = z
-  .object({
-    type: z.literal('service_account'),
-    project_id: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u),
-    private_key_id: z.string().regex(/^[a-f0-9]{40}$/u),
-    private_key: z.string().min(1).max(16_384),
-    client_email: z.string().trim().email().max(320),
-    client_id: z.string().regex(/^\d+$/u),
-    auth_uri: z.literal('https://accounts.google.com/o/oauth2/auth'),
-    token_uri: z.literal(GOOGLE_TOKEN_ENDPOINT),
-    auth_provider_x509_cert_url: z.literal(
-      'https://www.googleapis.com/oauth2/v1/certs',
-    ),
-    client_x509_cert_url: z.string().url().max(2_048),
-    universe_domain: z.literal('googleapis.com'),
-    // Required retained-secret provenance only. Runtime source authority comes
-    // from the exact versioned database configuration loaded by syncRoster.
-    approved_staff_group_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-    credential_created_at: TimestampSchema,
-    domain_wide_delegation: z.literal(false),
-    oauth_scopes: z.tuple([z.literal(GOOGLE_GROUP_MEMBER_SCOPE)]).readonly(),
-    workspace_admin_role: z.literal(GOOGLE_ROSTER_WORKSPACE_ROLE),
-  })
-  .strict()
-  .superRefine((credential, context) => {
-    const serviceAccountSuffix = `@${credential.project_id}.iam.gserviceaccount.com`;
-    const serviceAccountName = credential.client_email.slice(
-      0,
-      -serviceAccountSuffix.length,
-    );
-    const expectedCertificateUrl = `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(credential.client_email)}`;
-    if (
-      !credential.client_email.endsWith(serviceAccountSuffix) ||
-      !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(serviceAccountName)
-    ) {
-      context.addIssue({
-        code: 'custom',
-        message: 'The service account email must belong to its GCP project.',
-        path: ['client_email'],
-      });
-    }
-    if (credential.client_x509_cert_url !== expectedCertificateUrl) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'The service account certificate URL must identify the same account.',
-        path: ['client_x509_cert_url'],
-      });
-    }
-  })
-  .readonly();
-
-export interface GoogleCloudIdentityRosterConfiguration {
-  readonly serviceAccountEmail: string;
-  readonly privateKeyId: string;
-  readonly privateKey: string;
-  readonly timeoutMilliseconds: number;
-}
-
-type Environment = Readonly<Record<string, string | undefined>>;
-
-function requiredEnvironmentValue(
-  environment: Environment,
-  name: string,
-  maximumLength: number,
-): string {
-  const value = environment[name];
-  if (
-    value === undefined ||
-    value.length === 0 ||
-    value.length > maximumLength ||
-    /[\0\r]/u.test(value)
-  ) {
-    throw new RosterSyncError(
-      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-      `${name} must be configured for roster synchronization.`,
-    );
-  }
-  return value;
-}
-
-/** Reads the exact non-delegated Cloud Identity credential with no fallback. */
-/**
- * Reports whether this deployment carries directory roster configuration.
- *
- * A district that curates every roster inside this application has no such
- * configuration, and must still be able to sync. Callers use this to decide
- * whether to build the directory adapter at all rather than treating its
- * absence as a startup failure.
- */
-export function hasGoogleCloudIdentityRosterConfiguration(
-  environment: Environment = process.env,
-): boolean {
-  try {
-    readGoogleCloudIdentityRosterConfiguration(environment);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function readGoogleCloudIdentityRosterConfiguration(
-  environment: Environment = process.env,
-): GoogleCloudIdentityRosterConfiguration {
-  const serialized = requiredEnvironmentValue(
-    environment,
-    'GOOGLE_ROSTER_CONFIG',
-    32_768,
-  );
-  let rawCredential: unknown;
-  try {
-    rawCredential = JSON.parse(serialized) as unknown;
-  } catch {
-    throw new RosterSyncError(
-      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-      'The Google roster credential is not valid JSON.',
-    );
-  }
-  const parsedCredential =
-    GoogleCloudIdentityCredentialSchema.safeParse(rawCredential);
-  if (!parsedCredential.success) {
-    throw new RosterSyncError(
-      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-      'The Google roster credential does not match the approved Cloud Identity contract.',
-    );
-  }
-  const timeoutRaw =
-    environment.GOOGLE_ROSTER_HTTP_TIMEOUT_MS ??
-    String(DEFAULT_GOOGLE_TIMEOUT_MILLISECONDS);
-  const timeoutMilliseconds = Number(timeoutRaw);
-  if (
-    !Number.isSafeInteger(timeoutMilliseconds) ||
-    timeoutMilliseconds < 1_000 ||
-    timeoutMilliseconds > 30_000
-  ) {
-    throw new RosterSyncError(
-      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-      'Google roster credentials or timeout are invalid.',
-    );
-  }
-  try {
-    const signingKey = createPrivateKey(parsedCredential.data.private_key);
-    if (
-      signingKey.type !== 'private' ||
-      signingKey.asymmetricKeyType !== 'rsa'
-    ) {
-      throw new Error('The roster signing key is not an RSA private key.');
-    }
-  } catch {
-    throw new RosterSyncError(
-      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-      'The Google roster signing key is invalid.',
-    );
-  }
-  return Object.freeze({
-    serviceAccountEmail: parsedCredential.data.client_email,
-    privateKeyId: parsedCredential.data.private_key_id,
-    privateKey: parsedCredential.data.private_key,
-    timeoutMilliseconds,
-  });
-}
-
-async function boundedJson(
-  response: Response,
-  signal: AbortSignal,
-): Promise<unknown> {
-  const declaredLength = response.headers.get('content-length');
-  if (
-    declaredLength !== null &&
-    (!/^\d+$/u.test(declaredLength) ||
-      Number(declaredLength) > MAX_GOOGLE_RESPONSE_BYTES)
-  ) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new RosterSyncError(
-      'GOOGLE_RESPONSE_TOO_LARGE',
-      'Google returned an oversized roster response.',
-    );
-  }
-  if (response.body === null) {
-    throw new RosterSyncError(
-      'GOOGLE_RESPONSE_INVALID',
-      'Google returned an empty roster response.',
-    );
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let byteLength = 0;
-  let abortListener: (() => void) | null = null;
-  const aborted = new Promise<never>((_, reject) => {
-    abortListener = () =>
-      reject(
-        new RosterSyncError(
-          'GOOGLE_UNAVAILABLE',
-          'Google Groups timed out during roster synchronization.',
-        ),
-      );
-    signal.addEventListener('abort', abortListener, { once: true });
-    if (signal.aborted) {
-      abortListener();
-    }
-  });
-  try {
-    for (;;) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (done) {
-        break;
-      }
-      byteLength += value.byteLength;
-      if (byteLength > MAX_GOOGLE_RESPONSE_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw new RosterSyncError(
-          'GOOGLE_RESPONSE_TOO_LARGE',
-          'Google returned an oversized roster response.',
-        );
-      }
-      chunks.push(value);
-    }
-  } finally {
-    if (abortListener !== null) {
-      signal.removeEventListener('abort', abortListener);
-    }
-    if (signal.aborted) {
-      void reader.cancel().catch(() => undefined);
-    }
-    try {
-      reader.releaseLock();
-    } catch {
-      // An aborted read may still own the lock; cancellation remains fail-safe.
-    }
-  }
-  const bytes = new Uint8Array(byteLength);
-  let offset = 0;
-  chunks.forEach((chunk) => {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  });
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    throw new RosterSyncError(
-      'GOOGLE_RESPONSE_INVALID',
-      'Google returned non-UTF-8 roster data.',
-    );
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new RosterSyncError(
-      'GOOGLE_RESPONSE_INVALID',
-      'Google returned malformed roster data.',
-    );
-  }
-}
-
-/** Creates the non-delegated, read-only Cloud Identity Groups adapter. */
-export function createGoogleCloudIdentityRosterAdapter(
-  configuration: GoogleCloudIdentityRosterConfiguration,
-  options: Readonly<{
-    fetch?: typeof fetch;
-    now?: () => Date;
-  }> = {},
-): RosterGroupsAdapter {
-  const fetchImplementation = options.fetch ?? globalThis.fetch;
-  const now = options.now ?? (() => new Date());
-  let cachedToken:
-    | Readonly<{ value: string; refreshAfterMilliseconds: number }>
-    | undefined;
-  const resolvedGroupNames = new Map<
-    string,
-    Readonly<{ sourceIdentity: string; groupName: string }>
-  >();
-
-  async function fetchWithTimeout<Result>(
-    input: string | URL,
-    init: RequestInit,
-    consume: (response: Response, signal: AbortSignal) => Promise<Result>,
-  ): Promise<Result> {
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      configuration.timeoutMilliseconds,
-    );
-    try {
-      const response = await fetchImplementation(input, {
-        ...init,
-        redirect: 'error',
-        signal: controller.signal,
-      });
-      return await consume(response, controller.signal);
-    } catch (error) {
-      if (error instanceof RosterSyncError) {
-        throw error;
-      }
-      throw new RosterSyncError(
-        'GOOGLE_UNAVAILABLE',
-        'Google Groups was unavailable during roster synchronization.',
-      );
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  async function accessToken(): Promise<string> {
-    const nowMilliseconds = now().getTime();
-    if (!Number.isFinite(nowMilliseconds)) {
-      throw new RosterSyncError(
-        'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-        'The Google roster clock is invalid.',
-      );
-    }
-    if (
-      cachedToken !== undefined &&
-      cachedToken.refreshAfterMilliseconds > nowMilliseconds
-    ) {
-      return cachedToken.value;
-    }
-    let key: CryptoKey;
-    try {
-      key = await importPKCS8(configuration.privateKey, 'RS256');
-    } catch {
-      throw new RosterSyncError(
-        'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-        'The Google roster signing key is invalid.',
-      );
-    }
-    const issuedAt = Math.floor(nowMilliseconds / 1_000);
-    const assertion = await new SignJWT({
-      scope: GOOGLE_GROUP_MEMBER_SCOPE,
-    })
-      .setProtectedHeader({
-        alg: 'RS256',
-        kid: configuration.privateKeyId,
-        typ: 'JWT',
-      })
-      .setIssuer(configuration.serviceAccountEmail)
-      .setAudience(GOOGLE_TOKEN_ENDPOINT)
-      .setIssuedAt(issuedAt)
-      .setExpirationTime(issuedAt + 300)
-      .sign(key);
-    const body = new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion,
-    });
-    const parsed = await fetchWithTimeout(
-      GOOGLE_TOKEN_ENDPOINT,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-      },
-      async (response, signal) => {
-        if (!response.ok) {
-          void response.body?.cancel().catch(() => undefined);
-          throw new RosterSyncError(
-            'GOOGLE_TOKEN_REJECTED',
-            'Google rejected the Cloud Identity roster credential.',
-          );
-        }
-        return GoogleTokenResponseSchema.safeParse(
-          await boundedJson(response, signal),
-        );
-      },
-    );
-    if (!parsed.success) {
-      throw new RosterSyncError(
-        'GOOGLE_TOKEN_RESPONSE_INVALID',
-        'Google returned an invalid Cloud Identity token response.',
-      );
-    }
-    cachedToken = Object.freeze({
-      value: parsed.data.access_token,
-      refreshAfterMilliseconds:
-        nowMilliseconds + Math.max(parsed.data.expires_in - 60, 30) * 1_000,
-    });
-    return cachedToken.value;
-  }
-
-  async function resolveConfiguredGroup(
-    source: Extract<GroupSource, { kind: 'google-group' }>,
-  ): Promise<string> {
-    const groupEmail = staffRosterEmail().parse(source.email);
-    if (!/^[A-Za-z0-9_-]+$/u.test(source.googleGroupId)) {
-      throw new RosterSyncError(
-        'GOOGLE_GROUP_SOURCE_INVALID',
-        'The configured Google roster group ID is invalid.',
-      );
-    }
-    const sourceIdentity = `${source.googleGroupId}:${groupEmail}`;
-    const cached = resolvedGroupNames.get(source.id);
-    if (cached !== undefined) {
-      if (cached.sourceIdentity !== sourceIdentity) {
-        throw new RosterSyncError(
-          'GOOGLE_GROUP_SOURCE_CHANGED',
-          'A configured Google roster source changed during synchronization.',
-        );
-      }
-      return cached.groupName;
-    }
-
-    const lookupUrl = new URL(
-      `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
-    );
-    lookupUrl.searchParams.set('groupKey.id', groupEmail);
-    lookupUrl.searchParams.set('fields', 'name');
-    const parsed = await fetchWithTimeout(
-      lookupUrl,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${await accessToken()}`,
-          Accept: 'application/json',
-        },
-      },
-      async (response, signal) => {
-        if (!response.ok) {
-          void response.body?.cancel().catch(() => undefined);
-          throw new RosterSyncError(
-            'GOOGLE_GROUP_LOOKUP_REJECTED',
-            'Google rejected a configured roster-group lookup.',
-          );
-        }
-        return GoogleCloudIdentityGroupSchema.safeParse(
-          await boundedJson(response, signal),
-        );
-      },
-    );
-    if (!parsed.success) {
-      throw new RosterSyncError(
-        'GOOGLE_GROUP_LOOKUP_INVALID',
-        'Google returned an invalid configured roster-group lookup.',
-      );
-    }
-    const expectedName = `groups/${source.googleGroupId}`;
-    if (parsed.data.name !== expectedName) {
-      throw new RosterSyncError(
-        'GOOGLE_GROUP_IDENTITY_MISMATCH',
-        'The configured roster-group email and ID did not identify the same Google group.',
-      );
-    }
-    resolvedGroupNames.set(
-      source.id,
-      Object.freeze({ sourceIdentity, groupName: parsed.data.name }),
-    );
-    return parsed.data.name;
-  }
-
-  return Object.freeze({
-    truthLabel: 'configured-unverified' as const,
-    async fetchPage(
-      source: GroupSource,
-      pageToken: string | null,
-    ): Promise<RosterGroupPage> {
-      if (source.kind !== 'google-group' || source.purpose === 'access') {
-        throw new RosterSyncError(
-          'GOOGLE_GROUP_SOURCE_INVALID',
-          'The Google roster adapter received a non-roster source.',
-        );
-      }
-      const groupEmail = staffRosterEmail().safeParse(source.email);
-      if (!groupEmail.success) {
-        throw new RosterSyncError(
-          'GOOGLE_GROUP_DOMAIN_INVALID',
-          'The configured roster group is outside the approved domain.',
-        );
-      }
-      const groupName = await resolveConfiguredGroup(source);
-      const url = new URL(
-        `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${groupName}/memberships:searchTransitiveMemberships`,
-      );
-      url.searchParams.set('pageSize', '200');
-      url.searchParams.set(
-        'fields',
-        'memberships(member,preferredMemberKey,relationType,roles),nextPageToken',
-      );
-      if (pageToken !== null) {
-        url.searchParams.set('pageToken', pageToken);
-      }
-      const parsed = await fetchWithTimeout(
-        url,
-        {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${await accessToken()}`,
-            Accept: 'application/json',
-          },
-        },
-        async (response, signal) => {
-          if (!response.ok) {
-            void response.body?.cancel().catch(() => undefined);
-            throw new RosterSyncError(
-              'GOOGLE_GROUP_FETCH_REJECTED',
-              'Google rejected a roster group read.',
-            );
-          }
-          return GoogleCloudIdentityMembersResponseSchema.safeParse(
-            await boundedJson(response, signal),
-          );
-        },
-      );
-      if (!parsed.success) {
-        throw new RosterSyncError(
-          'GOOGLE_GROUP_RESPONSE_INVALID',
-          'Google returned invalid roster group data.',
-        );
-      }
-      return RosterGroupPageSchema.parse({
-        members: (parsed.data.memberships ?? []).flatMap((member) => {
-          if (!member.member.startsWith('users/')) {
-            return [];
-          }
-          const [preferredMemberKey] = member.preferredMemberKey;
-          if (preferredMemberKey === undefined) {
-            throw new RosterSyncError(
-              'GOOGLE_GROUP_RESPONSE_INVALID',
-              'Google returned a member without a preferred identity key.',
-            );
-          }
-          return [
-            {
-              memberKey: preferredMemberKey.id,
-              googleSubject: null,
-              displayName: 'Staff member',
-              email: preferredMemberKey.id,
-            },
-          ];
-        }),
-        nextPageToken: parsed.data.nextPageToken ?? null,
-      });
-    },
-  });
-}
-
-/** Creates an isolated, network-free adapter for development and CI. */
-export function createMockGoogleGroupsAdapter(
-  fixtures: Readonly<Record<string, readonly RosterGroupMember[]>>,
-  pageSize = 200,
-  options: Readonly<{
-    runtimeMode?: string;
-  }> = {},
-): RosterGroupsAdapter {
-  const runtimeMode = options.runtimeMode ?? process.env.NODE_ENV;
-  if (runtimeMode !== 'development' && runtimeMode !== 'test') {
-    throw new RosterSyncError(
-      'MOCK_ROSTER_DISABLED',
-      'The mock Google Groups adapter requires an explicitly non-production runtime.',
-    );
-  }
-  const parsedPageSize = z.number().int().min(1).max(200).parse(pageSize);
-  const isolated = new Map<string, readonly RosterGroupMember[]>();
-  for (const [sourceId, members] of Object.entries(fixtures)) {
-    UuidSchema.parse(sourceId);
-    isolated.set(
-      sourceId,
-      Object.freeze(
-        members.map((member) => RosterGroupMemberSchema.parse(member)),
-      ),
-    );
-  }
-  return Object.freeze({
-    truthLabel: 'mocked' as const,
-    fetchPage(
-      source: GroupSource,
-      pageToken: string | null,
-    ): Promise<RosterGroupPage> {
-      const members = isolated.get(source.id);
-      if (members === undefined) {
-        throw new RosterSyncError(
-          'MOCK_GROUP_NOT_FOUND',
-          'The requested synthetic roster fixture does not exist.',
-        );
-      }
-      const offset =
-        pageToken === null
-          ? 0
-          : z.coerce.number().int().nonnegative().parse(pageToken);
-      if (offset > members.length) {
-        throw new RosterSyncError(
-          'MOCK_PAGE_TOKEN_INVALID',
-          'The synthetic roster fixture page token is invalid.',
-        );
-      }
-      const nextOffset = offset + parsedPageSize;
-      return Promise.resolve(
-        RosterGroupPageSchema.parse({
-          members: members.slice(offset, nextOffset),
-          nextPageToken:
-            nextOffset < members.length ? String(nextOffset) : null,
-        }),
-      );
-    },
-  });
-}
-
-/**
- * Reads the staff list an administrator curates inside this application.
- *
- * A manual source names specific people rather than delegating the audience to
- * a directory group, which is what a deployment needs when only some staff are
- * enrolled. Membership is already retained in `group_members`, so this adapter
- * only pages over it; every downstream boundary — snapshot versioning,
- * recipient identity, the device-registration endpoint join, completeness, and
- * retained evidence — is the same code the Google path uses.
- *
- * There is no provider and no credential here, so a fetch cannot fail for an
- * external reason. The adapter still refuses a source that is not an active
- * manual building source rather than silently returning an empty page, because
- * an empty page would publish a complete snapshot that reaches nobody.
- */
-export function createManualRosterAdapter(
-  database: Database,
-  pageSize = 200,
-): RosterGroupsAdapter {
-  const parsedPageSize = z.number().int().min(1).max(200).parse(pageSize);
-  return Object.freeze({
-    truthLabel: 'configured-unverified' as const,
-    async fetchPage(
-      source: GroupSource,
-      pageToken: string | null,
-    ): Promise<RosterGroupPage> {
-      if (source.kind !== 'manual') {
-        throw new RosterSyncError(
-          'MANUAL_SOURCE_KIND_INVALID',
-          'The manual roster adapter only reads manual sources.',
-        );
-      }
-      const offset =
-        pageToken === null
-          ? 0
-          : z.coerce.number().int().nonnegative().parse(pageToken);
-      const rows = await database
-        .select({ email: groupMembers.email })
-        .from(groupMembers)
-        .where(eq(groupMembers.groupSourceId, source.id))
-        .orderBy(asc(groupMembers.email))
-        .limit(parsedPageSize + 1)
-        .offset(offset);
-      const page = rows.slice(0, parsedPageSize);
-      return RosterGroupPageSchema.parse({
-        members: page.map(({ email }) => {
-          const canonical = email.trim().toLowerCase();
-          const localPart = canonical.slice(0, canonical.indexOf('@'));
-          return {
-            // A manual source has no provider identifier, so the canonical
-            // address is the stable key and the only retained identity.
-            memberKey: canonical,
-            googleSubject: null,
-            displayName: localPart.length > 0 ? localPart : canonical,
-            email: canonical,
-          };
-        }),
-        nextPageToken:
-          rows.length > parsedPageSize ? String(offset + parsedPageSize) : null,
-      });
-    },
-  });
-}
-
-/**
- * Routes each source to the adapter that owns its kind.
- *
- * One roster source configuration may mix a directory-backed building group
- * with a manually curated one, so the sync cannot assume a single provider.
- * Dispatching on the retained `kind` keeps that decision with the source
- * record rather than with deployment configuration, and refuses a kind no
- * adapter claims instead of silently returning no members.
- *
- * The composite reports the weaker of its adapters' truth labels: a roster
- * that draws on an unverified provider is not more trustworthy than that
- * provider.
- */
-export function createRoutingRosterAdapter(
-  adapters: Readonly<Partial<Record<GroupSourceKind, RosterGroupsAdapter>>>,
-): RosterGroupsAdapter {
-  const claimed = Object.values(adapters).filter(
-    (adapter): adapter is RosterGroupsAdapter => adapter !== undefined,
-  );
-  if (claimed.length === 0) {
-    throw new RosterSyncError(
-      'ROSTER_ADAPTER_MISSING',
-      'A routing roster adapter needs at least one source adapter.',
-    );
-  }
-  return Object.freeze({
-    truthLabel: claimed.some((adapter) => adapter.truthLabel === 'mocked')
-      ? ('mocked' as const)
-      : ('configured-unverified' as const),
-    fetchPage(
-      source: GroupSource,
-      pageToken: string | null,
-    ): Promise<RosterGroupPage> {
-      const adapter = adapters[source.kind];
-      if (adapter === undefined) {
-        return Promise.reject(
-          new RosterSyncError(
-            'ROSTER_ADAPTER_MISSING',
-            'No roster adapter is configured for this source kind.',
-          ),
-        );
-      }
-      return adapter.fetchPage(source, pageToken);
-    },
-  });
 }
 
 /** Safe structured-log alert; CloudWatch alarm wiring remains issue #29. */
@@ -2636,6 +1788,15 @@ export function createDrizzleRosterSyncStore(
   }
 
   return Object.freeze({
+    async loadGroupMembers(groupSourceId: string): Promise<readonly string[]> {
+      const rows = await database
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, UuidSchema.parse(groupSourceId)))
+        .orderBy(asc(groupMembers.email))
+        .limit(MAX_GROUP_MEMBERS + 1);
+      return Object.freeze(rows.map(({ email }) => email));
+    },
     async reserve(
       request: RosterSyncReservationRequest,
     ): Promise<RosterSyncReservation> {
