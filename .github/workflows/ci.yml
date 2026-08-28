@@ -116,7 +116,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes poppler-utils
 
       - name: Set up Terraform for isolated Firebase plan tests
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: 1.9.8
 
