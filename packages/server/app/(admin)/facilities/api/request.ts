@@ -57,6 +57,11 @@ export type FacilitiesAdminMutation =
       intent: 'set-manual-roster-members';
       command: SetManualRosterMembersInput;
       status: 'manual-members-saved';
+    }>
+  | Readonly<{
+      intent: 'publish-roster-snapshot';
+      command: null;
+      status: 'roster-snapshot-published';
     }>;
 
 function parseActive(value: string): boolean {
@@ -238,6 +243,9 @@ export function parseFacilitiesAdminMutation(
       return parseGoogleGroup(form, intent);
     case 'create-manual-building-group':
       return parseManualBuildingGroup(form);
+    case 'publish-roster-snapshot':
+      form.assertFields([...COMMON_FIELDS]);
+      return { intent, command: null, status: 'roster-snapshot-published' };
     case 'set-manual-roster-members':
       form.assertFields([...COMMON_FIELDS, 'sourceId', 'emails']);
       return {

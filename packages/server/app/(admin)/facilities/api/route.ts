@@ -7,12 +7,17 @@ import {
   executeUpdateGroupSourceCapability,
 } from '../capabilities';
 import {
+  AdminFormError,
   adminFormErrorResponse,
   adminSuccessRedirect,
   authenticateAdminMutation,
   parseIdempotencyKey,
   readAdminForm,
 } from '../admin-request';
+import {
+  currentStaffRosterConfiguration,
+  publishRosterSnapshot,
+} from '../roster-publish';
 import { parseFacilitiesAdminMutation } from './request';
 
 export const dynamic = 'force-dynamic';
@@ -61,6 +66,20 @@ export async function POST(request: Request): Promise<Response> {
           metadata,
         });
         break;
+      case 'publish-roster-snapshot': {
+        const sourceConfiguration = await currentStaffRosterConfiguration();
+        if (sourceConfiguration === null) {
+          throw new AdminFormError(
+            'Add a building source before publishing a roster snapshot.',
+          );
+        }
+        await publishRosterSnapshot({
+          authenticated,
+          sourceConfiguration,
+          idempotencyKey,
+        });
+        break;
+      }
       case 'set-manual-roster-members':
         await executeSetManualRosterMembersCapability({
           authenticated,
