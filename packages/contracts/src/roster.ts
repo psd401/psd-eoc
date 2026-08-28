@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { PaginationCursorSchema } from './api';
 import { NotificationChannelSchema } from './event-type';
 import { FacilityIdSchema } from './facility';
-import { type RosterGroupSourceRef, RosterGroupSourceRefSchema } from './group';
+import {
+  type GroupSourceKind,
+  type RosterGroupSourceRef,
+  RosterGroupSourceRefSchema,
+} from './group';
 import {
   hasUniqueStrings,
   TimestampSchema,
@@ -41,14 +45,6 @@ const hasUniqueGroupSourceIds = (
   sources: readonly RosterGroupSourceRef[],
 ): boolean => hasUniqueStrings(sources.map((source) => source.id));
 
-const groupSourceMatchesPopulation = (
-  source: RosterGroupSourceRef,
-  population: z.infer<typeof RosterPopulationSchema>,
-): boolean =>
-  population === 'staff'
-    ? source.kind === 'google-group' || source.kind === 'manual'
-    : source.kind === 'synthetic';
-
 /**
  * Owns the population boundary for immutable roster snapshots. Production
  * staff and synthetic training recipients are intentionally disjoint so test
@@ -58,6 +54,26 @@ export const RosterPopulationSchema = z.enum(['staff', 'synthetic']);
 
 /** Roster population inferred from {@link RosterPopulationSchema}. */
 export type RosterPopulation = z.infer<typeof RosterPopulationSchema>;
+
+/**
+ * Owns which population a source kind belongs to. A manual source is a staff
+ * list an administrator curates here, so it is staff for the same reason a
+ * Google group is: both name real people. Synthetic stays disjoint so a test
+ * path can never resolve a real endpoint.
+ *
+ * This is the only place that rule is written. The server used to restate it
+ * as `kind === 'google-group' ? 'staff' : 'synthetic'`, which silently sorted
+ * every manual source into the synthetic population and then dropped it.
+ */
+export const rosterPopulationForGroupSourceKind = (
+  kind: GroupSourceKind,
+): RosterPopulation => (kind === 'synthetic' ? 'synthetic' : 'staff');
+
+/** True when a source of this kind belongs to {@link population}. */
+export const groupSourceKindMatchesPopulation = (
+  kind: GroupSourceKind,
+  population: RosterPopulation,
+): boolean => rosterPopulationForGroupSourceKind(kind) === population;
 
 /**
  * Owns the lifecycle state of a snapshotted contact endpoint. Invalid and
@@ -284,7 +300,9 @@ export const RecipientSchema = z
       });
     }
     recipient.groupSourceRefs.forEach((source, index) => {
-      if (!groupSourceMatchesPopulation(source, recipient.population)) {
+      if (
+        !groupSourceKindMatchesPopulation(source.kind, recipient.population)
+      ) {
         context.addIssue({
           code: 'custom',
           message:
@@ -392,7 +410,9 @@ export const RosterSourceConfigurationSchema = z
     }
     const facilityIds = new Set(configuration.facilityIds);
     configuration.groupSourceRefs.forEach((source, index) => {
-      if (!groupSourceMatchesPopulation(source, configuration.population)) {
+      if (
+        !groupSourceKindMatchesPopulation(source.kind, configuration.population)
+      ) {
         context.addIssue({
           code: 'custom',
           message:
@@ -501,7 +521,7 @@ export const RosterSnapshotSchema = z
     }
     const facilityIds = new Set(snapshot.facilityIds);
     snapshot.sourceGroupRefs.forEach((source, index) => {
-      if (!groupSourceMatchesPopulation(source, snapshot.population)) {
+      if (!groupSourceKindMatchesPopulation(source.kind, snapshot.population)) {
         context.addIssue({
           code: 'custom',
           message: 'Roster snapshot source kind must match its population.',
@@ -783,7 +803,7 @@ export const RosterSyncResultSchema = z
       });
     }
     result.expectedSourceGroupRefs.forEach((source, index) => {
-      if (!groupSourceMatchesPopulation(source, result.population)) {
+      if (!groupSourceKindMatchesPopulation(source.kind, result.population)) {
         context.addIssue({
           code: 'custom',
           message: 'Roster sync source kind must match its population.',

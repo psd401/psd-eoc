@@ -6,8 +6,8 @@ import {
   CreateNeighborhoodVersionInputSchema,
   FacilityPageSchema,
   FacilitySchema,
+  GroupSourceKindSchema,
   GroupSourcePageSchema,
-  GroupSourceSchema,
   ListGroupSourcesInputSchema,
   ListNeighborhoodsInputSchema,
   ManualRosterMembershipSchema,
@@ -17,15 +17,19 @@ import {
   UpdateFacilityInputSchema,
   UpdateGroupSourceInputSchema,
   UuidSchema,
+  groupSourceKindMatchesPopulation,
+  rosterPopulationForGroupSourceKind,
   type Actor,
   type CapabilityInput,
   type Facility,
   type FacilityPage,
   type GroupSource,
+  type GroupSourceKind,
   type GroupSourcePage,
   type ManualRosterMembership,
   type Neighborhood,
   type NeighborhoodPage,
+  type RosterPopulation,
 } from '@psd-eoc/contracts';
 import {
   and,
@@ -81,6 +85,7 @@ import {
   type AdminQueryDatabase,
   type AdminQueryMetadata,
 } from '../../../lib/capabilities/admin';
+import { groupSourceRecordFromRow } from '../../../lib/roster/group-source-record';
 
 type AdminContext = CapabilityHandlerContext<AdminCapabilityTransaction>;
 
@@ -773,31 +778,7 @@ function groupSourceFromRow(
   row: typeof groupSources.$inferSelect,
   effectiveActive: boolean = row.active,
 ): GroupSource {
-  const common = {
-    id: row.id,
-    kind: row.kind,
-    purpose: row.purpose,
-    facilityId: row.facilityId,
-    displayName: row.displayName,
-    active: effectiveActive,
-    // Access sources carry the role they grant; every other purpose is null.
-    // The schema union rejects either one appearing on the wrong purpose, so a
-    // row that drifted from the database check constraint fails here loudly
-    // rather than presenting a group whose authority is unclear.
-    grantedRole: row.grantedRole,
-    membersCapturedAt:
-      row.membersCapturedAt === null ? null : dateIso(row.membersCapturedAt),
-    createdAt: dateIso(row.createdAt),
-  };
-  return GroupSourceSchema.parse(
-    row.kind === 'google-group'
-      ? {
-          ...common,
-          googleGroupId: row.googleGroupId,
-          email: row.email,
-        }
-      : { ...common, fixtureKey: row.fixtureKey },
-  );
+  return groupSourceRecordFromRow(row, effectiveActive);
 }
 
 async function getGroupSource(
@@ -814,7 +795,20 @@ async function getGroupSource(
   return row === undefined ? null : groupSourceFromRow(row);
 }
 
-type RosterPopulation = 'staff' | 'synthetic';
+/**
+ * The source kinds each population draws from, derived from the contract rule
+ * rather than restated, so adding a kind there reaches these queries.
+ */
+const POPULATION_KINDS: Readonly<
+  Record<RosterPopulation, readonly GroupSourceKind[]>
+> = {
+  staff: GroupSourceKindSchema.options.filter(
+    (kind) => rosterPopulationForGroupSourceKind(kind) === 'staff',
+  ),
+  synthetic: GroupSourceKindSchema.options.filter(
+    (kind) => rosterPopulationForGroupSourceKind(kind) === 'synthetic',
+  ),
+};
 
 interface RosterConfigurationState {
   readonly id: string;
@@ -1018,7 +1012,7 @@ async function assertGroupIdentityAvailable(
 
 function sourcePopulation(source: GroupSource): RosterPopulation | null {
   if (source.purpose === 'access') return null;
-  return source.kind === 'google-group' ? 'staff' : 'synthetic';
+  return rosterPopulationForGroupSourceKind(source.kind);
 }
 
 async function refreshRosterSourceConfiguration(
@@ -1044,7 +1038,6 @@ async function refreshRosterSourceConfiguration(
       'The group source has already been superseded; reload before replacing it.',
     );
   }
-  const sourceKind = population === 'staff' ? 'google-group' : 'synthetic';
   let baseSources: readonly GroupSource[];
   if (latest === null) {
     const initialRows = await database
@@ -1052,7 +1045,7 @@ async function refreshRosterSourceConfiguration(
       .from(groupSources)
       .where(
         and(
-          eq(groupSources.kind, sourceKind),
+          inArray(groupSources.kind, POPULATION_KINDS[population]),
           ne(groupSources.purpose, 'access'),
           eq(groupSources.active, true),
         ),
@@ -1077,7 +1070,7 @@ async function refreshRosterSourceConfiguration(
   const sources = [...byId.values()]
     .filter(
       (source) =>
-        source.kind === sourceKind &&
+        groupSourceKindMatchesPopulation(source.kind, population) &&
         source.active &&
         source.purpose !== 'access' &&
         (source.purpose === 'others' ||
