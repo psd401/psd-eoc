@@ -11,6 +11,7 @@ import {
   SesVerificationReferenceSchema,
 } from '@psd-eoc/contracts';
 
+import { failureDetail } from '../shared/failure-detail';
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { AwsSesV2Client } from './aws-client';
@@ -32,6 +33,8 @@ type SafeLogEvent = Readonly<{
     | 'email-worker-started';
   count?: number;
   durationMilliseconds?: number;
+  /** Bounded, value-free reason. Never a recipient, token, or payload. */
+  detail?: string;
 }>;
 
 export interface EmailServiceConfiguration {
@@ -309,8 +312,12 @@ export async function runEmailService(
     let message: ReturnType<typeof parseMessage>;
     try {
       message = parseMessage(raw);
-    } catch {
-      log({ event: 'email-worker-message-failed', count: 1 });
+    } catch (error) {
+      log({
+        event: 'email-worker-message-failed',
+        count: 1,
+        detail: failureDetail(error),
+      });
       continue;
     }
     const heartbeat = setInterval(() => {
@@ -368,9 +375,13 @@ export async function runEmailService(
           });
         }
       }
-    } catch {
+    } catch (error) {
       // Leave the message for the queue's bounded redrive policy and alarm.
-      log({ event: 'email-worker-message-failed', count: 1 });
+      log({
+        event: 'email-worker-message-failed',
+        count: 1,
+        detail: failureDetail(error),
+      });
     } finally {
       clearInterval(heartbeat);
     }

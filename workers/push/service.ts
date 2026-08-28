@@ -13,6 +13,7 @@ import {
   type PushProviderCutover,
 } from '@psd-eoc/contracts';
 
+import { failureDetail } from '../shared/failure-detail';
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { LedgeredExpoPushAdapter } from './adapter';
@@ -60,6 +61,8 @@ type SafeLogEvent = Readonly<{
     | 'push-worker-stuck-outbox-sample-failed';
   count?: number;
   durationMilliseconds?: number;
+  /** Bounded, value-free reason. Never a recipient, token, or payload. */
+  detail?: string;
 }>;
 
 export interface ExpoPushServiceConfiguration {
@@ -581,8 +584,12 @@ export async function runExpoPushService(
     let message: ReturnType<typeof parseMessage>;
     try {
       message = parseMessage(raw);
-    } catch {
-      log({ event: 'push-worker-message-failed', count: 1 });
+    } catch (error) {
+      log({
+        event: 'push-worker-message-failed',
+        count: 1,
+        detail: failureDetail(error),
+      });
       continue;
     }
     const heartbeat = setInterval(() => {
