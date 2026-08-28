@@ -96,6 +96,8 @@ import {
   GroupSourcePageSchema,
   GroupSourceSchema,
   ListGroupSourcesInputSchema,
+  ManualRosterMembershipSchema,
+  SetManualRosterMembersInputSchema,
   UpdateGroupSourceInputSchema,
 } from './group';
 import type { HumanOnlyActionId } from './human-only';
@@ -1317,6 +1319,14 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: UpdateGroupSourceInputSchema,
     outputSchema: GroupSourceSchema,
+  }),
+  'set-manual-roster-members': canonicalCapability({
+    id: 'set-manual-roster-members',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    inputSchema: SetManualRosterMembersInputSchema,
+    outputSchema: ManualRosterMembershipSchema,
   }),
   'set-channel-enabled': canonicalCapability({
     id: 'set-channel-enabled',

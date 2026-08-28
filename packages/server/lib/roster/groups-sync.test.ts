@@ -33,6 +33,7 @@ import {
   type RosterSyncAlertSink,
   type RosterSyncBaseline,
   type RosterSyncCapabilityContext,
+  type ScheduledRosterSyncContext,
   type RosterSyncDependencies,
   type RosterSyncReservation,
   type RosterSyncReservationRequest,
@@ -592,7 +593,7 @@ function countingAdapter(adapter: RosterGroupsAdapter): Readonly<{
 
 function context(
   idempotencyKey = 'roster-sync-schedule-0001',
-  overrides: Partial<RosterSyncCapabilityContext> = {},
+  overrides: Partial<ScheduledRosterSyncContext> = {},
 ): RosterSyncCapabilityContext {
   return {
     actor: SYSTEM_ACTOR,

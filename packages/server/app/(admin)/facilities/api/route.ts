@@ -1,6 +1,7 @@
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
+  executeSetManualRosterMembersCapability,
   executeCreateNeighborhoodVersionCapability,
   executeUpdateFacilityCapability,
   executeUpdateGroupSourceCapability,
@@ -55,6 +56,13 @@ export async function POST(request: Request): Promise<Response> {
       case 'replace-synthetic-building-group':
       case 'replace-synthetic-others-group':
         await executeUpdateGroupSourceCapability({
+          authenticated,
+          command: mutation.command,
+          metadata,
+        });
+        break;
+      case 'set-manual-roster-members':
+        await executeSetManualRosterMembersCapability({
           authenticated,
           command: mutation.command,
           metadata,

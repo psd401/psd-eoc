@@ -365,6 +365,43 @@ function ManualBuildingGroupForm({
   );
 }
 
+/**
+ * Replaces the people a manual building source reaches.
+ *
+ * The whole list is stated rather than edited one address at a time, so an
+ * administrator can read back exactly who a site will notify before saving.
+ * Saving changes who a later activation would reach; it notifies nobody.
+ */
+function ManualMembersForm({
+  csrfToken,
+  group,
+}: Readonly<{ csrfToken: string; group: GroupSource }>) {
+  if (group.kind !== 'manual' || !group.active) {
+    return null;
+  }
+  const helpId = `manual-members-help-${group.id}`;
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="set-manual-roster-members" />
+      <input name="sourceId" type="hidden" value={group.id} />
+      <fieldset>
+        <legend>People notified by {group.displayName}</legend>
+        <p id={helpId}>
+          One staff address per line. Saving replaces the whole list, and
+          rebuilding the roster afterwards is what puts it into effect. This
+          does not notify anyone.
+        </p>
+        <label>
+          Staff addresses
+          <textarea aria-describedby={helpId} name="emails" rows={6} />
+        </label>
+        <button type="submit">Save people</button>
+      </fieldset>
+    </form>
+  );
+}
+
 function OthersGroupForm({
   csrfToken,
 }: Readonly<{
@@ -543,6 +580,15 @@ function GroupSourcesSection({
       <div aria-label="Replace active building sources" role="group">
         {buildingGroups.map((group) => (
           <GroupSourceReplacementForm
+            csrfToken={csrfToken}
+            group={group}
+            key={group.id}
+          />
+        ))}
+      </div>
+      <div aria-label="People notified by manual building sources" role="group">
+        {buildingGroups.map((group) => (
+          <ManualMembersForm
             csrfToken={csrfToken}
             group={group}
             key={group.id}

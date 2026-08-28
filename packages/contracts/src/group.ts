@@ -413,3 +413,78 @@ export const UpdateGroupSourceInputSchema = z
 export type UpdateGroupSourceInput = z.infer<
   typeof UpdateGroupSourceInputSchema
 >;
+
+/**
+ * Owns the complete membership of one manual roster source.
+ *
+ * The whole list is stated rather than added to one address at a time, so an
+ * administrator can see exactly who a site will reach before saving and a
+ * removal cannot be forgotten. Addresses are canonicalised to lowercase and
+ * deduplicated, because the same person written two ways is one recipient.
+ *
+ * An empty list is allowed and means the source reaches nobody. That is a
+ * legitimate state for a site being prepared, and the roster sync refuses to
+ * publish a snapshot from it rather than silently reaching no one.
+ */
+export const SetManualRosterMembersInputSchema = z
+  .object({
+    groupSourceId: GroupSourceIdSchema,
+    emails: z
+      .array(
+        z
+          .string()
+          .max(320)
+          .email()
+          // Canonical form is asserted rather than applied. This schema is
+          // published as JSON Schema for the agent surface, which cannot
+          // represent a transform, so the caller canonicalises and the
+          // contract refuses anything that is not already canonical.
+          .refine(
+            (value) => value === value.trim().toLowerCase(),
+            'Staff addresses must be lowercase and trimmed.',
+          ),
+      )
+      .max(1_000)
+      .refine(
+        (values) => new Set(values).size === values.length,
+        'Staff addresses must be unique.',
+      )
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+/** Canonicalises caller-supplied addresses into the form the contract accepts. */
+export function canonicalManualRosterEmails(
+  values: readonly string[],
+): readonly string[] {
+  return Object.freeze(
+    [...new Set(values.map((value) => value.trim().toLowerCase()))]
+      .filter((value) => value.length > 0)
+      .sort(),
+  );
+}
+
+/** Manual roster membership input inferred from its schema. */
+export type SetManualRosterMembersInput = z.infer<
+  typeof SetManualRosterMembersInputSchema
+>;
+
+/**
+ * Owns the retained membership of one manual roster source. Addresses are
+ * staff contact data, so the result carries a count and the capture time
+ * rather than the list itself.
+ */
+export const ManualRosterMembershipSchema = z
+  .object({
+    groupSourceId: GroupSourceIdSchema,
+    memberCount: z.number().int().nonnegative(),
+    capturedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Manual roster membership result inferred from its schema. */
+export type ManualRosterMembership = z.infer<
+  typeof ManualRosterMembershipSchema
+>;

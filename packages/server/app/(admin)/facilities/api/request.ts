@@ -2,11 +2,14 @@ import {
   CreateFacilityInputSchema,
   CreateGroupSourceInputSchema,
   CreateNeighborhoodVersionInputSchema,
+  canonicalManualRosterEmails,
+  SetManualRosterMembersInputSchema,
   UpdateFacilityInputSchema,
   UpdateGroupSourceInputSchema,
   type CreateFacilityInput,
   type CreateGroupSourceInput,
   type CreateNeighborhoodVersionInput,
+  type SetManualRosterMembersInput,
   type UpdateFacilityInput,
   type UpdateGroupSourceInput,
 } from '@psd-eoc/contracts';
@@ -49,6 +52,11 @@ export type FacilitiesAdminMutation =
       intent: 'create-neighborhood-version';
       command: CreateNeighborhoodVersionInput;
       status: 'neighborhood-version-created';
+    }>
+  | Readonly<{
+      intent: 'set-manual-roster-members';
+      command: SetManualRosterMembersInput;
+      status: 'manual-members-saved';
     }>;
 
 function parseActive(value: string): boolean {
@@ -230,6 +238,20 @@ export function parseFacilitiesAdminMutation(
       return parseGoogleGroup(form, intent);
     case 'create-manual-building-group':
       return parseManualBuildingGroup(form);
+    case 'set-manual-roster-members':
+      form.assertFields([...COMMON_FIELDS, 'sourceId', 'emails']);
+      return {
+        intent,
+        command: SetManualRosterMembersInputSchema.parse({
+          groupSourceId: form.required('sourceId'),
+          // One address per line is what an administrator can paste from a
+          // list and read back; blank lines are ignored rather than rejected.
+          emails: canonicalManualRosterEmails(
+            form.required('emails').split(/[\n,;]/u),
+          ),
+        }),
+        status: 'manual-members-saved',
+      };
     case 'create-synthetic-building-group':
     case 'create-synthetic-others-group':
       return parseSyntheticGroup(form, intent);

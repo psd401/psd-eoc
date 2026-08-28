@@ -22,6 +22,9 @@ import {
   createScheduledRosterSyncAuthorizer,
   createStructuredRosterSyncAlertSink,
   createSyncRosterHandler,
+  createManualRosterAdapter,
+  createRoutingRosterAdapter,
+  hasGoogleCloudIdentityRosterConfiguration,
   readGoogleCloudIdentityRosterConfiguration,
   verifyRosterSyncJobToken,
   type RosterSyncAlert,
@@ -510,9 +513,20 @@ async function createDefaultRuntime(
 ): Promise<RosterSyncRouteRuntime> {
   const connection = createDatabaseClient(readDatabaseConfig());
   try {
-    const adapter = createGoogleCloudIdentityRosterAdapter(
-      readGoogleCloudIdentityRosterConfiguration(),
-    );
+    // A manual source needs no provider credential, so its adapter is always
+    // available. Google is added only when this deployment is configured for
+    // it: a district that curates every roster here must not be unable to sync
+    // because it has no directory configuration to read.
+    const adapter = createRoutingRosterAdapter({
+      manual: createManualRosterAdapter(connection.db),
+      ...(hasGoogleCloudIdentityRosterConfiguration()
+        ? {
+            'google-group': createGoogleCloudIdentityRosterAdapter(
+              readGoogleCloudIdentityRosterConfiguration(),
+            ),
+          }
+        : {}),
+    });
     return Object.freeze({
       handler: createSyncRosterHandler({
         store: createDrizzleRosterSyncStore(connection.db),
