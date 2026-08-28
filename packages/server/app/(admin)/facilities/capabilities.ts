@@ -982,6 +982,12 @@ async function assertGroupIdentityAvailable(
     | CapabilityInput<'update-group-source'>,
   exceptId: string | null,
 ): Promise<void> {
+  if (source.kind === 'manual') {
+    // A manual source carries no provider identifier, so there is nothing for
+    // a second source to collide with. Two manual sources at the same facility
+    // are a legitimate way to keep separate lists of people.
+    return;
+  }
   const identity =
     source.kind === 'google-group' ? source.googleGroupId : source.fixtureKey;
   await lockAdminIdentity(

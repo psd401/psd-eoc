@@ -26,6 +26,7 @@ import {
   type CapabilityExecutionAuthorizer,
   type GroupSource,
   type GroupCompletionKind,
+  type GroupSourceKind,
   type Recipient,
   type RegisteredCapabilityHandler,
   type RegisteredCapabilityId,
@@ -54,6 +55,7 @@ import {
   deviceEnrollments,
   devicePushTokenRegistrations,
   devicePushTokenUnregistrations,
+  groupMembers,
   groupSources,
   idempotencyRecords,
   rosterEndpoints,
@@ -1838,6 +1840,117 @@ export function createMockGoogleGroupsAdapter(
   });
 }
 
+/**
+ * Reads the staff list an administrator curates inside this application.
+ *
+ * A manual source names specific people rather than delegating the audience to
+ * a directory group, which is what a deployment needs when only some staff are
+ * enrolled. Membership is already retained in `group_members`, so this adapter
+ * only pages over it; every downstream boundary — snapshot versioning,
+ * recipient identity, the device-registration endpoint join, completeness, and
+ * retained evidence — is the same code the Google path uses.
+ *
+ * There is no provider and no credential here, so a fetch cannot fail for an
+ * external reason. The adapter still refuses a source that is not an active
+ * manual building source rather than silently returning an empty page, because
+ * an empty page would publish a complete snapshot that reaches nobody.
+ */
+export function createManualRosterAdapter(
+  database: Database,
+  pageSize = 200,
+): RosterGroupsAdapter {
+  const parsedPageSize = z.number().int().min(1).max(200).parse(pageSize);
+  return Object.freeze({
+    truthLabel: 'configured-unverified' as const,
+    async fetchPage(
+      source: GroupSource,
+      pageToken: string | null,
+    ): Promise<RosterGroupPage> {
+      if (source.kind !== 'manual') {
+        throw new RosterSyncError(
+          'MANUAL_SOURCE_KIND_INVALID',
+          'The manual roster adapter only reads manual sources.',
+        );
+      }
+      const offset =
+        pageToken === null
+          ? 0
+          : z.coerce.number().int().nonnegative().parse(pageToken);
+      const rows = await database
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, source.id))
+        .orderBy(asc(groupMembers.email))
+        .limit(parsedPageSize + 1)
+        .offset(offset);
+      const page = rows.slice(0, parsedPageSize);
+      return RosterGroupPageSchema.parse({
+        members: page.map(({ email }) => {
+          const canonical = email.trim().toLowerCase();
+          const localPart = canonical.slice(0, canonical.indexOf('@'));
+          return {
+            // A manual source has no provider identifier, so the canonical
+            // address is the stable key and the only retained identity.
+            memberKey: canonical,
+            googleSubject: null,
+            displayName: localPart.length > 0 ? localPart : canonical,
+            email: canonical,
+          };
+        }),
+        nextPageToken:
+          rows.length > parsedPageSize ? String(offset + parsedPageSize) : null,
+      });
+    },
+  });
+}
+
+/**
+ * Routes each source to the adapter that owns its kind.
+ *
+ * One roster source configuration may mix a directory-backed building group
+ * with a manually curated one, so the sync cannot assume a single provider.
+ * Dispatching on the retained `kind` keeps that decision with the source
+ * record rather than with deployment configuration, and refuses a kind no
+ * adapter claims instead of silently returning no members.
+ *
+ * The composite reports the weaker of its adapters' truth labels: a roster
+ * that draws on an unverified provider is not more trustworthy than that
+ * provider.
+ */
+export function createRoutingRosterAdapter(
+  adapters: Readonly<Partial<Record<GroupSourceKind, RosterGroupsAdapter>>>,
+): RosterGroupsAdapter {
+  const claimed = Object.values(adapters).filter(
+    (adapter): adapter is RosterGroupsAdapter => adapter !== undefined,
+  );
+  if (claimed.length === 0) {
+    throw new RosterSyncError(
+      'ROSTER_ADAPTER_MISSING',
+      'A routing roster adapter needs at least one source adapter.',
+    );
+  }
+  return Object.freeze({
+    truthLabel: claimed.some((adapter) => adapter.truthLabel === 'mocked')
+      ? ('mocked' as const)
+      : ('configured-unverified' as const),
+    fetchPage(
+      source: GroupSource,
+      pageToken: string | null,
+    ): Promise<RosterGroupPage> {
+      const adapter = adapters[source.kind];
+      if (adapter === undefined) {
+        return Promise.reject(
+          new RosterSyncError(
+            'ROSTER_ADAPTER_MISSING',
+            'No roster adapter is configured for this source kind.',
+          ),
+        );
+      }
+      return adapter.fetchPage(source, pageToken);
+    },
+  });
+}
+
 /** Safe structured-log alert; CloudWatch alarm wiring remains issue #29. */
 export function createStructuredRosterSyncAlertSink(
   write: (value: string) => void = console.error,
@@ -1868,7 +1981,7 @@ interface ConfigurationHeaderRow {
 
 interface ConfiguredSourceRow {
   readonly id: string;
-  readonly kind: 'google-group' | 'synthetic';
+  readonly kind: GroupSourceKind;
   readonly purpose: 'access' | 'building' | 'others';
   readonly facilityId: string | null;
   readonly displayName: string;

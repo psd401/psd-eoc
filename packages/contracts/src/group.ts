@@ -13,10 +13,18 @@ export const GroupSourceIdSchema = UuidSchema;
 export type GroupSourceId = z.infer<typeof GroupSourceIdSchema>;
 
 /**
- * Owns the source-system discriminator for configured groups. Google data is
- * untrusted external input; synthetic data is locally controlled test data.
+ * Owns the source-system discriminator for configured groups.
+ *
+ * Google data is untrusted external input. Synthetic data is locally
+ * controlled test data. Manual data is the staff list an administrator curates
+ * inside this application, for a deployment that notifies named people rather
+ * than everyone who happens to be in a directory group.
  */
-export const GroupSourceKindSchema = z.enum(['google-group', 'synthetic']);
+export const GroupSourceKindSchema = z.enum([
+  'google-group',
+  'manual',
+  'synthetic',
+]);
 
 /** Configured group source-system kind inferred from its schema. */
 export type GroupSourceKind = z.infer<typeof GroupSourceKindSchema>;
@@ -154,6 +162,18 @@ const syntheticGroupDetailsShape = {
 };
 
 /**
+ * A manual source has no external identity to carry. Its members are curated
+ * in this application, so the facility binding and display name are the whole
+ * record; pinning the provider fields to null keeps a Google or synthetic
+ * source from being reinterpreted as a manual one.
+ */
+const manualGroupDetailsShape = {
+  googleGroupId: z.null(),
+  email: z.null(),
+  fixtureKey: z.null(),
+};
+
+/**
  * Owns one administrator-configured Google Group or fail-closed synthetic
  * fixture source. Its union makes every valid kind, purpose, and facility
  * combination explicit; synthetic access groups do not exist.
@@ -191,6 +211,17 @@ export const GroupSourceSchema = z
         ...groupSourceMetadataShape,
         ...noGrantedRoleShape,
         ...googleGroupDetailsShape,
+      })
+      .strict(),
+    z
+      .object({
+        id: GroupSourceIdSchema,
+        kind: z.literal('manual'),
+        purpose: z.literal('building'),
+        facilityId: UuidSchema,
+        ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
+        ...manualGroupDetailsShape,
       })
       .strict(),
     z
@@ -281,6 +312,15 @@ export const CreateGroupSourceInputSchema = z
         facilityId: z.null(),
         ...groupSourceWriteMetadataShape,
         ...googleGroupDetailsShape,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal('manual'),
+        purpose: z.literal('building'),
+        facilityId: UuidSchema,
+        ...groupSourceWriteMetadataShape,
+        ...manualGroupDetailsShape,
       })
       .strict(),
     z
