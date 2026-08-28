@@ -1,0 +1,2 @@
+ALTER TYPE "public"."agent_capability_grant" ADD VALUE 'set-manual-roster-members' BEFORE 'set-channel-enabled';--> statement-breakpoint
+ALTER TYPE "public"."mutation_capability" ADD VALUE 'set-manual-roster-members' BEFORE 'set-channel-enabled';

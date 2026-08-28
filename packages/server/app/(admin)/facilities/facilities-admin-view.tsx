@@ -321,6 +321,87 @@ function BuildingGroupForm({
   );
 }
 
+function ManualBuildingGroupForm({
+  csrfToken,
+  facilities,
+}: Readonly<{
+  csrfToken: string;
+  facilities: readonly Facility[];
+}>) {
+  const activeFacilities = facilities.filter((facility) => facility.active);
+  const helpId = 'new-manual-building-group-help';
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="create-manual-building-group" />
+      <fieldset disabled={activeFacilities.length === 0}>
+        <legend>Add a manual building source</legend>
+        <p id={helpId}>
+          A manual source notifies only the people an administrator adds to it,
+          for a site where not every staff member is enrolled. Creating the
+          source does not add anyone; add people to it afterwards.
+        </p>
+        <label>
+          Facility
+          <select aria-describedby={helpId} name="facilityId" required>
+            <option value="">Select a facility</option>
+            {activeFacilities.map((facility) => (
+              <option key={facility.id} value={facility.id}>
+                {facility.code} — {facility.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Display name
+          <input maxLength={160} name="displayName" required type="text" />
+        </label>
+        <button type="submit">Add manual building source</button>
+      </fieldset>
+      {activeFacilities.length === 0 ? (
+        <p role="status">Add an active facility before its building source.</p>
+      ) : null}
+    </form>
+  );
+}
+
+/**
+ * Replaces the people a manual building source reaches.
+ *
+ * The whole list is stated rather than edited one address at a time, so an
+ * administrator can read back exactly who a site will notify before saving.
+ * Saving changes who a later activation would reach; it notifies nobody.
+ */
+function ManualMembersForm({
+  csrfToken,
+  group,
+}: Readonly<{ csrfToken: string; group: GroupSource }>) {
+  if (group.kind !== 'manual' || !group.active) {
+    return null;
+  }
+  const helpId = `manual-members-help-${group.id}`;
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="set-manual-roster-members" />
+      <input name="sourceId" type="hidden" value={group.id} />
+      <fieldset>
+        <legend>People notified by {group.displayName}</legend>
+        <p id={helpId}>
+          One staff address per line. Saving replaces the whole list, and
+          rebuilding the roster afterwards is what puts it into effect. This
+          does not notify anyone.
+        </p>
+        <label>
+          Staff addresses
+          <textarea aria-describedby={helpId} name="emails" rows={6} />
+        </label>
+        <button type="submit">Save people</button>
+      </fieldset>
+    </form>
+  );
+}
+
 function OthersGroupForm({
   csrfToken,
 }: Readonly<{
@@ -345,9 +426,14 @@ function OthersGroupForm({
 }
 
 function groupSourceIdentity(group: GroupSource): string {
-  return group.kind === 'google-group'
-    ? `${group.googleGroupId} (${group.email})`
-    : group.fixtureKey;
+  if (group.kind === 'google-group') {
+    return `${group.googleGroupId} (${group.email})`;
+  }
+  if (group.kind === 'synthetic') {
+    return group.fixtureKey;
+  }
+  // A manual source carries no external identifier; its members are curated here.
+  return 'Curated in PSD EOC';
 }
 
 function GroupSourceReplacementForm({
@@ -500,6 +586,15 @@ function GroupSourcesSection({
           />
         ))}
       </div>
+      <div aria-label="People notified by manual building sources" role="group">
+        {buildingGroups.map((group) => (
+          <ManualMembersForm
+            csrfToken={csrfToken}
+            group={group}
+            key={group.id}
+          />
+        ))}
+      </div>
       {buildingPage.pageInfo.hasMore
         ? nextPageLink(
             'Next page of building sources',
@@ -509,6 +604,7 @@ function GroupSourcesSection({
           )
         : null}
       <BuildingGroupForm csrfToken={csrfToken} facilities={facilities} />
+      <ManualBuildingGroupForm csrfToken={csrfToken} facilities={facilities} />
       <h3>Optional others sources</h3>
       <GroupSourceTable
         facilitiesById={facilitiesById}

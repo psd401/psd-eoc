@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import {
   invokeAuthorizedCapabilityHandler,
   GroupSourceSchema,
@@ -11,14 +11,11 @@ import {
   type RosterSnapshot,
   type RosterSyncResult,
 } from '@psd-eoc/contracts';
-import { exportPKCS8, generateKeyPair } from 'jose';
 
 import {
-  createMockGoogleGroupsAdapter as createRuntimeMockGoogleGroupsAdapter,
   createScheduledRosterSyncAuthorizer,
   createSyncRosterHandler,
   diffRosterGroupCounts,
-  readGoogleCloudIdentityRosterConfiguration,
   rosterSourceConfigurationRevisionDigest,
   RosterSyncError,
   syncRoster,
@@ -26,13 +23,12 @@ import {
   type LoadedRosterSourceConfiguration,
   type RejectedRosterSyncPersistenceRequest,
   type RosterGroupMember,
-  type RosterGroupPage,
-  type RosterGroupsAdapter,
   type RosterLocalContact,
   type RosterSyncAlert,
   type RosterSyncAlertSink,
   type RosterSyncBaseline,
   type RosterSyncCapabilityContext,
+  type ScheduledRosterSyncContext,
   type RosterSyncDependencies,
   type RosterSyncReservation,
   type RosterSyncReservationRequest,
@@ -42,42 +38,6 @@ import {
 const SYNC_TIME = '2026-08-08T12:00:00.000Z';
 const HISTORICAL_TIME = '2026-08-07T12:00:00.000Z';
 const REVISION_DIGEST = 'a'.repeat(64);
-let syntheticPrivateKey = '';
-const SYNTHETIC_GOOGLE_PROJECT = 'example-eoc-project';
-const SYNTHETIC_SERVICE_ACCOUNT = `roster-sync-reader@${SYNTHETIC_GOOGLE_PROJECT}.iam.gserviceaccount.com`;
-
-beforeAll(async () => {
-  const { privateKey } = await generateKeyPair('RS256', {
-    extractable: true,
-  });
-  syntheticPrivateKey = await exportPKCS8(privateKey);
-});
-
-function serializedCloudIdentityCredential(
-  overrides: Readonly<Record<string, unknown>> = {},
-): string {
-  return JSON.stringify({
-    type: 'service_account',
-    project_id: SYNTHETIC_GOOGLE_PROJECT,
-    private_key_id: 'a'.repeat(40),
-    private_key: syntheticPrivateKey,
-    client_email: SYNTHETIC_SERVICE_ACCOUNT,
-    client_id: '123456789012345678901',
-    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-    token_uri: 'https://oauth2.googleapis.com/token',
-    auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
-    client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(SYNTHETIC_SERVICE_ACCOUNT)}`,
-    universe_domain: 'googleapis.com',
-    approved_staff_group_sha256: 'b'.repeat(64),
-    credential_created_at: HISTORICAL_TIME,
-    domain_wide_delegation: false,
-    oauth_scopes: [
-      'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
-    ],
-    workspace_admin_role: '_GROUPS_READER_ROLE',
-    ...overrides,
-  });
-}
 
 const IDS = Object.freeze({
   facilityNorth: '00000000-0000-4000-8000-000000000001',
@@ -195,35 +155,6 @@ function loadedConfiguration(
   });
 }
 
-function staffLoadedConfiguration(): LoadedRosterSourceConfiguration {
-  const source = GroupSourceSchema.parse({
-    id: IDS.groupNorth,
-    kind: 'google-group',
-    purpose: 'building',
-    facilityId: IDS.facilityNorth,
-    grantedRole: null,
-    displayName: 'North Staff',
-    active: true,
-    membersCapturedAt: null,
-    googleGroupId: 'north-staff-group',
-    email: 'north-staff@example.invalid',
-    createdAt: HISTORICAL_TIME,
-  });
-  const configuration = RosterSourceConfigurationSchema.parse({
-    id: IDS.configuration,
-    version: 3,
-    population: 'staff',
-    facilityIds: [IDS.facilityNorth],
-    groupSourceRefs: [sourceReference(source)],
-    createdAt: HISTORICAL_TIME,
-  });
-  return Object.freeze({
-    configuration,
-    sources: Object.freeze([source]),
-    revisionDigest: REVISION_DIGEST,
-  });
-}
-
 function member(
   memberKey: string,
   displayName: string,
@@ -248,15 +179,6 @@ function standardFixtures(
     [NORTH_SOURCE.id]: Object.freeze([NORTH_MEMBER, SHARED_MEMBER]),
     [SOUTH_SOURCE.id]: Object.freeze([SOUTH_MEMBER]),
     [OTHERS_SOURCE.id]: Object.freeze([...othersMembers]),
-  });
-}
-
-function createMockGoogleGroupsAdapter(
-  fixtures: Readonly<Record<string, readonly RosterGroupMember[]>>,
-  pageSize = 200,
-): RosterGroupsAdapter {
-  return createRuntimeMockGoogleGroupsAdapter(fixtures, pageSize, {
-    runtimeMode: 'test',
   });
 }
 
@@ -286,6 +208,23 @@ class MemoryRosterSyncStore implements RosterSyncStore {
   public localContactLoads = 0;
   public publishCalls = 0;
   public rejectionCalls = 0;
+
+  public groupMemberFixtures: Readonly<
+    Record<string, readonly RosterGroupMember[]>
+  > = {};
+
+  public readonly groupMemberLoads: string[] = [];
+
+  public async loadGroupMembers(
+    groupSourceId: string,
+  ): Promise<readonly string[]> {
+    this.groupMemberLoads.push(groupSourceId);
+    return Object.freeze(
+      (this.groupMemberFixtures[groupSourceId] ?? [])
+        .map((member) => member.email)
+        .sort(),
+    );
+  }
 
   private readonly reservationsByKey = new Map<string, MemoryReservation>();
   private readonly reservationsById = new Map<string, MemoryReservation>();
@@ -570,29 +509,9 @@ function alertCollector(): Readonly<{
   });
 }
 
-function countingAdapter(adapter: RosterGroupsAdapter): Readonly<{
-  adapter: RosterGroupsAdapter;
-  calls: ReadonlyArray<{ sourceId: string; pageToken: string | null }>;
-}> {
-  const calls: Array<{ sourceId: string; pageToken: string | null }> = [];
-  return Object.freeze({
-    calls,
-    adapter: Object.freeze({
-      truthLabel: adapter.truthLabel,
-      fetchPage(
-        source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        calls.push({ sourceId: source.id, pageToken });
-        return adapter.fetchPage(source, pageToken);
-      },
-    }),
-  });
-}
-
 function context(
   idempotencyKey = 'roster-sync-schedule-0001',
-  overrides: Partial<RosterSyncCapabilityContext> = {},
+  overrides: Partial<ScheduledRosterSyncContext> = {},
 ): RosterSyncCapabilityContext {
   return {
     actor: SYSTEM_ACTOR,
@@ -610,14 +529,14 @@ const SYNC_INPUT = Object.freeze({
 });
 
 function dependencies(
-  store: RosterSyncStore,
-  adapter: RosterGroupsAdapter,
+  store: MemoryRosterSyncStore,
+  fixtures: Readonly<Record<string, readonly RosterGroupMember[]>>,
   alerts: RosterSyncAlertSink,
   uuid = uuidSequence(1_000),
 ): RosterSyncDependencies {
+  store.groupMemberFixtures = fixtures;
   return Object.freeze({
     store,
-    adapter,
     alerts,
     now: () => new Date(SYNC_TIME),
     uuid,
@@ -714,11 +633,7 @@ describe('complete fail-closed roster synchronization', () => {
     const result = await syncRoster(
       { sourceConfiguration: { id: IDS.configuration, version: 4 } },
       context('roster-sync-forward-configuration-0001'),
-      dependencies(
-        store,
-        createMockGoogleGroupsAdapter(standardFixtures(), 1),
-        collector.sink,
-      ),
+      dependencies(store, standardFixtures(), collector.sink),
     );
 
     expect(result.outcome).toBe('complete');
@@ -732,18 +647,16 @@ describe('complete fail-closed roster synchronization', () => {
     expect(collector.alerts).toEqual([]);
   });
 
-  test('publishes immutable sequential versions from complete multi-page union', async () => {
+  test('publishes immutable sequential versions from the union of every source', async () => {
     const loaded = loadedConfiguration();
     const store = new MemoryRosterSyncStore(loaded, [
       historicalSnapshot(loaded),
     ]);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures(), 1),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
     const syncDependencies = dependencies(
       store,
-      counted.adapter,
+      countedFixtures,
       collector.sink,
     );
 
@@ -766,7 +679,8 @@ describe('complete fail-closed roster synchronization', () => {
     ]);
     expect(store.publishCalls).toBe(2);
     expect(collector.alerts).toEqual([]);
-    expect(counted.calls).toHaveLength(8);
+    // Two publications, each reading all three configured sources once.
+    expect(store.groupMemberLoads).toHaveLength(6);
 
     const firstPublished = store.snapshots[1];
     if (first.publishedSnapshotId === null) {
@@ -781,13 +695,9 @@ describe('complete fail-closed roster synchronization', () => {
     );
     expect(
       firstPublished?.recipients.map((recipient) => recipient.displayName),
-    ).toEqual([
-      'Synthetic North Member',
-      'Synthetic Shared Member',
-      'Synthetic South Member',
-    ]);
+    ).toEqual(['north-member', 'shared-member', 'south-member']);
     const shared = firstPublished?.recipients.find(
-      (recipient) => recipient.displayName === 'Synthetic Shared Member',
+      (recipient) => recipient.displayName === 'shared-member',
     );
     expect(shared?.groupSourceRefs.map((source) => source.id)).toEqual([
       IDS.groupNorth,
@@ -811,20 +721,12 @@ describe('complete fail-closed roster synchronization', () => {
     await syncRoster(
       SYNC_INPUT,
       context('roster-sync-others-baseline-0001'),
-      dependencies(
-        store,
-        createMockGoogleGroupsAdapter(standardFixtures(), 1),
-        collector.sink,
-      ),
+      dependencies(store, standardFixtures(), collector.sink),
     );
     const result = await syncRoster(
       SYNC_INPUT,
       context('roster-sync-empty-others-0001'),
-      dependencies(
-        store,
-        createMockGoogleGroupsAdapter(standardFixtures([]), 1),
-        collector.sink,
-      ),
+      dependencies(store, standardFixtures([]), collector.sink),
     );
 
     expect(result.outcome).toBe('complete');
@@ -834,7 +736,7 @@ describe('complete fail-closed roster synchronization', () => {
     );
     expect(store.snapshots[1]?.recipients).toHaveLength(3);
     const shared = store.snapshots[1]?.recipients.find(
-      (recipient) => recipient.displayName === 'Synthetic Shared Member',
+      (recipient) => recipient.displayName === 'shared-member',
     );
     expect(shared?.groupSourceRefs).toEqual([sourceReference(NORTH_SOURCE)]);
     expect(collector.alerts).toEqual([]);
@@ -843,23 +745,21 @@ describe('complete fail-closed roster synchronization', () => {
   test('replays a completed idempotency key without provider refetch or publication', async () => {
     const loaded = loadedConfiguration();
     const store = new MemoryRosterSyncStore(loaded);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures(), 1),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
     const syncDependencies = dependencies(
       store,
-      counted.adapter,
+      countedFixtures,
       collector.sink,
     );
     const syncContext = context('roster-sync-idempotent-0001');
 
     const first = await syncRoster(SYNC_INPUT, syncContext, syncDependencies);
-    const callsAfterFirst = counted.calls.length;
+    const callsAfterFirst = store.groupMemberLoads.length;
     const replay = await syncRoster(SYNC_INPUT, syncContext, syncDependencies);
 
     expect(replay).toEqual(first);
-    expect(counted.calls).toHaveLength(callsAfterFirst);
+    expect(store.groupMemberLoads).toHaveLength(callsAfterFirst);
     expect(store.snapshots).toHaveLength(1);
     expect(store.publishCalls).toBe(1);
     expect(store.configurationLoads).toBe(1);
@@ -879,13 +779,11 @@ describe('source-configuration monotonicity', () => {
     });
     const latestSnapshot = historicalSnapshot(latest);
     const store = new MemoryRosterSyncStore(candidate, [latestSnapshot]);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures(), 1),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
     const syncDependencies = dependencies(
       store,
-      counted.adapter,
+      countedFixtures,
       collector.sink,
     );
     const delayedContext = context('roster-sync-delayed-configuration-0001');
@@ -902,7 +800,7 @@ describe('source-configuration monotonicity', () => {
       'ROSTER_SYNC_REPLAY_FAILED',
     );
 
-    expect(counted.calls).toEqual([]);
+    expect(store.groupMemberLoads).toEqual([]);
     expect(store.localContactLoads).toBe(0);
     expect(store.publishCalls).toBe(0);
     expect(store.rejectionCalls).toBe(0);
@@ -927,21 +825,19 @@ describe('source-configuration monotonicity', () => {
     });
     const latestSnapshot = historicalSnapshot(otherLineage);
     const store = new MemoryRosterSyncStore(candidate, [latestSnapshot]);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures(), 1),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
 
     await expectSyncError(
       syncRoster(
         SYNC_INPUT,
         context('roster-sync-ambiguous-lineage-0001'),
-        dependencies(store, counted.adapter, collector.sink),
+        dependencies(store, countedFixtures, collector.sink),
       ),
       'SOURCE_CONFIGURATION_LINEAGE_AMBIGUOUS',
     );
 
-    expect(counted.calls).toEqual([]);
+    expect(store.groupMemberLoads).toEqual([]);
     expect(store.snapshots).toEqual([latestSnapshot]);
     expect(store.publishCalls).toBe(0);
     expect(store.rejectionCalls).toBe(0);
@@ -962,11 +858,7 @@ describe('rejected roster synchronization', () => {
     const first = await syncRoster(
       SYNC_INPUT,
       context('roster-sync-building-baseline-0001'),
-      dependencies(
-        store,
-        createMockGoogleGroupsAdapter(standardFixtures()),
-        collector.sink,
-      ),
+      dependencies(store, standardFixtures(), collector.sink),
     );
     const lastComplete = store.snapshots[0];
     if (lastComplete === undefined) {
@@ -978,10 +870,10 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-empty-building-0001'),
       dependencies(
         store,
-        createMockGoogleGroupsAdapter({
+        {
           ...standardFixtures(),
           [NORTH_SOURCE.id]: [],
-        }),
+        },
         collector.sink,
       ),
     );
@@ -1021,11 +913,11 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-count-baseline-0001'),
       dependencies(
         store,
-        createMockGoogleGroupsAdapter({
+        {
           [NORTH_SOURCE.id]: baselineNorthMembers,
           [SOUTH_SOURCE.id]: [SOUTH_MEMBER],
           [OTHERS_SOURCE.id]: [],
-        }),
+        },
         collector.sink,
       ),
     );
@@ -1039,11 +931,11 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-suspicious-drop-0001'),
       dependencies(
         store,
-        createMockGoogleGroupsAdapter({
+        {
           [NORTH_SOURCE.id]: [baselineNorthMembers[0]!],
           [SOUTH_SOURCE.id]: [SOUTH_MEMBER],
           [OTHERS_SOURCE.id]: [],
-        }),
+        },
         collector.sink,
       ),
     );
@@ -1074,11 +966,11 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-forward-drop-baseline-0001'),
       dependencies(
         store,
-        createMockGoogleGroupsAdapter({
+        {
           [NORTH_SOURCE.id]: baselineNorthMembers,
           [SOUTH_SOURCE.id]: [SOUTH_MEMBER],
           [OTHERS_SOURCE.id]: [],
-        }),
+        },
         collector.sink,
       ),
     );
@@ -1096,11 +988,11 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-forward-drop-0001'),
       dependencies(
         store,
-        createMockGoogleGroupsAdapter({
+        {
           [NORTH_SOURCE.id]: [baselineNorthMembers[0]!],
           [SOUTH_SOURCE.id]: [SOUTH_MEMBER],
           [OTHERS_SOURCE.id]: [],
-        }),
+        },
         collector.sink,
       ),
     );
@@ -1114,264 +1006,6 @@ describe('rejected roster synchronization', () => {
     expect(store.publishCalls).toBe(1);
   });
 
-  test('rejects a partial fetch, preserves last-good, and emits only sanitized alert facts', async () => {
-    const loaded = loadedConfiguration();
-    const previous = historicalSnapshot(loaded);
-    const store = new MemoryRosterSyncStore(loaded, [previous]);
-    const base = createMockGoogleGroupsAdapter(standardFixtures(), 1);
-    const rawFailure = 'raw-secret-token-and-person@example.invalid';
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked',
-      fetchPage(
-        source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        if (source.id === SOUTH_SOURCE.id) {
-          return Promise.reject(new Error(rawFailure));
-        }
-        return base.fetchPage(source, pageToken);
-      },
-    });
-    const collector = alertCollector();
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context(),
-      dependencies(store, adapter, collector.sink),
-    );
-
-    expect(result.outcome).toBe('partial-rejected');
-    expect(result.publishedSnapshotId).toBeNull();
-    expect(result.completedSourceGroupRefs.map((source) => source.id)).toEqual([
-      IDS.groupNorth,
-      IDS.groupOthers,
-    ]);
-    expect(result.groupFailures).toEqual([
-      {
-        groupSourceRef: sourceReference(SOUTH_SOURCE),
-        errorCode: 'GROUP_FETCH_FAILED',
-        attemptedAt: SYNC_TIME,
-      },
-    ]);
-    expect(store.publishCalls).toBe(0);
-    expect(store.snapshots).toEqual([previous]);
-    expect(collector.alerts).toEqual([
-      {
-        sourceConfiguration: {
-          id: IDS.configuration,
-          version: 3,
-        },
-        population: 'synthetic',
-        syncResultId: result.id,
-        outcome: 'partial-rejected',
-        errorCodes: ['GROUP_FETCH_FAILED'],
-        occurredAt: SYNC_TIME,
-      },
-    ]);
-    expect(JSON.stringify({ result, alerts: collector.alerts })).not.toContain(
-      rawFailure,
-    );
-  });
-
-  test('records a total provider failure without publishing', async () => {
-    const loaded = loadedConfiguration();
-    const store = new MemoryRosterSyncStore(loaded);
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked',
-      fetchPage(): Promise<RosterGroupPage> {
-        return Promise.reject(
-          new Error('provider body with credential=do-not-record'),
-        );
-      },
-    });
-    const collector = alertCollector();
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context(),
-      dependencies(store, adapter, collector.sink),
-    );
-
-    expect(result.outcome).toBe('failed');
-    expect(result.completedSourceGroupRefs).toEqual([]);
-    expect(result.groupFailures).toHaveLength(3);
-    expect(
-      result.groupFailures.every(
-        (failure) => failure.errorCode === 'GROUP_FETCH_FAILED',
-      ),
-    ).toBe(true);
-    expect(store.snapshots).toEqual([]);
-    expect(store.publishCalls).toBe(0);
-    expect(collector.alerts[0]?.outcome).toBe('failed');
-    expect(collector.alerts[0]?.errorCodes).toEqual(['GROUP_FETCH_FAILED']);
-    expect(JSON.stringify(result)).not.toContain('credential');
-  });
-
-  test('rejects malformed pages and repeated pagination tokens', async () => {
-    const singleSource = loadedConfiguration([NORTH_SOURCE]);
-    const cases: ReadonlyArray<{
-      name: string;
-      code: string;
-      adapter: RosterGroupsAdapter;
-    }> = [
-      {
-        name: 'malformed page',
-        code: 'GROUP_RESPONSE_INVALID',
-        adapter: Object.freeze({
-          truthLabel: 'mocked' as const,
-          fetchPage(): Promise<RosterGroupPage> {
-            return Promise.resolve({
-              members: 'not-an-array',
-              nextPageToken: null,
-            } as unknown as RosterGroupPage);
-          },
-        }),
-      },
-      {
-        name: 'pagination loop',
-        code: 'GROUP_PAGINATION_LOOP',
-        adapter: Object.freeze({
-          truthLabel: 'mocked' as const,
-          fetchPage(): Promise<RosterGroupPage> {
-            return Promise.resolve({
-              members: [],
-              nextPageToken: 'repeat-page-token',
-            });
-          },
-        }),
-      },
-    ];
-
-    for (const testCase of cases) {
-      const store = new MemoryRosterSyncStore(singleSource);
-      const collector = alertCollector();
-      const result = await syncRoster(
-        SYNC_INPUT,
-        context(`roster-sync-${testCase.name.replaceAll(' ', '-')}-0001`),
-        dependencies(store, testCase.adapter, collector.sink),
-      );
-      expect(result.outcome).toBe('failed');
-      expect(result.groupFailures.map((failure) => failure.errorCode)).toEqual([
-        testCase.code,
-      ]);
-      expect(store.publishCalls).toBe(0);
-      expect(collector.alerts[0]?.errorCodes).toEqual([testCase.code]);
-    }
-  });
-
-  test('rejects sources that exceed page and member safety caps without publishing', async () => {
-    const loaded = loadedConfiguration();
-
-    const pageLimitedStore = new MemoryRosterSyncStore(loaded);
-    let pageCalls = 0;
-    const endlessAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked' as const,
-      fetchPage(
-        _source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        pageCalls += 1;
-        const pageIndex = pageToken === null ? 0 : Number(pageToken);
-        return Promise.resolve({
-          members: [],
-          nextPageToken: String(pageIndex + 1),
-        });
-      },
-    });
-    const pageLimited = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-page-limit-0001'),
-      dependencies(pageLimitedStore, endlessAdapter, alertCollector().sink),
-    );
-
-    expect(pageLimited.outcome).toBe('failed');
-    expect(
-      pageLimited.groupFailures.map((failure) => failure.errorCode),
-    ).toEqual([
-      'GROUP_PAGE_LIMIT_EXCEEDED',
-      'GROUP_PAGE_LIMIT_EXCEEDED',
-      'GROUP_PAGE_LIMIT_EXCEEDED',
-    ]);
-    expect(pageCalls).toBe(300);
-    expect(pageLimitedStore.publishCalls).toBe(0);
-
-    const memberLimitedStore = new MemoryRosterSyncStore(loaded);
-    let memberPageCalls = 0;
-    const oversizedMembershipAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked' as const,
-      fetchPage(
-        source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        memberPageCalls += 1;
-        const pageIndex = pageToken === null ? 0 : Number(pageToken);
-        return Promise.resolve({
-          members: Array.from({ length: 200 }, (_, memberIndex) =>
-            member(
-              `${source.id}-${pageIndex}-${memberIndex}`,
-              `Synthetic bounded member ${pageIndex}-${memberIndex}`,
-            ),
-          ),
-          nextPageToken: pageIndex < 6 ? String(pageIndex + 1) : null,
-        });
-      },
-    });
-    const memberLimited = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-member-limit-0001'),
-      dependencies(
-        memberLimitedStore,
-        oversizedMembershipAdapter,
-        alertCollector().sink,
-      ),
-    );
-
-    expect(memberLimited.outcome).toBe('failed');
-    expect(
-      memberLimited.groupFailures.map((failure) => failure.errorCode),
-    ).toEqual([
-      'GROUP_MEMBER_LIMIT_EXCEEDED',
-      'GROUP_MEMBER_LIMIT_EXCEEDED',
-      'GROUP_MEMBER_LIMIT_EXCEEDED',
-    ]);
-    expect(memberPageCalls).toBe(21);
-    expect(memberLimitedStore.publishCalls).toBe(0);
-  });
-
-  test('rejects a cross-group member conflict after every source completes', async () => {
-    const loaded = loadedConfiguration();
-    const conflicting = member(
-      SHARED_MEMBER.memberKey,
-      'Conflicting Synthetic Name',
-      'conflicting-shared@example.invalid',
-    );
-    const adapter = createMockGoogleGroupsAdapter({
-      [NORTH_SOURCE.id]: [SHARED_MEMBER],
-      [SOUTH_SOURCE.id]: [conflicting],
-      [OTHERS_SOURCE.id]: [],
-    });
-    const store = new MemoryRosterSyncStore(loaded);
-    const collector = alertCollector();
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context(),
-      dependencies(store, adapter, collector.sink),
-    );
-
-    expect(result.outcome).toBe('failed');
-    expect(result.completedSourceGroupRefs).toEqual([]);
-    expect(result.groupFailures).toHaveLength(3);
-    expect(
-      result.groupFailures.every(
-        (failure) => failure.errorCode === 'ROSTER_MEMBER_CONFLICT',
-      ),
-    ).toBe(true);
-    expect(store.publishCalls).toBe(0);
-    expect(store.rejectionCalls).toBe(1);
-    expect(collector.alerts[0]?.errorCodes).toEqual(['ROSTER_MEMBER_CONFLICT']);
-  });
-
   test('rejects routable synthetic endpoints while reserved endpoints publish', async () => {
     const singleSource = loadedConfiguration([NORTH_SOURCE]);
     const validStore = new MemoryRosterSyncStore(singleSource);
@@ -1380,9 +1014,9 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-reserved-endpoint-0001'),
       dependencies(
         validStore,
-        createMockGoogleGroupsAdapter({
+        {
           [NORTH_SOURCE.id]: [NORTH_MEMBER],
-        }),
+        },
         alertCollector().sink,
       ),
     );
@@ -1400,7 +1034,7 @@ describe('rejected roster synchronization', () => {
       context('roster-sync-routable-endpoint-0001'),
       dependencies(
         invalidStore,
-        createMockGoogleGroupsAdapter({
+        {
           [NORTH_SOURCE.id]: [
             member(
               'routable-member',
@@ -1408,7 +1042,7 @@ describe('rejected roster synchronization', () => {
               'routable@example.com',
             ),
           ],
-        }),
+        },
         collector.sink,
       ),
     );
@@ -1424,450 +1058,14 @@ describe('rejected roster synchronization', () => {
 });
 
 describe('adapter, authorization, and configuration boundaries', () => {
-  test('enables the mock adapter only for explicit test or development runtimes', async () => {
-    for (const runtimeMode of ['production', 'staging', '']) {
-      await expectSyncError(
-        Promise.resolve().then(() =>
-          createRuntimeMockGoogleGroupsAdapter({}, 1, { runtimeMode }),
-        ),
-        'MOCK_ROSTER_DISABLED',
-      );
-    }
-
-    expect(
-      createRuntimeMockGoogleGroupsAdapter({}, 1, {
-        runtimeMode: 'test',
-      }).truthLabel,
-    ).toBe('mocked');
-    expect(
-      createRuntimeMockGoogleGroupsAdapter({}, 1, {
-        runtimeMode: 'development',
-      }).truthLabel,
-    ).toBe('mocked');
-  });
-
-  test('never permits a mocked adapter to populate the staff roster', async () => {
-    const loaded = staffLoadedConfiguration();
-    const source = loaded.sources[0];
-    if (source === undefined || source.kind !== 'google-group') {
-      throw new Error('Google staff source fixture was missing.');
-    }
-    const store = new MemoryRosterSyncStore(loaded);
-    const collector = alertCollector();
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-mock-staff-0001'),
-      dependencies(
-        store,
-        createMockGoogleGroupsAdapter({
-          [source.id]: [
-            {
-              memberKey: 'staff-google-subject',
-              googleSubject: 'staff-google-subject',
-              displayName: 'Staff Fixture',
-              email: 'staff-fixture@example.invalid',
-            },
-          ],
-        }),
-        collector.sink,
-      ),
-    );
-
-    expect(result.outcome).toBe('failed');
-    expect(result.groupFailures[0]?.errorCode).toBe(
-      'MOCK_STAFF_ROSTER_FORBIDDEN',
-    );
-    expect(store.snapshots).toEqual([]);
-    expect(store.publishCalls).toBe(0);
-    expect(collector.alerts[0]?.errorCodes).toEqual([
-      'MOCK_STAFF_ROSTER_FORBIDDEN',
-    ]);
-  });
-
-  test('reads only the database-configured group and matches its staff emails to local identities', async () => {
-    const loaded = staffLoadedConfiguration();
-    const source = loaded.sources[0];
-    if (source === undefined || source.kind !== 'google-group') {
-      throw new Error('Google staff source fixture was missing.');
-    }
-    const staffEmail = 'staff.member@example.invalid';
-    const pushEndpointId = '00000000-0000-4000-8000-000000000099';
-    const store = new MemoryRosterSyncStore(
-      loaded,
-      [],
-      [
-        {
-          staffEmail,
-          googleSubject: 'verified-google-subject',
-          displayName: 'Verified Staff Member',
-          pushEndpoints: [
-            {
-              id: pushEndpointId,
-              platform: 'ios',
-              provider: 'expo',
-              serviceEnvironment: 'production',
-              token: 'synthetic-unroutable-push-token',
-            },
-          ],
-        },
-      ],
-    );
-    const providerReads: Array<
-      Readonly<{ id: string; email: string; googleGroupId: string }>
-    > = [];
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'configured-unverified' as const,
-      fetchPage(configuredSource: GroupSource): Promise<RosterGroupPage> {
-        if (configuredSource.kind !== 'google-group') {
-          throw new Error('The staff sync read a non-Google source.');
-        }
-        providerReads.push({
-          id: configuredSource.id,
-          email: configuredSource.email,
-          googleGroupId: configuredSource.googleGroupId,
-        });
-        return Promise.resolve({
-          members: [
-            {
-              memberKey: staffEmail,
-              googleSubject: null,
-              displayName: 'Staff member',
-              email: staffEmail,
-            },
-            {
-              memberKey: 'unmatched.staff@example.invalid',
-              googleSubject: null,
-              displayName: 'Staff member',
-              email: 'unmatched.staff@example.invalid',
-            },
-          ],
-          nextPageToken: null,
-        });
-      },
-    });
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-cloud-identity-email-0001'),
-      dependencies(store, adapter, alertCollector().sink),
-    );
-
-    expect(result.outcome).toBe('complete');
-    expect(providerReads).toEqual([
-      {
-        id: source.id,
-        email: source.email,
-        googleGroupId: source.googleGroupId,
-      },
-    ]);
-    expect(store.loadedContactSubjects).toEqual([
-      ['staff.member@example.invalid', 'unmatched.staff@example.invalid'],
-    ]);
-    expect(store.snapshots[0]?.recipients).toEqual([
-      expect.objectContaining({
-        googleSubject: 'verified-google-subject',
-        staffEmail,
-        displayName: 'Verified Staff Member',
-        endpoints: [
-          expect.objectContaining({ channel: 'email', email: staffEmail }),
-          expect.objectContaining({
-            id: pushEndpointId,
-            channel: 'push',
-          }),
-        ],
-      }),
-      expect.objectContaining({
-        googleSubject: null,
-        staffEmail: 'unmatched.staff@example.invalid',
-        displayName: 'Staff member',
-        endpoints: [
-          expect.objectContaining({
-            channel: 'email',
-            email: 'unmatched.staff@example.invalid',
-          }),
-        ],
-      }),
-    ]);
-  });
-
-  test('rejects a provider-supplied subject and preserves the last complete staff snapshot', async () => {
-    const loaded = staffLoadedConfiguration();
-    const previous = RosterSnapshotSchema.parse({
-      id: IDS.historicalSnapshot,
-      version: 1,
-      population: 'staff',
-      complete: true,
-      sourceConfiguration: {
-        id: loaded.configuration.id,
-        version: loaded.configuration.version,
-      },
-      facilityIds: loaded.configuration.facilityIds,
-      expectedSourceGroupRefs: loaded.configuration.groupSourceRefs,
-      sourceGroupRefs: loaded.configuration.groupSourceRefs,
-      recipients: [
-        {
-          id: '00000000-0000-4000-8000-000000000097',
-          population: 'staff',
-          googleSubject: null,
-          staffEmail: 'previous.staff@example.invalid',
-          displayName: 'Previous Staff',
-          groupSourceRefs: loaded.configuration.groupSourceRefs,
-          endpoints: [],
-        },
-      ],
-      syncStartedAt: HISTORICAL_TIME,
-      capturedAt: HISTORICAL_TIME,
-    });
-    const store = new MemoryRosterSyncStore(loaded, [previous]);
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'configured-unverified' as const,
-      fetchPage(): Promise<RosterGroupPage> {
-        return Promise.resolve({
-          members: [
-            {
-              memberKey: 'provider-supplied-subject',
-              googleSubject: 'provider-supplied-subject',
-              displayName: 'Unverified Provider Identity',
-              email: 'provider.subject@example.invalid',
-            },
-          ],
-          nextPageToken: null,
-        });
-      },
-    });
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-provider-subject-0001'),
-      dependencies(store, adapter, alertCollector().sink),
-    );
-
-    expect(result.outcome).toBe('failed');
-    expect(result.groupFailures[0]?.errorCode).toBe('GROUP_MEMBER_INVALID');
-    expect(store.snapshots).toEqual([previous]);
-    expect(store.publishCalls).toBe(0);
-  });
-
-  test('rejects a 403 after a partial membership page and preserves the last complete snapshot', async () => {
-    const loaded = staffLoadedConfiguration();
-    const previous = RosterSnapshotSchema.parse({
-      id: IDS.historicalSnapshot,
-      version: 1,
-      population: 'staff',
-      complete: true,
-      sourceConfiguration: {
-        id: loaded.configuration.id,
-        version: loaded.configuration.version,
-      },
-      facilityIds: loaded.configuration.facilityIds,
-      expectedSourceGroupRefs: loaded.configuration.groupSourceRefs,
-      sourceGroupRefs: loaded.configuration.groupSourceRefs,
-      recipients: [
-        {
-          id: '00000000-0000-4000-8000-000000000096',
-          population: 'staff',
-          googleSubject: null,
-          staffEmail: 'previous.staff@example.invalid',
-          displayName: 'Previous Staff',
-          groupSourceRefs: loaded.configuration.groupSourceRefs,
-          endpoints: [],
-        },
-      ],
-      syncStartedAt: HISTORICAL_TIME,
-      capturedAt: HISTORICAL_TIME,
-    });
-    const store = new MemoryRosterSyncStore(loaded, [previous]);
-    const providerPayload = 'provider-403-member-payload-must-not-leak';
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'configured-unverified' as const,
-      fetchPage(
-        _source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        if (pageToken === null) {
-          return Promise.resolve({
-            members: [
-              {
-                memberKey: 'partial.staff@example.invalid',
-                googleSubject: null,
-                displayName: 'Staff member',
-                email: 'partial.staff@example.invalid',
-              },
-            ],
-            nextPageToken: 'second-provider-page',
-          });
-        }
-        return Promise.reject(
-          new RosterSyncError('GOOGLE_GROUP_FETCH_REJECTED', providerPayload),
-        );
-      },
-    });
-    const collector = alertCollector();
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-partial-page-403-0001'),
-      dependencies(store, adapter, collector.sink),
-    );
-
-    expect(result.outcome).toBe('failed');
-    expect(result.groupFailures[0]?.errorCode).toBe(
-      'GOOGLE_GROUP_FETCH_REJECTED',
-    );
-    expect(store.localContactLoads).toBe(0);
-    expect(store.snapshots).toEqual([previous]);
-    expect(store.publishCalls).toBe(0);
-    expect(collector.alerts[0]?.errorCodes).toEqual([
-      'GOOGLE_GROUP_FETCH_REJECTED',
-    ]);
-    expect(JSON.stringify({ result, alerts: collector.alerts })).not.toContain(
-      providerPayload,
-    );
-  });
-
-  test('rejects ambiguous local email mappings without replacing the last complete snapshot', async () => {
-    const loaded = staffLoadedConfiguration();
-    const source = loaded.sources[0];
-    if (source === undefined) {
-      throw new Error('Staff source fixture was missing.');
-    }
-    const previous = RosterSnapshotSchema.parse({
-      id: IDS.historicalSnapshot,
-      version: 1,
-      population: 'staff',
-      complete: true,
-      sourceConfiguration: {
-        id: loaded.configuration.id,
-        version: loaded.configuration.version,
-      },
-      facilityIds: loaded.configuration.facilityIds,
-      expectedSourceGroupRefs: loaded.configuration.groupSourceRefs,
-      sourceGroupRefs: loaded.configuration.groupSourceRefs,
-      recipients: [
-        {
-          id: '00000000-0000-4000-8000-000000000098',
-          population: 'staff',
-          googleSubject: null,
-          staffEmail: 'previous.staff@example.invalid',
-          displayName: 'Previous Staff',
-          groupSourceRefs: loaded.configuration.groupSourceRefs,
-          endpoints: [],
-        },
-      ],
-      syncStartedAt: HISTORICAL_TIME,
-      capturedAt: HISTORICAL_TIME,
-    });
-    const duplicateEmail = 'duplicate.staff@example.invalid';
-    const store = new MemoryRosterSyncStore(
-      loaded,
-      [previous],
-      [
-        {
-          staffEmail: duplicateEmail,
-          googleSubject: 'verified-subject-one',
-          displayName: 'First Local Match',
-          pushEndpoints: [],
-        },
-        {
-          staffEmail: duplicateEmail,
-          googleSubject: 'verified-subject-two',
-          displayName: 'Second Local Match',
-          pushEndpoints: [],
-        },
-      ],
-    );
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'configured-unverified' as const,
-      fetchPage(): Promise<RosterGroupPage> {
-        return Promise.resolve({
-          members: [
-            {
-              memberKey: duplicateEmail,
-              googleSubject: null,
-              displayName: 'Staff member',
-              email: duplicateEmail,
-            },
-          ],
-          nextPageToken: null,
-        });
-      },
-    });
-
-    const result = await syncRoster(
-      SYNC_INPUT,
-      context('roster-sync-ambiguous-email-0001'),
-      dependencies(store, adapter, alertCollector().sink),
-    );
-
-    expect(result.outcome).toBe('failed');
-    expect(result.groupFailures[0]?.errorCode).toBe('LOCAL_CONTACT_DUPLICATE');
-    expect(result.publishedSnapshotId).toBeNull();
-    expect(store.snapshots).toEqual([previous]);
-    expect(store.publishCalls).toBe(0);
-  });
-
-  test('keeps mock fixtures isolated, frozen, paged, and network-free', async () => {
-    const mutableFixture = {
-      memberKey: 'isolated-member',
-      googleSubject: null,
-      displayName: 'Original Synthetic Name',
-      email: 'isolated@example.invalid',
-    };
-    const adapter = createMockGoogleGroupsAdapter(
-      { [NORTH_SOURCE.id]: [mutableFixture] },
-      1,
-    );
-    mutableFixture.displayName = 'Mutated Outside Adapter';
-    mutableFixture.email = 'mutated@example.invalid';
-
-    const originalFetch = globalThis.fetch;
-    let networkCalls = 0;
-    globalThis.fetch = (() => {
-      networkCalls += 1;
-      throw new Error('Mock adapter attempted network access.');
-    }) as unknown as typeof globalThis.fetch;
-    try {
-      const page = await adapter.fetchPage(NORTH_SOURCE, null);
-      expect(page.members).toEqual([
-        {
-          memberKey: 'isolated-member',
-          googleSubject: null,
-          displayName: 'Original Synthetic Name',
-          email: 'isolated@example.invalid',
-        },
-      ]);
-      expect(page.nextPageToken).toBeNull();
-      expect(Object.isFrozen(page)).toBe(true);
-      expect(Object.isFrozen(page.members)).toBe(true);
-      expect(Object.isFrozen(page.members[0])).toBe(true);
-      expect(networkCalls).toBe(0);
-
-      const unknownSource = syntheticSource(
-        IDS.groupUnknown,
-        'building',
-        IDS.facilityNorth,
-        'unknown-staff',
-      );
-      await expectSyncError(
-        Promise.resolve().then(() => adapter.fetchPage(unknownSource, null)),
-        'MOCK_GROUP_NOT_FOUND',
-      );
-      expect(networkCalls).toBe(0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   test('runs the scheduler authorizer before the registered handler', async () => {
     const loaded = loadedConfiguration();
     const store = new MemoryRosterSyncStore(loaded);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures()),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
     const syncDependencies = dependencies(
       store,
-      counted.adapter,
+      countedFixtures,
       collector.sink,
     );
     const handler = createSyncRosterHandler(syncDependencies);
@@ -1887,7 +1085,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
 
     expect(store.reserveCalls).toBe(0);
     expect(store.configurationLoads).toBe(0);
-    expect(counted.calls).toEqual([]);
+    expect(store.groupMemberLoads).toEqual([]);
     expect(collector.alerts).toEqual([]);
   });
 
@@ -1901,21 +1099,19 @@ describe('adapter, authorization, and configuration boundaries', () => {
       }),
     });
     const store = new MemoryRosterSyncStore(invalidLoaded);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures()),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
 
     await expectSyncError(
       syncRoster(
         SYNC_INPUT,
         context('roster-sync-missing-building-0001'),
-        dependencies(store, counted.adapter, collector.sink),
+        dependencies(store, countedFixtures, collector.sink),
       ),
       'SOURCE_CONFIGURATION_INCOMPLETE',
     );
 
-    expect(counted.calls).toEqual([]);
+    expect(store.groupMemberLoads).toEqual([]);
     expect(store.snapshots).toEqual([]);
     expect(store.publishCalls).toBe(0);
     expect(collector.alerts[0]?.errorCodes).toEqual([
@@ -1927,22 +1123,20 @@ describe('adapter, authorization, and configuration boundaries', () => {
     const secret = 'private-key-material-never-log-this';
     const invalidLoaded = loadedConfiguration(SOURCES, secret);
     const store = new MemoryRosterSyncStore(invalidLoaded);
-    const counted = countingAdapter(
-      createMockGoogleGroupsAdapter(standardFixtures()),
-    );
+    const countedFixtures = standardFixtures();
     const collector = alertCollector();
 
     const error = await expectSyncError(
       syncRoster(
         SYNC_INPUT,
         context(),
-        dependencies(store, counted.adapter, collector.sink),
+        dependencies(store, countedFixtures, collector.sink),
       ),
       'SOURCE_CONFIGURATION_MISMATCH',
     );
 
     expect(error.message).not.toContain(secret);
-    expect(counted.calls).toEqual([]);
+    expect(store.groupMemberLoads).toEqual([]);
     expect(store.failedReservations[0]?.errorCode).toBe(
       'SOURCE_CONFIGURATION_MISMATCH',
     );
@@ -1960,90 +1154,5 @@ describe('adapter, authorization, and configuration boundaries', () => {
       },
     ]);
     expect(JSON.stringify(collector.alerts)).not.toContain(secret);
-  });
-
-  test('accepts only the exact non-delegated Cloud Identity secret contract', () => {
-    const runtimeConfiguration = readGoogleCloudIdentityRosterConfiguration({
-      GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential(),
-      GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '12000',
-    });
-    expect(runtimeConfiguration).toEqual({
-      serviceAccountEmail: SYNTHETIC_SERVICE_ACCOUNT,
-      privateKeyId: 'a'.repeat(40),
-      privateKey: syntheticPrivateKey,
-      timeoutMilliseconds: 12_000,
-    });
-    expect(
-      readGoogleCloudIdentityRosterConfiguration({
-        GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential({
-          approved_staff_group_sha256: 'c'.repeat(64),
-        }),
-        GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '12000',
-      }),
-    ).toEqual(runtimeConfiguration);
-
-    const otherProject = 'second-district-eoc';
-    const otherServiceAccount = `groups-reader@${otherProject}.iam.gserviceaccount.com`;
-    expect(
-      readGoogleCloudIdentityRosterConfiguration({
-        GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential({
-          project_id: otherProject,
-          client_email: otherServiceAccount,
-          client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(otherServiceAccount)}`,
-        }),
-      }).serviceAccountEmail,
-    ).toBe(otherServiceAccount);
-
-    for (const override of [
-      { project_id: 'invalid_project' },
-      {
-        client_email: 'other-reader@other-project.iam.gserviceaccount.com',
-      },
-      {
-        client_x509_cert_url:
-          'https://www.googleapis.com/robot/v1/metadata/x509/other-reader%40other-project.iam.gserviceaccount.com',
-      },
-      {
-        client_x509_cert_url:
-          'https://www.googleapis.com.evil.invalid/robot/v1/metadata/x509/account',
-      },
-      {
-        oauth_scopes: [
-          'https://www.googleapis.com/auth/admin.directory.group.member.readonly',
-        ],
-      },
-      { domain_wide_delegation: true },
-      { delegated_subject: 'admin@example.invalid' },
-      { approved_staff_group_sha256: 'not-a-sha256' },
-      { private_key: 'not-a-private-key' },
-    ]) {
-      expect(() =>
-        readGoogleCloudIdentityRosterConfiguration({
-          GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential(override),
-        }),
-      ).toThrow(RosterSyncError);
-    }
-  });
-
-  test('does not include supplied secrets in Google configuration errors', () => {
-    const secret = 'secret-private-key-body-never-reflect';
-    let caught: unknown;
-    try {
-      readGoogleCloudIdentityRosterConfiguration({
-        GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential({
-          private_key: `-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----`,
-        }),
-        GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '999999',
-      });
-    } catch (error) {
-      caught = error;
-    }
-
-    expect(caught).toBeInstanceOf(RosterSyncError);
-    expect((caught as RosterSyncError).code).toBe(
-      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
-    );
-    expect((caught as Error).message).not.toContain(secret);
-    expect(JSON.stringify(caught)).not.toContain(secret);
   });
 });

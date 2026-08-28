@@ -10,6 +10,7 @@ import {
   GroupSourceSchema,
   ListGroupSourcesInputSchema,
   ListNeighborhoodsInputSchema,
+  ManualRosterMembershipSchema,
   NeighborhoodPageSchema,
   NeighborhoodSchema,
   RosterSourceConfigurationSchema,
@@ -22,12 +23,14 @@ import {
   type FacilityPage,
   type GroupSource,
   type GroupSourcePage,
+  type ManualRosterMembership,
   type Neighborhood,
   type NeighborhoodPage,
 } from '@psd-eoc/contracts';
 import {
   and,
   asc,
+  countDistinct,
   desc,
   eq,
   gt,
@@ -42,6 +45,7 @@ import {
 
 import {
   facilities,
+  groupMembers,
   groupSources,
   neighborhoodFacilities,
   neighborhoodVersions,
@@ -60,7 +64,10 @@ import type {
   CapabilityHandlerContext,
   ServerCapabilityRegistration,
 } from '../../../lib/capabilities/engine';
-import { digestCapabilityValue } from '../../../lib/capabilities/engine';
+import {
+  digestCapabilityValue,
+  readCapabilityTime,
+} from '../../../lib/capabilities/engine';
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
@@ -982,6 +989,12 @@ async function assertGroupIdentityAvailable(
     | CapabilityInput<'update-group-source'>,
   exceptId: string | null,
 ): Promise<void> {
+  if (source.kind === 'manual') {
+    // A manual source carries no provider identifier, so there is nothing for
+    // a second source to collide with. Two manual sources at the same facility
+    // are a legitimate way to keep separate lists of people.
+    return;
+  }
   const identity =
     source.kind === 'google-group' ? source.googleGroupId : source.fixtureKey;
   await lockAdminIdentity(
@@ -1869,6 +1882,142 @@ async function facilitiesAdminProjection(
   });
 }
 
+async function loadManualSource(
+  database: AdminQueryDatabase,
+  groupSourceId: string,
+) {
+  const [source] = await database
+    .select({
+      id: groupSources.id,
+      kind: groupSources.kind,
+      purpose: groupSources.purpose,
+      facilityId: groupSources.facilityId,
+      active: groupSources.active,
+    })
+    .from(groupSources)
+    .where(eq(groupSources.id, groupSourceId))
+    .limit(1);
+  if (source === undefined) {
+    throw conflict('The group source is unavailable.');
+  }
+  if (source.kind !== 'manual' || source.purpose !== 'building') {
+    throw conflict('Only a manual building source has curated members.');
+  }
+  if (source.facilityId === null) {
+    throw conflict('The manual building source has no facility binding.');
+  }
+  return source;
+}
+
+async function replaceManualMembers(
+  database: AdminCapabilityTransaction['database'],
+  input: CapabilityInput<'set-manual-roster-members'>,
+  capturedAt: Date,
+): Promise<ManualRosterMembership> {
+  await loadManualSource(database, input.groupSourceId);
+  await database
+    .delete(groupMembers)
+    .where(eq(groupMembers.groupSourceId, input.groupSourceId));
+  if (input.emails.length > 0) {
+    await database.insert(groupMembers).values(
+      input.emails.map((email) => ({
+        groupSourceId: input.groupSourceId,
+        email,
+        capturedAt,
+      })),
+    );
+  }
+  // `members_captured_at` is how sign-in and the roster decide whether a
+  // source has ever been read. A curated list is read the moment it is saved.
+  await database
+    .update(groupSources)
+    .set({ membersCapturedAt: capturedAt })
+    .where(eq(groupSources.id, input.groupSourceId));
+  return ManualRosterMembershipSchema.parse({
+    groupSourceId: input.groupSourceId,
+    memberCount: input.emails.length,
+    capturedAt: capturedAt.toISOString(),
+  });
+}
+
+/**
+ * Replaces the complete membership of one manual building source.
+ *
+ * Stating the whole list keeps a removal from being forgotten, and makes the
+ * saved state exactly what an administrator reviewed. This never notifies
+ * anyone; it changes who a later activation would reach.
+ */
+export const setManualRosterMembersRegistration: ServerCapabilityRegistration<
+  'set-manual-roster-members',
+  AdminCapabilityTransaction
+> = {
+  id: 'set-manual-roster-members',
+  async resolveFacilityId(input, context) {
+    const source = await loadManualSource(
+      context.transaction.database,
+      input.groupSourceId,
+    );
+    return guard(context, source.facilityId);
+  },
+  async handler(input, context) {
+    const output = await replaceManualMembers(
+      context.transaction.database,
+      input,
+      await readCapabilityTime(context),
+    );
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.groupSourceId,
+    });
+    return output;
+  },
+  resultReference: (output) =>
+    resultReference(output.groupSourceId, null, {
+      memberCount: output.memberCount,
+      capturedAt: output.capturedAt,
+    }),
+  async loadReplay(reference, context) {
+    const parsed = parseResultReference(reference);
+    // Refuses a replay whose source is no longer a manual building source.
+    await loadManualSource(context.transaction.database, parsed.id);
+    const [row] = await context.transaction.database
+      .select({ memberCount: countDistinct(groupMembers.email) })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupSourceId, parsed.id));
+    const [captured] = await context.transaction.database
+      .select({ membersCapturedAt: groupSources.membersCapturedAt })
+      .from(groupSources)
+      .where(eq(groupSources.id, parsed.id))
+      .limit(1);
+    if (captured?.membersCapturedAt === undefined) {
+      throw conflict('The manual membership is unavailable.');
+    }
+    const output = ManualRosterMembershipSchema.parse({
+      groupSourceId: parsed.id,
+      memberCount: row?.memberCount ?? 0,
+      capturedAt: (captured.membersCapturedAt ?? new Date(0)).toISOString(),
+    });
+    assertReplayOutput(parsed, {
+      memberCount: output.memberCount,
+      capturedAt: output.capturedAt,
+    });
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.groupSourceId,
+    });
+    return output;
+  },
+  async resolveReplayFacilityId(reference, context) {
+    const parsed = parseResultReference(reference);
+    const source = await loadManualSource(
+      context.transaction.database,
+      parsed.id,
+    );
+    return guard(context, source.facilityId);
+  },
+  replayFacilityId: () => null,
+};
+
 export function createDefaultFacilityAdminStore(
   authenticated: AuthenticatedSession,
 ): AdminCapabilityStore {
@@ -2065,6 +2214,17 @@ export const executeCreateGroupSourceCapability = (
 ) =>
   executeAdminMutationCapability(
     createGroupSourceRegistration,
+    input.command,
+    input.authenticated,
+    executionStore(input.authenticated, input.store),
+    input.metadata,
+  );
+
+export const executeSetManualRosterMembersCapability = (
+  input: MutationExecution<CapabilityInput<'set-manual-roster-members'>>,
+) =>
+  executeAdminMutationCapability(
+    setManualRosterMembersRegistration,
     input.command,
     input.authenticated,
     executionStore(input.authenticated, input.store),

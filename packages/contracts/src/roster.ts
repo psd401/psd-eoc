@@ -46,7 +46,7 @@ const groupSourceMatchesPopulation = (
   population: z.infer<typeof RosterPopulationSchema>,
 ): boolean =>
   population === 'staff'
-    ? source.kind === 'google-group'
+    ? source.kind === 'google-group' || source.kind === 'manual'
     : source.kind === 'synthetic';
 
 /**
