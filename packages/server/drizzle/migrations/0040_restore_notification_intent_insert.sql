@@ -1,0 +1,21 @@
+-- Restores the application role's ability to record a notification intent.
+--
+-- Migration 0010 revoked INSERT on "notification_intents" because every intent
+-- had to be written through
+-- "psd_eoc_insert_authorized_notification_intent", a SECURITY DEFINER function
+-- that bound each intent to a fan-out control record. The revoke was the point:
+-- it made the function the only way in.
+--
+-- Migration 0023 removed that gate and dropped the function, because a switch
+-- that silently stops an emergency notification system is a liability rather
+-- than a safety control. It did not restore the privilege the function had
+-- replaced, so the application was left with no way to write an intent at all:
+-- the only route was revoked and the only alternative no longer existed.
+--
+-- Every activation since has failed with insufficient_privilege, which the
+-- capability engine reported as "The capability could not be completed" -- a
+-- staff drill or incident could be confirmed by a human and then reach nobody.
+--
+-- INSERT only. An intent is append-only truth: nothing updates or deletes one,
+-- and 0010's revoke of UPDATE and DELETE stays in force.
+GRANT INSERT ON TABLE public."notification_intents" TO "psd_eoc_app";
