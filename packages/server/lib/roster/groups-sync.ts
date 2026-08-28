@@ -1094,42 +1094,6 @@ export function createSyncRosterHandler(
   );
 }
 
-/**
- * Deny-by-default authorizer for an administrator-initiated roster rebuild.
- *
- * A curated roster changes when a person edits it, not on a provider's
- * schedule, so an administrator must be able to publish a new snapshot from
- * the running application. This accepts only a human actor on an authenticated
- * session, and only for `sync-roster`; it never accepts the scheduler's
- * assertion, which belongs to the job surface.
- */
-export function createAdministratorRosterSyncAuthorizer(): Readonly<
-  CapabilityExecutionAuthorizer<RosterSyncCapabilityContext>
-> {
-  return Object.freeze({
-    authorize(
-      request: CapabilityAuthorizationRequest<
-        RegisteredCapabilityId,
-        RosterSyncCapabilityContext
-      >,
-    ): void {
-      const context = request.context;
-      if (
-        request.definition.id !== 'sync-roster' ||
-        context.actor.kind !== 'human' ||
-        context.source !== 'administrator' ||
-        context.transport !== 'authenticated-session' ||
-        request.humanActionRequirement.actionIds.length !== 0
-      ) {
-        throw new RosterSyncError(
-          'ROSTER_SYNC_UNAUTHORIZED',
-          'The roster sync invocation was not authorized.',
-        );
-      }
-    },
-  });
-}
-
 /** Deny-by-default authorizer for the authenticated scheduled job surface. */
 export function createScheduledRosterSyncAuthorizer(): Readonly<
   CapabilityExecutionAuthorizer<RosterSyncCapabilityContext>

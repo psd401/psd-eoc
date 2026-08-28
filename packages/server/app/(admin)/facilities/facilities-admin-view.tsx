@@ -402,6 +402,35 @@ function ManualMembersForm({
   );
 }
 
+/**
+ * Publishes a roster snapshot from the current sources.
+ *
+ * Saving who a manual source reaches only stores a list. An activation reads a
+ * snapshot, so the roster has to be published before the change takes effect.
+ * Publishing notifies nobody.
+ */
+function RosterPublishForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
+  const helpId = 'roster-publish-help';
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="publish-roster-snapshot" />
+      <fieldset>
+        <legend>Publish the roster</legend>
+        <p id={helpId}>
+          Reads every configured building source and publishes a new immutable
+          snapshot, including the devices currently registered for push. Do this
+          after changing who a manual source reaches. This does not start an
+          event or notify anyone.
+        </p>
+        <button aria-describedby={helpId} type="submit">
+          Publish roster snapshot
+        </button>
+      </fieldset>
+    </form>
+  );
+}
+
 function OthersGroupForm({
   csrfToken,
 }: Readonly<{
@@ -595,6 +624,7 @@ function GroupSourcesSection({
           />
         ))}
       </div>
+      <RosterPublishForm csrfToken={csrfToken} />
       {buildingPage.pageInfo.hasMore
         ? nextPageLink(
             'Next page of building sources',
