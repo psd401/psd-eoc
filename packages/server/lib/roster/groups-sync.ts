@@ -36,6 +36,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import { staffRosterEmail } from '../config/staff-email';
+import { groupSourceRecordFromRow } from './group-source-record';
 import {
   parsePushProviderCutover,
   PUSH_PROVIDER_CUTOVER_ENV,
@@ -1187,27 +1188,7 @@ interface ConfiguredSourceRow {
 }
 
 function parseConfiguredSource(row: ConfiguredSourceRow): GroupSource {
-  const common = {
-    id: row.id,
-    kind: row.kind,
-    purpose: row.purpose,
-    facilityId: row.facilityId,
-    displayName: row.displayName,
-    active: row.active,
-    // Access sources carry the role they grant; roster purposes never do.
-    grantedRole: row.grantedRole,
-    membersCapturedAt: row.membersCapturedAt?.toISOString() ?? null,
-    createdAt: row.createdAt.toISOString(),
-  };
-  return GroupSourceSchema.parse(
-    row.kind === 'google-group'
-      ? {
-          ...common,
-          googleGroupId: row.googleGroupId,
-          email: row.email,
-        }
-      : { ...common, fixtureKey: row.fixtureKey },
-  );
+  return groupSourceRecordFromRow(row);
 }
 
 /** Hashes roster configuration while excluding volatile membership-read evidence. */

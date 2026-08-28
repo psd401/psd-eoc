@@ -127,7 +127,8 @@ export const rosterSourceConfigurationGroups = pgTable(
     check(
       'roster_source_configuration_groups_population_source',
       sql`(
-        ${table.population} = 'staff' and ${table.groupSourceKind} = 'google-group'
+        ${table.population} = 'staff'
+        and ${table.groupSourceKind}::text in ('google-group', 'manual')
       ) or (
         ${table.population} = 'synthetic' and ${table.groupSourceKind} = 'synthetic'
       )`,
@@ -238,7 +239,8 @@ export const rosterSnapshotSources = pgTable(
     check(
       'roster_snapshot_sources_population_source',
       sql`(
-        ${table.population} = 'staff' and ${table.groupSourceKind} = 'google-group'
+        ${table.population} = 'staff'
+        and ${table.groupSourceKind}::text in ('google-group', 'manual')
       ) or (
         ${table.population} = 'synthetic' and ${table.groupSourceKind} = 'synthetic'
       )`,
@@ -384,7 +386,8 @@ export const rosterSyncResultSources = pgTable(
     check(
       'roster_sync_result_sources_population_source',
       sql`(
-        ${table.population} = 'staff' and ${table.groupSourceKind} = 'google-group'
+        ${table.population} = 'staff'
+        and ${table.groupSourceKind}::text in ('google-group', 'manual')
       ) or (
         ${table.population} = 'synthetic' and ${table.groupSourceKind} = 'synthetic'
       )`,
@@ -532,7 +535,8 @@ export const rosterRecipientGroupSources = pgTable(
     check(
       'roster_recipient_group_sources_population_source',
       sql`(
-        ${table.population} = 'staff' and ${table.groupSourceKind} = 'google-group'
+        ${table.population} = 'staff'
+        and ${table.groupSourceKind}::text in ('google-group', 'manual')
       ) or (
         ${table.population} = 'synthetic' and ${table.groupSourceKind} = 'synthetic'
       )`,
