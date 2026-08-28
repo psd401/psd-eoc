@@ -19,8 +19,8 @@ import { parseCli as parseConfiguredCli } from './asc-cli';
 import { syncTestFlight as syncConfiguredTestFlight } from './asc-commands';
 import {
   isPathInside,
-  parseReviewInfo,
-  parseReviewInfoJson,
+  parseTestInfo,
+  parseTestInfoJson,
   parseTesterCsv,
   readPrivateFile,
 } from './asc-inputs';
@@ -28,7 +28,7 @@ import {
   type AscAppConfiguration,
   type AscClient,
   type AscCredentials,
-  type BetaReviewInfo,
+  type BetaTestInfo,
   type JsonApiPageSummary,
   type JsonApiResource,
   type SyncOptions,
@@ -41,7 +41,6 @@ const TEST_APP_CONFIGURATION = Object.freeze({
   appName: 'Synthetic Emergency App',
   appSku: 'SYNTHETIC-EOC-IOS',
   bundleId: 'org.example.synthetic.eoc',
-  externalGroupName: 'Synthetic External Staff',
   internalGroupName: 'Synthetic Internal Technology',
 }) satisfies AscAppConfiguration;
 
@@ -49,11 +48,28 @@ type TestSyncOptions =
   | Omit<Extract<SyncOptions, { readonly apply: false }>, 'app'>
   | Omit<Extract<SyncOptions, { readonly apply: true }>, 'app'>;
 
-const syncTestFlight = (client: AscClient, options: TestSyncOptions) =>
-  syncConfiguredTestFlight(client, {
+// Internal distribution requires every tester to be an eligible App Store
+// Connect user. Eligibility has its own dedicated tests; every other test here
+// is about tester-write mechanics, so the fixture supplies an eligible user for
+// any desired email a test has not already seeded on purpose.
+const syncTestFlight = (client: AscClient, options: TestSyncOptions) => {
+  const candidate = client as { users?: JsonApiResource[] };
+  if (Array.isArray(candidate.users)) {
+    const emails: string[] = [];
+    for (let index = 0; index < options.internalTesters.length; index += 1) {
+      const tester = options.internalTesters[index];
+      if (tester !== undefined) emails.push(tester.email);
+    }
+    seedInternalUsers(
+      candidate as { readonly users: JsonApiResource[] },
+      emails,
+    );
+  }
+  return syncConfiguredTestFlight(client, {
     ...options,
     app: TEST_APP_CONFIGURATION,
   } as SyncOptions);
+};
 
 const parseCli = (arguments_: readonly string[]) =>
   parseConfiguredCli(arguments_, TEST_APP_CONFIGURATION);
@@ -167,7 +183,7 @@ class StatefulClient implements AscClient {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
       isInternalGroup: false,
-      name: TEST_APP_CONFIGURATION.externalGroupName,
+      name: 'Unmanaged External Staff',
       publicLinkEnabled: false,
     }),
   ];
@@ -265,7 +281,7 @@ class StatefulClient implements AscClient {
     string,
     JsonApiResource[]
   >();
-  readonly users = [
+  readonly users: JsonApiResource[] = [
     resource('users', 'user-1', {
       allAppsVisible: true,
       roles: ['APP_MANAGER'],
@@ -858,29 +874,49 @@ class ScaleStatefulClient extends OrderedStatefulClient {
   }
 }
 
-const review: BetaReviewInfo = {
+const review: BetaTestInfo = {
   betaDescription: 'Synthetic emergency app beta description.',
-  contactEmail: 'review@example.invalid',
-  contactFirstName: 'Synthetic',
-  contactLastName: 'Reviewer',
-  contactPhone: '+12065550100',
-  demoAccountRequired: false,
   feedbackEmail: 'feedback@example.invalid',
   locale: 'en-US',
-  notes: 'Synthetic review notes.',
   whatsNew: 'Synthetic TestFlight release notes.',
 };
 
-const reviewWithoutOptionalFields: BetaReviewInfo = {
-  betaDescription: review.betaDescription,
-  contactEmail: review.contactEmail,
-  contactFirstName: review.contactFirstName,
-  contactLastName: review.contactLastName,
-  contactPhone: review.contactPhone,
-  demoAccountRequired: false,
-  feedbackEmail: review.feedbackEmail,
-  locale: review.locale,
-  whatsNew: review.whatsNew,
+// Smallest Apple request budget the apply guard accepts for a zero-write and a
+// one-write internal sync. A one-write sync costs more than a zero-write one
+// because each internal tester adds account-user eligibility reads. The tests
+// below assert the boundary: one below fails without mutating, at the value it
+// applies.
+const ZERO_WRITE_BUDGET = 433;
+const ONE_WRITE_BUDGET = 731;
+
+let seededUserCount = 0;
+const seedInternalUsers = (
+  client: { readonly users: JsonApiResource[] },
+  emails: readonly string[],
+): void => {
+  for (const email of emails) {
+    const normalized = email.toLocaleLowerCase('en-US');
+    if (
+      client.users.some((user) => {
+        const username = (user.attributes as { username?: unknown } | undefined)
+          ?.username;
+        return (
+          typeof username === 'string' &&
+          username.toLocaleLowerCase('en-US') === normalized
+        );
+      })
+    ) {
+      continue;
+    }
+    seededUserCount += 1;
+    client.users.push(
+      resource('users', `seeded-user-${String(seededUserCount)}`, {
+        allAppsVisible: true,
+        roles: ['APP_MANAGER'],
+        username: email,
+      }),
+    );
+  }
 };
 
 const supportedBetaBuildLocalizationLocales = [
@@ -914,20 +950,10 @@ const supportedBetaBuildLocalizationLocales = [
   'zh-Hant',
 ] as const;
 
-const seedMatchingReviewMetadata = (
+const seedMatchingTestMetadata = (
   client: StatefulClient,
-  info: BetaReviewInfo = review,
+  info: BetaTestInfo = review,
 ): void => {
-  client.reviewDetails = resource('betaAppReviewDetails', 'review-1', {
-    contactEmail: info.contactEmail,
-    contactFirstName: info.contactFirstName,
-    contactLastName: info.contactLastName,
-    contactPhone: info.contactPhone,
-    demoAccountRequired: info.demoAccountRequired,
-    demoAccountName: info.demoAccountName ?? null,
-    demoAccountPassword: info.demoAccountPassword ?? null,
-    notes: info.notes ?? null,
-  });
   client.localizations.splice(
     0,
     client.localizations.length,
@@ -1012,18 +1038,12 @@ const appWithIdentityDrift = (drift: FixedAppIdentityDrift): JsonApiResource =>
 
 interface RequestedSync {
   readonly build?: string;
-  readonly externalTesters: readonly {
-    readonly email: string;
-    readonly firstName?: string;
-    readonly lastName?: string;
-  }[];
   readonly internalTesters: readonly {
     readonly email: string;
     readonly firstName?: string;
     readonly lastName?: string;
   }[];
-  readonly reviewInfo?: BetaReviewInfo;
-  readonly submitBetaReview: boolean;
+  readonly testInfo?: BetaTestInfo;
 }
 
 const previewAndApply = async (client: AscClient, options: RequestedSync) => {
@@ -2328,25 +2348,28 @@ describe('controlled input parsing', () => {
     }
   });
 
-  test('validates review access and does not accept unknown fields', () => {
-    expect(parseReviewInfo(review)).toEqual(review);
-    expect(() =>
-      parseReviewInfo({ ...review, demoAccountRequired: true }),
-    ).toThrow('needs both name and password');
-    expect(() => parseReviewInfo({ ...review, surprise: true })).toThrow(
+  test('accepts only the four supported beta-test fields', () => {
+    expect(parseTestInfo(review)).toEqual(review);
+    expect(() => parseTestInfo({ ...review, surprise: true })).toThrow(
       'unsupported field',
     );
+    for (const removed of [
+      'contactEmail',
+      'contactFirstName',
+      'contactLastName',
+      'contactPhone',
+      'demoAccountName',
+      'demoAccountPassword',
+      'demoAccountRequired',
+      'notes',
+    ]) {
+      expect(() => parseTestInfo({ ...review, [removed]: 'anything' })).toThrow(
+        'unsupported field',
+      );
+    }
     expect(() =>
-      parseReviewInfo({ ...review, demoAccountPassword: 'unneeded' }),
-    ).toThrow('forbidden when no demo account is required');
-    expect(
-      parseReviewInfo({
-        ...review,
-        demoAccountName: 'demo',
-        demoAccountPassword: ' password with spaces ',
-        demoAccountRequired: true,
-      }).demoAccountPassword,
-    ).toBe(' password with spaces ');
+      parseTestInfo({ ...review, feedbackEmail: 'not-an-email' }),
+    ).toThrow('valid email address');
   });
 
   test('accepts exactly the case-sensitive Apple BetaBuildLocalization locale set', () => {
@@ -2354,16 +2377,14 @@ describe('controlled input parsing', () => {
       supportedBetaBuildLocalizationLocales.length,
     );
     for (const locale of supportedBetaBuildLocalizationLocales) {
-      expect(parseReviewInfo({ ...review, locale }).locale, locale).toBe(
-        locale,
-      );
+      expect(parseTestInfo({ ...review, locale }).locale, locale).toBe(locale);
     }
     const omittedLocale: Record<string, unknown> = { ...review };
     delete omittedLocale.locale;
-    expect(parseReviewInfo(omittedLocale).locale).toBe('en-US');
-    expect(
-      parseReviewInfo({ ...omittedLocale, locale: undefined }).locale,
-    ).toBe('en-US');
+    expect(parseTestInfo(omittedLocale).locale).toBe('en-US');
+    expect(parseTestInfo({ ...omittedLocale, locale: undefined }).locale).toBe(
+      'en-US',
+    );
   });
 
   test('rejects unsupported or wrongly cased review locales before any Apple read or write', async () => {
@@ -2384,15 +2405,13 @@ describe('controlled input parsing', () => {
     ] as const) {
       const label = JSON.stringify(locale);
       const candidate = { ...review, locale };
-      expect(() => parseReviewInfo(candidate), label).toThrow();
+      expect(() => parseTestInfo(candidate), label).toThrow();
       const client = new StatefulClient();
       await expect(
         syncTestFlight(client, {
           apply: false,
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: candidate as unknown as BetaReviewInfo,
-          submitBetaReview: false,
+          testInfo: candidate as unknown as BetaTestInfo,
         }),
         label,
       ).rejects.toThrow();
@@ -2416,7 +2435,7 @@ describe('controlled input parsing', () => {
       });
     }
 
-    expect(parseReviewInfo(getterBackedReview)).toEqual(review);
+    expect(parseTestInfo(getterBackedReview)).toEqual(review);
     for (const key of Object.keys(review)) {
       expect(reads.get(key), key).toBe(1);
     }
@@ -2424,11 +2443,9 @@ describe('controlled input parsing', () => {
 
   test('requires bounded nonblank What to Test text', () => {
     for (const whatsNew of [undefined, '', '   ', 'x'.repeat(4_001)]) {
-      expect(() => parseReviewInfo({ ...review, whatsNew })).toThrow(
-        'whatsNew',
-      );
+      expect(() => parseTestInfo({ ...review, whatsNew })).toThrow('whatsNew');
     }
-    expect(parseReviewInfo(review).whatsNew).toBe(review.whatsNew);
+    expect(parseTestInfo(review).whatsNew).toBe(review.whatsNew);
   });
 
   test('recognizes repository-contained paths', () => {
@@ -2440,9 +2457,9 @@ describe('controlled input parsing', () => {
 describe('private operational inputs', () => {
   test('sanitizes malformed beta-review JSON', () => {
     const malformed = '{"contactEmail":"secret@example.invalid",';
-    expect(() => parseReviewInfoJson(malformed)).toThrow('not valid JSON');
+    expect(() => parseTestInfoJson(malformed)).toThrow('not valid JSON');
     try {
-      parseReviewInfoJson(malformed);
+      parseTestInfoJson(malformed);
     } catch (error) {
       expect(String(error)).not.toContain('secret@example.invalid');
     }
@@ -2609,59 +2626,33 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(client, {
         apply: true,
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       } as never),
     ).rejects.toThrow('prior preview');
     expect(client.listPaths).toHaveLength(0);
     expect(client.mutations).toHaveLength(0);
   });
 
-  test('rejects a combined approved roster above 1,200 before any provider activity', async () => {
-    const client = new StatefulClient();
-    await expect(
-      syncTestFlight(client, {
-        apply: false,
-        externalTesters: Array.from({ length: 1_101 }, (_, index) => ({
-          email: `combined-external-${index}@example.invalid`,
-        })),
-        internalTesters: Array.from({ length: 100 }, (_, index) => ({
-          email: `combined-internal-${index}@example.invalid`,
-        })),
-        submitBetaReview: false,
-      }),
-    ).rejects.toThrow('approved PSD limit');
-    expect(client.listPaths).toHaveLength(0);
-    expect(client.getPaths).toHaveLength(0);
-    expect(client.pageSummaryPaths).toHaveLength(0);
-    expect(client.mutations).toHaveLength(0);
-  });
-
   test('fails closed on unavailable or insufficient rate budget before any mutation', async () => {
-    for (const { budget, externalTesters, label } of [
+    for (const { budget, internalTesters, label } of [
       {
         budget: null,
-        externalTesters: [{ email: 'missing-budget@example.invalid' }],
+        internalTesters: [{ email: 'missing-budget@example.invalid' }],
         label: 'missing budget for one write',
       },
       {
-        budget: 520,
-        externalTesters: [{ email: 'low-budget@example.invalid' }],
+        budget: ONE_WRITE_BUDGET - 1,
+        internalTesters: [{ email: 'low-budget@example.invalid' }],
         label: 'one below the one-write threshold',
       },
       {
-        budget: 465,
-        externalTesters: [],
+        budget: ZERO_WRITE_BUDGET - 1,
+        internalTesters: [],
         label: 'one below the zero-write final-audit reserve',
       },
     ] as const) {
       const client = new StatefulClient();
-      const options = {
-        externalTesters,
-        internalTesters: [],
-        submitBetaReview: false,
-      } as const;
+      const options = { internalTesters } as const;
       const preview = await syncTestFlight(client, {
         ...options,
         apply: false,
@@ -2680,27 +2671,23 @@ describe('write gates and reconciliation', () => {
   });
 
   test('accepts the exact rate-budget threshold for zero and one selected tester write', async () => {
-    for (const { budget, externalTesters, expectedWrites, label } of [
+    for (const { budget, internalTesters, expectedWrites, label } of [
       {
-        budget: 466,
-        externalTesters: [],
+        budget: ZERO_WRITE_BUDGET,
+        internalTesters: [],
         expectedWrites: 0,
         label: 'zero writes',
       },
       {
-        budget: 521,
-        externalTesters: [{ email: 'exact-budget@example.invalid' }],
+        budget: ONE_WRITE_BUDGET,
+        internalTesters: [{ email: 'exact-budget@example.invalid' }],
         expectedWrites: 1,
         label: 'one write',
       },
     ] as const) {
       const client = new StatefulClient();
       client.rateLimitBudget = budget;
-      const result = await previewAndApply(client, {
-        externalTesters,
-        internalTesters: [],
-        submitBetaReview: false,
-      });
+      const result = await previewAndApply(client, { internalTesters });
       expect(result.actions.at(-1), label).toEqual({
         detail: 'Read-back verification passed.',
         kind: 'verification',
@@ -2715,166 +2702,32 @@ describe('write gates and reconciliation', () => {
     }
   });
 
-  test('selects a budgeted weighted 50-internal plus 50-external prefix before group setup', async () => {
-    const client = new StatefulClient();
-    const internalTesters = Array.from({ length: 50 }, (_, index) => ({
-      email: `budget-internal-${index}@example.invalid`,
-    }));
-    const externalTesters = Array.from({ length: 50 }, (_, index) => ({
-      email: `budget-external-${index}@example.invalid`,
-    }));
-    client.users.splice(0, client.users.length);
-    for (let index = 0; index < internalTesters.length; index += 1) {
-      const email = internalTesters[index]?.email;
-      if (email === undefined) throw new Error('Missing synthetic tester.');
-      client.users.push(
-        resource('users', `budget-user-${index}`, {
-          allAppsVisible: true,
-          roles: ['APP_MANAGER'],
-          username: email,
-        }),
-      );
-      client.accountTesters.push(
-        resource('betaTesters', `budget-tester-${index}`, { email }),
-      );
-    }
-    client.groups.splice(0, client.groups.length);
-    client.rateLimitBudget = 2_834;
-    const options = {
-      externalTesters,
-      internalTesters,
-      submitBetaReview: false,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    const budgeted = await syncTestFlight(client, {
-      ...options,
-      apply: true,
-      confirmPlanDigest: preview.planDigest,
-    });
-    expect(
-      client.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path.endsWith('/relationships/betaTesters'),
-      ),
-    ).toHaveLength(8);
-    expect(client.groups).toHaveLength(2);
-    expect(client.accountTesters).toHaveLength(50);
-    expect(
-      budgeted.actions
-        .filter(
-          ({ kind, status }) => kind === 'tester' && status === 'deferred',
-        )
-        .map(({ detail }) => detail),
-    ).toEqual([
-      expect.stringContaining('Defer 42 approved tester write(s)'),
-      expect.stringContaining('Defer 50 approved tester write(s)'),
-    ]);
-
-    const applied = new ScaleStatefulClient();
-    applied.users.splice(0, applied.users.length);
-    for (let index = 0; index < internalTesters.length; index += 1) {
-      const email = internalTesters[index]?.email;
-      if (email === undefined) throw new Error('Missing synthetic tester.');
-      applied.users.push(
-        resource('users', `budget-user-${index}`, {
-          allAppsVisible: true,
-          roles: ['APP_MANAGER'],
-          username: email,
-        }),
-      );
-      applied.accountTesters.push(
-        resource('betaTesters', `budget-tester-${index}`, { email }),
-      );
-    }
-    applied.groups.splice(0, applied.groups.length);
-    const appliedPreview = await syncTestFlight(applied, {
-      ...options,
-      apply: false,
-    });
-    applied.resetScaleCounters();
-    applied.rateLimitBudget = 1_000_000;
-    const startingBudget = applied.rateLimitBudget;
-    const result = await syncTestFlight(applied, {
-      ...options,
-      apply: true,
-      confirmPlanDigest: appliedPreview.planDigest,
-    });
-    expect(result.actions.at(-1)).toEqual({
-      detail: 'Read-back verification passed.',
-      kind: 'verification',
-      status: 'applied',
-    });
-    expect(
-      applied.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path.endsWith('/relationships/betaTesters'),
-      ),
-    ).toHaveLength(9);
-    expect(
-      applied.mutations.filter(
-        ({ method, path }) => method === 'POST' && path === '/v1/betaTesters',
-      ),
-    ).toHaveLength(0);
-    expect(
-      result.actions
-        .filter(
-          ({ kind, status }) => kind === 'tester' && status === 'deferred',
-        )
-        .map(({ detail }) => detail),
-    ).toEqual([
-      expect.stringContaining('Defer 41 approved tester write(s)'),
-      expect.stringContaining('Defer 50 approved tester write(s)'),
-    ]);
-    expect(
-      sortedTesterEmails(
-        applied.groupTesters.get('created-internal-group') ?? [],
-      ),
-    ).toEqual(
-      internalTesters
-        .map(({ email }) => email)
-        .sort()
-        .slice(0, 9),
-    );
-    expect(startingBudget - (applied.rateLimitBudget ?? Number.NaN)).toBe(
-      applied.providerRequestCount,
-    );
-  });
-
   test('honors decrementing one-below and adequate budgets across preflight, group setup, and tester links', async () => {
     type BudgetScenario = {
       readonly label: string;
       readonly options: {
-        readonly externalTesters: readonly { readonly email: string }[];
-        readonly internalTesters: readonly [];
-        readonly submitBetaReview: false;
+        readonly internalTesters: readonly { readonly email: string }[];
       };
       readonly requiredAtPreMutationGuard: number;
       readonly setup: () => ScaleStatefulClient;
     };
     const scenarios: readonly BudgetScenario[] = [
       {
-        label: 'existing groups and external create',
+        label: 'existing groups and tester create',
         options: {
-          externalTesters: [{ email: 'decrement-create@example.invalid' }],
-          internalTesters: [],
-          submitBetaReview: false,
+          internalTesters: [{ email: 'decrement-create@example.invalid' }],
         },
-        requiredAtPreMutationGuard: 521,
+        requiredAtPreMutationGuard: 738,
         setup: () => new ScaleStatefulClient(),
       },
       {
-        label: 'missing groups and external create',
+        label: 'missing groups and tester create',
         options: {
-          externalTesters: [
+          internalTesters: [
             { email: 'decrement-group-create@example.invalid' },
           ],
-          internalTesters: [],
-          submitBetaReview: false,
         },
-        requiredAtPreMutationGuard: 521,
+        requiredAtPreMutationGuard: 733,
         setup: () => {
           const client = new ScaleStatefulClient();
           client.groups.splice(0, client.groups.length);
@@ -2884,11 +2737,9 @@ describe('write gates and reconciliation', () => {
       {
         label: 'existing account tester link',
         options: {
-          externalTesters: [{ email: 'decrement-link@example.invalid' }],
-          internalTesters: [],
-          submitBetaReview: false,
+          internalTesters: [{ email: 'decrement-link@example.invalid' }],
         },
-        requiredAtPreMutationGuard: 686,
+        requiredAtPreMutationGuard: 739,
         setup: () => {
           const client = new ScaleStatefulClient();
           client.accountTesters.push(
@@ -2971,11 +2822,9 @@ describe('write gates and reconciliation', () => {
 
   test('reserves a topology-derived final audit for many builds and paginated membership', async () => {
     const baseline = new StatefulClient();
-    baseline.rateLimitBudget = 599;
+    baseline.rateLimitBudget = ONE_WRITE_BUDGET;
     await previewAndApply(baseline, {
-      externalTesters: [{ email: 'baseline-audit@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'baseline-audit@example.invalid' }],
     });
     expect(
       baseline.mutations.filter(
@@ -3000,22 +2849,14 @@ describe('write gates and reconciliation', () => {
       client.appBuilds.push(build);
       client.individualTesters.set(build.id, []);
     }
-    const externalTesters = [
-      ...existing.map((tester) => ({
-        email: String(tester.attributes?.email),
-      })),
-      { email: 'topology-audit-new@example.invalid' },
-    ];
     const options = {
-      externalTesters,
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'topology-audit-new@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
       apply: false,
     });
-    client.rateLimitBudget = 599;
+    client.rateLimitBudget = ONE_WRITE_BUDGET;
     await expect(
       syncTestFlight(client, {
         ...options,
@@ -3031,15 +2872,13 @@ describe('write gates and reconciliation', () => {
   test('rejects additive group and group-build writes at bounded collection caps', async () => {
     const groupCap = new StatefulClient();
     groupCap.groups.splice(0, groupCap.groups.length);
-    for (let index = 0; index < 199; index += 1) {
+    for (let index = 0; index < 200; index += 1) {
       addTypedGroup(groupCap, `cap-group-${index}`, index % 2 === 0, []);
     }
     await expect(
       syncTestFlight(groupCap, {
         apply: false,
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow('no safe capacity for required group creation');
     expect(groupCap.mutations).toHaveLength(0);
@@ -3057,10 +2896,8 @@ describe('write gates and reconciliation', () => {
       syncTestFlight(buildCap, {
         apply: false,
         build: 'build-1',
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       }),
     ).rejects.toThrow('no safe capacity for an additive write');
     expect(buildCap.mutations).toHaveLength(0);
@@ -3086,9 +2923,7 @@ describe('write gates and reconciliation', () => {
         client.testerAppRelationshipOverrides.set(tester.id, relationships);
       }
       const options = {
-        externalTesters: [{ email: `cap-${relationship}@example.invalid` }],
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: [{ email: `cap-${relationship}@example.invalid` }],
       } as const;
       const preview = await syncTestFlight(client, {
         ...options,
@@ -3118,9 +2953,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(client, {
         apply: false,
-        externalTesters: [{ email: 'account-cap-new@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: [{ email: 'account-cap-new@example.invalid' }],
       }),
     ).rejects.toThrow('exceed the safe account tester capacity');
     expect(client.mutations).toHaveLength(0);
@@ -3192,9 +3025,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const options = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     for (const drift of [
       'hasAccessToAllBuilds',
@@ -3249,7 +3080,7 @@ describe('write gates and reconciliation', () => {
               feedbackEnabled: true,
               hasAccessToAllBuilds: false,
               isInternalGroup: false,
-              name: TEST_APP_CONFIGURATION.externalGroupName,
+              name: 'Concurrent Unmanaged External',
               publicLinkEnabled: false,
             });
             this.groups.push(group);
@@ -3264,9 +3095,7 @@ describe('write gates and reconciliation', () => {
 
     const client = new ConcurrentEmptyGroupClient();
     const options = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -3285,7 +3114,7 @@ describe('write gates and reconciliation', () => {
     expect(
       client.groups.filter(
         ({ attributes }) =>
-          attributes?.name === TEST_APP_CONFIGURATION.externalGroupName &&
+          attributes?.name === 'Concurrent Unmanaged External' &&
           attributes.isInternalGroup === false,
       ),
     ).toHaveLength(1);
@@ -3342,9 +3171,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const options = {
-      externalTesters: [{ email: 'extra-reciprocal@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'extra-reciprocal@example.invalid' }],
     } as const;
     for (const drift of ['group', 'app'] as const) {
       const client = new CreatedTesterExtraReciprocalClient(drift);
@@ -3383,10 +3210,8 @@ describe('write gates and reconciliation', () => {
     client.rateLimitBudget = 2_500;
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -3408,9 +3233,7 @@ describe('write gates and reconciliation', () => {
   test('captures the confirmed digest exactly once before the first await', async () => {
     const client = new StatefulClient();
     const requested = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(client, {
       ...requested,
@@ -3438,7 +3261,7 @@ describe('write gates and reconciliation', () => {
     expect(digestReads).toBe(1);
   });
 
-  test('CLI refuses an unconfirmed apply or incomplete beta review request', () => {
+  test('CLI refuses an unconfirmed apply and every removed external flag', () => {
     expect(() => parseCli(['sync', '--apply'])).toThrow(
       `--confirm-apply ${TEST_APP_CONFIGURATION.bundleId}`,
     );
@@ -3450,27 +3273,30 @@ describe('write gates and reconciliation', () => {
         TEST_APP_CONFIGURATION.bundleId,
       ]),
     ).toThrow('--confirm-plan');
-    expect(() => parseCli(['sync', '--submit-beta-review'])).toThrow(
-      'requires --review-info and --build',
-    );
+    for (const removed of [
+      ['sync', '--submit-beta-review'],
+      ['sync', '--external-testers', '/secure/external.csv'],
+      ['sync', '--review-info', '/secure/review.json'],
+    ]) {
+      expect(() => parseCli(removed), removed.join(' ')).toThrow(
+        'Unknown command-line argument',
+      );
+    }
     expect(
       parseCli([
         'sync',
-        '--submit-beta-review',
-        '--review-info',
-        '/secure/review.json',
+        '--test-info',
+        '/secure/test-info.json',
         '--build',
         'build-1',
       ]).apply,
     ).toBe(false);
   });
 
-  test('plan digests are stable and bind inputs, build, review flag, and Apple state', async () => {
+  test('plan digests are stable and bind inputs, build, and Apple state', async () => {
     const client = new StatefulClient();
     const base = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const first = await syncTestFlight(client, { ...base, apply: false });
     const second = await syncTestFlight(client, { ...base, apply: false });
@@ -3480,30 +3306,18 @@ describe('write gates and reconciliation', () => {
     const testerPlan = await syncTestFlight(client, {
       ...base,
       apply: false,
-      externalTesters: [{ email: 'approved@example.invalid' }],
+      internalTesters: [{ email: 'internal@example.invalid' }],
     });
     const buildPlan = await syncTestFlight(client, {
       ...base,
       apply: false,
       build: 'build-1',
-      reviewInfo: review,
-    });
-    const reviewPlan = await syncTestFlight(client, {
-      apply: false,
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
+      testInfo: review,
     });
     expect(
-      new Set([
-        first.planDigest,
-        testerPlan.planDigest,
-        buildPlan.planDigest,
-        reviewPlan.planDigest,
-      ]).size,
-    ).toBe(4);
+      new Set([first.planDigest, testerPlan.planDigest, buildPlan.planDigest])
+        .size,
+    ).toBe(3);
 
     const internalAttributes = client.groups[0]?.attributes as
       | Record<string, unknown>
@@ -3530,9 +3344,7 @@ describe('write gates and reconciliation', () => {
     client.groupTesters.set(otherInternal.id, []);
     client.groupBuilds.set(otherInternal.id, []);
     const requested = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
 
     const first = await syncTestFlight(client, {
@@ -3566,9 +3378,7 @@ describe('write gates and reconciliation', () => {
       return attributes;
     };
     const requested = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const firstClient = new StatefulClient();
     firstClient.groups.splice(
@@ -3661,9 +3471,7 @@ describe('write gates and reconciliation', () => {
       await expect(
         syncTestFlight(client, {
           apply: false,
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         }),
         label,
       ).rejects.toThrow();
@@ -3688,9 +3496,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(client, {
         apply: false,
-        externalTesters,
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: externalTesters,
       }),
     ).rejects.toThrow();
     expect(hostileMapCalls).toBe(0);
@@ -3701,9 +3507,7 @@ describe('write gates and reconciliation', () => {
   test('a stale plan digest fails with zero mutations', async () => {
     const client = new StatefulClient();
     const options = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(client, { ...options, apply: false });
     const attributes = client.groups[0]?.attributes as
@@ -3766,9 +3570,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const requested = {
-      externalTesters: [{ email: 'approved@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'approved@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...requested,
@@ -3791,7 +3593,7 @@ describe('write gates and reconciliation', () => {
       previewTranscript,
     );
     const assertionReads = beforeMutation.slice(previewTranscript.length);
-    expect(assertionReads).toHaveLength(40);
+    expect(assertionReads).toHaveLength(38);
     expect(
       assertionReads.every(
         (operation) =>
@@ -3803,9 +3605,8 @@ describe('write gates and reconciliation', () => {
     for (const expected of [
       'list /v1/apps/app-1/betaGroups?',
       'list /v1/betaGroups/internal-group/betaTesters?',
-      'list /v1/betaGroups/external-group/betaTesters?',
-      'list /v1/betaGroups/external-group/builds?',
-      'list /v1/betaGroups/external-group/relationships/builds?limit=200',
+      'list /v1/betaGroups/internal-group/builds?',
+      'list /v1/betaGroups/internal-group/relationships/builds?limit=200',
       'list /v1/betaTesters?',
       'list /v1/apps/app-1/builds?',
       'list /v1/apps/app-1/relationships/builds?',
@@ -3820,12 +3621,12 @@ describe('write gates and reconciliation', () => {
     expect(assertionReads.slice(-8)).toEqual([
       'list /v1/betaTesters/existing-account-tester/relationships/builds?limit=200',
       'get /v1/betaTesters/existing-account-tester?fields%5BbetaTesters%5D=email',
-      'get /v1/betaGroups/external-group?fields%5BbetaGroups%5D=name%2CisInternalGroup%2ChasAccessToAllBuilds%2CfeedbackEnabled%2CpublicLinkEnabled',
-      'get /v1/betaGroups/external-group/app',
-      'list /v1/betaGroups/external-group/builds?fields%5Bbuilds%5D=version%2CuploadedDate&limit=200',
-      'list /v1/betaGroups/external-group/relationships/builds?limit=200',
-      'pageSummary /v1/betaGroups/external-group/betaTesters?fields%5BbetaTesters%5D=email&limit=1',
-      'pageSummary /v1/betaGroups/external-group/relationships/betaTesters?limit=1',
+      'get /v1/betaGroups/internal-group?fields%5BbetaGroups%5D=name%2CisInternalGroup%2ChasAccessToAllBuilds%2CfeedbackEnabled%2CpublicLinkEnabled',
+      'get /v1/betaGroups/internal-group/app',
+      'list /v1/betaGroups/internal-group/builds?fields%5Bbuilds%5D=version%2CuploadedDate&limit=200',
+      'list /v1/betaGroups/internal-group/relationships/builds?limit=200',
+      'pageSummary /v1/betaGroups/internal-group/betaTesters?fields%5BbetaTesters%5D=email&limit=1',
+      'pageSummary /v1/betaGroups/internal-group/relationships/betaTesters?limit=1',
     ]);
   });
 
@@ -3833,9 +3634,7 @@ describe('write gates and reconciliation', () => {
     for (const drift of ['build', 'membership'] as const) {
       const client = new StatefulClient();
       const requested = {
-        externalTesters: [],
         internalTesters: [{ email: 'internal@example.invalid' }],
-        submitBetaReview: false,
       } as const;
       const preview = await syncTestFlight(client, {
         ...requested,
@@ -3908,9 +3707,7 @@ describe('write gates and reconciliation', () => {
     const client = new BarrierClient();
     const tester = { email: 'original@example.invalid' };
     const requested: RequestedSync = {
-      externalTesters: [tester],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [tester],
     };
     const preview = await syncTestFlight(client, {
       ...requested,
@@ -3949,9 +3746,7 @@ describe('write gates and reconciliation', () => {
     const client = new SecondMutationFailsClient();
     client.groups.splice(0);
     const requested = {
-      externalTesters: [],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'second-mutation@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...requested,
@@ -3974,9 +3769,7 @@ describe('write gates and reconciliation', () => {
       await expect(
         syncTestFlight(appClient, {
           apply: false,
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         }),
         `app:${id}`,
       ).rejects.toThrow('resource ID was malformed');
@@ -3989,9 +3782,7 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(buildClient, {
           apply: false,
           build: id,
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         }),
         `build:${id}`,
       ).rejects.toThrow('Build ID was malformed');
@@ -4007,9 +3798,7 @@ describe('write gates and reconciliation', () => {
         apply: true,
         build: 'latest',
         confirmPlanDigest: `sha256:${'0'.repeat(64)}`,
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow('exact build ID');
   });
@@ -4019,33 +3808,23 @@ describe('write gates and reconciliation', () => {
     const result = await syncTestFlight(client, {
       apply: false,
       build: 'build-1',
-      externalTesters: [{ email: 'external@example.invalid' }],
       internalTesters: [{ email: 'internal@example.invalid' }],
-      reviewInfo: {
-        ...review,
-        demoAccountName: 'demo',
-        demoAccountPassword: 'secret',
-        demoAccountRequired: true,
-      },
-      submitBetaReview: true,
+      testInfo: review,
     });
     expect(result.mode).toBe('plan');
     expect(result.actions.filter(({ kind }) => kind === 'group')).toHaveLength(
-      2,
-    );
-    expect(result.actions.filter(({ kind }) => kind === 'tester')).toHaveLength(
-      3,
+      1,
     );
     expect(
       result.actions.filter(({ kind }) => kind === 'build-distribution'),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(
-      result.actions.some(({ kind }) => kind === 'beta-review-submission'),
-    ).toBe(true);
+      result.actions.some(({ detail }) =>
+        detail.toLocaleLowerCase('en-US').includes('beta app review'),
+      ),
+    ).toBe(false);
     const output = JSON.stringify(result);
-    expect(output).not.toContain('external@example.invalid');
     expect(output).not.toContain('internal@example.invalid');
-    expect(output).not.toContain('secret');
     expect(result.selectedBuild).toEqual({
       audienceType: 'APP_STORE_ELIGIBLE',
       externalBuildState: 'READY_FOR_BETA_SUBMISSION',
@@ -4089,9 +3868,7 @@ describe('write gates and reconciliation', () => {
     const result = await syncTestFlight(new MultipleBuildClient(), {
       apply: false,
       build: 'latest',
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     });
     expect(result.selectedBuild?.id).toBe('build-1');
     expect(result.selectedBuild?.platform).toBe('IOS');
@@ -4112,10 +3889,8 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(client, {
           apply: false,
           build,
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         }),
         build,
       ).rejects.toThrow(/iOS|IOS/u);
@@ -4157,13 +3932,11 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new PlatformDriftClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -4184,23 +3957,6 @@ describe('write gates and reconciliation', () => {
     ).toHaveLength(0);
   });
 
-  test('external review rejects an internal-only build before mutation', async () => {
-    const client = new StatefulClient();
-    client.buildAttributes.buildAudienceType = 'INTERNAL_ONLY';
-    await expect(
-      syncTestFlight(client, {
-        apply: true,
-        build: 'build-1',
-        confirmPlanDigest: `sha256:${'0'.repeat(64)}`,
-        externalTesters: [],
-        internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: true,
-      }),
-    ).rejects.toThrow('APP_STORE_ELIGIBLE');
-    expect(client.mutations).toHaveLength(0);
-  });
-
   test('rejects a selected build that is not app scoped', async () => {
     class WrongBuildAppClient extends StatefulClient {
       override async get(
@@ -4219,10 +3975,8 @@ describe('write gates and reconciliation', () => {
       syncTestFlight(client, {
         apply: false,
         build: 'build-1',
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       }),
     ).rejects.toThrow('does not belong');
     expect(client.mutations).toHaveLength(0);
@@ -4256,10 +4010,8 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(client, {
           apply: false,
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         }),
         label,
       ).rejects.toThrow();
@@ -4270,10 +4022,8 @@ describe('write gates and reconciliation', () => {
     await syncTestFlight(correct, {
       apply: false,
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     });
     expect(correct.getPaths).toContain(
       '/v1/preReleaseVersions/pre-release-1/app',
@@ -4300,13 +4050,11 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new PreReleaseParentDriftClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -4323,32 +4071,17 @@ describe('write gates and reconciliation', () => {
     expect(client.mutations).toHaveLength(0);
   });
 
-  test('requires approved review info for every exact build and forbids latest for review', async () => {
+  test('requires approved beta test info for every exact build', async () => {
     const exactClient = new StatefulClient();
     await expect(
       syncTestFlight(exactClient, {
         apply: false,
         build: 'build-1',
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       }),
-    ).rejects.toThrow('approved review info, including What to Test');
+    ).rejects.toThrow('approved beta test info, including What to Test');
     expect(exactClient.listPaths).toHaveLength(0);
     expect(exactClient.mutations).toHaveLength(0);
-
-    const latestReviewClient = new StatefulClient();
-    await expect(
-      syncTestFlight(latestReviewClient, {
-        apply: false,
-        build: 'latest',
-        externalTesters: [],
-        internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: true,
-      }),
-    ).rejects.toThrow('exact build ID');
-    expect(latestReviewClient.mutations).toHaveLength(0);
   });
 
   test('accepts only positive internal beta states and records encryption evidence', async () => {
@@ -4372,10 +4105,8 @@ describe('write gates and reconciliation', () => {
         const result = await syncTestFlight(client, {
           apply: false,
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         });
         expect(result.selectedBuild).toMatchObject({
           externalBuildState: 'READY_FOR_BETA_SUBMISSION',
@@ -4401,10 +4132,8 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(client, {
           apply: false,
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         }),
       ).rejects.toThrow();
       expect(client.mutations).toHaveLength(0);
@@ -4417,39 +4146,10 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(client, {
           apply: false,
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         }),
       ).rejects.toThrow('malformed selected-build metadata');
-      expect(client.mutations).toHaveLength(0);
-    }
-  });
-
-  test('requires READY_FOR_BETA_SUBMISSION for a new external review', async () => {
-    for (const externalBuildState of [
-      'IN_BETA_TESTING',
-      'BETA_APPROVED',
-      'MISSING_EXPORT_COMPLIANCE',
-      'FUTURE_UNKNOWN_STATE',
-    ]) {
-      const client = new StatefulClient();
-      client.buildBetaDetail = resource('buildBetaDetails', 'build-detail-1', {
-        autoNotifyEnabled: false,
-        externalBuildState,
-        internalBuildState: 'READY_FOR_BETA_TESTING',
-      });
-      await expect(
-        syncTestFlight(client, {
-          apply: false,
-          build: 'build-1',
-          externalTesters: [],
-          internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: true,
-        }),
-      ).rejects.toThrow();
       expect(client.mutations).toHaveLength(0);
     }
   });
@@ -4461,10 +4161,8 @@ describe('write gates and reconciliation', () => {
       syncTestFlight(wrongParent, {
         apply: false,
         build: 'build-1',
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       }),
     ).rejects.toThrow();
     expect(wrongParent.mutations).toHaveLength(0);
@@ -4473,10 +4171,8 @@ describe('write gates and reconciliation', () => {
     await syncTestFlight(correct, {
       apply: false,
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     });
     expect(correct.getPaths).toContain(
       '/v1/buildBetaDetails/build-detail-1/build',
@@ -4511,12 +4207,10 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(client, {
         apply: false,
-        externalTesters: [],
         internalTesters: [
           { email: 'new-1@example.invalid' },
           { email: 'new-2@example.invalid' },
         ],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow('App-wide internal membership');
     expect(client.mutations).toHaveLength(0);
@@ -4527,32 +4221,30 @@ describe('write gates and reconciliation', () => {
     const existing = resource('betaTesters', 'same-audience-tester', {
       email: 'same-audience@example.invalid',
     });
-    addTypedGroup(client, 'other-external-group', false, [existing]);
+    addTypedGroup(client, 'other-internal-group', true, [existing]);
     client.accountTesters.push(existing);
     client.appTesters.push(existing);
     const options = {
-      externalTesters: [{ email: 'same-audience@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'same-audience@example.invalid' }],
     } as const;
 
     const first = await previewAndApply(client, options);
     expect(first.actions.at(-1)?.kind).toBe('verification');
     expect(
       client.groupTesters
-        .get('external-group')
+        .get('internal-group')
         ?.some(({ id }) => id === existing.id),
     ).toBe(true);
     expect(
       client.groupTesters
-        .get('other-external-group')
+        .get('other-internal-group')
         ?.some(({ id }) => id === existing.id),
     ).toBe(true);
     expect(
       client.mutations.filter(
         ({ method, path }) =>
           method === 'POST' &&
-          path === '/v1/betaGroups/external-group/relationships/betaTesters',
+          path === '/v1/betaGroups/internal-group/relationships/betaTesters',
       ),
     ).toHaveLength(1);
 
@@ -4569,16 +4261,14 @@ describe('write gates and reconciliation', () => {
     const internal = resource('betaTesters', 'cross-audience-tester', {
       email: 'cross-audience@example.invalid',
     });
-    addTypedGroup(client, 'other-internal-group', true, [internal]);
+    addTypedGroup(client, 'other-external-group', false, [internal]);
     client.accountTesters.push(internal);
     client.appTesters.push(internal);
 
     await expect(
       syncTestFlight(client, {
         apply: false,
-        externalTesters: [{ email: 'cross-audience@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: [{ email: 'cross-audience@example.invalid' }],
       }),
     ).rejects.toThrow('opposite app audience');
     expect(client.mutations).toHaveLength(0);
@@ -4590,7 +4280,7 @@ describe('write gates and reconciliation', () => {
       'betaTesters',
       'anonymous-cross-audience-id',
     );
-    addTypedGroup(client, 'anonymous-internal-classifier', true, [
+    addTypedGroup(client, 'anonymous-external-classifier', false, [
       anonymousInternal,
     ]);
     client.appTesters.push(anonymousInternal);
@@ -4600,9 +4290,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [{ email: 'anonymous-cross-audience@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'anonymous-cross-audience@example.invalid' }],
     } as const;
 
     let message = '';
@@ -4650,9 +4338,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [{ email: 'shared-external@example.invalid' }],
       internalTesters: [{ email: 'shared-internal@example.invalid' }],
-      submitBetaReview: false,
     } as const;
 
     await expect(
@@ -4672,9 +4358,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [{ email: 'requested@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'requested@example.invalid' }],
     } as const;
     await previewAndApply(client, options);
     expect(
@@ -4687,12 +4371,12 @@ describe('write gates and reconciliation', () => {
     ).toBe(true);
     expect(
       client.groupTesters
-        .get('external-group')
+        .get('internal-group')
         ?.some(({ id }) => id === 'requested-account-id'),
     ).toBe(true);
     expect(
       client.groupTesters
-        .get('external-group')
+        .get('internal-group')
         ?.some(({ id }) => id === 'unrelated-account-id'),
     ).toBe(false);
     expect(
@@ -4736,9 +4420,10 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [{ email: 'created-id-external@example.invalid' }],
-      internalTesters: [{ email: 'created-id-internal@example.invalid' }],
-      submitBetaReview: false,
+      internalTesters: [
+        { email: 'created-id-internal@example.invalid' },
+        { email: 'created-id-second@example.invalid' },
+      ],
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -4778,9 +4463,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [],
       internalTesters: [{ email: 'internal@example.invalid' }],
-      submitBetaReview: false,
     } as const;
 
     await previewAndApply(client, options);
@@ -4808,9 +4491,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(client, {
         apply: false,
-        externalTesters: [{ email: 'new-external@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: [{ email: 'new-external@example.invalid' }],
       }),
     ).rejects.toThrow();
     expect(
@@ -4862,9 +4543,7 @@ describe('write gates and reconciliation', () => {
       await expect(
         syncTestFlight(client, {
           apply: false,
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         }),
         label,
       ).rejects.toThrow();
@@ -4874,9 +4553,7 @@ describe('write gates and reconciliation', () => {
 
   test('requires forward group and individual-build inventories to match raw relationship linkage', async () => {
     const requested = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const cases: Array<{
       client: StatefulClient;
@@ -4968,7 +4645,7 @@ describe('write gates and reconciliation', () => {
       'bounded-relationship-tester',
       { email: 'bounded-relationship-tester@example.invalid' },
     );
-    addTypedGroup(client, 'bounded-relationship-group', false, [
+    addTypedGroup(client, 'bounded-relationship-group', true, [
       inventoryTester,
     ]);
     client.appTesters.push(inventoryTester);
@@ -4980,17 +4657,15 @@ describe('write gates and reconciliation', () => {
       resource('users', 'bounded-relationship-user', {
         allAppsVisible: false,
         roles: ['APP_MANAGER'],
-        username: 'bounded-relationship-user@example.invalid',
+        username: 'bounded-relationship-tester@example.invalid',
       }),
     );
     client.userVisibleApps.set('bounded-relationship-user', [client.app]);
 
     await previewAndApply(client, {
-      externalTesters: [
+      internalTesters: [
         { email: 'bounded-relationship-tester@example.invalid' },
       ],
-      internalTesters: [{ email: 'bounded-relationship-user@example.invalid' }],
-      submitBetaReview: false,
     });
 
     const boundedPaths = client.listPaths.filter((path) => {
@@ -5068,9 +4743,7 @@ describe('write gates and reconciliation', () => {
 
     const requested = {
       apply: false,
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     for (const scenario of ['linkage-omitted', 'wrong-type'] as const) {
       const client = new ExtendedBuildInventoryClient(scenario);
@@ -5084,93 +4757,6 @@ describe('write gates and reconciliation', () => {
     expect((await syncTestFlight(correct, requested)).mode).toBe('plan');
     expect(correct.mutations).toHaveLength(0);
   });
-
-  test('enforces internal and external capacity independently with individual assignments', async () => {
-    const internalClient = new StatefulClient();
-    const internalGrouped = syntheticTesters('internal-capacity', 99);
-    const internalIndividual = resource('betaTesters', 'internal-individual', {
-      email: 'internal-individual@example.invalid',
-    });
-    addTypedGroup(
-      internalClient,
-      'internal-capacity-group',
-      true,
-      internalGrouped,
-    );
-    addTypedGroup(internalClient, 'internal-individual-classifier', true, [
-      internalIndividual,
-    ]);
-    internalClient.appTesters.push(...internalGrouped, internalIndividual);
-    internalClient.individualTesters.set('build-1', [internalIndividual]);
-    internalClient.users.push(
-      resource('users', 'internal-over-cap-user', {
-        allAppsVisible: true,
-        roles: ['APP_MANAGER'],
-        username: 'internal-over-cap@example.invalid',
-      }),
-    );
-    await expect(
-      syncTestFlight(internalClient, {
-        apply: false,
-        externalTesters: [],
-        internalTesters: [{ email: 'internal-over-cap@example.invalid' }],
-        submitBetaReview: false,
-      }),
-    ).rejects.toThrow('100-tester limit');
-
-    const externalClient = new StatefulClient();
-    const externalGrouped = syntheticTesters('external-capacity', 9_999);
-    const externalIndividual = resource('betaTesters', 'external-individual', {
-      email: 'external-individual@example.invalid',
-    });
-    addTypedGroup(
-      externalClient,
-      'external-capacity-group',
-      false,
-      externalGrouped,
-    );
-    addTypedGroup(externalClient, 'external-individual-classifier', false, [
-      externalIndividual,
-    ]);
-    externalClient.appTesters.push(...externalGrouped, externalIndividual);
-    externalClient.individualTesters.set('build-1', [externalIndividual]);
-    await expect(
-      syncTestFlight(externalClient, {
-        apply: false,
-        externalTesters: [{ email: 'external-over-cap@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
-      }),
-    ).rejects.toThrow('10,000-tester limit');
-
-    const independentClient = new StatefulClient();
-    const fullInternalAudience = syntheticTesters('full-internal', 100);
-    addTypedGroup(
-      independentClient,
-      'full-internal-audience',
-      true,
-      fullInternalAudience,
-    );
-    const partialExternalAudience = syntheticTesters('partial-external', 9_900);
-    addTypedGroup(
-      independentClient,
-      'partial-external-audience',
-      false,
-      partialExternalAudience,
-    );
-    independentClient.appTesters.push(
-      ...fullInternalAudience,
-      ...partialExternalAudience,
-    );
-    const independentPlan = await syncTestFlight(independentClient, {
-      apply: false,
-      externalTesters: [{ email: 'allowed-external@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
-    });
-    expect(independentPlan.mode).toBe('plan');
-    expect(independentClient.mutations).toHaveLength(0);
-  }, 30_000);
 
   test('fails closed on unclassified, cross-category, and conflicting tester identities', async () => {
     const appOnly = new StatefulClient();
@@ -5228,9 +4814,7 @@ describe('write gates and reconciliation', () => {
       await expect(
         syncTestFlight(client, {
           apply: false,
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         }),
         label,
       ).rejects.toThrow();
@@ -5238,27 +4822,7 @@ describe('write gates and reconciliation', () => {
     }
   });
 
-  test('counts anonymous typed group members but rejects anonymous unclassified assignments', async () => {
-    const typedAnonymous = new StatefulClient();
-    const anonymousMembers = Array.from({ length: 10_000 }, (_, index) =>
-      resource('betaTesters', `anonymous-external-${index}`),
-    );
-    addTypedGroup(
-      typedAnonymous,
-      'anonymous-external-group',
-      false,
-      anonymousMembers,
-    );
-    typedAnonymous.appTesters.push(...anonymousMembers);
-    await expect(
-      syncTestFlight(typedAnonymous, {
-        apply: false,
-        externalTesters: [{ email: 'over-anonymous-cap@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
-      }),
-    ).rejects.toThrow('10,000-tester limit');
-
+  test('rejects anonymous unclassified app-tester assignments', async () => {
     const unclassifiedAnonymous = new StatefulClient();
     unclassifiedAnonymous.appTesters.push(
       resource('betaTesters', 'anonymous-app-only'),
@@ -5266,9 +4830,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(unclassifiedAnonymous, {
         apply: false,
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow();
     expect(unclassifiedAnonymous.mutations).toHaveLength(0);
@@ -5284,9 +4846,7 @@ describe('write gates and reconciliation', () => {
     ]);
     digestClient.appTesters.push(typedIndividual);
     const requested = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const beforeAssignment = await syncTestFlight(digestClient, {
       ...requested,
@@ -5328,9 +4888,7 @@ describe('write gates and reconciliation', () => {
 
     const driftClient = new CapacityDriftClient();
     const driftRequested = {
-      externalTesters: [{ email: 'new-tester@example.invalid' }],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(driftClient, {
       ...driftRequested,
@@ -5365,9 +4923,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(wrongGroupClient, {
         apply: false,
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow();
     expect(wrongGroupClient.mutations).toHaveLength(0);
@@ -5381,9 +4937,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(wrongTesterClient, {
         apply: false,
-        externalTesters: [],
         internalTesters: [{ email: 'internal@example.invalid' }],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow();
     expect(wrongTesterClient.mutations).toHaveLength(0);
@@ -5421,9 +4975,7 @@ describe('write gates and reconciliation', () => {
     }
     await syncTestFlight(client, {
       apply: false,
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     });
     expect(client.peakReads).toBe(1);
     expect(
@@ -5444,9 +4996,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(wrongParent, {
         apply: false,
-        externalTesters: [],
         internalTesters: [],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow();
     expect(wrongParent.mutations).toHaveLength(0);
@@ -5454,9 +5004,7 @@ describe('write gates and reconciliation', () => {
     const correct = new StatefulClient();
     await syncTestFlight(correct, {
       apply: false,
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     });
     expect(
       correct.listPaths.some((path) =>
@@ -5495,9 +5043,7 @@ describe('write gates and reconciliation', () => {
     const client = new MissingCreatedGroupLinkageClient();
     client.groups.splice(0);
     const options = {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -5536,9 +5082,7 @@ describe('write gates and reconciliation', () => {
 
     const client = new GroupParentGuardDriftClient();
     const options = {
-      externalTesters: [{ email: 'group-parent-guard@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'group-parent-guard@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -5566,7 +5110,7 @@ describe('write gates and reconciliation', () => {
           path.startsWith('/v1/apps/app-1/relationships/betaGroups?')
         ) {
           this.finalDrift = true;
-          return current.filter(({ id }) => id !== 'external-group');
+          return current.filter(({ id }) => id !== 'internal-group');
         }
         return current;
       }
@@ -5574,9 +5118,7 @@ describe('write gates and reconciliation', () => {
 
     const client = new FinalGroupParentDriftClient();
     const options = {
-      externalTesters: [{ email: 'final-group-parent@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'final-group-parent@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -5611,9 +5153,7 @@ describe('write gates and reconciliation', () => {
       await expect(
         syncTestFlight(client, {
           apply: false,
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         }),
       ).rejects.toThrow('manual build assignment');
       expect(client.mutations).toHaveLength(0);
@@ -5706,9 +5246,7 @@ describe('write gates and reconciliation', () => {
 
       const client = new UntrustedCreateClient();
       const requested = {
-        externalTesters: [],
         internalTesters: [{ email: 'internal@example.invalid' }],
-        submitBetaReview: false,
       } as const;
       const preview = await syncTestFlight(client, {
         ...requested,
@@ -5748,24 +5286,18 @@ describe('write gates and reconciliation', () => {
     const internalAttributes = client.groups[0]?.attributes as
       | Record<string, unknown>
       | undefined;
-    const externalAttributes = client.groups[1]?.attributes as
-      | Record<string, unknown>
-      | undefined;
-    if (internalAttributes === undefined || externalAttributes === undefined) {
-      throw new Error('Missing fixture groups.');
+    if (internalAttributes === undefined) {
+      throw new Error('Missing fixture group.');
     }
     internalAttributes.feedbackEnabled = false;
-    externalAttributes.publicLinkEnabled = true;
     await previewAndApply(client, {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     });
     const patches = client.mutations.filter(
       ({ method, path }) =>
         method === 'PATCH' && path.startsWith('/v1/betaGroups/'),
     );
-    expect(patches).toHaveLength(2);
+    expect(patches).toHaveLength(1);
     for (const patch of patches) {
       expect(dataAttributes(patch.body)).not.toHaveProperty(
         'hasAccessToAllBuilds',
@@ -5790,10 +5322,8 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(client, {
           apply: false,
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [{ email: 'internal@example.invalid' }],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         }),
       ).rejects.toThrow();
       expect(client.mutations).toHaveLength(0);
@@ -5814,10 +5344,8 @@ describe('write gates and reconciliation', () => {
       syncTestFlight(noRosterClient, {
         apply: false,
         build: 'build-1',
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       }),
     ).rejects.toThrow('complete approved roster');
     expect(noRosterClient.mutations).toHaveLength(0);
@@ -5827,9 +5355,7 @@ describe('write gates and reconciliation', () => {
     const client = new StatefulClient();
     const result = await syncTestFlight(client, {
       apply: false,
-      externalTesters: [],
       internalTesters: [{ email: 'internal@example.invalid' }],
-      submitBetaReview: false,
     });
     expect(
       result.actions.some(
@@ -5840,23 +5366,6 @@ describe('write gates and reconciliation', () => {
       ),
     ).toBe(true);
     expect(client.mutations).toHaveLength(0);
-
-    const externalClient = new StatefulClient();
-    const externalResult = await syncTestFlight(externalClient, {
-      apply: false,
-      externalTesters: [{ email: 'staff@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
-    });
-    expect(
-      externalResult.actions.some(
-        ({ detail, kind, status }) =>
-          kind === 'tester' &&
-          status === 'planned' &&
-          detail.includes('real TestFlight invitation email'),
-      ),
-    ).toBe(true);
-    expect(externalClient.mutations).toHaveLength(0);
   });
 
   test('rechecks group state before every tester write and stops after late build attachment', async () => {
@@ -5889,12 +5398,10 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [],
       internalTesters: [
         { email: 'internal@example.invalid' },
         { email: 'second-internal@example.invalid' },
       ],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -5979,68 +5486,6 @@ describe('write gates and reconciliation', () => {
     ).toBe(false);
   });
 
-  test('bounded per-write guards accept an earlier verified tester without repeating the app-wide audit', async () => {
-    class MultiWriteGuardClient extends OrderedStatefulClient {}
-
-    const client = new MultiWriteGuardClient();
-    const options = {
-      externalTesters: [
-        { email: 'first-external-create@example.invalid' },
-        { email: 'second-external-create@example.invalid' },
-      ],
-      internalTesters: [],
-      submitBetaReview: false,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    client.operations.splice(0);
-    await syncTestFlight(client, {
-      ...options,
-      apply: true,
-      confirmPlanDigest: preview.planDigest,
-    });
-
-    const writes = client.operations.flatMap((operation, index) =>
-      operation === 'mutate POST /v1/betaTesters' ? [index] : [],
-    );
-    expect(writes).toHaveLength(2);
-    const betweenWrites = client.operations.slice(
-      (writes[0] as number) + 1,
-      writes[1],
-    );
-    for (const expected of [
-      'get /v1/betaTesters/tester-1?',
-      'list /v1/betaTesters/tester-1/betaGroups?',
-      'list /v1/betaTesters/tester-1/apps?',
-      'get /v1/betaGroups/external-group?fields%5BbetaGroups%5D=',
-      'get /v1/betaGroups/external-group/app',
-      'pageSummary /v1/betaGroups/external-group/betaTesters?',
-      'pageSummary /v1/betaGroups/external-group/relationships/betaTesters?',
-      'list /v1/betaGroups/external-group/builds?',
-    ]) {
-      expect(
-        betweenWrites.some((operation) => operation.startsWith(expected)),
-        expected,
-      ).toBe(true);
-    }
-    expect(
-      betweenWrites.some((operation) => {
-        if (!operation.startsWith('list /v1/betaTesters?')) return false;
-        return new URL(
-          operation.slice('list '.length),
-          'https://api.appstoreconnect.apple.com',
-        ).searchParams.has('filter[apps]');
-      }),
-    ).toBe(false);
-    expect(
-      client.mutations.filter(
-        ({ method, path }) => method === 'POST' && path === '/v1/betaTesters',
-      ),
-    ).toHaveLength(2);
-  });
-
   test('rechecks global identity and capacity in the live pre-mutation guard', async () => {
     type InventoryDrift = 'capacity' | 'cross-audience';
 
@@ -6103,9 +5548,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const options = {
-      externalTesters: [{ email: 'late-link@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'late-link@example.invalid' }],
     } as const;
     for (const drift of ['cross-audience', 'capacity'] as const) {
       const client = new PreMutationInventoryDriftClient(drift);
@@ -6178,9 +5621,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const options = {
-      externalTesters: [{ email: 'identity-guard@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'identity-guard@example.invalid' }],
     } as const;
     for (const linkExisting of [false, true]) {
       for (const drift of ['name', 'bundleId', 'sku', 'id'] as const) {
@@ -6232,9 +5673,7 @@ describe('write gates and reconciliation', () => {
         label: 'group create',
         mutationPath: '/v1/betaGroups',
         options: {
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         },
         setup: (client) => {
           client.groups.splice(
@@ -6247,9 +5686,7 @@ describe('write gates and reconciliation', () => {
         label: 'group update',
         mutationPath: '/v1/betaGroups/internal-group',
         options: {
-          externalTesters: [],
           internalTesters: [],
-          submitBetaReview: false,
         },
         setup: (client) => {
           const groupIndex = client.groups.findIndex(
@@ -6271,13 +5708,11 @@ describe('write gates and reconciliation', () => {
         label: 'review details',
         mutationPath: '/v1/betaAppReviewDetails/review-1',
         options: {
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         },
         setup: (client) => {
-          seedMatchingReviewMetadata(client);
+          seedMatchingTestMetadata(client);
           client.reviewDetails = resource('betaAppReviewDetails', 'review-1', {
             ...client.reviewDetails.attributes,
             contactFirstName: 'Stale',
@@ -6288,13 +5723,11 @@ describe('write gates and reconciliation', () => {
         label: 'app localization create',
         mutationPath: '/v1/betaAppLocalizations',
         options: {
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         },
         setup: (client) => {
-          seedMatchingReviewMetadata(client);
+          seedMatchingTestMetadata(client);
           client.localizations.splice(0);
         },
       },
@@ -6302,13 +5735,11 @@ describe('write gates and reconciliation', () => {
         label: 'app localization update',
         mutationPath: '/v1/betaAppLocalizations/localization-1',
         options: {
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         },
         setup: (client) => {
-          seedMatchingReviewMetadata(client);
+          seedMatchingTestMetadata(client);
           client.localizations.splice(
             0,
             1,
@@ -6325,13 +5756,11 @@ describe('write gates and reconciliation', () => {
         mutationPath: '/v1/betaBuildLocalizations',
         options: {
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         },
         setup: (client) => {
-          seedMatchingReviewMetadata(client);
+          seedMatchingTestMetadata(client);
           client.buildLocalizations.splice(0);
         },
       },
@@ -6340,13 +5769,11 @@ describe('write gates and reconciliation', () => {
         mutationPath: '/v1/betaBuildLocalizations/build-localization-1',
         options: {
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         },
         setup: (client) => {
-          seedMatchingReviewMetadata(client);
+          seedMatchingTestMetadata(client);
           client.buildLocalizations.splice(
             0,
             1,
@@ -6362,13 +5789,11 @@ describe('write gates and reconciliation', () => {
         mutationPath: '/v1/buildBetaDetails/build-detail-1',
         options: {
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: true,
+          testInfo: review,
         },
         setup: (client) => {
-          seedMatchingReviewMetadata(client);
+          seedMatchingTestMetadata(client);
           client.buildBetaDetail = resource(
             'buildBetaDetails',
             'build-detail-1',
@@ -6403,73 +5828,6 @@ describe('write gates and reconciliation', () => {
     }
   });
 
-  test('rechecks fixed app identity before internal and external build relationship writes', async () => {
-    class PreBuildIdentityDriftClient extends StatefulClient {
-      armed = false;
-      individualTesterReads = 0;
-      injected = false;
-
-      constructor(readonly drift: FixedAppIdentityDrift) {
-        super();
-        seedMatchingReviewMetadata(this);
-      }
-
-      override async list(path: string): Promise<readonly JsonApiResource[]> {
-        const current = await super.list(path);
-        if (!this.armed) return current;
-        if (path.startsWith('/v1/builds/build-1/individualTesters?')) {
-          this.individualTesterReads += 1;
-        }
-        if (this.individualTesterReads >= 2 && path.startsWith('/v1/apps?')) {
-          this.injected = true;
-          return [appWithIdentityDrift(this.drift)];
-        }
-        return current;
-      }
-    }
-
-    for (const scenario of [
-      { drift: 'name', target: 'internal' },
-      { drift: 'bundleId', target: 'internal' },
-      { drift: 'sku', target: 'external' },
-      { drift: 'id', target: 'external' },
-    ] as const) {
-      const client = new PreBuildIdentityDriftClient(scenario.drift);
-      if (scenario.target === 'external') {
-        client.groupBuilds.set('internal-group', [client.build]);
-      }
-      const options = {
-        build: 'build-1',
-        externalTesters: [],
-        internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: scenario.target === 'external',
-      } as const;
-      const preview = await syncTestFlight(client, {
-        ...options,
-        apply: false,
-      });
-      client.armed = true;
-      await expect(
-        syncTestFlight(client, {
-          ...options,
-          apply: true,
-          confirmPlanDigest: preview.planDigest,
-        }),
-        `${scenario.target}:${scenario.drift}`,
-      ).rejects.toThrow('no mutations were attempted');
-      expect(client.injected, scenario.target).toBe(true);
-      expect(
-        client.mutations.filter(
-          ({ method, path }) =>
-            method === 'POST' && path.endsWith('/relationships/builds'),
-        ),
-        scenario.target,
-      ).toHaveLength(0);
-      expect(client.mutations, scenario.target).toHaveLength(0);
-    }
-  });
-
   test('makes a complete bounded target-group guard the final read before every invitation-capable POST', async () => {
     const existing = new OrderedStatefulClient();
     existing.accountTesters.push(
@@ -6479,7 +5837,7 @@ describe('write gates and reconciliation', () => {
     );
     const create = new OrderedStatefulClient();
     const build = new OrderedStatefulClient();
-    seedMatchingReviewMetadata(build);
+    seedMatchingTestMetadata(build);
 
     const cases: Array<{
       client: OrderedStatefulClient;
@@ -6493,9 +5851,7 @@ describe('write gates and reconciliation', () => {
         mutation:
           'mutate POST /v1/betaGroups/internal-group/relationships/betaTesters',
         options: {
-          externalTesters: [],
           internalTesters: [{ email: 'internal@example.invalid' }],
-          submitBetaReview: false,
         },
       },
       {
@@ -6503,9 +5859,7 @@ describe('write gates and reconciliation', () => {
         label: 'tester create',
         mutation: 'mutate POST /v1/betaTesters',
         options: {
-          externalTesters: [],
           internalTesters: [{ email: 'internal@example.invalid' }],
-          submitBetaReview: false,
         },
       },
       {
@@ -6515,10 +5869,8 @@ describe('write gates and reconciliation', () => {
           'mutate POST /v1/betaGroups/internal-group/relationships/builds',
         options: {
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         },
       },
     ];
@@ -6681,13 +6033,11 @@ describe('write gates and reconciliation', () => {
     }
 
     const calibration = new OrderedStatefulClient();
-    seedMatchingReviewMetadata(calibration);
+    seedMatchingTestMetadata(calibration);
     const buildOptions = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const calibrationPreview = await syncTestFlight(calibration, {
       ...buildOptions,
@@ -6716,7 +6066,7 @@ describe('write gates and reconciliation', () => {
     );
     const roster = new LateTargetRaceClient('roster');
     const builds = new LateTargetRaceClient('builds', buildArmAtExactAppRead);
-    seedMatchingReviewMetadata(builds);
+    seedMatchingTestMetadata(builds);
     const cases: Array<{
       client: LateTargetRaceClient;
       label: LateRace;
@@ -6728,9 +6078,7 @@ describe('write gates and reconciliation', () => {
         label: 'settings',
         marker: 'get /v1/betaTesters/existing-final-guard-tester',
         options: {
-          externalTesters: [],
           internalTesters: [{ email: 'internal@example.invalid' }],
-          submitBetaReview: false,
         },
       },
       {
@@ -6738,9 +6086,7 @@ describe('write gates and reconciliation', () => {
         label: 'roster',
         marker: 'get /v1/betaGroups/internal-group/app',
         options: {
-          externalTesters: [],
           internalTesters: [{ email: 'internal@example.invalid' }],
-          submitBetaReview: false,
         },
       },
       {
@@ -6806,114 +6152,6 @@ describe('write gates and reconciliation', () => {
     }
   });
 
-  test('rechecks complete app-wide tester inventory immediately before every build and review POST', async () => {
-    type InventoryDrift = 'capacity' | 'cross-audience';
-
-    class PreRiskyPostInventoryDriftClient extends StatefulClient {
-      armed = false;
-      individualTesterReads = 0;
-      injected = false;
-      injectionPathIndex = -1;
-
-      constructor(readonly drift: InventoryDrift) {
-        super();
-        seedMatchingReviewMetadata(this);
-      }
-
-      injectInventoryDrift(): void {
-        if (this.drift === 'cross-audience') {
-          const crossAudience = resource(
-            'betaTesters',
-            'late-cross-audience-id',
-            { email: 'late-cross-audience@example.invalid' },
-          );
-          this.groupTesters.set('internal-group', [crossAudience]);
-          this.groupTesters.set('external-group', [crossAudience]);
-          this.appTesters.push(crossAudience);
-        } else {
-          const internalCapacity = syntheticTesters(
-            'late-internal-capacity',
-            100,
-          );
-          const externalCapacity = syntheticTesters(
-            'late-external-capacity',
-            10_000,
-          );
-          this.groupTesters.set('internal-group', internalCapacity);
-          this.groupTesters.set('external-group', externalCapacity);
-          this.appTesters.push(...internalCapacity, ...externalCapacity);
-        }
-        this.injected = true;
-        this.injectionPathIndex = this.listPaths.length;
-      }
-
-      override async list(path: string): Promise<readonly JsonApiResource[]> {
-        const current = await super.list(path);
-        if (
-          this.armed &&
-          path.startsWith('/v1/builds/build-1/individualTesters?')
-        ) {
-          this.individualTesterReads += 1;
-          if (this.individualTesterReads === 2) {
-            this.injectInventoryDrift();
-          }
-        }
-        return current;
-      }
-    }
-
-    for (const target of [
-      'internal-build',
-      'external-build',
-      'review',
-    ] as const) {
-      for (const drift of ['cross-audience', 'capacity'] as const) {
-        const client = new PreRiskyPostInventoryDriftClient(drift);
-        if (target !== 'internal-build') {
-          client.groupBuilds.set('internal-group', [client.build]);
-        }
-        if (target === 'review') {
-          client.groupBuilds.set('external-group', [client.build]);
-        }
-        const options = {
-          build: 'build-1',
-          externalTesters: [],
-          internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: target !== 'internal-build',
-        } as const;
-        const preview = await syncTestFlight(client, {
-          ...options,
-          apply: false,
-        });
-        client.armed = true;
-        await expect(
-          syncTestFlight(client, {
-            ...options,
-            apply: true,
-            confirmPlanDigest: preview.planDigest,
-          }),
-          `${target}:${drift}`,
-        ).rejects.toThrow('no mutations were attempted');
-        expect(client.injected, `${target}:${drift}`).toBe(true);
-        expect(
-          client.individualTesterReads,
-          `${target}:${drift}`,
-        ).toBeGreaterThanOrEqual(2);
-        expect(
-          client.mutations.filter(
-            ({ method, path }) =>
-              method === 'POST' &&
-              (path.endsWith('/relationships/builds') ||
-                path === '/v1/betaAppReviewSubmissions'),
-          ),
-          `${target}:${drift}`,
-        ).toHaveLength(0);
-        expect(client.mutations, `${target}:${drift}`).toHaveLength(0);
-      }
-    }
-  }, 30_000);
-
   test('treats provider over-application of a build relationship as partial', async () => {
     class OverApplyingBuildClient extends StatefulClient {
       readonly extraBuild = resource('builds', 'unconfirmed-extra-build');
@@ -6937,13 +6175,11 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new OverApplyingBuildClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -6972,9 +6208,7 @@ describe('write gates and reconciliation', () => {
   test('requires related group builds and relationship linkage to be one exact typed ID set', async () => {
     const requested = {
       apply: false,
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const scenarios: Array<{
       linkage: JsonApiResource[];
@@ -7029,7 +6263,7 @@ describe('write gates and reconciliation', () => {
 
       constructor(readonly drift: 'immediate' | 'later') {
         super();
-        seedMatchingReviewMetadata(this);
+        seedMatchingTestMetadata(this);
       }
 
       override async list(path: string): Promise<readonly JsonApiResource[]> {
@@ -7068,10 +6302,8 @@ describe('write gates and reconciliation', () => {
 
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     for (const drift of ['immediate', 'later'] as const) {
       const client = new GroupBuildLinkageDriftClient(drift);
@@ -7103,7 +6335,7 @@ describe('write gates and reconciliation', () => {
     }
   });
 
-  test('accepts reordered identical managed-group build inventories through immediate and final verification', async () => {
+  test('accepts a reordered managed-group build inventory through immediate and final verification', async () => {
     type BuildReadPhase = 'final' | 'immediate' | 'preview';
 
     class ReorderedGroupBuildClient extends StatefulClient {
@@ -7112,6 +6344,7 @@ describe('write gates and reconciliation', () => {
         ids: readonly string[];
         phase: BuildReadPhase;
       }> = [];
+      readonly postWriteReads = new Map<string, number>();
 
       override async list(path: string): Promise<readonly JsonApiResource[]> {
         const current = [...(await super.list(path))];
@@ -7119,21 +6352,17 @@ describe('write gates and reconciliation', () => {
         const groupId = match?.[1];
         if (groupId === undefined || current.length < 2) return current;
 
-        const reviewAccepted = this.mutations.some(
-          ({ method, path: mutationPath }) =>
-            method === 'POST' &&
-            mutationPath === '/v1/betaAppReviewSubmissions',
-        );
         const buildAccepted = this.mutations.some(
           ({ method, path: mutationPath }) =>
             method === 'POST' &&
             mutationPath === `/v1/betaGroups/${groupId}/relationships/builds`,
         );
-        const phase: BuildReadPhase = reviewAccepted
-          ? 'final'
-          : buildAccepted
-            ? 'immediate'
-            : 'preview';
+        let phase: BuildReadPhase = 'preview';
+        if (buildAccepted) {
+          const seen = (this.postWriteReads.get(groupId) ?? 0) + 1;
+          this.postWriteReads.set(groupId, seen);
+          phase = seen === 1 ? 'immediate' : 'final';
+        }
         const reordered =
           phase === 'immediate'
             ? current.reverse()
@@ -7148,21 +6377,15 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new ReorderedGroupBuildClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     client.groupBuilds.set('internal-group', [
       resource('builds', 'existing-internal-a'),
       resource('builds', 'existing-internal-b'),
     ]);
-    client.groupBuilds.set('external-group', [
-      resource('builds', 'existing-external-a'),
-      resource('builds', 'existing-external-b'),
-    ]);
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
+      testInfo: review,
     } as const;
     const first = await previewAndApply(client, options);
     expect(first.actions.at(-1)?.kind).toBe('verification');
@@ -7171,16 +6394,12 @@ describe('write gates and reconciliation', () => {
         ({ method, path }) =>
           method === 'POST' && path.endsWith('/relationships/builds'),
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
 
     for (const [groupId, expectedIds] of [
       [
         'internal-group',
         ['build-1', 'existing-internal-a', 'existing-internal-b'],
-      ],
-      [
-        'external-group',
-        ['build-1', 'existing-external-a', 'existing-external-b'],
       ],
     ] as const) {
       const immediate = client.buildReads.find(
@@ -7210,7 +6429,7 @@ describe('write gates and reconciliation', () => {
     expect(second.actions.at(-1)?.kind).toBe('verification');
   });
 
-  test('final verification rejects late extra builds in either managed group', async () => {
+  test('final verification rejects a late extra build in the managed group', async () => {
     class LateInternalBuildClient extends StatefulClient {
       injected = false;
       readonly extraBuild = resource('builds', 'late-internal-extra-build');
@@ -7239,13 +6458,11 @@ describe('write gates and reconciliation', () => {
     }
 
     const internal = new LateInternalBuildClient();
-    seedMatchingReviewMetadata(internal);
+    seedMatchingTestMetadata(internal);
     const internalOptions = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const internalPreview = await syncTestFlight(internal, {
       ...internalOptions,
@@ -7261,68 +6478,9 @@ describe('write gates and reconciliation', () => {
       'partial or indeterminate after 1 provider-accepted mutation',
     );
     expect(internal.injected).toBe(true);
-
-    class LateExternalBuildClient extends StatefulClient {
-      injected = false;
-      readonly extraBuild = resource('builds', 'late-external-extra-build');
-
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        const result = await super.mutate(method, path, body, expectedType);
-        if (method === 'POST' && path === '/v1/betaAppReviewSubmissions') {
-          this.injected = true;
-          this.groupBuilds.set('external-group', [
-            ...(this.groupBuilds.get('external-group') ?? []),
-            this.extraBuild,
-          ]);
-        }
-        return result;
-      }
-    }
-
-    const external = new LateExternalBuildClient();
-    seedMatchingReviewMetadata(external);
-    external.groupBuilds.set('internal-group', [external.build]);
-    const externalOptions = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const externalPreview = await syncTestFlight(external, {
-      ...externalOptions,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(external, {
-        ...externalOptions,
-        apply: true,
-        confirmPlanDigest: externalPreview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 2 provider-accepted mutation(s)',
-    );
-    expect(external.injected).toBe(true);
-    expect(
-      external.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path.endsWith('/relationships/builds'),
-      ),
-    ).toHaveLength(1);
-    expect(
-      external.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toHaveLength(1);
   });
 
-  test('tester-only apply exact-verifies both managed group build sets', async () => {
+  test('tester-only apply exact-verifies the managed group build set', async () => {
     class TesterOnlyBuildInventoryClient extends StatefulClient {
       readonly operations: string[] = [];
 
@@ -7344,11 +6502,8 @@ describe('write gates and reconciliation', () => {
 
     const control = new TesterOnlyBuildInventoryClient();
     control.groupBuilds.set('internal-group', [control.build]);
-    control.groupBuilds.set('external-group', [control.build]);
     const options = {
-      externalTesters: [{ email: 'tester-only-build-check@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'tester-only-build-check@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(control, {
       ...options,
@@ -7366,23 +6521,19 @@ describe('write gates and reconciliation', () => {
     );
     expect(testerWrite).toBeGreaterThanOrEqual(0);
     const afterTesterWrite = control.operations.slice(testerWrite + 1);
-    for (const groupId of ['internal-group', 'external-group']) {
-      expect(
-        afterTesterWrite.some((operation) =>
-          operation.startsWith(`list /v1/betaGroups/${groupId}/builds?`),
-        ),
-        groupId,
-      ).toBe(true);
-    }
+    expect(
+      afterTesterWrite.some((operation) =>
+        operation.startsWith('list /v1/betaGroups/internal-group/builds?'),
+      ),
+    ).toBe(true);
 
     class TesterOnlyLateBuildDriftClient extends StatefulClient {
       injected = false;
       readonly extraBuild = resource('builds', 'tester-only-late-build');
 
-      constructor(readonly target: 'external-group' | 'internal-group') {
+      constructor(readonly target: 'internal-group') {
         super();
         this.groupBuilds.set('internal-group', [this.build]);
-        this.groupBuilds.set('external-group', [this.build]);
       }
 
       override async list(path: string): Promise<readonly JsonApiResource[]> {
@@ -7393,7 +6544,7 @@ describe('write gates and reconciliation', () => {
             ({ method, path: mutationPath }) =>
               method === 'POST' && mutationPath === '/v1/betaTesters',
           ) &&
-          path.startsWith('/v1/betaGroups/external-group/betaTesters?')
+          path.startsWith('/v1/betaGroups/internal-group/betaTesters?')
         ) {
           this.injected = true;
           this.groupBuilds.set(this.target, [
@@ -7405,7 +6556,7 @@ describe('write gates and reconciliation', () => {
       }
     }
 
-    for (const target of ['internal-group', 'external-group'] as const) {
+    for (const target of ['internal-group'] as const) {
       const client = new TesterOnlyLateBuildDriftClient(target);
       const driftPreview = await syncTestFlight(client, {
         ...options,
@@ -7441,9 +6592,7 @@ describe('write gates and reconciliation', () => {
 
     const client = new FinalAppIdentityDriftClient();
     const options = {
-      externalTesters: [{ email: 'final-identity@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'final-identity@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -7503,9 +6652,7 @@ describe('write gates and reconciliation', () => {
 
     const client = new FinalGlobalInventoryDriftClient();
     const options = {
-      externalTesters: [{ email: 'approved-final-create@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'approved-final-create@example.invalid' }],
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -7532,322 +6679,6 @@ describe('write gates and reconciliation', () => {
         path.endsWith('/relationships/betaTesters'),
       ),
     ).toHaveLength(0);
-  });
-
-  test('disables and verifies automatic external notifications before external attachment', async () => {
-    const client = new StatefulClient();
-    client.buildBetaDetail = resource('buildBetaDetails', 'build-detail-1', {
-      autoNotifyEnabled: true,
-      externalBuildState: 'READY_FOR_BETA_SUBMISSION',
-      internalBuildState: 'READY_FOR_BETA_TESTING',
-    });
-    const preview = await syncTestFlight(client, {
-      apply: false,
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    });
-    expect(
-      preview.actions.some(
-        ({ kind, status }) =>
-          kind === 'build-notification-safety' && status === 'planned',
-      ),
-    ).toBe(true);
-    await syncTestFlight(client, {
-      apply: true,
-      build: 'build-1',
-      confirmPlanDigest: preview.planDigest,
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    });
-    expect(client.buildBetaDetail.attributes?.autoNotifyEnabled).toBe(false);
-    const disableIndex = client.mutations.findIndex(
-      ({ path }) => path === '/v1/buildBetaDetails/build-detail-1',
-    );
-    const externalAttachIndex = client.mutations.findIndex(
-      ({ path }) =>
-        path === '/v1/betaGroups/external-group/relationships/builds',
-    );
-    expect(disableIndex).toBeGreaterThanOrEqual(0);
-    expect(externalAttachIndex).toBeGreaterThan(disableIndex);
-  });
-
-  test('rechecks the build-beta-detail parent before the notification PATCH', async () => {
-    class NotificationParentGuardClient extends StatefulClient {
-      parentReads = 0;
-      wrongAt = Number.POSITIVE_INFINITY;
-
-      override async get(
-        path: string,
-        expectedType: string,
-      ): Promise<JsonApiResource> {
-        if (
-          path === '/v1/buildBetaDetails/build-detail-1/build' &&
-          expectedType === 'builds'
-        ) {
-          this.parentReads += 1;
-          if (this.parentReads >= this.wrongAt) {
-            return resource('builds', 'another-build');
-          }
-        }
-        return super.get(path, expectedType);
-      }
-    }
-
-    const client = new NotificationParentGuardClient();
-    client.buildBetaDetail = resource('buildBetaDetails', 'build-detail-1', {
-      autoNotifyEnabled: true,
-      externalBuildState: 'READY_FOR_BETA_SUBMISSION',
-      internalBuildState: 'READY_FOR_BETA_TESTING',
-    });
-    seedMatchingReviewMetadata(client);
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    client.wrongAt = client.parentReads * 2 + 1;
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow('no mutations were attempted');
-    expect(client.parentReads).toBeGreaterThanOrEqual(client.wrongAt);
-    expect(client.mutations).toHaveLength(0);
-  });
-
-  test('treats a wrong build-beta-detail parent after notification PATCH as partial', async () => {
-    class WrongPatchedNotificationParentClient extends StatefulClient {
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        const result = await super.mutate(method, path, body, expectedType);
-        if (
-          method === 'PATCH' &&
-          path === '/v1/buildBetaDetails/build-detail-1'
-        ) {
-          this.buildBetaDetailBuildId = 'another-build';
-        }
-        return result;
-      }
-    }
-
-    const client = new WrongPatchedNotificationParentClient();
-    client.buildBetaDetail = resource('buildBetaDetails', 'build-detail-1', {
-      autoNotifyEnabled: true,
-      externalBuildState: 'READY_FOR_BETA_SUBMISSION',
-      internalBuildState: 'READY_FOR_BETA_TESTING',
-    });
-    seedMatchingReviewMetadata(client);
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(
-      client.mutations.filter(
-        ({ method, path }) =>
-          method === 'PATCH' && path === '/v1/buildBetaDetails/build-detail-1',
-      ),
-    ).toHaveLength(1);
-  });
-
-  test('missing automatic-notification state fails before every mutation', async () => {
-    const client = new StatefulClient();
-    client.buildBetaDetail = resource('buildBetaDetails', 'build-detail-1', {
-      externalBuildState: 'READY_FOR_BETA_SUBMISSION',
-      internalBuildState: 'READY_FOR_BETA_TESTING',
-    });
-    await expect(
-      syncTestFlight(client, {
-        apply: false,
-        build: 'build-1',
-        externalTesters: [],
-        internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: true,
-      }),
-    ).rejects.toThrow('notification setting');
-    expect(client.mutations).toHaveLength(0);
-  });
-
-  test('binds review details and every app localization to the exact app during planning', async () => {
-    const wrongDetailsParent = new StatefulClient();
-    seedMatchingReviewMetadata(wrongDetailsParent);
-    wrongDetailsParent.reviewDetailsAppId = 'another-app';
-
-    const wrongLocalizationParent = new StatefulClient();
-    seedMatchingReviewMetadata(wrongLocalizationParent);
-    wrongLocalizationParent.appLocalizationAppIds.set(
-      'localization-1',
-      'another-app',
-    );
-
-    for (const [label, client] of [
-      ['review details parent', wrongDetailsParent],
-      ['app localization parent', wrongLocalizationParent],
-    ] as const) {
-      await expect(
-        syncTestFlight(client, {
-          apply: false,
-          externalTesters: [],
-          internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
-        }),
-        label,
-      ).rejects.toThrow();
-      expect(client.mutations, label).toHaveLength(0);
-    }
-
-    const correct = new StatefulClient();
-    seedMatchingReviewMetadata(correct);
-    await syncTestFlight(correct, {
-      apply: false,
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
-    });
-    expect(correct.getPaths).toContain('/v1/betaAppReviewDetails/review-1/app');
-    expect(correct.getPaths).toContain(
-      '/v1/betaAppLocalizations/localization-1/app',
-    );
-  });
-
-  test('treats a wrong review-details parent after PATCH as partial', async () => {
-    class WrongUpdatedReviewParentClient extends StatefulClient {
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        const result = await super.mutate(method, path, body, expectedType);
-        if (
-          method === 'PATCH' &&
-          path === '/v1/betaAppReviewDetails/review-1'
-        ) {
-          this.reviewDetailsAppId = 'another-app';
-        }
-        return result;
-      }
-    }
-
-    const client = new WrongUpdatedReviewParentClient();
-    client.localizations.push(
-      resource('betaAppLocalizations', 'localization-1', {
-        description: review.betaDescription,
-        feedbackEmail: review.feedbackEmail,
-        locale: review.locale,
-      }),
-    );
-    client.appLocalizationAppIds.set('localization-1', client.app.id);
-    const options = {
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(
-      client.mutations.filter(
-        ({ method, path }) =>
-          method === 'PATCH' && path === '/v1/betaAppReviewDetails/review-1',
-      ),
-    ).toHaveLength(1);
-  });
-
-  test('final verification rejects review-details parent drift after an accepted PATCH', async () => {
-    class FinalReviewDetailsParentDriftClient extends StatefulClient {
-      parentReadsAfterMutation = 0;
-
-      override async get(
-        path: string,
-        expectedType: string,
-      ): Promise<JsonApiResource> {
-        if (
-          this.mutations.length > 0 &&
-          path === '/v1/betaAppReviewDetails/review-1/app' &&
-          expectedType === 'apps'
-        ) {
-          this.parentReadsAfterMutation += 1;
-          if (this.parentReadsAfterMutation >= 2) {
-            return resource('apps', 'another-app');
-          }
-        }
-        return super.get(path, expectedType);
-      }
-    }
-
-    const client = new FinalReviewDetailsParentDriftClient();
-    seedMatchingReviewMetadata(client);
-    client.reviewDetails = resource('betaAppReviewDetails', 'review-1', {
-      ...client.reviewDetails.attributes,
-      notes: 'Outdated synthetic notes.',
-    });
-    const options = {
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(client.parentReadsAfterMutation).toBeGreaterThanOrEqual(2);
   });
 
   test('verifies created and updated app-localization parents before success', async () => {
@@ -7889,12 +6720,12 @@ describe('write gates and reconciliation', () => {
     }
 
     const createClient = new WrongCreatedLocalizationParentClient();
-    seedMatchingReviewMetadata(createClient);
+    seedMatchingTestMetadata(createClient);
     createClient.localizations.splice(0);
     createClient.appLocalizationAppIds.delete('localization-1');
 
     const updateClient = new WrongUpdatedLocalizationParentClient();
-    seedMatchingReviewMetadata(updateClient);
+    seedMatchingTestMetadata(updateClient);
     updateClient.localizations.splice(
       0,
       1,
@@ -7910,10 +6741,8 @@ describe('write gates and reconciliation', () => {
       ['update', updateClient, '/v1/betaAppLocalizations/localization-1'],
     ] as const) {
       const options = {
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       } as const;
       const preview = await syncTestFlight(client, {
         ...options,
@@ -7954,16 +6783,19 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new FinalAppLocalizationParentDriftClient();
-    seedMatchingReviewMetadata(client);
-    client.reviewDetails = resource('betaAppReviewDetails', 'review-1', {
-      ...client.reviewDetails.attributes,
-      notes: 'Outdated synthetic notes.',
-    });
+    seedMatchingTestMetadata(client);
+    client.localizations.splice(
+      0,
+      client.localizations.length,
+      resource('betaAppLocalizations', 'localization-1', {
+        description: 'Outdated synthetic beta description.',
+        feedbackEmail: review.feedbackEmail,
+        locale: review.locale,
+      }),
+    );
     const options = {
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -7979,93 +6811,9 @@ describe('write gates and reconciliation', () => {
       'partial or indeterminate after 1 provider-accepted mutation',
     );
     expect(client.mutations).toHaveLength(1);
-    expect(client.mutations[0]?.path).toBe('/v1/betaAppReviewDetails/review-1');
-  });
-
-  test('explicitly clears omitted optional review fields, verifies the clear, and becomes idempotent', async () => {
-    const seedStaleOptionalFields = (client: StatefulClient): void => {
-      seedMatchingReviewMetadata(client, reviewWithoutOptionalFields);
-      client.reviewDetails = resource('betaAppReviewDetails', 'review-1', {
-        ...client.reviewDetails.attributes,
-        demoAccountName: 'stale-demo-name',
-        demoAccountPassword: 'stale-demo-password',
-        notes: 'Stale unapproved notes.',
-      });
-    };
-    const options = {
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: reviewWithoutOptionalFields,
-      submitBetaReview: false,
-    } as const;
-
-    const client = new StatefulClient();
-    seedStaleOptionalFields(client);
-    await previewAndApply(client, options);
-    const detailPatches = client.mutations.filter(
-      ({ method, path }) =>
-        method === 'PATCH' && path === '/v1/betaAppReviewDetails/review-1',
+    expect(client.mutations[0]?.path).toBe(
+      '/v1/betaAppLocalizations/localization-1',
     );
-    expect(detailPatches).toHaveLength(1);
-    expect(dataAttributes(detailPatches[0]?.body)).toMatchObject({
-      demoAccountName: null,
-      demoAccountPassword: null,
-      notes: null,
-    });
-    expect(client.reviewDetails.attributes).toMatchObject({
-      demoAccountName: null,
-      demoAccountPassword: null,
-      notes: null,
-    });
-
-    const mutationCount = client.mutations.length;
-    await previewAndApply(client, options);
-    expect(client.mutations).toHaveLength(mutationCount);
-
-    class IgnoreOptionalClearsClient extends StatefulClient {
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        const result = await super.mutate(method, path, body, expectedType);
-        if (
-          method === 'PATCH' &&
-          path === '/v1/betaAppReviewDetails/review-1'
-        ) {
-          this.reviewDetails = resource('betaAppReviewDetails', 'review-1', {
-            ...this.reviewDetails.attributes,
-            demoAccountName: 'stale-demo-name',
-            demoAccountPassword: 'stale-demo-password',
-            notes: 'Stale unapproved notes.',
-          });
-        }
-        return result;
-      }
-    }
-
-    const ignored = new IgnoreOptionalClearsClient();
-    seedStaleOptionalFields(ignored);
-    const preview = await syncTestFlight(ignored, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(ignored, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(
-      ignored.mutations.filter(
-        ({ method, path }) =>
-          method === 'PATCH' && path === '/v1/betaAppReviewDetails/review-1',
-      ),
-    ).toHaveLength(1);
   });
 
   test('rejects wrong-type beta localizations during planning and verification', async () => {
@@ -8081,10 +6829,8 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(planningClient, {
         apply: false,
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       }),
     ).rejects.toThrow();
     expect(planningClient.mutations).toHaveLength(0);
@@ -8118,128 +6864,17 @@ describe('write gates and reconciliation', () => {
 
     const verificationClient = new WrongVerificationLocalizationClient();
     verificationClient.localizations.push(
-      resource(
-        'betaAppLocalizations',
-        'existing-localization',
-        localizationAttributes,
-      ),
+      resource('betaAppLocalizations', 'existing-localization', {
+        ...localizationAttributes,
+        description: 'Outdated synthetic beta description.',
+      }),
     );
     await expect(
       previewAndApply(verificationClient, {
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       }),
     ).rejects.toThrow();
-  });
-
-  test('blocks nonblank non-target localization content drift before build invitation or review', async () => {
-    type ContentDrift =
-      | 'french-app-description'
-      | 'french-app-feedback'
-      | 'french-build-whats-new';
-
-    class NonTargetContentDriftClient extends StatefulClient {
-      armed = false;
-      appLocalizationReads = 0;
-      buildLocalizationReads = 0;
-
-      constructor(readonly drift: ContentDrift) {
-        super();
-        seedMatchingReviewMetadata(this);
-        seedMatchingFrenchLocalizations(this);
-      }
-
-      arm(): void {
-        this.armed = true;
-      }
-
-      override async list(path: string): Promise<readonly JsonApiResource[]> {
-        const current = await super.list(path);
-        if (!this.armed) return current;
-        if (path.startsWith('/v1/apps/app-1/betaAppLocalizations?')) {
-          this.appLocalizationReads += 1;
-          if (
-            this.appLocalizationReads >= 2 &&
-            (this.drift === 'french-app-description' ||
-              this.drift === 'french-app-feedback')
-          ) {
-            return current.map((localization) =>
-              localization.id === 'localization-fr-FR'
-                ? resource('betaAppLocalizations', localization.id, {
-                    ...localization.attributes,
-                    ...(this.drift === 'french-app-description'
-                      ? {
-                          description:
-                            'Description synthétique modifiée mais non vide.',
-                        }
-                      : {
-                          feedbackEmail: 'changed-fr-feedback@example.invalid',
-                        }),
-                  })
-                : localization,
-            );
-          }
-        }
-        if (path.startsWith('/v1/builds/build-1/betaBuildLocalizations?')) {
-          this.buildLocalizationReads += 1;
-          if (
-            this.buildLocalizationReads >= 3 &&
-            this.drift === 'french-build-whats-new'
-          ) {
-            return current.map((localization) =>
-              localization.id === 'build-localization-fr-FR'
-                ? resource('betaBuildLocalizations', localization.id, {
-                    ...localization.attributes,
-                    whatsNew:
-                      'Instructions synthétiques modifiées mais non vides.',
-                  })
-                : localization,
-            );
-          }
-        }
-        return current;
-      }
-    }
-
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    for (const drift of [
-      'french-app-description',
-      'french-app-feedback',
-      'french-build-whats-new',
-    ] as const) {
-      const client = new NonTargetContentDriftClient(drift);
-      const preview = await syncTestFlight(client, {
-        ...options,
-        apply: false,
-      });
-      client.arm();
-      await expect(
-        syncTestFlight(client, {
-          ...options,
-          apply: true,
-          confirmPlanDigest: preview.planDigest,
-        }),
-        drift,
-      ).rejects.toThrow();
-      expect(client.mutations, drift).toHaveLength(0);
-      expect(
-        client.mutations.filter(
-          ({ method, path }) =>
-            method === 'POST' &&
-            (path.endsWith('/relationships/builds') ||
-              path === '/v1/betaAppReviewSubmissions'),
-        ),
-        drift,
-      ).toHaveLength(0);
-    }
   });
 
   test('binds complete localization IDs, locales, membership, and build relationships before invitations', async () => {
@@ -8264,7 +6899,7 @@ describe('write gates and reconciliation', () => {
 
       constructor(readonly drift: SetDrift) {
         super();
-        seedMatchingReviewMetadata(this);
+        seedMatchingTestMetadata(this);
         seedMatchingFrenchLocalizations(this);
         this.buildLocalizationBuildIds.set(
           'changed-build-localization-fr-FR',
@@ -8418,10 +7053,8 @@ describe('write gates and reconciliation', () => {
 
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
+      testInfo: review,
     } as const;
     for (const drift of [
       'app-add',
@@ -8465,15 +7098,13 @@ describe('write gates and reconciliation', () => {
 
   test('treats reordered unchanged localization multisets as idempotent', async () => {
     const client = new StatefulClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     seedMatchingFrenchLocalizations(client);
     client.groupBuilds.set('internal-group', [client.build]);
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -8500,28 +7131,22 @@ describe('write gates and reconciliation', () => {
     const base = await syncTestFlight(digestClient, {
       apply: false,
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     });
     const changed = await syncTestFlight(digestClient, {
       apply: false,
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: { ...review, whatsNew: 'Changed synthetic release notes.' },
-      submitBetaReview: false,
+      testInfo: { ...review, whatsNew: 'Changed synthetic release notes.' },
     });
     expect(changed.planDigest).not.toBe(base.planDigest);
 
     const createClient = new StatefulClient();
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     await previewAndApply(createClient, options);
     const creates = createClient.mutations.filter(
@@ -8539,7 +7164,7 @@ describe('write gates and reconciliation', () => {
     expect(createClient.mutations).toHaveLength(createMutationCount);
 
     const patchClient = new StatefulClient();
-    seedMatchingReviewMetadata(patchClient);
+    seedMatchingTestMetadata(patchClient);
     const existing = patchClient.buildLocalizations[0];
     if (existing === undefined) throw new Error('Missing seeded localization.');
     patchClient.buildLocalizations.splice(
@@ -8586,7 +7211,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new PrePatchBuildLocalizationParentDriftClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     client.buildLocalizations.splice(
       0,
       client.buildLocalizations.length,
@@ -8597,10 +7222,8 @@ describe('write gates and reconciliation', () => {
     );
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -8669,7 +7292,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const client = new PostPatchBuildLocalizationParentDriftClient();
-    seedMatchingReviewMetadata(client);
+    seedMatchingTestMetadata(client);
     client.buildLocalizations.splice(
       0,
       client.buildLocalizations.length,
@@ -8680,10 +7303,8 @@ describe('write gates and reconciliation', () => {
     );
     const options = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -8732,7 +7353,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const wrongBuild = new StatefulClient();
-    seedMatchingReviewMetadata(wrongBuild);
+    seedMatchingTestMetadata(wrongBuild);
     wrongBuild.buildLocalizationBuildIds.set(
       'build-localization-1',
       'another-build',
@@ -8747,10 +7368,8 @@ describe('write gates and reconciliation', () => {
         syncTestFlight(client, {
           apply: false,
           build: 'build-1',
-          externalTesters: [],
           internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: false,
+          testInfo: review,
         }),
         label,
       ).rejects.toThrow();
@@ -8777,14 +7396,12 @@ describe('write gates and reconciliation', () => {
       }
     }
     const driftClient = new FinalLocalizationDriftClient();
-    seedMatchingReviewMetadata(driftClient);
+    seedMatchingTestMetadata(driftClient);
     driftClient.groupBuilds.set('internal-group', [driftClient.build]);
     const driftOptions = {
       build: 'build-1',
-      externalTesters: [],
       internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: false,
+      testInfo: review,
     } as const;
     const preview = await syncTestFlight(driftClient, {
       ...driftOptions,
@@ -8846,13 +7463,11 @@ describe('write gates and reconciliation', () => {
       new PreDistributionLocalizationDriftClient(),
       new PreDistributionStateDriftClient(),
     ]) {
-      seedMatchingReviewMetadata(client);
+      seedMatchingTestMetadata(client);
       const options = {
         build: 'build-1',
-        externalTesters: [],
         internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: false,
+        testInfo: review,
       } as const;
       const preview = await syncTestFlight(client, {
         ...options,
@@ -8881,9 +7496,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(client, {
         apply: false,
-        externalTesters: [],
         internalTesters: [{ email: 'support@example.invalid' }],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow('not eligible');
     expect(client.mutations).toHaveLength(0);
@@ -8915,9 +7528,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     const options = {
-      externalTesters: [],
       internalTesters: [{ email: 'restricted-internal@example.invalid' }],
-      submitBetaReview: false,
     } as const;
     await previewAndApply(client, options);
     const userCollectionReads = client.listPaths.filter((path) =>
@@ -8972,9 +7583,7 @@ describe('write gates and reconciliation', () => {
     await expect(
       syncTestFlight(noAccess, {
         apply: false,
-        externalTesters: [],
         internalTesters: [{ email: 'no-access@example.invalid' }],
-        submitBetaReview: false,
       }),
     ).rejects.toThrow('lacks access');
     expect(noAccess.mutations).toHaveLength(0);
@@ -8988,9 +7597,7 @@ describe('write gates and reconciliation', () => {
   test('requires restricted-user visible apps and relationship linkage to match exactly', async () => {
     const requested = {
       apply: false,
-      externalTesters: [],
       internalTesters: [{ email: 'restricted@example.invalid' }],
-      submitBetaReview: false,
     } as const;
     for (const [label, linkage] of [
       ['omitted', []],
@@ -9095,9 +7702,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const requested = {
-      externalTesters: [],
       internalTesters: [{ email: 'internal-drift@example.invalid' }],
-      submitBetaReview: false,
     } as const;
     for (const linkExisting of [false, true]) {
       for (const drift of ['role', 'access'] as const) {
@@ -9194,9 +7799,7 @@ describe('write gates and reconciliation', () => {
       try {
         await syncTestFlight(client, {
           apply: false,
-          externalTesters: [],
           internalTesters: [{ email: 'internal@example.invalid' }],
-          submitBetaReview: false,
         });
       } catch (error) {
         message = error instanceof Error ? error.message : String(error);
@@ -9277,11 +7880,9 @@ describe('write gates and reconciliation', () => {
       try {
         await syncTestFlight(client, {
           apply: false,
-          externalTesters: [
+          internalTesters: [
             { email: 'desired-private-tester@example.invalid' },
           ],
-          internalTesters: [],
-          submitBetaReview: false,
         });
       } catch (error) {
         message = error instanceof Error ? error.message : String(error);
@@ -9304,747 +7905,20 @@ describe('write gates and reconciliation', () => {
     }
   });
 
-  test('binds every filtered Beta App Review submission to the exact build relationship', async () => {
-    const wrongBuild = new StatefulClient();
-    wrongBuild.submissions.push(
-      resource('betaAppReviewSubmissions', 'wrong-build-submission', {
-        betaReviewState: 'WAITING_FOR_REVIEW',
-      }),
-    );
-    wrongBuild.submissionBuildIds.set(
-      'wrong-build-submission',
-      'unrelated-build',
-    );
-    await expect(
-      syncTestFlight(wrongBuild, {
-        apply: false,
-        build: 'build-1',
-        externalTesters: [],
-        internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: true,
-      }),
-    ).rejects.toThrow();
-    expect(wrongBuild.mutations).toHaveLength(0);
-    expect(wrongBuild.getPaths).toContain(
-      '/v1/betaAppReviewSubmissions/wrong-build-submission/build',
-    );
-
-    for (const invalid of [
-      {
-        expectedRelationshipPaths: [],
-        label: 'wrong type',
-        submissions: [
-          resource('builds', 'wrong-submission-type', {
-            betaReviewState: 'WAITING_FOR_REVIEW',
-          }),
-        ],
-      },
-      {
-        expectedRelationshipPaths: [],
-        label: 'duplicate ID',
-        submissions: [
-          resource('betaAppReviewSubmissions', 'duplicate-submission', {
-            betaReviewState: 'WAITING_FOR_REVIEW',
-          }),
-          resource('betaAppReviewSubmissions', 'duplicate-submission', {
-            betaReviewState: 'WAITING_FOR_REVIEW',
-          }),
-        ],
-      },
-      {
-        expectedRelationshipPaths: [],
-        label: 'multiple exact-build submissions',
-        submissions: [
-          resource('betaAppReviewSubmissions', 'first-over-return', {
-            betaReviewState: 'WAITING_FOR_REVIEW',
-          }),
-          resource('betaAppReviewSubmissions', 'second-over-return', {
-            betaReviewState: 'IN_REVIEW',
-          }),
-        ],
-      },
-    ] as const) {
-      const client = new StatefulClient();
-      client.submissions.push(...invalid.submissions);
-      for (const submission of invalid.submissions) {
-        if (submission.type === 'betaAppReviewSubmissions') {
-          client.submissionBuildIds.set(submission.id, client.build.id);
-        }
-      }
-      await expect(
-        syncTestFlight(client, {
-          apply: false,
-          build: 'build-1',
-          externalTesters: [],
-          internalTesters: [],
-          reviewInfo: review,
-          submitBetaReview: true,
-        }),
-        invalid.label,
-      ).rejects.toThrow();
-      expect(client.mutations, invalid.label).toHaveLength(0);
-      expect(
-        client.getPaths
-          .filter((path) => path.startsWith('/v1/betaAppReviewSubmissions/'))
-          .sort(),
-        invalid.label,
-      ).toEqual([...invalid.expectedRelationshipPaths].sort());
-    }
-
-    const exactBuild = new StatefulClient();
-    exactBuild.submissions.push(
-      resource('betaAppReviewSubmissions', 'exact-build-submission', {
-        betaReviewState: 'APPROVED',
-      }),
-    );
-    exactBuild.submissionBuildIds.set('exact-build-submission', 'build-1');
-    const result = await syncTestFlight(exactBuild, {
-      apply: false,
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    });
-    expect(exactBuild.getPaths).toContain(
-      '/v1/betaAppReviewSubmissions/exact-build-submission/build',
-    );
-    expect(
-      result.actions.some(
-        ({ detail, kind, status }) =>
-          kind === 'beta-review-submission' &&
-          status === 'unchanged' &&
-          detail.includes('APPROVED'),
-      ),
-    ).toBe(true);
-    expect(exactBuild.mutations).toHaveLength(0);
-  });
-
-  test('a mismatched created Beta Review submission is partial, never success', async () => {
-    class MismatchedCreatedSubmissionClient extends StatefulClient {
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        const created = await super.mutate(method, path, body, expectedType);
-        if (method !== 'POST' || path !== '/v1/betaAppReviewSubmissions') {
-          return created;
-        }
-        this.submissionBuildIds.set('different-created-id', this.build.id);
-        return resource('betaAppReviewSubmissions', 'different-created-id', {
-          betaReviewState: 'WAITING_FOR_REVIEW',
-        });
-      }
-    }
-
-    const client = new MismatchedCreatedSubmissionClient();
-    seedMatchingReviewMetadata(client);
-    client.groupBuilds.set('internal-group', [client.build]);
-    client.groupBuilds.set('external-group', [client.build]);
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(
-      client.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toHaveLength(1);
-    expect(client.getPaths).toContain(
-      '/v1/betaAppReviewSubmissions/different-created-id/build',
-    );
-    expect(client.getPaths).toContain(
-      '/v1/betaAppReviewSubmissions/submission-1/build',
-    );
-  });
-
-  test('a wrong live build relationship after Beta Review POST is partial', async () => {
-    class WrongCreatedSubmissionRelationshipClient extends StatefulClient {
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        const created = await super.mutate(method, path, body, expectedType);
-        if (method === 'POST' && path === '/v1/betaAppReviewSubmissions') {
-          this.submissionBuildIds.set('submission-1', 'unrelated-build');
-        }
-        return created;
-      }
-    }
-
-    const client = new WrongCreatedSubmissionRelationshipClient();
-    seedMatchingReviewMetadata(client);
-    client.groupBuilds.set('internal-group', [client.build]);
-    client.groupBuilds.set('external-group', [client.build]);
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(
-      client.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toHaveLength(1);
-    expect(client.getPaths).toContain(
-      '/v1/betaAppReviewSubmissions/submission-1/build',
-    );
-  });
-
-  test('rejected Beta App Review is never reported as unchanged success', async () => {
-    const client = new StatefulClient();
-    client.submissions.push(
-      resource('betaAppReviewSubmissions', 'rejected-submission', {
-        betaReviewState: 'REJECTED',
-      }),
-    );
-    client.submissionBuildIds.set('rejected-submission', 'build-1');
-    await expect(
-      syncTestFlight(client, {
-        apply: false,
-        build: 'build-1',
-        externalTesters: [],
-        internalTesters: [],
-        reviewInfo: review,
-        submitBetaReview: true,
-      }),
-    ).rejects.toThrow('rejected by Beta App Review');
-    expect(client.mutations).toHaveLength(0);
-  });
-
-  test('rechecks the build-beta-detail parent in the final review guard', async () => {
-    class ReviewBuildDetailParentDriftClient extends StatefulClient {
-      appReads = 0;
-      reviewGuardStarted = false;
-
-      override async list(path: string): Promise<readonly JsonApiResource[]> {
-        const current = await super.list(path);
-        if (path.startsWith('/v1/apps?')) {
-          this.appReads += 1;
-          if (this.appReads >= 3) this.reviewGuardStarted = true;
-        }
-        return current;
-      }
-
-      override async get(
-        path: string,
-        expectedType: string,
-      ): Promise<JsonApiResource> {
-        if (
-          this.reviewGuardStarted &&
-          path === '/v1/buildBetaDetails/build-detail-1/build' &&
-          expectedType === 'builds'
-        ) {
-          return resource('builds', 'another-build');
-        }
-        return super.get(path, expectedType);
-      }
-    }
-
-    const client = new ReviewBuildDetailParentDriftClient();
-    seedMatchingReviewMetadata(client);
-    client.groupBuilds.set('internal-group', [client.build]);
-    client.groupBuilds.set('external-group', [client.build]);
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow('no mutations were attempted');
-    expect(client.reviewGuardStarted).toBe(true);
-    expect(client.mutations).toHaveLength(0);
-  });
-
-  test('final verification rejects build-beta-detail parent drift after review POST', async () => {
-    class FinalBuildDetailParentDriftClient extends StatefulClient {
-      override async get(
-        path: string,
-        expectedType: string,
-      ): Promise<JsonApiResource> {
-        if (
-          this.mutations.some(
-            ({ method, path: mutationPath }) =>
-              method === 'POST' &&
-              mutationPath === '/v1/betaAppReviewSubmissions',
-          ) &&
-          path === '/v1/buildBetaDetails/build-detail-1/build' &&
-          expectedType === 'builds'
-        ) {
-          return resource('builds', 'another-build');
-        }
-        return super.get(path, expectedType);
-      }
-    }
-
-    const client = new FinalBuildDetailParentDriftClient();
-    seedMatchingReviewMetadata(client);
-    client.groupBuilds.set('internal-group', [client.build]);
-    client.groupBuilds.set('external-group', [client.build]);
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    const preview = await syncTestFlight(client, {
-      ...options,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      }),
-    ).rejects.toThrow(
-      'partial or indeterminate after 1 provider-accepted mutation',
-    );
-    expect(
-      client.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toHaveLength(1);
-  });
-
-  test('rechecks every review consequence immediately before the Beta Review POST', async () => {
-    type ReviewDrift =
-      | 'app'
-      | 'app-localization'
-      | 'auto-notify'
-      | 'build-app'
-      | 'build-encryption'
-      | 'build-localization'
-      | 'build-localization-relationship'
-      | 'build-platform'
-      | 'build-set'
-      | 'build-state'
-      | 'details'
-      | 'group-settings'
-      | 'internal-transition'
-      | 'none'
-      | 'omitted-details'
-      | 'other-localization-blank'
-      | 'roster'
-      | 'submission';
-
-    class ReviewGuardClient extends StatefulClient {
-      appReads = 0;
-      guardStarted = false;
-      readonly operations: string[] = [];
-
-      constructor(
-        readonly drift: ReviewDrift,
-        info: BetaReviewInfo = review,
-      ) {
-        super();
-        seedMatchingReviewMetadata(this, info);
-        if (drift === 'other-localization-blank') {
-          this.localizations.push(
-            resource('betaAppLocalizations', 'other-localization', {
-              description: 'Approved French beta description.',
-              feedbackEmail: review.feedbackEmail,
-              locale: 'fr-FR',
-            }),
-          );
-        }
-        this.groupBuilds.set('internal-group', [this.build]);
-        this.groupBuilds.set('external-group', [this.build]);
-      }
-
-      override async first(path: string): Promise<JsonApiResource | null> {
-        this.operations.push(`first ${path}`);
-        return super.first(path);
-      }
-
-      override async list(path: string): Promise<readonly JsonApiResource[]> {
-        this.operations.push(`list ${path}`);
-        const current = await super.list(path);
-        if (path.startsWith('/v1/apps?')) {
-          this.appReads += 1;
-          if (this.appReads >= 3) this.guardStarted = true;
-        }
-        if (!this.guardStarted) return current;
-        if (this.drift === 'app' && path.startsWith('/v1/apps?')) {
-          return [
-            resource('apps', 'another-app', {
-              bundleId: 'net.psd401.other',
-              name: 'Another App',
-              sku: 'ANOTHER-APP',
-            }),
-          ];
-        }
-        if (
-          this.drift === 'build-encryption' &&
-          path.startsWith('/v1/builds?') &&
-          (path.includes('filter%5Bid%5D=') || path.includes('filter[id]='))
-        ) {
-          return [
-            resource('builds', this.build.id, {
-              ...this.buildAttributes,
-              usesNonExemptEncryption: true,
-            }),
-          ];
-        }
-        if (
-          this.drift === 'group-settings' &&
-          path.startsWith('/v1/apps/app-1/betaGroups?')
-        ) {
-          return current.map((group) =>
-            group.id === 'external-group'
-              ? resource('betaGroups', group.id, {
-                  ...group.attributes,
-                  publicLinkEnabled: true,
-                })
-              : group,
-          );
-        }
-        if (
-          this.drift === 'roster' &&
-          path.startsWith('/v1/betaGroups/external-group/betaTesters?')
-        ) {
-          return [
-            resource('betaTesters', 'late-external-tester', {
-              email: 'late-external-tester@example.invalid',
-            }),
-          ];
-        }
-        if (
-          this.drift === 'build-set' &&
-          path.startsWith('/v1/betaGroups/external-group/builds?')
-        ) {
-          return [];
-        }
-        if (
-          this.drift === 'app-localization' &&
-          path.startsWith('/v1/apps/app-1/betaAppLocalizations?')
-        ) {
-          return [
-            resource('betaAppLocalizations', 'localization-1', {
-              description: 'Late unreviewed app-localization drift.',
-              feedbackEmail: review.feedbackEmail,
-              locale: review.locale,
-            }),
-          ];
-        }
-        if (
-          this.drift === 'other-localization-blank' &&
-          path.startsWith('/v1/apps/app-1/betaAppLocalizations?')
-        ) {
-          return current.map((localization) =>
-            localization.id === 'other-localization'
-              ? resource('betaAppLocalizations', localization.id, {
-                  ...localization.attributes,
-                  description: '   ',
-                })
-              : localization,
-          );
-        }
-        if (
-          this.drift === 'build-localization' &&
-          path.startsWith('/v1/builds/build-1/betaBuildLocalizations?')
-        ) {
-          return [
-            resource('betaBuildLocalizations', 'build-localization-1', {
-              locale: review.locale,
-              whatsNew: 'Late unreviewed build-localization drift.',
-            }),
-          ];
-        }
-        if (
-          this.drift === 'submission' &&
-          path.startsWith('/v1/betaAppReviewSubmissions?')
-        ) {
-          return [
-            resource('betaAppReviewSubmissions', 'late-submission', {
-              betaReviewState: 'WAITING_FOR_REVIEW',
-            }),
-          ];
-        }
-        return current;
-      }
-
-      override async get(
-        path: string,
-        expectedType: string,
-      ): Promise<JsonApiResource> {
-        this.operations.push(`get ${path}`);
-        const current = await super.get(path, expectedType);
-        if (!this.guardStarted) return current;
-        if (this.drift === 'build-app' && path === '/v1/builds/build-1/app') {
-          return resource('apps', 'another-app');
-        }
-        if (
-          this.drift === 'build-platform' &&
-          path.startsWith('/v1/builds/build-1/preReleaseVersion')
-        ) {
-          return resource('preReleaseVersions', 'pre-release-1', {
-            platform: 'MAC_OS',
-            version: '1.0',
-          });
-        }
-        if (
-          (this.drift === 'auto-notify' ||
-            this.drift === 'build-state' ||
-            this.drift === 'internal-transition') &&
-          path.startsWith('/v1/builds/build-1/buildBetaDetail?')
-        ) {
-          return resource('buildBetaDetails', 'build-detail-1', {
-            ...this.buildBetaDetail.attributes,
-            ...(this.drift === 'auto-notify'
-              ? { autoNotifyEnabled: true }
-              : {
-                  internalBuildState:
-                    this.drift === 'internal-transition'
-                      ? 'IN_BETA_TESTING'
-                      : 'PROCESSING',
-                }),
-          });
-        }
-        if (
-          (this.drift === 'details' || this.drift === 'omitted-details') &&
-          path === '/v1/apps/app-1/betaAppReviewDetail'
-        ) {
-          return resource('betaAppReviewDetails', 'review-1', {
-            ...this.reviewDetails.attributes,
-            ...(this.drift === 'omitted-details'
-              ? {
-                  demoAccountName: 'late-stale-demo',
-                  demoAccountPassword: 'late-stale-password',
-                  notes: 'Late stale notes.',
-                }
-              : { notes: 'Late unreviewed detail drift.' }),
-          });
-        }
-        if (
-          this.drift === 'build-localization-relationship' &&
-          path === '/v1/betaBuildLocalizations/build-localization-1/build'
-        ) {
-          return resource('builds', 'another-build');
-        }
-        return current;
-      }
-
-      override async mutate(
-        method: 'PATCH' | 'POST',
-        path: string,
-        body: unknown,
-        expectedType?: string,
-      ): Promise<JsonApiResource | null> {
-        this.operations.push(`mutate ${method} ${path}`);
-        return super.mutate(method, path, body, expectedType);
-      }
-    }
-
-    const options = {
-      build: 'build-1',
-      externalTesters: [],
-      internalTesters: [],
-      reviewInfo: review,
-      submitBetaReview: true,
-    } as const;
-    for (const drift of [
-      'app',
-      'build-app',
-      'build-encryption',
-      'build-platform',
-      'build-state',
-      'auto-notify',
-      'group-settings',
-      'roster',
-      'build-set',
-      'details',
-      'app-localization',
-      'other-localization-blank',
-      'build-localization',
-      'build-localization-relationship',
-      'submission',
-    ] as const) {
-      const client = new ReviewGuardClient(drift);
-      const preview = await syncTestFlight(client, {
-        ...options,
-        apply: false,
-      });
-      await expect(
-        syncTestFlight(client, {
-          ...options,
-          apply: true,
-          confirmPlanDigest: preview.planDigest,
-        }),
-        drift,
-      ).rejects.toThrow();
-      expect(
-        client.mutations.filter(
-          ({ method, path }) =>
-            method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-        ),
-        drift,
-      ).toHaveLength(0);
-    }
-
-    const control = new ReviewGuardClient('none');
-    const preview = await syncTestFlight(control, {
-      ...options,
-      apply: false,
-    });
-    control.operations.splice(0);
-    await syncTestFlight(control, {
-      ...options,
-      apply: true,
-      confirmPlanDigest: preview.planDigest,
-    });
-    const reviewPost = control.operations.indexOf(
-      'mutate POST /v1/betaAppReviewSubmissions',
-    );
-    expect(reviewPost).toBeGreaterThan(0);
-    expect(control.operations[reviewPost - 1]).toStartWith(
-      'list /v1/betaAppReviewSubmissions?',
-    );
-    let guardStart = -1;
-    for (let index = 0; index < reviewPost; index += 1) {
-      if (control.operations[index]?.startsWith('list /v1/apps?')) {
-        guardStart = index;
-      }
-    }
-    expect(guardStart).toBeGreaterThanOrEqual(0);
-    const guardOperations = control.operations.slice(guardStart, reviewPost);
-    for (const expected of [
-      'list /v1/apps?',
-      'list /v1/builds?',
-      'get /v1/builds/build-1/app',
-      'get /v1/builds/build-1/preReleaseVersion',
-      'get /v1/builds/build-1/buildBetaDetail?',
-      'list /v1/apps/app-1/betaGroups?',
-      'list /v1/betaGroups/external-group/betaTesters?',
-      'list /v1/betaGroups/external-group/builds?',
-      'get /v1/apps/app-1/betaAppReviewDetail',
-      'list /v1/apps/app-1/betaAppLocalizations?',
-      'list /v1/builds/build-1/betaBuildLocalizations?',
-      'get /v1/betaBuildLocalizations/build-localization-1/build',
-      'list /v1/betaAppReviewSubmissions?',
-    ]) {
-      expect(
-        guardOperations.some((operation) => operation.startsWith(expected)),
-        expected,
-      ).toBe(true);
-    }
-    expect(
-      guardOperations.some((operation) => operation.startsWith('mutate ')),
-    ).toBe(false);
-
-    const expectedTransition = new ReviewGuardClient('internal-transition');
-    const transitionPreview = await syncTestFlight(expectedTransition, {
-      ...options,
-      apply: false,
-    });
-    await syncTestFlight(expectedTransition, {
-      ...options,
-      apply: true,
-      confirmPlanDigest: transitionPreview.planDigest,
-    });
-    expect(
-      expectedTransition.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toHaveLength(1);
-
-    const omittedOptions = {
-      ...options,
-      reviewInfo: reviewWithoutOptionalFields,
-    } as const;
-    const omittedDrift = new ReviewGuardClient(
-      'omitted-details',
-      reviewWithoutOptionalFields,
-    );
-    const omittedPreview = await syncTestFlight(omittedDrift, {
-      ...omittedOptions,
-      apply: false,
-    });
-    await expect(
-      syncTestFlight(omittedDrift, {
-        ...omittedOptions,
-        apply: true,
-        confirmPlanDigest: omittedPreview.planDigest,
-      }),
-    ).rejects.toThrow();
-    expect(
-      omittedDrift.mutations.filter(
-        ({ method, path }) =>
-          method === 'POST' && path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toHaveLength(0);
-  });
-
   test('apply creates both required groups with private explicit-build settings', async () => {
     const client = new StatefulClient();
     client.groups.splice(0);
     const result = await previewAndApply(client, {
-      externalTesters: [],
       internalTesters: [],
-      submitBetaReview: false,
     });
     const groupCreates = client.mutations.filter(
       ({ method, path }) => method === 'POST' && path === '/v1/betaGroups',
     );
-    expect(groupCreates).toHaveLength(2);
-    expect(dataAttributes(groupCreates[0]?.body).isInternalGroup).toBe(true);
-    expect(dataAttributes(groupCreates[1]?.body)).toMatchObject({
+    expect(groupCreates).toHaveLength(1);
+    expect(dataAttributes(groupCreates[0]?.body)).toMatchObject({
       hasAccessToAllBuilds: false,
-      isInternalGroup: false,
-      name: TEST_APP_CONFIGURATION.externalGroupName,
-      publicLinkEnabled: false,
+      isInternalGroup: true,
+      name: TEST_APP_CONFIGURATION.internalGroupName,
     });
     expect(result.actions.at(-1)?.kind).toBe('verification');
   });
@@ -10078,26 +7952,13 @@ describe('write gates and reconciliation', () => {
         email: unrelatedTesterEmail,
       }),
     );
-    const privateReview: BetaReviewInfo = {
+    const privateReview: BetaTestInfo = {
       betaDescription: 'Private description token 9372.',
-      contactEmail: 'private-review-contact@example.invalid',
-      contactFirstName: 'PrivateFirst9372',
-      contactLastName: 'PrivateLast9372',
-      contactPhone: '+12065550198',
-      demoAccountRequired: false,
       feedbackEmail: 'private-feedback@example.invalid',
       locale: 'en-US',
-      notes: 'Private notes token 9372.',
       whatsNew: 'Private What to Test token 9372.',
     };
     const result = await previewAndApply(client, {
-      externalTesters: [
-        {
-          email: externalEmail,
-          firstName: 'ExternalFirst9372',
-          lastName: 'ExternalLast9372',
-        },
-      ],
       internalTesters: [
         {
           email: internalEmail,
@@ -10105,8 +7966,7 @@ describe('write gates and reconciliation', () => {
           lastName: 'InternalLast9372',
         },
       ],
-      reviewInfo: privateReview,
-      submitBetaReview: false,
+      testInfo: privateReview,
     });
 
     const paths = [
@@ -10119,14 +7979,8 @@ describe('write gates and reconciliation', () => {
       externalEmail,
       unrelatedUserEmail,
       unrelatedTesterEmail,
-      'ExternalFirst9372',
-      'ExternalLast9372',
       'InternalFirst9372',
       'InternalLast9372',
-      privateReview.contactEmail,
-      privateReview.contactFirstName,
-      privateReview.contactLastName,
-      privateReview.contactPhone,
       privateReview.feedbackEmail,
     ];
     for (const path of paths) {
@@ -10184,14 +8038,12 @@ describe('write gates and reconciliation', () => {
 
   test('large approved rosters use one bounded identity-free account collection read', async () => {
     const client = new StatefulClient();
-    const externalTesters = Array.from({ length: 120 }, (_, index) => ({
+    const approvedTesters = Array.from({ length: 100 }, (_, index) => ({
       email: `tester-${index}@example.invalid`,
     }));
     await syncTestFlight(client, {
       apply: false,
-      externalTesters,
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: approvedTesters,
     });
     const accountCollections = client.listPaths.filter((path) => {
       if (!path.startsWith('/v1/betaTesters?')) return false;
@@ -10213,7 +8065,7 @@ describe('write gates and reconciliation', () => {
       .map((path) => decodeURIComponent(path))
       .join('\n');
     expect(decodedPaths).not.toContain('filter[email]');
-    for (const { email } of externalTesters) {
+    for (const { email } of approvedTesters) {
       expect(decodedPaths).not.toContain(email);
     }
   });
@@ -10247,9 +8099,7 @@ describe('write gates and reconciliation', () => {
       client.accountTesters.push(resource('betaTesters', testerId, { email }));
     }
     const options = {
-      externalTesters: [],
       internalTesters: desired,
-      submitBetaReview: false,
     } as const;
     const relationshipPath =
       '/v1/betaGroups/internal-group/relationships/betaTesters';
@@ -10520,225 +8370,6 @@ describe('write gates and reconciliation', () => {
     ).toEqual(expectedEmails);
   }, 60_000);
 
-  test('applies 1,200 external creates through confirmed weighted chunks with exact final state', async () => {
-    const testerCount = 1_200;
-    const maximumChunkSize = 45;
-    const chunkCount = Math.ceil(testerCount / maximumChunkSize);
-    const perApplyOperationCeiling = 3_000;
-    const perApplyProviderRequestCeiling = 3_000;
-    const maximumFullRosterCollections = 20;
-    const client = new ScaleStatefulClient();
-    const desired = Array.from({ length: testerCount }, (_, index) => ({
-      email: `scale-external-${index}@example.invalid`,
-    }));
-    const deterministicWriteOrder = desired.map(({ email }) => email).sort();
-    const options = {
-      externalTesters: desired,
-      internalTesters: [],
-      submitBetaReview: false,
-    } as const;
-    const confirmedDigests = new Set<string>();
-    const allWrittenEmails: string[] = [];
-    let aggregateProviderRequests = 0;
-    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
-      const chunkLabel = `chunk ${chunkIndex + 1}`;
-      const chunkStart = chunkIndex * maximumChunkSize;
-      const expectedChunkSize = Math.min(
-        maximumChunkSize,
-        testerCount - chunkStart,
-      );
-      const preview = await syncTestFlight(client, {
-        ...options,
-        apply: false,
-      });
-      expect(confirmedDigests.has(preview.planDigest), chunkLabel).toBe(false);
-      confirmedDigests.add(preview.planDigest);
-      const mutationStart = client.mutations.length;
-      client.resetScaleCounters();
-      client.operationCeiling = perApplyOperationCeiling;
-      client.providerRequestCeiling = perApplyProviderRequestCeiling;
-      const result = await syncTestFlight(client, {
-        ...options,
-        apply: true,
-        confirmPlanDigest: preview.planDigest,
-      });
-      expect(result.actions.at(-1), chunkLabel).toEqual({
-        detail: 'Read-back verification passed.',
-        kind: 'verification',
-        status: 'applied',
-      });
-      expect(client.operations.length, chunkLabel).toBeLessThanOrEqual(
-        perApplyOperationCeiling,
-      );
-      expect(client.providerRequestCount, chunkLabel).toBeLessThanOrEqual(
-        perApplyProviderRequestCeiling,
-      );
-      aggregateProviderRequests += client.providerRequestCount;
-
-      const globalInventoryPasses = client.operations.filter((operation) => {
-        if (!operation.startsWith('list /v1/betaTesters?')) return false;
-        return new URL(
-          operation.slice('list '.length),
-          'https://api.appstoreconnect.apple.com',
-        ).searchParams.has('filter[apps]');
-      });
-      expect(globalInventoryPasses.length, chunkLabel).toBeGreaterThanOrEqual(
-        3,
-      );
-      expect(globalInventoryPasses.length, chunkLabel).toBeLessThanOrEqual(8);
-      const fullRosterCollections = client.providerRequests.filter(
-        ({ operation }) =>
-          operation.startsWith(
-            'list /v1/betaGroups/external-group/betaTesters?',
-          ) ||
-          operation.startsWith(
-            'list /v1/betaGroups/external-group/relationships/betaTesters?',
-          ),
-      );
-      expect(fullRosterCollections.length, chunkLabel).toBeLessThanOrEqual(
-        maximumFullRosterCollections,
-      );
-      expect(
-        fullRosterCollections.reduce((total, { cost }) => total + cost, 0),
-        chunkLabel,
-      ).toBeLessThanOrEqual(
-        maximumFullRosterCollections * Math.ceil(testerCount / 200),
-      );
-
-      const writes = client.mutations
-        .slice(mutationStart)
-        .filter(
-          ({ method, path }) => method === 'POST' && path === '/v1/betaTesters',
-        );
-      expect(writes, chunkLabel).toHaveLength(expectedChunkSize);
-      const writtenEmails = writes.map(({ body }) => {
-        const email = dataAttributes(body).email;
-        if (typeof email !== 'string') {
-          throw new Error('Synthetic tester write is missing an email.');
-        }
-        return email;
-      });
-      expect(writtenEmails, chunkLabel).toEqual(
-        deterministicWriteOrder.slice(
-          chunkStart,
-          chunkStart + expectedChunkSize,
-        ),
-      );
-      allWrittenEmails.push(...writtenEmails);
-
-      const operationWrites = client.operations.flatMap((operation, index) =>
-        operation === 'mutate POST /v1/betaTesters' ? [index] : [],
-      );
-      expect(operationWrites, chunkLabel).toHaveLength(expectedChunkSize);
-      for (let index = 0; index < operationWrites.length; index += 1) {
-        const writeIndex = operationWrites[index] as number;
-        const priorWriteIndex = operationWrites[index - 1] ?? -1;
-        const nextWriteIndex =
-          operationWrites[index + 1] ?? client.operations.length;
-        const before = client.operations.slice(priorWriteIndex + 1, writeIndex);
-        const after = client.operations.slice(writeIndex + 1, nextWriteIndex);
-        const testerId = `tester-${chunkStart + index + 1}`;
-        expect(
-          before.some((operation) => operation.startsWith('list /v1/apps?')),
-          testerId,
-        ).toBe(true);
-        for (const path of [
-          '/v1/betaGroups/external-group/betaTesters?',
-          '/v1/betaGroups/external-group/relationships/betaTesters?',
-        ]) {
-          expect(
-            before.some(
-              (operation) =>
-                operation.startsWith(`pageSummary ${path}`) &&
-                operation.includes('limit=1'),
-            ),
-            `${testerId}:pre:${path}`,
-          ).toBe(true);
-          expect(
-            after.some(
-              (operation) =>
-                operation.startsWith(`pageSummary ${path}`) &&
-                operation.includes('limit=1'),
-            ),
-            `${testerId}:post:${path}`,
-          ).toBe(true);
-        }
-        expect(client.operations[writeIndex - 1], testerId).toBe(
-          'pageSummary /v1/betaGroups/external-group/relationships/betaTesters?limit=1',
-        );
-        for (const path of [
-          '/v1/betaGroups/external-group/builds?',
-          '/v1/betaGroups/external-group/relationships/builds?',
-        ]) {
-          expect(
-            before.some((operation) => operation.startsWith(`list ${path}`)),
-            `${testerId}:${path}`,
-          ).toBe(true);
-        }
-        expect(
-          after.some((operation) =>
-            operation.startsWith(`get /v1/betaTesters/${testerId}?`),
-          ),
-          testerId,
-        ).toBe(true);
-        for (const relationship of ['betaGroups', 'apps'] as const) {
-          expect(
-            after.some((operation) =>
-              operation.startsWith(
-                `list /v1/betaTesters/${testerId}/${relationship}?`,
-              ),
-            ),
-            `${testerId}:${relationship}:related`,
-          ).toBe(true);
-          expect(
-            after.some((operation) =>
-              operation.startsWith(
-                `list /v1/betaTesters/${testerId}/relationships/${relationship}?`,
-              ),
-            ),
-            `${testerId}:${relationship}:linkage`,
-          ).toBe(true);
-        }
-      }
-
-      expect(
-        sortedTesterEmails(client.groupTesters.get('external-group') ?? []),
-        chunkLabel,
-      ).toEqual(
-        deterministicWriteOrder.slice(0, chunkStart + expectedChunkSize).sort(),
-      );
-    }
-
-    expect(confirmedDigests.size).toBe(chunkCount);
-    expect(aggregateProviderRequests).toBeLessThanOrEqual(
-      perApplyProviderRequestCeiling * chunkCount,
-    );
-    expect(allWrittenEmails).toEqual(deterministicWriteOrder);
-    expect(new Set(allWrittenEmails).size).toBe(testerCount);
-
-    const expectedEmails = desired.map(({ email }) => email).sort();
-    expect(
-      sortedTesterEmails(client.groupTesters.get('external-group') ?? []),
-    ).toEqual(expectedEmails);
-    expect(sortedTesterEmails(client.accountTesters)).toEqual(expectedEmails);
-    expect(sortedTesterEmails(client.appTesters)).toEqual(expectedEmails);
-    expect(client.groupTesters.get('internal-group')).toEqual([]);
-
-    const mutationCount = client.mutations.length;
-    client.resetScaleCounters();
-    const second = await previewAndApply(client, options);
-    expect(client.mutations).toHaveLength(mutationCount);
-    expect(
-      second.actions.filter(({ status }) => status === 'planned'),
-    ).toHaveLength(0);
-    expect(client.providerRequestCount).toBeLessThanOrEqual(
-      perApplyProviderRequestCeiling,
-    );
-    expect(
-      sortedTesterEmails(client.groupTesters.get('external-group') ?? []),
-    ).toEqual(expectedEmails);
-  }, 120_000);
-
   test('fails closed on related/linkage roster-total mismatch before and after a tester write', async () => {
     type CountDrift = 'post-related' | 'pre-linkage';
 
@@ -10752,7 +8383,7 @@ describe('write gates and reconciliation', () => {
 
       override async pageSummary(path: string): Promise<JsonApiPageSummary> {
         const current = await super.pageSummary(path);
-        if (!this.armed || !path.startsWith('/v1/betaGroups/external-group/')) {
+        if (!this.armed || !path.startsWith('/v1/betaGroups/internal-group/')) {
           return current;
         }
         if (
@@ -10794,9 +8425,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const options = {
-      externalTesters: [{ email: 'count-drift@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'count-drift@example.invalid' }],
     } as const;
     for (const drift of ['pre-linkage', 'post-related'] as const) {
       const client = new RosterCountDriftClient(drift);
@@ -10843,9 +8472,9 @@ describe('write gates and reconciliation', () => {
         const result = await super.mutate(method, path, body, expectedType);
         if (method === 'POST' && path === '/v1/betaTesters') {
           this.acceptedTesterCreates += 1;
-          if (this.acceptedTesterCreates === 45) {
-            const target = this.groupTesters.get('external-group');
-            if (target === undefined || target.length !== 45) {
+          if (this.acceptedTesterCreates === 5) {
+            const target = this.groupTesters.get('internal-group');
+            if (target === undefined || target.length !== 5) {
               throw new Error('Missing synthetic final-audit roster.');
             }
             target.splice(
@@ -10864,11 +8493,9 @@ describe('write gates and reconciliation', () => {
 
     const client = new SameCountFinalAuditDriftClient();
     const options = {
-      externalTesters: Array.from({ length: 46 }, (_, index) => ({
+      internalTesters: Array.from({ length: 5 }, (_, index) => ({
         email: `final-audit-${index}@example.invalid`,
       })),
-      internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const preview = await syncTestFlight(client, {
       ...options,
@@ -10881,21 +8508,21 @@ describe('write gates and reconciliation', () => {
         confirmPlanDigest: preview.planDigest,
       }),
     ).rejects.toThrow(
-      'partial or indeterminate after 45 provider-accepted mutation',
+      'partial or indeterminate after 5 provider-accepted mutation',
     );
     expect(client.injected).toBe(true);
-    expect(client.acceptedTesterCreates).toBe(45);
+    expect(client.acceptedTesterCreates).toBe(5);
     expect(
       client.mutations.filter(
         ({ method, path }) => method === 'POST' && path === '/v1/betaTesters',
       ),
-    ).toHaveLength(45);
+    ).toHaveLength(5);
   }, 30_000);
 
   test('keeps opposite-audience and capacity drift in phase baseline and final global audits', async () => {
     class BaselineOppositeAudienceDriftClient extends OrderedStatefulClient {
       armed = false;
-      externalBuildLinkageReads = 0;
+      buildLinkageReads = 0;
       injected = false;
       readonly existing = resource('betaTesters', 'baseline-opposite-tester', {
         email: 'baseline-opposite@example.invalid',
@@ -10904,7 +8531,7 @@ describe('write gates and reconciliation', () => {
       constructor() {
         super();
         this.accountTesters.push(this.existing);
-        addTypedGroup(this, 'late-internal-audience', true, []);
+        addTypedGroup(this, 'late-external-audience', false, []);
       }
 
       override async list(path: string): Promise<readonly JsonApiResource[]> {
@@ -10912,11 +8539,11 @@ describe('write gates and reconciliation', () => {
         if (
           this.armed &&
           path ===
-            '/v1/betaGroups/external-group/relationships/builds?limit=200'
+            '/v1/betaGroups/internal-group/relationships/builds?limit=200'
         ) {
-          this.externalBuildLinkageReads += 1;
-          if (this.externalBuildLinkageReads === 2) {
-            this.groupTesters.set('late-internal-audience', [this.existing]);
+          this.buildLinkageReads += 1;
+          if (this.buildLinkageReads === 2) {
+            this.groupTesters.set('late-external-audience', [this.existing]);
             this.appTesters.push(this.existing);
             this.injected = true;
           }
@@ -10927,9 +8554,7 @@ describe('write gates and reconciliation', () => {
 
     const baselineClient = new BaselineOppositeAudienceDriftClient();
     const baselineOptions = {
-      externalTesters: [{ email: 'baseline-opposite@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'baseline-opposite@example.invalid' }],
     } as const;
     const baselinePreview = await syncTestFlight(baselineClient, {
       ...baselineOptions,
@@ -10949,7 +8574,7 @@ describe('write gates and reconciliation', () => {
     expect(
       baselineClient.operations.some((operation) =>
         operation.startsWith(
-          'list /v1/betaGroups/late-internal-audience/betaTesters?',
+          'list /v1/betaGroups/late-external-audience/betaTesters?',
         ),
       ),
     ).toBe(true);
@@ -10985,12 +8610,10 @@ describe('write gates and reconciliation', () => {
 
     const finalClient = new FinalCapacityDriftClient();
     const finalOptions = {
-      externalTesters: [
+      internalTesters: [
         { email: 'final-capacity-1@example.invalid' },
         { email: 'final-capacity-2@example.invalid' },
       ],
-      internalTesters: [],
-      submitBetaReview: false,
     } as const;
     const finalPreview = await syncTestFlight(finalClient, {
       ...finalOptions,
@@ -11060,9 +8683,7 @@ describe('write gates and reconciliation', () => {
         }),
       );
       const options = {
-        externalTesters: [{ email: 'existing@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: [{ email: 'existing@example.invalid' }],
       } as const;
       const preview = await syncTestFlight(client, {
         ...options,
@@ -11118,9 +8739,7 @@ describe('write gates and reconciliation', () => {
     for (const drift of ['email', 'id'] as const) {
       const client = new CreatedTesterIdentityDriftClient(drift);
       const options = {
-        externalTesters: [{ email: 'created@example.invalid' }],
-        internalTesters: [],
-        submitBetaReview: false,
+        internalTesters: [{ email: 'created@example.invalid' }],
       } as const;
       const preview = await syncTestFlight(client, {
         ...options,
@@ -11193,9 +8812,7 @@ describe('write gates and reconciliation', () => {
     }
 
     const options = {
-      externalTesters: [{ email: 'reciprocal@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'reciprocal@example.invalid' }],
     } as const;
     for (const drift of [
       'group-related',
@@ -11237,9 +8854,7 @@ describe('write gates and reconciliation', () => {
       }),
     );
     await previewAndApply(client, {
-      externalTesters: [{ email: 'existing@example.invalid' }],
-      internalTesters: [],
-      submitBetaReview: false,
+      internalTesters: [{ email: 'existing@example.invalid' }],
     });
     expect(
       client.mutations.some(({ path }) => path === '/v1/betaTesters'),
@@ -11255,10 +8870,8 @@ describe('write gates and reconciliation', () => {
     const client = new StatefulClient();
     const options = {
       build: 'build-1',
-      externalTesters: [{ email: 'external@example.invalid' }],
       internalTesters: [{ email: 'internal@example.invalid' }],
-      reviewInfo: review,
-      submitBetaReview: true,
+      testInfo: review,
     } as const;
     const first = await previewAndApply(client, options);
     expect(first.actions.at(-1)).toEqual({
@@ -11269,11 +8882,6 @@ describe('write gates and reconciliation', () => {
     expect(
       client.mutations.some(({ path }) => path === '/v1/betaTesters'),
     ).toBe(true);
-    expect(
-      client.mutations.some(
-        ({ path }) => path === '/v1/betaAppReviewSubmissions',
-      ),
-    ).toBe(false);
     expect(first.actions.some(({ status }) => status === 'deferred')).toBe(
       true,
     );
@@ -11285,8 +8893,8 @@ describe('write gates and reconciliation', () => {
     const second = await previewAndApply(client, options);
     expect(client.mutations.length).toBeGreaterThan(testerMutationCount);
     expect(
-      client.mutations.some(
-        ({ path }) => path === '/v1/betaAppReviewSubmissions',
+      client.mutations.some(({ path }) =>
+        path.endsWith('/relationships/builds'),
       ),
     ).toBe(true);
     expect(

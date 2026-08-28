@@ -13,12 +13,9 @@ export const MAX_GROUP_BUILDS = 200;
 export const MAX_TESTERS_PER_GROUP = 10000;
 export const MAX_INDIVIDUAL_TESTERS_PER_BUILD = 10000;
 export const MAX_TESTER_RELATIONSHIPS = 1000;
-export const MAX_APPROVED_TESTERS = 1200;
 export const MAX_INTERNAL_TESTERS = 100;
 export const MAX_TESTER_WRITES_PER_APPLY = 100;
 export const MAX_TESTER_WRITE_REQUEST_COST_PER_APPLY = 2500;
-export const EXTERNAL_CREATE_REQUEST_COST = 55;
-export const EXTERNAL_LINK_REQUEST_COST = 220;
 export const INTERNAL_TESTER_WRITE_REQUEST_COST = 265;
 export const RATE_LIMIT_GROUP_SETUP_RESERVE = 66;
 export const MAX_APPLY_REQUEST_COST = 2950;
@@ -84,15 +81,7 @@ export interface Tester {
   readonly firstName?: string;
   readonly lastName?: string;
 }
-export interface BetaReviewInfo {
-  readonly contactFirstName: string;
-  readonly contactLastName: string;
-  readonly contactPhone: string;
-  readonly contactEmail: string;
-  readonly demoAccountRequired: boolean;
-  readonly demoAccountName?: string;
-  readonly demoAccountPassword?: string;
-  readonly notes?: string;
+export interface BetaTestInfo {
   readonly locale: string;
   readonly betaDescription: string;
   readonly feedbackEmail: string;
@@ -102,16 +91,13 @@ export interface AscAppConfiguration {
   readonly appName: string;
   readonly appSku: string;
   readonly bundleId: string;
-  readonly externalGroupName: string;
   readonly internalGroupName: string;
 }
 interface SyncOptionsBase {
   readonly app: AscAppConfiguration;
   readonly internalTesters: readonly Tester[];
-  readonly externalTesters: readonly Tester[];
-  readonly reviewInfo?: BetaReviewInfo;
+  readonly testInfo?: BetaTestInfo;
   readonly build?: string;
-  readonly submitBetaReview: boolean;
 }
 export type SyncOptions =
   | (SyncOptionsBase & {
@@ -126,8 +112,6 @@ export interface SyncAction {
   readonly kind:
     | 'beta-localization'
     | 'beta-build-localization'
-    | 'beta-review-details'
-    | 'beta-review-submission'
     | 'build-notification-safety'
     | 'build-distribution'
     | 'group'
@@ -167,10 +151,8 @@ export interface CliOptions {
   readonly build?: string;
   readonly confirmApply?: string;
   readonly confirmPlanDigest?: string;
-  readonly externalTestersPath?: string;
   readonly internalTestersPath?: string;
-  readonly reviewInfoPath?: string;
-  readonly submitBetaReview: boolean;
+  readonly testInfoPath?: string;
 }
 export const isRecord = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -355,21 +337,6 @@ export const optionalString = (
 ): string | undefined => {
   if (value === undefined || value === null || value === '') return undefined;
   return requireString(value, label, maximumLength);
-};
-export const optionalSecretString = (
-  value: unknown,
-  label: string,
-  maximumLength: number,
-): string | undefined => {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (
-    typeof value !== 'string' ||
-    value.trim().length === 0 ||
-    value.length > maximumLength
-  ) {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value;
 };
 export const isEmail = (value: string): boolean =>
   value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);

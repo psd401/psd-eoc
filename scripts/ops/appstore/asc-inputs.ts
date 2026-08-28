@@ -13,15 +13,13 @@ import {
 import { isProxy } from 'node:util/types';
 import {
   BETA_BUILD_LOCALIZATION_LOCALES,
-  type BetaReviewInfo,
+  type BetaTestInfo,
   canonicalValue,
   deepFreezeCanonical,
   FILE_READ_CHUNK_BYTES,
   isEmail,
   type JsonObject,
-  MAX_APPROVED_TESTERS,
-  optionalSecretString,
-  optionalString,
+  MAX_INTERNAL_TESTERS,
   requireString,
   type Tester,
 } from './asc-model';
@@ -183,26 +181,18 @@ export const parseTesterCsv = (input: string): readonly Tester[] => {
   }
   if (testers.length === 0)
     throw new Error('Tester CSV contains no user email rows.');
-  if (testers.length > MAX_APPROVED_TESTERS) {
-    throw new Error('Tester CSV exceeds the approved PSD roster limit.');
+  if (testers.length > MAX_INTERNAL_TESTERS) {
+    throw new Error("Tester CSV exceeds Apple's 100-user internal limit.");
   }
   return testers;
 };
-const REVIEW_INFO_FIELDS = new Set([
+const TEST_INFO_FIELDS = new Set([
   'betaDescription',
-  'contactEmail',
-  'contactFirstName',
-  'contactLastName',
-  'contactPhone',
-  'demoAccountName',
-  'demoAccountPassword',
-  'demoAccountRequired',
   'feedbackEmail',
   'locale',
-  'notes',
   'whatsNew',
 ]);
-const snapshotReviewInput = (input: unknown): JsonObject => {
+const snapshotTestInput = (input: unknown): JsonObject => {
   if (
     typeof input !== 'object' ||
     input === null ||
@@ -211,23 +201,23 @@ const snapshotReviewInput = (input: unknown): JsonObject => {
     (Object.getPrototypeOf(input) !== Object.prototype &&
       Object.getPrototypeOf(input) !== null)
   ) {
-    throw new Error('Beta-review input must be a JSON object.');
+    throw new Error('Beta-test input must be a JSON object.');
   }
   const keys = Reflect.ownKeys(input);
   if (keys.some((key) => typeof key === 'symbol')) {
-    throw new Error('Beta-review input has an unsupported field.');
+    throw new Error('Beta-test input has an unsupported field.');
   }
   const descriptors: Array<{
     descriptor: PropertyDescriptor;
     key: string;
   }> = [];
   for (const key of keys as string[]) {
-    if (!REVIEW_INFO_FIELDS.has(key)) {
-      throw new Error('Beta-review input has an unsupported field.');
+    if (!TEST_INFO_FIELDS.has(key)) {
+      throw new Error('Beta-test input has an unsupported field.');
     }
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
     if (descriptor === undefined || !descriptor.enumerable) {
-      throw new Error('Beta-review input has an unsupported field.');
+      throw new Error('Beta-test input has an unsupported field.');
     }
     descriptors.push({ descriptor, key });
   }
@@ -239,7 +229,7 @@ const snapshotReviewInput = (input: unknown): JsonObject => {
     } else if (typeof descriptor.get === 'function') {
       value = descriptor.get.call(input) as unknown;
     } else {
-      throw new Error('Beta-review input has an unreadable field.');
+      throw new Error('Beta-test input has an unreadable field.');
     }
     Object.defineProperty(snapshot, key, {
       configurable: true,
@@ -250,57 +240,23 @@ const snapshotReviewInput = (input: unknown): JsonObject => {
   }
   return snapshot;
 };
-export const parseReviewInfo = (input: unknown): BetaReviewInfo => {
-  const snapshot = snapshotReviewInput(input);
-  const contactEmail = requireString(
-    snapshot.contactEmail,
-    'contactEmail',
-    320,
-  );
+export const parseTestInfo = (input: unknown): BetaTestInfo => {
+  const snapshot = snapshotTestInput(input);
   const feedbackEmail = requireString(
     snapshot.feedbackEmail,
     'feedbackEmail',
     320,
   );
-  if (!isEmail(contactEmail) || !isEmail(feedbackEmail)) {
-    throw new Error('Beta-review email fields must be valid email addresses.');
+  if (!isEmail(feedbackEmail)) {
+    throw new Error('Beta-test feedbackEmail must be a valid email address.');
   }
-  const demoAccountRequired = snapshot.demoAccountRequired;
-  if (typeof demoAccountRequired !== 'boolean') {
-    throw new Error('demoAccountRequired must be a boolean.');
-  }
-  const demoAccountName = optionalString(
-    snapshot.demoAccountName,
-    'demoAccountName',
-    255,
-  );
-  const demoAccountPassword = optionalSecretString(
-    snapshot.demoAccountPassword,
-    'demoAccountPassword',
-    255,
-  );
-  if (
-    demoAccountRequired &&
-    (demoAccountName === undefined || demoAccountPassword === undefined)
-  ) {
-    throw new Error('A required demo account needs both name and password.');
-  }
-  if (
-    !demoAccountRequired &&
-    (demoAccountName !== undefined || demoAccountPassword !== undefined)
-  ) {
-    throw new Error(
-      'Demo account credentials are forbidden when no demo account is required.',
-    );
-  }
-  const notes = optionalString(snapshot.notes, 'notes', 4000);
   const locale = snapshot.locale === undefined ? 'en-US' : snapshot.locale;
   if (
     typeof locale !== 'string' ||
     !BETA_BUILD_LOCALIZATION_LOCALES.has(locale)
   ) {
     throw new Error(
-      'Beta-review locale is not supported by Apple BetaBuildLocalization.',
+      'Beta-test locale is not supported by Apple BetaBuildLocalization.',
     );
   }
   return deepFreezeCanonical(
@@ -310,27 +266,11 @@ export const parseReviewInfo = (input: unknown): BetaReviewInfo => {
         'betaDescription',
         4000,
       ),
-      contactEmail,
-      contactFirstName: requireString(
-        snapshot.contactFirstName,
-        'contactFirstName',
-        255,
-      ),
-      contactLastName: requireString(
-        snapshot.contactLastName,
-        'contactLastName',
-        255,
-      ),
-      contactPhone: requireString(snapshot.contactPhone, 'contactPhone', 50),
-      demoAccountRequired,
       feedbackEmail,
       locale,
       whatsNew: requireString(snapshot.whatsNew, 'whatsNew', 4000),
-      ...(demoAccountName === undefined ? {} : { demoAccountName }),
-      ...(demoAccountPassword === undefined ? {} : { demoAccountPassword }),
-      ...(notes === undefined ? {} : { notes }),
     }),
-  ) as unknown as BetaReviewInfo;
+  ) as unknown as BetaTestInfo;
 };
 export const isPathInside = (candidate: string, parent: string): boolean => {
   const path = relative(parent, candidate);
@@ -525,12 +465,12 @@ export const readPrivateFile = async (
     throw new Error(`${label} could not be read safely.`);
   }
 };
-export const parseReviewInfoJson = (text: string): BetaReviewInfo => {
+export const parseTestInfoJson = (text: string): BetaTestInfo => {
   let input: unknown;
   try {
     input = JSON.parse(text) as unknown;
   } catch {
-    throw new Error('Beta-review input is not valid JSON.');
+    throw new Error('Beta-test input is not valid JSON.');
   }
-  return parseReviewInfo(input);
+  return parseTestInfo(input);
 };
