@@ -14,6 +14,8 @@ const STATUS_MESSAGES = Object.freeze({
     'The people notified by that manual source were saved. Rebuild the roster to put the change into effect.',
   'neighborhood-version-created': 'The neighborhood version was saved.',
   'others-group-created': 'The immutable others source was added.',
+  'roster-snapshot-published':
+    'A new roster snapshot was published. Activations now reach the saved people.',
   'others-group-replaced':
     'The others source was replaced with a new immutable source and roster configuration version.',
 } as const);
