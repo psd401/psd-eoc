@@ -281,6 +281,13 @@
       "when": 1787939018446,
       "tag": "0039_manual_source_is_staff",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1787939019446,
+      "tag": "0040_restore_notification_intent_insert",
+      "breakpoints": true
     }
   ]
 }
