@@ -7,6 +7,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
+  pushRegistrationFailureMessage,
   PushRegistrationController,
   parsePushRegistrationConfiguration,
   type NativePushToken,
@@ -585,5 +586,50 @@ describe('push registration controller', () => {
       phase: 'denied',
       message: expect.stringContaining('could not confirm push cleanup'),
     });
+  });
+});
+
+describe('push registration failure messages', () => {
+  test('names the step that failed', () => {
+    expect(
+      pushRegistrationFailureMessage('expo-token', new Error('network down')),
+    ).toContain('Expo did not issue a push token');
+    expect(
+      pushRegistrationFailureMessage('server', new Error('401')),
+    ).toContain('did not accept');
+    expect(
+      pushRegistrationFailureMessage('service-environment', null),
+    ).toContain('which push environment');
+  });
+
+  test('repeats a bounded provider message', () => {
+    expect(
+      pushRegistrationFailureMessage('server', new Error('refused upstream')),
+    ).toContain('refused upstream');
+    const long = 'x'.repeat(400);
+    const rendered = pushRegistrationFailureMessage(
+      'expo-token',
+      new Error(long),
+    );
+    expect(rendered.length).toBeLessThan(300);
+  });
+
+  test('reports which field a schema refused, never its value', () => {
+    // The refused field is almost always the token, which is a credential.
+    const rendered = pushRegistrationFailureMessage('assemble', {
+      issues: [{ path: ['expoFallbackToken'] }, { path: ['token'] }],
+    });
+    expect(rendered).toContain('expoFallbackToken');
+    expect(rendered).toContain('token');
+    expect(rendered).not.toContain('ExponentPushToken');
+  });
+
+  test('still says something when the error carries nothing', () => {
+    expect(pushRegistrationFailureMessage('assemble', {})).toContain(
+      'cannot accept',
+    );
+    expect(pushRegistrationFailureMessage('server', new Error('  '))).toContain(
+      'did not accept',
+    );
   });
 });
