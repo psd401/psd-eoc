@@ -5,6 +5,7 @@ import { NotificationChannelSchema } from './event-type';
 import { FacilityIdSchema } from './facility';
 import {
   type GroupSourceKind,
+  GroupSourceKindSchema,
   type RosterGroupSourceRef,
   RosterGroupSourceRefSchema,
 } from './group';
@@ -74,6 +75,20 @@ export const groupSourceKindMatchesPopulation = (
   kind: GroupSourceKind,
   population: RosterPopulation,
 ): boolean => rosterPopulationForGroupSourceKind(kind) === population;
+
+/**
+ * The source kinds belonging to {@link population}.
+ *
+ * For querying by kind. Deriving it from the enum means a new kind reaches
+ * every such query, instead of being silently excluded by a filter that named
+ * `google-group` and predates it.
+ */
+export const groupSourceKindsForPopulation = (
+  population: RosterPopulation,
+): readonly GroupSourceKind[] =>
+  GroupSourceKindSchema.options.filter(
+    (kind) => rosterPopulationForGroupSourceKind(kind) === population,
+  );
 
 /**
  * Owns the lifecycle state of a snapshotted contact endpoint. Invalid and
