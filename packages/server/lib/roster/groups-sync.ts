@@ -254,7 +254,8 @@ export interface RosterSyncAlertSink {
 }
 
 /** Trusted context supplied by a capability adapter, never by its JSON body. */
-export interface RosterSyncCapabilityContext {
+/** A roster sync run by the authenticated scheduled job. */
+export interface ScheduledRosterSyncContext {
   readonly actor: Actor;
   readonly source: 'scheduled-job';
   readonly transport: 'scheduled-execution';
@@ -262,6 +263,26 @@ export interface RosterSyncCapabilityContext {
   readonly requestId: string;
   readonly idempotencyKey: string;
 }
+
+/**
+ * A roster sync an administrator asked for in the running application.
+ *
+ * A manually curated source has no external provider whose changes a schedule
+ * would notice, so the person who edited the list is the only signal that the
+ * roster should be rebuilt. This carries no scheduler assertion: it is
+ * authorized by the administrator's own authenticated session.
+ */
+export interface AdministratorRosterSyncContext {
+  readonly actor: Actor;
+  readonly source: 'administrator';
+  readonly transport: 'authenticated-session';
+  readonly requestId: string;
+  readonly idempotencyKey: string;
+}
+
+export type RosterSyncCapabilityContext =
+  | ScheduledRosterSyncContext
+  | AdministratorRosterSyncContext;
 
 export interface RosterSyncDependencies {
   readonly store: RosterSyncStore;
@@ -1145,6 +1166,42 @@ export function createSyncRosterHandler(
   );
 }
 
+/**
+ * Deny-by-default authorizer for an administrator-initiated roster rebuild.
+ *
+ * A curated roster changes when a person edits it, not on a provider's
+ * schedule, so an administrator must be able to publish a new snapshot from
+ * the running application. This accepts only a human actor on an authenticated
+ * session, and only for `sync-roster`; it never accepts the scheduler's
+ * assertion, which belongs to the job surface.
+ */
+export function createAdministratorRosterSyncAuthorizer(): Readonly<
+  CapabilityExecutionAuthorizer<RosterSyncCapabilityContext>
+> {
+  return Object.freeze({
+    authorize(
+      request: CapabilityAuthorizationRequest<
+        RegisteredCapabilityId,
+        RosterSyncCapabilityContext
+      >,
+    ): void {
+      const context = request.context;
+      if (
+        request.definition.id !== 'sync-roster' ||
+        context.actor.kind !== 'human' ||
+        context.source !== 'administrator' ||
+        context.transport !== 'authenticated-session' ||
+        request.humanActionRequirement.actionIds.length !== 0
+      ) {
+        throw new RosterSyncError(
+          'ROSTER_SYNC_UNAUTHORIZED',
+          'The roster sync invocation was not authorized.',
+        );
+      }
+    },
+  });
+}
+
 /** Deny-by-default authorizer for the authenticated scheduled job surface. */
 export function createScheduledRosterSyncAuthorizer(): Readonly<
   CapabilityExecutionAuthorizer<RosterSyncCapabilityContext>
@@ -1347,6 +1404,25 @@ function requiredEnvironmentValue(
 }
 
 /** Reads the exact non-delegated Cloud Identity credential with no fallback. */
+/**
+ * Reports whether this deployment carries directory roster configuration.
+ *
+ * A district that curates every roster inside this application has no such
+ * configuration, and must still be able to sync. Callers use this to decide
+ * whether to build the directory adapter at all rather than treating its
+ * absence as a startup failure.
+ */
+export function hasGoogleCloudIdentityRosterConfiguration(
+  environment: Environment = process.env,
+): boolean {
+  try {
+    readGoogleCloudIdentityRosterConfiguration(environment);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function readGoogleCloudIdentityRosterConfiguration(
   environment: Environment = process.env,
 ): GoogleCloudIdentityRosterConfiguration {
