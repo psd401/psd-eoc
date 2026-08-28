@@ -565,7 +565,40 @@ const UNEXPECTED_FAILURE_MESSAGE_LIMIT = 300;
  * A schema refusal reports the field paths it rejected rather than its own
  * message, because a Zod message can quote the value it refused.
  */
+/**
+ * The schema identifiers of a database refusal, when the failure is one.
+ *
+ * Drizzle's own message is the statement it tried to run, which says nothing
+ * about why the database refused it. The constraint name does, and it is a
+ * schema identifier rather than data.
+ *
+ * PostgreSQL's `detail` is deliberately excluded: it quotes the failing row.
+ */
+function databaseRefusal(error: unknown): string | null {
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const fields = (cause ?? error) as {
+    code?: unknown;
+    constraint_name?: unknown;
+    table_name?: unknown;
+  } | null;
+  const code = typeof fields?.code === 'string' ? fields.code : null;
+  const constraint =
+    typeof fields?.constraint_name === 'string' ? fields.constraint_name : null;
+  const table =
+    typeof fields?.table_name === 'string' ? fields.table_name : null;
+  if (code === null && constraint === null) return null;
+  return `database refused: ${[
+    code === null ? [] : [`code ${code}`],
+    table === null ? [] : [`table ${table}`],
+    constraint === null ? [] : [`constraint ${constraint}`],
+  ]
+    .flat()
+    .join(', ')}`;
+}
+
 function unexpectedFailureMessage(error: unknown): string {
+  const refusal = databaseRefusal(error);
+  if (refusal !== null) return refusal;
   const issues = (
     error as { issues?: readonly { path?: readonly unknown[] }[] } | null
   )?.issues;
