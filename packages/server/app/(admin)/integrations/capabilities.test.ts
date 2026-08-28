@@ -91,54 +91,25 @@ function expectAdminError(
 }
 
 describe('integration channel administration boundary', () => {
-  test('keeps SMS dark until persisted truth is live-verified', () => {
+  test('refuses to enable an integration blocked by an external prerequisite', () => {
     const error = expectAdminError(
       () =>
         assertChannelChangeAllowed(
           command(SMS_INTEGRATION_ID, true),
-          status(SMS_INTEGRATION_ID, 'mocked'),
+          status(SMS_INTEGRATION_ID, 'blocked'),
         ),
       409,
     );
 
-    expect(error.message).toContain('independent live verification');
-    expect(() =>
-      assertChannelChangeAllowed(
-        command(
-          SMS_INTEGRATION_ID,
-          true,
-          authorization(SMS_INTEGRATION_ID, true),
-        ),
-        status(SMS_INTEGRATION_ID, 'live-verified'),
-        SMS_READY,
-      ),
-    ).not.toThrow();
+    expect(error.message).toContain('external prerequisite');
   });
 
-  test('requires deployed worker readiness without conflating carrier evidence with the live authorization', () => {
-    const input = command(
-      SMS_INTEGRATION_ID,
-      true,
-      authorization(SMS_INTEGRATION_ID, true),
-    );
-    const live = status(SMS_INTEGRATION_ID, 'live-verified');
-    for (const readiness of [
-      { ready: false, registrationVerificationReference: null },
-      { ready: true, registrationVerificationReference: null },
-      { ready: true, registrationVerificationReference: 'UNVERIFIED' },
-    ]) {
-      const error = expectAdminError(
-        () => assertChannelChangeAllowed(input, live, readiness),
-        409,
-      );
-      expect(error.message).toContain('worker deployment');
-    }
-
-    expect(live.authorizationReference).not.toBe(
-      SMS_READY.registrationVerificationReference,
-    );
+  test('lets an administrator disable a blocked integration', () => {
     expect(() =>
-      assertChannelChangeAllowed(input, live, SMS_READY),
+      assertChannelChangeAllowed(
+        command(SMS_INTEGRATION_ID, false),
+        status(SMS_INTEGRATION_ID, 'blocked'),
+      ),
     ).not.toThrow();
   });
 
@@ -158,41 +129,38 @@ describe('integration channel administration boundary', () => {
     ).toEqual({ ready: false, registrationVerificationReference: null });
   });
 
-  test('rejects enabling blocked or configured-unverified integrations', () => {
-    for (const label of ['blocked', 'configured-unverified'] as const) {
-      expectAdminError(
-        () =>
-          assertChannelChangeAllowed(
-            command(`synthetic-${label}`, true),
-            status(`synthetic-${label}`, label),
-          ),
-        409,
-      );
+  test('lets an administrator enable a channel from any unblocked truth label', () => {
+    for (const label of [
+      'mocked',
+      'configured-unverified',
+      'live-verified',
+    ] as const) {
+      expect(() =>
+        assertChannelChangeAllowed(
+          command(`synthetic-${label}`, true),
+          status(`synthetic-${label}`, label),
+        ),
+      ).not.toThrow();
     }
   });
 
-  test('allows only initial mobile-push verification to cross from configured to live', () => {
-    const directVerification = SetChannelEnabledInputSchema.parse({
+  test('lets an administrator enable mobile push without a direct-push artifact', () => {
+    const enableMobilePush = SetChannelEnabledInputSchema.parse({
       integrationId: 'mobile-push',
       enabled: true,
       authorization: null,
-      verificationReference: 'issue-43-direct-push-proof-001',
     });
-    expect(() =>
-      assertChannelChangeAllowed(
-        directVerification,
-        status('mobile-push', 'configured-unverified'),
-      ),
-    ).not.toThrow();
-    for (const label of ['mocked', 'live-verified'] as const) {
-      expectAdminError(
-        () =>
-          assertChannelChangeAllowed(
-            directVerification,
-            status('mobile-push', label),
-          ),
-        409,
-      );
+    for (const label of [
+      'mocked',
+      'configured-unverified',
+      'live-verified',
+    ] as const) {
+      expect(() =>
+        assertChannelChangeAllowed(
+          enableMobilePush,
+          status('mobile-push', label),
+        ),
+      ).not.toThrow();
     }
   });
 
@@ -227,41 +195,21 @@ describe('integration channel administration boundary', () => {
     );
   });
 
-  test('requires a pre-issued artifact for every live change', () => {
+  test('needs no pre-issued artifact to change a live channel either way', () => {
     const live = status('synthetic-live-provider', 'live-verified');
 
     for (const enabled of [true, false]) {
-      expectAdminError(
-        () =>
-          assertChannelChangeAllowed(
-            command('synthetic-live-provider', enabled),
-            live,
-          ),
-        403,
-      );
       expect(() =>
         assertChannelChangeAllowed(
-          command(
-            'synthetic-live-provider',
-            enabled,
-            authorization('synthetic-live-provider', enabled),
-          ),
+          command('synthetic-live-provider', enabled),
           live,
         ),
       ).not.toThrow();
     }
   });
 
-  test('rejects live artifacts on mocked status and binds every digest input', () => {
+  test('binds every digest input for the retained authorization record', () => {
     const artifact = authorization('synthetic-live-provider', true);
-    expectAdminError(
-      () =>
-        assertChannelChangeAllowed(
-          command('synthetic-live-provider', true, artifact),
-          status('synthetic-live-provider', 'mocked'),
-        ),
-      409,
-    );
 
     expect(liveChannelChangeRequestDigest(artifact)).toMatch(/^[a-f0-9]{64}$/u);
     expect(

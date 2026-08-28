@@ -532,14 +532,14 @@ describe('mobile distribution configuration', () => {
 
     const apple = rowFor('TestFlight device installation');
     const play = rowFor('Google Play device installation');
-    expect(apple).toContain('| `configured-unverified`');
+    expect(apple).toContain('| `live-verified`');
     expect(play).toContain('| `configured-unverified`');
     expect(apple).toContain('1.0.5/build 12');
-    expect(apple).toContain('assigned to the existing `PSD EOC Testers`');
-    expect(apple).toContain('automatic tester notifications disabled');
+    expect(apple).toContain('internal tester group');
+    expect(apple).toContain('automatic distribution enabled');
     expect(apple).toContain('`Waiting for Review`');
     expect(apple).toContain(
-      'No exact build 12 physical-device installation, launch, or diagnostic readback exists',
+      'No in-app Release diagnostic readback, push registration, or notification observation is retained',
     );
     expect(play).toContain('1.0.5/code 6');
     expect(play).toContain('saved in the existing Alpha Closed-testing draft');
