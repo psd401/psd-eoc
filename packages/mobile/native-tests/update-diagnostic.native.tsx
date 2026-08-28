@@ -216,69 +216,110 @@ describe('authenticated release diagnostic', () => {
     expectNoUpdateSideEffects();
   });
 
-  test('accepts only the exact deliberate embedded-only native and app config fingerprint', () => {
+  test('refuses a build whose own runtime says it cannot be trusted', () => {
     const mutations: ReadonlyArray<
-      readonly [string, Partial<ReadOnlyUpdateConstants>]
+      readonly [string, Partial<ReadOnlyUpdateConstants>, string]
     > = [
-      ['native service enabled', { isEnabled: true }],
-      ['config still enables updates', { configuredUpdatesEnabled: true }],
-      ['config missing', { configuredUpdatesEnabled: undefined }],
-      ['native automatic checking', { checkAutomatically: 'ON_LOAD' }],
       [
-        'configured automatic checking',
-        { configuredCheckAutomatically: 'ON_LOAD' },
+        'remote updates on',
+        { isEnabled: true },
+        'Remote updates are not switched off.',
       ],
       [
-        'configured update URL',
-        { configuredUpdateUrl: 'https://example.test' },
-      ],
-      ['native embedded marker drift', { isEmbeddedLaunch: true }],
-      ['embedded assets missing', { isUsingEmbeddedAssets: false }],
-      ['emergency fallback', { isEmergencyLaunch: true }],
-      ['unexpected update ID', { updateId: 'unexpected' }],
-      ['unexpected native runtime', { runtimeVersion: '1.0.1' }],
-      ['unexpected channel', { channel: 'production' }],
-      [
-        'configured version mismatch',
-        { configuredApplicationVersion: '1.0.0' },
+        'downloaded update running',
+        { updateId: 'unexpected' },
+        'A downloaded update is running.',
       ],
       [
-        'configured application ID mismatch',
+        'emergency fallback',
+        { isEmergencyLaunch: true },
+        'The application started in emergency recovery.',
+      ],
+      [
+        'application identifier malformed',
+        { applicationId: 'not-an-identifier' },
+        'The application identifier is unavailable.',
+      ],
+      [
+        'configuration names a different application',
         { configuredApplicationId: 'org.example.other' },
+        'The application identifier is unavailable.',
       ],
       [
-        'runtime policy mismatch',
-        { configuredRuntimeVersion: { policy: 'sdkVersion' } },
+        'installed version malformed',
+        { applicationVersion: 'Bearer-secret' },
+        'The application version is unavailable.',
       ],
-      ['application ID mismatch', { applicationId: 'wrong.example.app' }],
-      ['installed version malformed', { applicationVersion: 'Bearer-secret' }],
-      ['build version malformed', { nativeBuildVersion: 'staff@example.org' }],
+      [
+        'build number malformed',
+        { nativeBuildVersion: 'staff@example.org' },
+        'The build number is unavailable.',
+      ],
     ];
 
-    for (const [name, mutation] of mutations) {
+    for (const [name, mutation, reason] of mutations) {
       const diagnostic = createLaunchedUpdateDiagnostic({
         ...validEmbeddedOnlyConstants(),
         ...mutation,
       });
-      const expectedEmergencyLaunch =
-        mutation.isEmergencyLaunch === true ? true : null;
-      expect({ name, diagnostic }).toEqual({
+      expect({ name, status: diagnostic.status }).toEqual({
         name,
-        diagnostic: {
-          status: 'unknown',
-          mode: 'unknown',
-          launchSource: 'unknown',
-          updateId: null,
-          runtimeVersion: null,
-          channel: null,
-          isEmergencyLaunch: expectedEmergencyLaunch,
-          applicationId: null,
-          applicationVersion: null,
-          configuredRuntimeVersion: null,
-          nativeBuildVersion: null,
-        },
+        status: 'unknown',
+      });
+      // A refusal has to say what was missing, or the screen can only say no.
+      expect({ name, reasons: diagnostic.unmetConditions }).toEqual({
+        name,
+        reasons: [reason],
       });
       expect(Object.isFrozen(diagnostic)).toBe(true);
+    }
+  });
+
+  test('confirms a release build that does not restate its own configuration', () => {
+    // A release build resolves and rewrites parts of the application
+    // configuration, so requiring it to echo the build back rejected correct
+    // devices. Only the running binary's own facts decide.
+    const releaseShapes: ReadonlyArray<
+      readonly [string, Partial<ReadOnlyUpdateConstants>]
+    > = [
+      [
+        'configuration absent',
+        {
+          configuredUpdatesEnabled: undefined,
+          configuredCheckAutomatically: undefined,
+          configuredUpdateUrl: undefined,
+          configuredApplicationVersion: undefined,
+          configuredApplicationId: undefined,
+          configuredRuntimeVersion: undefined,
+        },
+      ],
+      [
+        'runtime version resolved to a string',
+        { configuredRuntimeVersion: '1.0.2' },
+      ],
+      ['native runtime version reported', { runtimeVersion: '1.0.2' }],
+      ['channel reported', { channel: 'production' }],
+      ['automatic checking unreported', { checkAutomatically: undefined }],
+      ['embedded asset flag unreported', { isUsingEmbeddedAssets: undefined }],
+      ['update identifier undefined', { updateId: undefined }],
+    ];
+
+    for (const [name, mutation] of releaseShapes) {
+      const diagnostic = createLaunchedUpdateDiagnostic({
+        ...validEmbeddedOnlyConstants(),
+        ...mutation,
+      });
+      expect({
+        name,
+        status: diagnostic.status,
+        reasons: diagnostic.unmetConditions,
+      }).toEqual({
+        name,
+        status: 'known',
+        reasons: [],
+      });
+      expect(diagnostic.applicationId).toBe('org.example.eoc');
+      expect(diagnostic.nativeBuildVersion).toBe('3');
     }
   });
 
