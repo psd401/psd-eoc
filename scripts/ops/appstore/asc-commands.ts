@@ -1,19 +1,17 @@
 import { createHash } from 'node:crypto';
 import { isProxy } from 'node:util/types';
-import { parseReviewInfo } from './asc-inputs';
+import { parseTestInfo } from './asc-inputs';
 import {
   appendQuery,
   type AscAppConfiguration,
   type AscClient,
   attributesOf,
   BETA_BUILD_LOCALIZATION_LOCALES,
-  type BetaReviewInfo,
+  type BetaTestInfo,
   canonicalJson,
   canonicalValue,
   deepFreezeCanonical,
   EMPTY_JSON_OBJECT,
-  EXTERNAL_CREATE_REQUEST_COST,
-  EXTERNAL_LINK_REQUEST_COST,
   INTERNAL_TESTER_WRITE_REQUEST_COST,
   isEmail,
   isRecord,
@@ -24,7 +22,6 @@ import {
   MAX_APP_LOCALIZATIONS,
   MAX_APP_TESTERS,
   MAX_APPLY_REQUEST_COST,
-  MAX_APPROVED_TESTERS,
   MAX_GET_ATTEMPTS,
   MAX_GROUP_BUILDS,
   MAX_GROUPS,
@@ -242,18 +239,6 @@ const assertEquivalentBetaGroupInventory = async (
   );
   return current;
 };
-const assertBetaAppReviewDetailBelongsToApp = async (
-  client: AscClient,
-  detailId: string,
-  appId: string,
-): Promise<void> =>
-  assertExactParent(
-    client,
-    `/v1/betaAppReviewDetails/${encodeURIComponent(detailId)}/app`,
-    'apps',
-    appId,
-    'Beta App Review details do not belong to the exact configured app.',
-  );
 const assertBetaAppLocalizationBelongsToApp = async (
   client: AscClient,
   localizationId: string,
@@ -659,29 +644,6 @@ const hasSafeGroupSettings = (
     (internal || attributes.publicLinkEnabled === false)
   );
 };
-const isManagedGroupIdentity = (
-  group: JsonApiResource,
-  configuration: AscAppConfiguration,
-): boolean => {
-  const attributes = attributesOf(group);
-  return (
-    (attributes.name === configuration.internalGroupName &&
-      attributes.isInternalGroup === true) ||
-    (attributes.name === configuration.externalGroupName &&
-      attributes.isInternalGroup === false)
-  );
-};
-const hasExactManagedGroupInventory = (
-  groups: readonly JsonApiResource[],
-  configuration: AscAppConfiguration,
-): boolean =>
-  groups.length === 2 &&
-  groups.filter((group) =>
-    hasSafeGroupSettings(group, configuration.internalGroupName, true),
-  ).length === 1 &&
-  groups.filter((group) =>
-    hasSafeGroupSettings(group, configuration.externalGroupName, false),
-  ).length === 1;
 const verifyCreatedGroupBeforeUse = async (
   client: AscClient,
   appId: string,
@@ -735,14 +697,12 @@ const ensureGroup = async (
   groupInventoryState: BetaGroupInventoryState,
   rateBudget: ApplyRateBudget | undefined,
   name: string,
-  internal: boolean,
   configuration: AscAppConfiguration,
   apply: boolean,
   actions: SyncAction[],
 ): Promise<GroupTarget> => {
-  const rateStage: ApplyRateStage = internal
-    ? 'group-internal'
-    : 'group-external';
+  const internal = true;
+  const rateStage: ApplyRateStage = 'group-internal';
   const named = groups.filter(
     (group) => group.type === 'betaGroups' && attributesOf(group).name === name,
   );
@@ -751,7 +711,7 @@ const ensureGroup = async (
   const existing = named[0];
   if (existing === undefined) {
     actions.push({
-      detail: `Create ${internal ? 'internal' : 'external'} group ${name}.`,
+      detail: `Create internal group ${name}.`,
       kind: 'group',
       status: actionStatus(apply),
     });
@@ -1144,7 +1104,6 @@ const inventoryAppTesterCapacity = async (
   appId: string,
   groups: readonly JsonApiResource[],
   internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
 ): Promise<AppWideTesterInventory> => {
   const groupIds = new Set<string>();
   const idToEmail = new Map<string, string>();
@@ -1367,8 +1326,10 @@ const inventoryAppTesterCapacity = async (
     if (email !== undefined) audienceByEmail.set(email, membership.audience);
     idsByAudience[membership.audience].add(membership.id);
   }
+  // No external roster is ever desired; Apple-side external memberships are
+  // still read so app-wide capacity stays accurate.
   const desiredByAudience: Readonly<Record<TesterAudience, readonly Tester[]>> =
-    { external: externalDesired, internal: internalDesired };
+    { external: [], internal: internalDesired };
   const maximumByAudience: Readonly<Record<TesterAudience, number>> = {
     external: 10000,
     internal: 100,
@@ -1777,7 +1738,6 @@ const assertEquivalentAppTesterInventory = async (
   appId: string,
   expected: AppWideTesterInventory,
   internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
 ): Promise<AppWideTesterInventory> => {
   const groups = await listVerifiedBetaGroupsForApp(client, appId);
   if (groups.length > MAX_GROUPS) {
@@ -1788,7 +1748,6 @@ const assertEquivalentAppTesterInventory = async (
     appId,
     groups,
     internalDesired,
-    externalDesired,
   );
   if (canonicalJson(current) !== canonicalJson(expected)) {
     throw new Error(
@@ -2002,7 +1961,6 @@ const finalAuditRequestReserve = (
   groups: readonly JsonApiResource[],
   inventory: AppWideTesterInventory,
   internalSnapshot: ManagedGroupSnapshot,
-  externalSnapshot: ManagedGroupSnapshot,
   selected: readonly PlannedTesterWrite[],
 ): number => {
   const groupCounts = new Map<string, number>();
@@ -2013,15 +1971,12 @@ const finalAuditRequestReserve = (
       (groupCounts.get(membership.groupId) ?? 0) + 1,
     );
   }
-  const targetKey = (audience: TesterAudience): string => {
-    const snapshot =
-      audience === 'internal' ? internalSnapshot : externalSnapshot;
-    return snapshot.target.id ?? `planned:${audience}:group`;
-  };
-  for (const audience of ['internal', 'external'] as const) {
-    const key = targetKey(audience);
-    if (!groupCounts.has(key)) groupCounts.set(key, 0);
-  }
+  const targetKey = (audience: TesterAudience): string =>
+    audience === 'internal'
+      ? (internalSnapshot.target.id ?? 'planned:internal:group')
+      : `planned:${audience}:group`;
+  const internalKey = targetKey('internal');
+  if (!groupCounts.has(internalKey)) groupCounts.set(internalKey, 0);
   for (const write of selected) {
     const key = targetKey(write.audience);
     groupCounts.set(key, (groupCounts.get(key) ?? 0) + 1);
@@ -2051,7 +2006,7 @@ const finalAuditRequestReserve = (
   for (const count of individualsByBuild.values()) {
     requests += 2 * pagedRequestCount(count);
   }
-  for (const snapshot of [internalSnapshot, externalSnapshot]) {
+  for (const snapshot of [internalSnapshot]) {
     const rosterCount =
       groupCounts.get(
         targetKey(snapshot.target.internal ? 'internal' : 'external'),
@@ -2069,14 +2024,9 @@ interface DownstreamTopology {
 }
 type ApplyRateStage =
   | 'app-localization'
-  | 'beta-review-submission'
   | 'build-localization'
-  | 'external-build'
-  | 'external-notification'
-  | 'group-external'
   | 'group-internal'
-  | 'internal-build'
-  | 'review-details';
+  | 'internal-build';
 interface ApplyRateStageReservation {
   readonly guardCost: number;
   readonly totalCost: number;
@@ -2142,7 +2092,6 @@ const appTesterAuditLogicalRequestCount = (
   groups: readonly JsonApiResource[],
   inventory: AppWideTesterInventory,
   internalSnapshot: ManagedGroupSnapshot,
-  externalSnapshot: ManagedGroupSnapshot,
 ): number => {
   const groupCounts = new Map(groups.map(({ id }) => [id, 0]));
   for (const membership of inventory.groupMemberships) {
@@ -2151,13 +2100,8 @@ const appTesterAuditLogicalRequestCount = (
       (groupCounts.get(membership.groupId) ?? 0) + 1,
     );
   }
-  for (const [audience, snapshot] of [
-    ['internal', internalSnapshot],
-    ['external', externalSnapshot],
-  ] as const) {
-    const key = snapshot.target.id ?? `planned:${audience}:group`;
-    if (!groupCounts.has(key)) groupCounts.set(key, 0);
-  }
+  const internalKey = internalSnapshot.target.id ?? 'planned:internal:group';
+  if (!groupCounts.has(internalKey)) groupCounts.set(internalKey, 0);
   const individualsByBuild = new Map(
     inventory.buildIds.map((buildId) => [buildId, 0]),
   );
@@ -2187,10 +2131,8 @@ const downstreamRequestReserve = (
   groups: readonly JsonApiResource[],
   inventory: AppWideTesterInventory,
   internalSnapshot: ManagedGroupSnapshot,
-  externalSnapshot: ManagedGroupSnapshot,
   build: JsonApiResource | null,
-  reviewInfoPresent: boolean,
-  submitBetaReview: boolean,
+  testInfoPresent: boolean,
   topology: DownstreamTopology,
 ): ApplyRatePlan => {
   const appendBuild = (
@@ -2208,31 +2150,24 @@ const downstreamRequestReserve = (
   const attachInternal =
     build !== null &&
     !internalSnapshot.builds.some(({ id }) => id === build.id);
-  const attachExternal =
-    submitBetaReview &&
-    build !== null &&
-    !externalSnapshot.builds.some(({ id }) => id === build.id);
   const projectedInternal = appendBuild(internalSnapshot, attachInternal);
-  const projectedExternal = appendBuild(externalSnapshot, attachExternal);
   const groupCount = Math.max(
     groups.length,
     new Set([
       ...groups.map(({ id }) => id),
       internalSnapshot.target.id ?? 'planned:internal:group',
-      externalSnapshot.target.id ?? 'planned:external:group',
     ]).size,
   );
   const coreAudit = appTesterAuditLogicalRequestCount(
     groups,
     inventory,
     internalSnapshot,
-    externalSnapshot,
   );
-  const appLocalizationCount = reviewInfoPresent
+  const appLocalizationCount = testInfoPresent
     ? Math.min(MAX_APP_LOCALIZATIONS, topology.appLocalizationCount + 1)
     : topology.appLocalizationCount;
   const buildLocalizationCount =
-    reviewInfoPresent && build !== null
+    testInfoPresent && build !== null
       ? Math.min(
           BETA_BUILD_LOCALIZATION_LOCALES.size,
           topology.buildLocalizationCount + 1,
@@ -2259,7 +2194,6 @@ const downstreamRequestReserve = (
   const attachLogicalCost = (
     before: ManagedGroupSnapshot,
     after: ManagedGroupSnapshot,
-    external: boolean,
   ): number =>
     groupReadiness(before) +
     buildLocalizationAudit +
@@ -2269,15 +2203,12 @@ const downstreamRequestReserve = (
     1 +
     exactTargetSnapshot(before) +
     1 +
-    buildReadback(after) +
-    (external ? 2 : 0);
+    buildReadback(after);
   const exactAppIdentityCost = MAX_GET_ATTEMPTS;
   const stages = new Map<ApplyRateStage, ApplyRateStageReservation>([
     ['group-internal', { guardCost: 12, totalCost: 33 }],
-    ['group-external', { guardCost: 12, totalCost: 33 }],
   ]);
-  if (reviewInfoPresent) {
-    stages.set('review-details', { guardCost: 9, totalCost: 18 });
+  if (testInfoPresent) {
     const appGuardCost =
       6 + exactAppIdentityCost + appLocalizationAudit * MAX_GET_ATTEMPTS;
     stages.set('app-localization', {
@@ -2295,13 +2226,9 @@ const downstreamRequestReserve = (
       });
     }
   }
-  if (submitBetaReview) {
-    stages.set('external-notification', { guardCost: 9, totalCost: 33 });
-  }
   if (attachInternal) {
     const totalCost =
-      attachLogicalCost(internalSnapshot, projectedInternal, false) *
-      MAX_GET_ATTEMPTS;
+      attachLogicalCost(internalSnapshot, projectedInternal) * MAX_GET_ATTEMPTS;
     stages.set('internal-build', {
       guardCost: Math.max(
         0,
@@ -2312,52 +2239,14 @@ const downstreamRequestReserve = (
   } else {
     stages.set('internal-build', { guardCost: 0, totalCost: 0 });
   }
-  if (attachExternal) {
-    const totalCost =
-      attachLogicalCost(externalSnapshot, projectedExternal, true) *
-      MAX_GET_ATTEMPTS;
-    stages.set('external-build', {
-      guardCost: Math.max(
-        0,
-        totalCost - buildReadback(projectedExternal) * MAX_GET_ATTEMPTS - 1,
-      ),
-      totalCost,
-    });
-  } else if (submitBetaReview && build !== null) {
-    const totalCost =
-      (groupReadiness(projectedExternal) + 2) * MAX_GET_ATTEMPTS;
-    stages.set('external-build', {
-      guardCost: totalCost,
-      totalCost,
-    });
-  }
-  if (submitBetaReview && build !== null) {
-    const reviewSubmissionLogicalCost =
-      buildRefresh +
-      groupReadiness(projectedExternal) +
-      appLocalizationAudit +
-      buildLocalizationAudit +
-      completeLocalizationAudit +
-      coreAudit +
-      10;
-    const totalCost = reviewSubmissionLogicalCost * MAX_GET_ATTEMPTS;
-    stages.set('beta-review-submission', {
-      guardCost: Math.max(0, totalCost - 12),
-      totalCost,
-    });
-  }
   let finalAuditReserve = finalAuditRequestReserve(
     groups,
     inventory,
     projectedInternal,
-    projectedExternal,
     [],
   );
-  if (reviewInfoPresent) {
+  if (testInfoPresent) {
     finalAuditReserve += (2 + completeLocalizationAudit) * MAX_GET_ATTEMPTS;
-  }
-  if (submitBetaReview && build !== null) {
-    finalAuditReserve += 4 * MAX_GET_ATTEMPTS;
   }
   return {
     finalAuditReserve,
@@ -2397,9 +2286,7 @@ const planTesterWriteChunk = (
   inventory: AppWideTesterInventory,
   accountTesterByEmail: ReadonlyMap<string, JsonApiResource>,
   internalSnapshot: ManagedGroupSnapshot,
-  externalSnapshot: ManagedGroupSnapshot,
   internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
   configuration: AscAppConfiguration,
   availableRateBudget: number | null,
   confirmedMaxWrites?: number,
@@ -2413,16 +2300,6 @@ const planTesterWriteChunk = (
         inventory,
         configuration.internalGroupName,
         true,
-      ),
-    ],
-    [
-      'external',
-      externalDesired,
-      managedGroupEmails(
-        groups,
-        inventory,
-        configuration.externalGroupName,
-        false,
       ),
     ],
   ] as const;
@@ -2465,12 +2342,7 @@ const planTesterWriteChunk = (
     for (const tester of desired) {
       if (currentEmails.has(tester.email)) continue;
       const existing = accountTesterByEmail.get(tester.email);
-      const requestCost =
-        audience === 'internal'
-          ? INTERNAL_TESTER_WRITE_REQUEST_COST
-          : existing === undefined
-            ? EXTERNAL_CREATE_REQUEST_COST
-            : EXTERNAL_LINK_REQUEST_COST;
+      const requestCost = INTERNAL_TESTER_WRITE_REQUEST_COST;
       const candidate = [
         ...selected,
         {
@@ -2483,7 +2355,6 @@ const planTesterWriteChunk = (
         groups,
         inventory,
         internalSnapshot,
-        externalSnapshot,
         candidate,
       );
       if (
@@ -2513,7 +2384,6 @@ const planTesterWriteChunk = (
     groups,
     inventory,
     internalSnapshot,
-    externalSnapshot,
     selected,
   );
   return {
@@ -2533,7 +2403,6 @@ const syncTesters = async (
   identityRegistry: TesterIdentityAudienceRegistry,
   inventoryState: AppWideTesterInventoryState,
   internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
   accountTesterByEmail: ReadonlyMap<string, JsonApiResource>,
   target: GroupTarget,
   snapshotGroupTesters: readonly JsonApiResource[],
@@ -2861,30 +2730,19 @@ const syncTesters = async (
   }
   return { deferredWrites, expectedBuilds: expectedGroupBuilds };
 };
-const reviewAttributes = (review: BetaReviewInfo): JsonObject => ({
-  contactEmail: review.contactEmail,
-  contactFirstName: review.contactFirstName,
-  contactLastName: review.contactLastName,
-  contactPhone: review.contactPhone,
-  demoAccountName: review.demoAccountName ?? null,
-  demoAccountPassword: review.demoAccountPassword ?? null,
-  demoAccountRequired: review.demoAccountRequired,
-  notes: review.notes ?? null,
-});
-const localizationAttributes = (review: BetaReviewInfo): JsonObject => ({
+const localizationAttributes = (review: BetaTestInfo): JsonObject => ({
   description: review.betaDescription,
   feedbackEmail: review.feedbackEmail,
 });
-const buildLocalizationAttributes = (review: BetaReviewInfo): JsonObject => ({
+const buildLocalizationAttributes = (review: BetaTestInfo): JsonObject => ({
   whatsNew: review.whatsNew,
 });
 interface LocalizationEvidence {
   readonly appLocalizations: readonly JsonApiResource[];
   readonly buildLocalizations?: readonly JsonApiResource[];
 }
-interface ReviewInfoSyncEvidence {
+interface TestInfoSyncEvidence {
   readonly appLocalizations: readonly JsonApiResource[];
-  readonly details: JsonApiResource;
 }
 const nullableLocalizationString = (
   value: unknown,
@@ -3008,7 +2866,7 @@ const projectLocalizationInventory = (
 };
 const expectedAppLocalization = (
   id: string,
-  review: BetaReviewInfo,
+  review: BetaTestInfo,
   previous?: JsonApiResource,
 ): JsonApiResource => {
   const previousAttributes =
@@ -3028,7 +2886,7 @@ const expectedAppLocalization = (
 };
 const expectedBuildLocalization = (
   id: string,
-  review: BetaReviewInfo,
+  review: BetaTestInfo,
 ): JsonApiResource =>
   projectBuildLocalization({
     attributes: { locale: review.locale, whatsNew: review.whatsNew },
@@ -3062,103 +2920,22 @@ const assertSameLocalizationInventory = (
     throw new Error(`${label} changed after the confirmed plan.`);
   }
 };
-const syncReviewInfo = async (
+const syncTestInfo = async (
   client: AscClient,
   assertionClient: AscClient | undefined,
   appId: string,
-  review: BetaReviewInfo,
+  review: BetaTestInfo,
   configuration: AscAppConfiguration,
   rateBudget: ApplyRateBudget | undefined,
   apply: boolean,
   actions: SyncAction[],
-): Promise<ReviewInfoSyncEvidence> => {
-  const detailsPath = `/v1/apps/${encodeURIComponent(appId)}/betaAppReviewDetail`;
-  const details = await client.get(detailsPath, 'betaAppReviewDetails');
-  await assertBetaAppReviewDetailBelongsToApp(client, details.id, appId);
-  let expectedLiveDetails = canonicalResource(details);
-  const assertExactLiveDetails = async (): Promise<void> => {
-    if (assertionClient === undefined) {
-      throw new Error('Apply is missing its review-details assertion.');
-    }
-    const current = canonicalResource(
-      await assertionClient.get(detailsPath, 'betaAppReviewDetails'),
-    );
-    if (canonicalJson(current) !== canonicalJson(expectedLiveDetails)) {
-      throw new Error(
-        'Beta App Review details changed after the confirmed plan.',
-      );
-    }
-    await assertBetaAppReviewDetailBelongsToApp(
-      assertionClient,
-      current.id,
-      appId,
-    );
-  };
-  const expectedDetails = reviewAttributes(review);
-  if (sameSelectedAttributes(attributesOf(details), expectedDetails)) {
-    actions.push({
-      detail: 'Beta App Review contact and access details already match.',
-      kind: 'beta-review-details',
-      status: 'unchanged',
-    });
-    if (apply) {
-      if (rateBudget === undefined) {
-        throw new Error('Apply is missing its rate-limit budget.');
-      }
-      rateBudget.complete('review-details');
-    }
-  } else {
-    actions.push({
-      detail: 'Update Beta App Review contact and access details.',
-      kind: 'beta-review-details',
-      status: actionStatus(apply),
-    });
-    if (apply) {
-      if (assertionClient === undefined || rateBudget === undefined) {
-        throw new Error('Apply is missing its review-details assertion.');
-      }
-      rateBudget.assertStageStart(assertionClient, 'review-details');
-      await assertExactLiveDetails();
-      await assertExactAppIdentity(assertionClient, appId, configuration);
-      rateBudget.assertBeforeMutation(assertionClient, 'review-details');
-      const updated = await client.mutate(
-        'PATCH',
-        `/v1/betaAppReviewDetails/${encodeURIComponent(details.id)}`,
-        {
-          data: {
-            attributes: expectedDetails,
-            id: details.id,
-            type: 'betaAppReviewDetails',
-          },
-        },
-        'betaAppReviewDetails',
-      );
-      if (updated === null || updated.id !== details.id) {
-        throw new Error(
-          'Apple did not return the expected Beta App Review details.',
-        );
-      }
-      await assertBetaAppReviewDetailBelongsToApp(
-        assertionClient,
-        updated.id,
-        appId,
-      );
-      if (!sameSelectedAttributes(attributesOf(updated), expectedDetails)) {
-        throw new Error(
-          'Apple did not return the expected Beta App Review details.',
-        );
-      }
-      expectedLiveDetails = canonicalResource(updated);
-      rateBudget.complete('review-details');
-    }
-  }
+): Promise<TestInfoSyncEvidence> => {
   const localizations = await listVerifiedBetaAppLocalizationsForApp(
     client,
     appId,
   );
   const projected = projectLocalizationInventory(localizations, 'app');
   const assertExactLiveReviewInventory = async (): Promise<void> => {
-    await assertExactLiveDetails();
     if (assertionClient === undefined) {
       throw new Error('Apply is missing its app-localization assertion.');
     }
@@ -3226,7 +3003,6 @@ const syncReviewInfo = async (
       rateBudget.complete('app-localization');
       return {
         appLocalizations: withLocalization(projected, projectedCreated),
-        details: expectedLiveDetails,
       };
     }
     const planned = expectedAppLocalization(
@@ -3235,7 +3011,6 @@ const syncReviewInfo = async (
     );
     return {
       appLocalizations: withLocalization(projected, planned),
-      details: expectedLiveDetails,
     };
   } else if (
     sameSelectedAttributes(attributesOf(existing), expectedLocalization)
@@ -3302,7 +3077,6 @@ const syncReviewInfo = async (
           projectedUpdated,
           existing.id,
         ),
-        details: expectedLiveDetails,
       };
     }
     return {
@@ -3311,10 +3085,9 @@ const syncReviewInfo = async (
         expectedAppLocalization(existing.id, review, existing),
         existing.id,
       ),
-      details: expectedLiveDetails,
     };
   }
-  return { appLocalizations: projected, details: expectedLiveDetails };
+  return { appLocalizations: projected };
 };
 const assertBuildLocalizationRelationship = async (
   client: AscClient,
@@ -3351,9 +3124,8 @@ const syncBuildLocalization = async (
   assertionClient: AscClient | undefined,
   appId: string,
   build: JsonApiResource,
-  review: BetaReviewInfo,
+  review: BetaTestInfo,
   configuration: AscAppConfiguration,
-  expectedReviewDetails: JsonApiResource,
   expectedAppLocalizations: readonly JsonApiResource[],
   rateBudget: ApplyRateBudget | undefined,
   apply: boolean,
@@ -3368,24 +3140,6 @@ const syncBuildLocalization = async (
     if (assertionClient === undefined) {
       throw new Error('Apply is missing its build-localization assertion.');
     }
-    const currentDetails = canonicalResource(
-      await assertionClient.get(
-        `/v1/apps/${encodeURIComponent(appId)}/betaAppReviewDetail`,
-        'betaAppReviewDetails',
-      ),
-    );
-    if (
-      canonicalJson(currentDetails) !== canonicalJson(expectedReviewDetails)
-    ) {
-      throw new Error(
-        'Beta App Review details changed before build localization.',
-      );
-    }
-    await assertBetaAppReviewDetailBelongsToApp(
-      assertionClient,
-      currentDetails.id,
-      appId,
-    );
     const currentAppLocalizations = projectLocalizationInventory(
       await listVerifiedBetaAppLocalizationsForApp(assertionClient, appId),
       'app',
@@ -3568,7 +3322,7 @@ const assertCompleteLocalizationEvidence = async (
 const assertExpectedBuildLocalization = async (
   client: AscClient,
   build: JsonApiResource,
-  review: BetaReviewInfo,
+  review: BetaTestInfo,
 ): Promise<void> => {
   const localizations = await listVerifiedBetaBuildLocalizations(
     client,
@@ -3791,119 +3545,17 @@ const buildSummary = (
     ...(typeof audienceType === 'string' ? { audienceType } : {}),
   };
 };
-const ensureManualExternalNotification = async (
-  client: AscClient,
-  assertionClient: AscClient | undefined,
-  appId: string,
-  build: JsonApiResource,
-  configuration: AscAppConfiguration,
-  rateBudget: ApplyRateBudget | undefined,
-  apply: boolean,
-  actions: SyncAction[],
-): Promise<string> => {
-  const path = appendQuery(
-    `/v1/builds/${encodeURIComponent(build.id)}/buildBetaDetail`,
-    { 'fields[buildBetaDetails]': 'autoNotifyEnabled' },
-  );
-  const detail = await client.get(path, 'buildBetaDetails');
-  await assertBuildBetaDetailBelongsToBuild(client, detail.id, build.id);
-  const autoNotifyEnabled = attributesOf(detail).autoNotifyEnabled;
-  if (typeof autoNotifyEnabled !== 'boolean') {
-    throw new Error(
-      'Apple did not provide the external tester notification setting; no changes were made.',
-    );
-  }
-  if (!autoNotifyEnabled) {
-    actions.push({
-      detail:
-        'Automatic external tester notifications are disabled; notifying testers remains a separate human action.',
-      kind: 'build-notification-safety',
-      status: 'unchanged',
-    });
-  } else {
-    actions.push({
-      detail:
-        'Disable automatic external tester notifications before review; notifying testers remains a separate human action.',
-      kind: 'build-notification-safety',
-      status: actionStatus(apply),
-    });
-    if (apply) {
-      if (assertionClient === undefined || rateBudget === undefined) {
-        throw new Error('Apply is missing its notification assertion client.');
-      }
-      rateBudget.assertStageStart(assertionClient, 'external-notification');
-      const current = canonicalResource(
-        await assertionClient.get(path, 'buildBetaDetails'),
-      );
-      if (canonicalJson(current) !== canonicalJson(detail)) {
-        throw new Error(
-          'Automatic external tester notification state changed after confirmation.',
-        );
-      }
-      await assertBuildBetaDetailBelongsToBuild(
-        assertionClient,
-        current.id,
-        build.id,
-      );
-      await assertExactAppIdentity(assertionClient, appId, configuration);
-      rateBudget.assertBeforeMutation(assertionClient, 'external-notification');
-      const updated = await client.mutate(
-        'PATCH',
-        `/v1/buildBetaDetails/${encodeURIComponent(detail.id)}`,
-        {
-          data: {
-            attributes: { autoNotifyEnabled: false },
-            id: detail.id,
-            type: 'buildBetaDetails',
-          },
-        },
-        'buildBetaDetails',
-      );
-      if (updated === null || updated.id !== detail.id) {
-        throw new Error('Apple did not return the updated build beta details.');
-      }
-      await assertBuildBetaDetailBelongsToBuild(
-        assertionClient,
-        updated.id,
-        build.id,
-      );
-    }
-  }
-  if (apply) {
-    if (assertionClient === undefined || rateBudget === undefined) {
-      throw new Error('Apply is missing its notification assertion client.');
-    }
-    const verified = await assertionClient.get(path, 'buildBetaDetails');
-    await assertBuildBetaDetailBelongsToBuild(
-      assertionClient,
-      verified.id,
-      build.id,
-    );
-    if (
-      verified.id !== detail.id ||
-      attributesOf(verified).autoNotifyEnabled !== false
-    ) {
-      throw new Error(
-        'Automatic external tester notification disablement could not be verified.',
-      );
-    }
-    rateBudget.complete('external-notification');
-  }
-  return detail.id;
-};
 const verifyGroupReadyForBuild = async (
   client: AscClient,
   appId: string,
   target: GroupTarget,
   approved: readonly Tester[],
   expectedBuilds: readonly JsonApiResource[],
-  configuration: AscAppConfiguration,
 ): Promise<readonly JsonApiResource[]> => {
   if (target.id === null) throw new Error('Apply has no verified group ID.');
   const groups = await listVerifiedBetaGroupsForApp(client, appId);
   const matches = groups.filter(({ id }) => id === target.id);
   if (
-    !hasExactManagedGroupInventory(groups, configuration) ||
     groups.length > MAX_GROUPS ||
     groups.some(({ type }) => type !== 'betaGroups') ||
     matches.length !== 1 ||
@@ -3929,27 +3581,6 @@ const verifyGroupReadyForBuild = async (
   assertSameGroupBuildInventory(currentBuilds, expectedBuilds);
   return canonicalResources(currentTesters);
 };
-const verifyExternalNotificationStillDisabled = async (
-  client: AscClient,
-  build: JsonApiResource,
-  expectedDetailId: string,
-): Promise<void> => {
-  const detail = await client.get(
-    appendQuery(`/v1/builds/${encodeURIComponent(build.id)}/buildBetaDetail`, {
-      'fields[buildBetaDetails]': 'autoNotifyEnabled',
-    }),
-    'buildBetaDetails',
-  );
-  await assertBuildBetaDetailBelongsToBuild(client, detail.id, build.id);
-  if (
-    detail.id !== expectedDetailId ||
-    attributesOf(detail).autoNotifyEnabled !== false
-  ) {
-    throw new Error(
-      'Automatic external tester notifications changed before distribution.',
-    );
-  }
-};
 const attachBuild = async (
   client: AscClient,
   assertionClient: AscClient | undefined,
@@ -3960,54 +3591,22 @@ const attachBuild = async (
   expectedBuilds: readonly JsonApiResource[],
   testerInventoryState: AppWideTesterInventoryState,
   internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
   configuration: AscAppConfiguration,
-  review: BetaReviewInfo | undefined,
+  review: BetaTestInfo | undefined,
   localizationEvidence: LocalizationEvidence | undefined,
-  external: boolean,
-  notificationDetailId: string | undefined,
   rateBudget: ApplyRateBudget | undefined,
   apply: boolean,
   actions: SyncAction[],
 ): Promise<readonly JsonApiResource[]> => {
-  const rateStage: ApplyRateStage = external
-    ? 'external-build'
-    : 'internal-build';
+  const rateStage: ApplyRateStage = 'internal-build';
   const { id: groupId, name: groupName } = target;
   const approvedAudienceCount = approvedAudience.length;
-  const consequence = external
-    ? `grant access to ${approvedAudienceCount} approved external tester(s); automatic notification stays disabled until a fresh human action`
-    : `grant access to ${approvedAudienceCount} approved internal tester(s) and may send real TestFlight invitation email`;
+  const consequence = `grant access to ${approvedAudienceCount} approved internal tester(s) and may send real TestFlight invitation email`;
   const linked = canonicalGroupBuildInventory(expectedBuilds);
   if (linked.some((item) => item.type === 'builds' && item.id === build.id)) {
     if (apply) {
       if (rateBudget === undefined) {
         throw new Error('Apply is missing its rate-limit budget.');
-      }
-      if (external) {
-        if (
-          assertionClient === undefined ||
-          groupId === null ||
-          notificationDetailId === undefined
-        ) {
-          throw new Error(
-            'External review lacks its live distribution assertions.',
-          );
-        }
-        rateBudget.assertStageStart(assertionClient, rateStage);
-        await verifyGroupReadyForBuild(
-          assertionClient,
-          appId,
-          target,
-          approvedAudience,
-          linked,
-          configuration,
-        );
-        await verifyExternalNotificationStillDisabled(
-          assertionClient,
-          build,
-          notificationDetailId,
-        );
       }
       rateBudget.complete(rateStage);
     }
@@ -4051,7 +3650,6 @@ const attachBuild = async (
       target,
       approvedAudience,
       linked,
-      configuration,
     );
     await assertExpectedBuildLocalization(assertionClient, build, review);
     await assertLiveBuildStillMatches(assertionClient, appId, build);
@@ -4066,19 +3664,8 @@ const attachBuild = async (
       appId,
       testerInventoryState.current,
       internalDesired,
-      externalDesired,
     );
     await assertExactAppIdentity(assertionClient, appId, configuration);
-    if (external) {
-      if (notificationDetailId === undefined) {
-        throw new Error('External distribution lacks notification evidence.');
-      }
-      await verifyExternalNotificationStillDisabled(
-        assertionClient,
-        build,
-        notificationDetailId,
-      );
-    }
     await verifyTargetGroupSnapshotBeforeBuildWrite(
       assertionClient,
       appId,
@@ -4108,309 +3695,6 @@ const attachBuild = async (
     return expectedAfter;
   }
   return canonicalGroupBuildInventory([...linked, build]);
-};
-const betaReviewSubmissionsPath = (buildId: string): string =>
-  appendQuery('/v1/betaAppReviewSubmissions', {
-    'fields[betaAppReviewSubmissions]': 'betaReviewState',
-    'filter[build]': buildId,
-    limit: '200',
-  });
-const projectBetaReviewSubmission = (
-  submission: JsonApiResource,
-): JsonApiResource => {
-  if (submission.type !== 'betaAppReviewSubmissions') {
-    throw new Error(
-      'Apple returned an unexpected Beta App Review submission resource.',
-    );
-  }
-  requireOpaqueIdentifier(submission.id, 'Beta App Review submission ID');
-  const state = attributesOf(submission).betaReviewState;
-  if (state === 'REJECTED') {
-    throw new Error(
-      'The selected build was rejected by Beta App Review; choose a corrected build.',
-    );
-  }
-  if (
-    state !== 'WAITING_FOR_REVIEW' &&
-    state !== 'IN_REVIEW' &&
-    state !== 'APPROVED'
-  ) {
-    throw new Error('Apple returned an unknown Beta App Review state.');
-  }
-  return canonicalResource({
-    attributes: { betaReviewState: state },
-    id: submission.id,
-    type: 'betaAppReviewSubmissions',
-  });
-};
-const assertSubmissionBuildRelationship = async (
-  client: AscClient,
-  submissionId: string,
-  buildId: string,
-): Promise<void> => {
-  const relatedBuild = await client.get(
-    `/v1/betaAppReviewSubmissions/${encodeURIComponent(submissionId)}/build`,
-    'builds',
-  );
-  if (relatedBuild.id !== buildId) {
-    throw new Error(
-      'Beta App Review submission does not belong to the selected exact build.',
-    );
-  }
-};
-const readVerifiedBetaReviewSubmissions = async (
-  client: AscClient,
-  buildId: string,
-): Promise<readonly JsonApiResource[]> => {
-  const returned = validateBoundedResourceInventory(
-    await client.list(betaReviewSubmissionsPath(buildId)),
-    'betaAppReviewSubmissions',
-    'Beta App Review submission',
-    1,
-  );
-  const projected: JsonApiResource[] = [];
-  for (const submission of returned) {
-    await assertSubmissionBuildRelationship(client, submission.id, buildId);
-    projected.push(projectBetaReviewSubmission(submission));
-  }
-  return canonicalResources(projected);
-};
-const existingSubmissionState = (
-  submissions: readonly JsonApiResource[],
-): string | null => {
-  if (submissions.length === 0) return null;
-  if (submissions.length !== 1) {
-    throw new Error('Apple returned ambiguous Beta App Review submissions.');
-  }
-  const state = attributesOf(
-    projectBetaReviewSubmission(submissions[0] as JsonApiResource),
-  ).betaReviewState as string;
-  return state;
-};
-const assertExpectedReviewInfo = async (
-  client: AscClient,
-  appId: string,
-  review: BetaReviewInfo,
-): Promise<void> => {
-  const details = await client.get(
-    `/v1/apps/${encodeURIComponent(appId)}/betaAppReviewDetail`,
-    'betaAppReviewDetails',
-  );
-  await assertBetaAppReviewDetailBelongsToApp(client, details.id, appId);
-  if (
-    !sameSelectedAttributes(attributesOf(details), reviewAttributes(review))
-  ) {
-    throw new Error('Beta App Review details changed before submission.');
-  }
-  const localizations = await listVerifiedBetaAppLocalizationsForApp(
-    client,
-    appId,
-  );
-  if (localizations.some(({ type }) => type !== 'betaAppLocalizations')) {
-    throw new Error('Beta app localization changed before submission.');
-  }
-  for (const localization of localizations) {
-    const description = attributesOf(localization).description;
-    if (typeof description !== 'string' || description.trim() === '') {
-      throw new Error(
-        'Every beta localization needs an approved description before review.',
-      );
-    }
-  }
-  const matching = localizations.filter(
-    (localization) =>
-      localization.type === 'betaAppLocalizations' &&
-      attributesOf(localization).locale === review.locale,
-  );
-  if (
-    matching.length !== 1 ||
-    !sameSelectedAttributes(
-      attributesOf(matching[0] as JsonApiResource),
-      localizationAttributes(review),
-    )
-  ) {
-    throw new Error('Beta app localization changed before submission.');
-  }
-};
-const assertReadyForNewBetaReview = async (
-  client: AscClient,
-  appId: string,
-  target: GroupTarget,
-  approvedAudience: readonly Tester[],
-  expectedBuilds: readonly JsonApiResource[],
-  build: JsonApiResource,
-  review: BetaReviewInfo,
-  localizationEvidence: LocalizationEvidence,
-  testerInventoryState: AppWideTesterInventoryState,
-  internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
-  notificationDetailId: string,
-  configuration: AscAppConfiguration,
-): Promise<void> => {
-  await assertExactAppIdentity(client, appId, configuration);
-  const liveBuild = await assertLiveBuildStillMatches(client, appId, build);
-  const liveBuildAttributes = attributesOf(liveBuild);
-  if (liveBuildAttributes.externalBuildState !== 'READY_FOR_BETA_SUBMISSION') {
-    throw new Error(
-      'The selected build is not positively ready for a new Beta App Review submission.',
-    );
-  }
-  const detail = await client.get(
-    appendQuery(`/v1/builds/${encodeURIComponent(build.id)}/buildBetaDetail`, {
-      'fields[buildBetaDetails]':
-        'autoNotifyEnabled,internalBuildState,externalBuildState',
-    }),
-    'buildBetaDetails',
-  );
-  await assertBuildBetaDetailBelongsToBuild(client, detail.id, build.id);
-  if (
-    detail.id !== notificationDetailId ||
-    attributesOf(detail).autoNotifyEnabled !== false
-  ) {
-    throw new Error(
-      'Automatic external tester notifications changed before Beta App Review.',
-    );
-  }
-  const states = requireBuildBetaStates(detail);
-  if (
-    states.internalBuildState !== liveBuildAttributes.internalBuildState ||
-    states.externalBuildState !== liveBuildAttributes.externalBuildState
-  ) {
-    throw new Error('Selected build beta states changed before review.');
-  }
-  await verifyGroupReadyForBuild(
-    client,
-    appId,
-    target,
-    approvedAudience,
-    expectedBuilds,
-    configuration,
-  );
-  await assertExpectedReviewInfo(client, appId, review);
-  await assertExpectedBuildLocalization(client, build, review);
-  await assertCompleteLocalizationEvidence(
-    client,
-    appId,
-    build,
-    localizationEvidence,
-  );
-  testerInventoryState.current = await assertEquivalentAppTesterInventory(
-    client,
-    appId,
-    testerInventoryState.current,
-    internalDesired,
-    externalDesired,
-  );
-  // This relationship-bound inventory must remain the final provider evidence
-  // before the submission POST.
-  const submissions = await readVerifiedBetaReviewSubmissions(client, build.id);
-  if (submissions.length !== 0) {
-    throw new Error(
-      'Beta App Review submission state changed before the confirmed POST.',
-    );
-  }
-};
-const submitForBetaReview = async (
-  client: AscClient,
-  assertionClient: AscClient | undefined,
-  appId: string,
-  target: GroupTarget,
-  approvedAudience: readonly Tester[],
-  expectedBuilds: readonly JsonApiResource[],
-  build: JsonApiResource,
-  review: BetaReviewInfo,
-  localizationEvidence: LocalizationEvidence,
-  testerInventoryState: AppWideTesterInventoryState,
-  internalDesired: readonly Tester[],
-  externalDesired: readonly Tester[],
-  notificationDetailId: string,
-  configuration: AscAppConfiguration,
-  rateBudget: ApplyRateBudget | undefined,
-  apply: boolean,
-  actions: SyncAction[],
-): Promise<JsonApiResource | null> => {
-  if (apply) {
-    if (assertionClient === undefined || rateBudget === undefined) {
-      throw new Error('Apply is missing its final Beta Review assertions.');
-    }
-    rateBudget.assertStageStart(assertionClient, 'beta-review-submission');
-  }
-  const submissions = await readVerifiedBetaReviewSubmissions(client, build.id);
-  const state = existingSubmissionState(submissions);
-  if (state !== null) {
-    actions.push({
-      detail: `Selected build Beta App Review state is ${state}.`,
-      kind: 'beta-review-submission',
-      status: 'unchanged',
-    });
-    if (apply) {
-      (rateBudget as ApplyRateBudget).complete('beta-review-submission');
-    }
-    return submissions[0] as JsonApiResource;
-  }
-  if (attributesOf(build).externalBuildState !== 'READY_FOR_BETA_SUBMISSION') {
-    throw new Error(
-      'A new Beta App Review submission requires external state READY_FOR_BETA_SUBMISSION.',
-    );
-  }
-  actions.push({
-    detail: 'Submit the selected build for external Beta App Review.',
-    kind: 'beta-review-submission',
-    status: actionStatus(apply),
-  });
-  if (apply) {
-    if (assertionClient === undefined || rateBudget === undefined) {
-      throw new Error('Apply is missing its final Beta Review assertions.');
-    }
-    await assertReadyForNewBetaReview(
-      assertionClient,
-      appId,
-      target,
-      approvedAudience,
-      expectedBuilds,
-      build,
-      review,
-      localizationEvidence,
-      testerInventoryState,
-      internalDesired,
-      externalDesired,
-      notificationDetailId,
-      configuration,
-    );
-    rateBudget.assertBeforeMutation(assertionClient, 'beta-review-submission');
-    const created = await client.mutate(
-      'POST',
-      '/v1/betaAppReviewSubmissions',
-      {
-        data: {
-          relationships: { build: { data: { id: build.id, type: 'builds' } } },
-          type: 'betaAppReviewSubmissions',
-        },
-      },
-      'betaAppReviewSubmissions',
-    );
-    if (created === null) {
-      throw new Error('Apple did not return the Beta App Review submission.');
-    }
-    const projectedCreated = projectBetaReviewSubmission(created);
-    await assertSubmissionBuildRelationship(
-      assertionClient,
-      projectedCreated.id,
-      build.id,
-    );
-    const readback = await readVerifiedBetaReviewSubmissions(
-      assertionClient,
-      build.id,
-    );
-    if (readback.length !== 1 || readback[0]?.id !== projectedCreated.id) {
-      throw new Error(
-        'Apple did not verify the created Beta App Review submission.',
-      );
-    }
-    rateBudget.complete('beta-review-submission');
-    return readback[0];
-  }
-  return null;
 };
 const assertApp = (
   apps: readonly JsonApiResource[],
@@ -4453,8 +3737,6 @@ const verifyAppliedState = async (
   localizationEvidence: LocalizationEvidence | undefined,
   expectedTesterInventory: AppWideTesterInventory,
   expectedInternalBuilds: readonly JsonApiResource[],
-  expectedExternalBuilds: readonly JsonApiResource[],
-  expectedSubmission: JsonApiResource | null,
   downstreamDeferred: boolean,
   configuration: AscAppConfiguration,
 ): Promise<void> => {
@@ -4465,17 +3747,12 @@ const verifyAppliedState = async (
   ) {
     throw new Error('Apply verification found an unsafe group inventory.');
   }
-  if (build !== null && !hasExactManagedGroupInventory(groups, configuration)) {
-    throw new Error(
-      'Apply verification found an unmanaged TestFlight group during build distribution.',
-    );
-  }
-  const find = (name: string, internal: boolean): JsonApiResource => {
+  const find = (name: string): JsonApiResource => {
     const matches = groups.filter(
       (group) =>
         group.type === 'betaGroups' &&
         attributesOf(group).name === name &&
-        attributesOf(group).isInternalGroup === internal,
+        attributesOf(group).isInternalGroup === true,
     );
     if (matches.length !== 1)
       throw new Error(`Apply verification failed for ${name}.`);
@@ -4483,18 +3760,15 @@ const verifyAppliedState = async (
     const expected: JsonObject = {
       feedbackEnabled: true,
       hasAccessToAllBuilds: false,
-      ...(internal ? {} : { publicLinkEnabled: false }),
     };
     if (!sameSelectedAttributes(attributesOf(match), expected)) {
       throw new Error(`Apply verification found unsafe settings for ${name}.`);
     }
     return match;
   };
-  const internal = find(configuration.internalGroupName, true);
-  const external = find(configuration.externalGroupName, false);
+  const internal = find(configuration.internalGroupName);
   for (const [group, name] of [
     [internal, configuration.internalGroupName],
-    [external, configuration.externalGroupName],
   ] as const) {
     const actual = await listVerifiedGroupTesters(client, group.id);
     const expectedMemberships = expectedTesterInventory.groupMemberships
@@ -4519,30 +3793,11 @@ const verifyAppliedState = async (
     await listVerifiedGroupBuilds(client, appId, internal.id),
     expectedInternalBuilds,
   );
-  assertSameGroupBuildInventory(
-    await listVerifiedGroupBuilds(client, appId, external.id),
-    expectedExternalBuilds,
-  );
   if (downstreamDeferred) {
-    if (localizationEvidence !== undefined || expectedSubmission !== null) {
+    if (localizationEvidence !== undefined) {
       throw new Error('Deferred downstream work produced unexpected evidence.');
     }
-  } else if (options.reviewInfo !== undefined) {
-    const details = await client.get(
-      `/v1/apps/${encodeURIComponent(appId)}/betaAppReviewDetail`,
-      'betaAppReviewDetails',
-    );
-    await assertBetaAppReviewDetailBelongsToApp(client, details.id, appId);
-    if (
-      !sameSelectedAttributes(
-        attributesOf(details),
-        reviewAttributes(options.reviewInfo),
-      )
-    ) {
-      throw new Error(
-        'Apply verification found Beta App Review details mismatched.',
-      );
-    }
+  } else if (options.testInfo !== undefined) {
     if (localizationEvidence === undefined) {
       throw new Error('Apply verification is missing localization evidence.');
     }
@@ -4557,47 +3812,11 @@ const verifyAppliedState = async (
       'Apply verification found unexpected localization evidence.',
     );
   }
-  if (!downstreamDeferred && options.submitBetaReview && build !== null) {
-    const notificationDetail = await client.get(
-      appendQuery(
-        `/v1/builds/${encodeURIComponent(build.id)}/buildBetaDetail`,
-        { 'fields[buildBetaDetails]': 'autoNotifyEnabled' },
-      ),
-      'buildBetaDetails',
-    );
-    await assertBuildBetaDetailBelongsToBuild(
-      client,
-      notificationDetail.id,
-      build.id,
-    );
-    if (attributesOf(notificationDetail).autoNotifyEnabled !== false) {
-      throw new Error(
-        'Apply verification found automatic external tester notifications enabled.',
-      );
-    }
-    const submissions = await readVerifiedBetaReviewSubmissions(
-      client,
-      build.id,
-    );
-    if (
-      expectedSubmission === null ||
-      submissions.length !== 1 ||
-      submissions[0]?.id !== expectedSubmission.id ||
-      existingSubmissionState(submissions) === null
-    ) {
-      throw new Error(
-        'Apply verification found no exact Beta App Review submission.',
-      );
-    }
-  } else if (expectedSubmission !== null) {
-    throw new Error('Apply verification found unexpected review evidence.');
-  }
   await assertEquivalentAppTesterInventory(
     client,
     appId,
     expectedTesterInventory,
     options.internalTesters,
-    options.externalTesters,
   );
   await assertExactAppIdentity(client, appId, configuration);
 };
@@ -4641,25 +3860,12 @@ const reconcileTestFlight = async (
   captureTesterWriteLimit?: (limit: number) => void,
 ): Promise<ReconcileResult> => {
   if (
-    options.submitBetaReview &&
-    (options.reviewInfo === undefined || options.build === undefined)
-  ) {
-    throw new Error(
-      'Beta App Review submission requires review info and a build.',
-    );
-  }
-  if (options.submitBetaReview && options.build === 'latest') {
-    throw new Error(
-      'Beta App Review requires an exact build ID reviewed by the operator; latest is discovery-only.',
-    );
-  }
-  if (
     options.build !== undefined &&
     options.build !== 'latest' &&
-    options.reviewInfo === undefined
+    options.testInfo === undefined
   ) {
     throw new Error(
-      'An exact build plan or apply requires approved review info, including What to Test text.',
+      'An exact build plan or apply requires approved beta test info, including What to Test text.',
     );
   }
   if (options.apply && options.build === 'latest') {
@@ -4670,20 +3876,9 @@ const reconcileTestFlight = async (
   if (options.internalTesters.length > MAX_INTERNAL_TESTERS) {
     throw new Error("Internal tester input exceeds Apple's 100-user limit.");
   }
-  if (
-    options.internalTesters.length + options.externalTesters.length >
-    MAX_APPROVED_TESTERS
-  ) {
-    throw new Error('Combined tester input exceeds the approved PSD limit.');
-  }
-  const allTesterEmails = [
-    ...options.internalTesters.map(({ email }) => email),
-    ...options.externalTesters.map(({ email }) => email),
-  ];
+  const allTesterEmails = options.internalTesters.map(({ email }) => email);
   if (new Set(allTesterEmails).size !== allTesterEmails.length) {
-    throw new Error(
-      'Tester inputs must be unique and cannot cross internal/external groups.',
-    );
+    throw new Error('Tester inputs must be unique.');
   }
   const apps = await client.list(appIdentityPath(options.app));
   const app = assertApp(apps, options.app);
@@ -4691,15 +3886,6 @@ const reconcileTestFlight = async (
     options.build === undefined
       ? null
       : await resolveBuild(client, app.id, options.build);
-  if (
-    options.submitBetaReview &&
-    build !== null &&
-    attributesOf(build).buildAudienceType !== 'APP_STORE_ELIGIBLE'
-  ) {
-    throw new Error(
-      'External Beta App Review requires an APP_STORE_ELIGIBLE build.',
-    );
-  }
   const actions: SyncAction[] = [];
   await preflightInternalTesters(
     client,
@@ -4714,20 +3900,9 @@ const reconcileTestFlight = async (
   ) {
     throw new Error('Apple returned an unsafe beta-group inventory.');
   }
-  if (
-    build !== null &&
-    groups.some((group) => !isManagedGroupIdentity(group, options.app))
-  ) {
-    throw new Error(
-      'Build distribution requires an app inventory containing only the two managed TestFlight groups; no changes were made.',
-    );
-  }
   const groupInventoryState: BetaGroupInventoryState = { current: groups };
   const requiredGroupCreations = (
-    [
-      [options.app.internalGroupName, true],
-      [options.app.externalGroupName, false],
-    ] as const
+    [[options.app.internalGroupName, true]] as const
   ).filter(
     ([name, internal]) =>
       !groups.some(
@@ -4746,7 +3921,6 @@ const reconcileTestFlight = async (
     app.id,
     groups,
     options.internalTesters,
-    options.externalTesters,
   );
   const testerIdentityRegistry = new TesterIdentityAudienceRegistry(
     expectedTesterInventory,
@@ -4754,7 +3928,7 @@ const reconcileTestFlight = async (
   const accountTesterByEmail = await collectAccountBetaTesters(
     client,
     testerIdentityRegistry,
-    options.internalTesters.length + options.externalTesters.length > 0,
+    options.internalTesters.length > 0,
   );
   const internalGroupSnapshot = await collectManagedGroupSnapshot(
     client,
@@ -4762,13 +3936,6 @@ const reconcileTestFlight = async (
     groups,
     options.app.internalGroupName,
     true,
-  );
-  const externalGroupSnapshot = await collectManagedGroupSnapshot(
-    client,
-    app.id,
-    groups,
-    options.app.externalGroupName,
-    false,
   );
   const testerInventoryState: AppWideTesterInventoryState = {
     current: expectedTesterInventory,
@@ -4778,9 +3945,7 @@ const reconcileTestFlight = async (
     expectedTesterInventory,
     accountTesterByEmail,
     internalGroupSnapshot,
-    externalGroupSnapshot,
     options.internalTesters,
-    options.externalTesters,
     options.app,
     client.rateLimitRemaining(),
     confirmedTesterWriteLimit,
@@ -4811,14 +3976,13 @@ const reconcileTestFlight = async (
       app.id,
       expectedTesterInventory,
       options.internalTesters,
-      options.externalTesters,
     );
     assertTesterWriteRateLimitBudget(
       assertionClient,
       0,
       testerWritePlan.auditReserve,
     );
-    for (const snapshot of [internalGroupSnapshot, externalGroupSnapshot]) {
+    for (const snapshot of [internalGroupSnapshot]) {
       if (!snapshot.target.existedInSnapshot) continue;
       await verifyManagedGroupInventoryBeforeMutation(
         assertionClient,
@@ -4851,34 +4015,27 @@ const reconcileTestFlight = async (
       testerIdentityRegistry.registerResolvedTester(
         liveTester,
         selected.audience,
-        new Set(
-          (selected.audience === 'internal'
-            ? options.internalTesters
-            : options.externalTesters
-          ).map(({ email }) => email),
-        ),
+        new Set(options.internalTesters.map(({ email }) => email)),
       );
     }
     if (testerWritePlan.pendingCount === 0) {
       const appLocalizations =
-        options.reviewInfo === undefined
+        options.testInfo === undefined
           ? []
           : await listVerifiedBetaAppLocalizationsForApp(
               assertionClient,
               app.id,
             );
       const buildLocalizations =
-        options.reviewInfo === undefined || build === null
+        options.testInfo === undefined || build === null
           ? []
           : await listVerifiedBetaBuildLocalizations(assertionClient, build.id);
       const ratePlan = downstreamRequestReserve(
         groups,
         testerInventoryState.current,
         internalGroupSnapshot,
-        externalGroupSnapshot,
         build,
-        options.reviewInfo !== undefined,
-        options.submitBetaReview,
+        options.testInfo !== undefined,
         {
           appLocalizationCount: appLocalizations.length,
           buildLocalizationCount: buildLocalizations.length,
@@ -4895,7 +4052,6 @@ const reconcileTestFlight = async (
       );
       const stages = new Map<ApplyRateStage, ApplyRateStageReservation>([
         ['group-internal', { guardCost: 12, totalCost: 33 }],
-        ['group-external', { guardCost: 12, totalCost: 33 }],
       ]);
       applyRateBudget = new ApplyRateBudget({
         finalAuditReserve:
@@ -4916,20 +4072,6 @@ const reconcileTestFlight = async (
     groupInventoryState,
     applyRateBudget,
     options.app.internalGroupName,
-    true,
-    options.app,
-    options.apply,
-    actions,
-  );
-  const externalGroupId = await ensureGroup(
-    client,
-    assertionClient,
-    app.id,
-    groups,
-    groupInventoryState,
-    applyRateBudget,
-    options.app.externalGroupName,
-    false,
     options.app,
     options.apply,
     actions,
@@ -4941,7 +4083,6 @@ const reconcileTestFlight = async (
     testerIdentityRegistry,
     testerInventoryState,
     options.internalTesters,
-    options.externalTesters,
     accountTesterByEmail,
     internalGroupId,
     internalGroupSnapshot.testers,
@@ -4954,43 +4095,23 @@ const reconcileTestFlight = async (
     actions,
   );
   let expectedInternalBuilds = internalTesterSync.expectedBuilds;
-  const externalTesterSync = await syncTesters(
-    client,
-    assertionClient,
-    app.id,
-    testerIdentityRegistry,
-    testerInventoryState,
-    options.internalTesters,
-    options.externalTesters,
-    accountTesterByEmail,
-    externalGroupId,
-    externalGroupSnapshot.testers,
-    externalGroupSnapshot.builds,
-    options.externalTesters,
-    testerWritePlan,
-    undefined,
-    options.app,
-    options.apply,
-    actions,
-  );
-  let expectedExternalBuilds = externalTesterSync.expectedBuilds;
   const selectedTesterWrites = testerWritePlan.selected.length;
   const downstreamDeferred =
     testerWritePlan.deferred > 0 || selectedTesterWrites > 0;
   let localizationEvidence: LocalizationEvidence | undefined;
-  if (downstreamDeferred && options.reviewInfo !== undefined) {
+  if (downstreamDeferred && options.testInfo !== undefined) {
     actions.push({
       detail:
-        'Defer Beta App Review metadata until every approved tester chunk has been freshly previewed and applied.',
-      kind: 'beta-review-details',
+        'Defer TestFlight beta test metadata until every approved tester chunk has been freshly previewed and applied.',
+      kind: 'beta-localization',
       status: 'deferred',
     });
-  } else if (options.reviewInfo !== undefined) {
-    const reviewInfoEvidence = await syncReviewInfo(
+  } else if (options.testInfo !== undefined) {
+    const testInfoEvidence = await syncTestInfo(
       client,
       assertionClient,
       app.id,
-      options.reviewInfo,
+      options.testInfo,
       options.app,
       applyRateBudget,
       options.apply,
@@ -5002,58 +4123,30 @@ const reconcileTestFlight = async (
         assertionClient,
         app.id,
         build,
-        options.reviewInfo,
+        options.testInfo,
         options.app,
-        reviewInfoEvidence.details,
-        reviewInfoEvidence.appLocalizations,
+        testInfoEvidence.appLocalizations,
         applyRateBudget,
         options.apply,
         actions,
       );
       localizationEvidence = {
-        appLocalizations: reviewInfoEvidence.appLocalizations,
+        appLocalizations: testInfoEvidence.appLocalizations,
         buildLocalizations,
       };
     } else {
       localizationEvidence = {
-        appLocalizations: reviewInfoEvidence.appLocalizations,
+        appLocalizations: testInfoEvidence.appLocalizations,
       };
     }
   }
-  let notificationDetailId: string | undefined;
-  let expectedSubmission: JsonApiResource | null = null;
   if (downstreamDeferred && build !== null) {
     actions.push({
       detail: `Defer build ${build.id} distribution to ${options.app.internalGroupName} until a fresh zero-backlog preview confirms the complete approved roster.`,
       kind: 'build-distribution',
       status: 'deferred',
     });
-    if (options.submitBetaReview) {
-      actions.push({
-        detail: `Defer build ${build.id} distribution to ${options.app.externalGroupName} until a fresh zero-backlog preview confirms the complete approved roster.`,
-        kind: 'build-distribution',
-        status: 'deferred',
-      });
-      actions.push({
-        detail:
-          'Defer Beta App Review submission until the complete approved roster is verified in a fresh preview.',
-        kind: 'beta-review-submission',
-        status: 'deferred',
-      });
-    }
   } else if (build !== null) {
-    if (options.submitBetaReview) {
-      notificationDetailId = await ensureManualExternalNotification(
-        client,
-        assertionClient,
-        app.id,
-        build,
-        options.app,
-        applyRateBudget,
-        options.apply,
-        actions,
-      );
-    }
     expectedInternalBuilds = await attachBuild(
       client,
       assertionClient,
@@ -5064,64 +4157,13 @@ const reconcileTestFlight = async (
       expectedInternalBuilds,
       testerInventoryState,
       options.internalTesters,
-      options.externalTesters,
       options.app,
-      options.reviewInfo,
+      options.testInfo,
       localizationEvidence,
-      false,
-      undefined,
       applyRateBudget,
       options.apply,
       actions,
     );
-    if (options.submitBetaReview) {
-      expectedExternalBuilds = await attachBuild(
-        client,
-        assertionClient,
-        app.id,
-        externalGroupId,
-        build,
-        options.externalTesters,
-        expectedExternalBuilds,
-        testerInventoryState,
-        options.internalTesters,
-        options.externalTesters,
-        options.app,
-        options.reviewInfo,
-        localizationEvidence,
-        true,
-        notificationDetailId,
-        applyRateBudget,
-        options.apply,
-        actions,
-      );
-      if (
-        options.reviewInfo === undefined ||
-        localizationEvidence === undefined ||
-        notificationDetailId === undefined
-      ) {
-        throw new Error('Beta App Review is missing approved metadata.');
-      }
-      expectedSubmission = await submitForBetaReview(
-        client,
-        assertionClient,
-        app.id,
-        externalGroupId,
-        options.externalTesters,
-        expectedExternalBuilds,
-        build,
-        options.reviewInfo,
-        localizationEvidence,
-        testerInventoryState,
-        options.internalTesters,
-        options.externalTesters,
-        notificationDetailId,
-        options.app,
-        applyRateBudget,
-        options.apply,
-        actions,
-      );
-    }
   }
   if (options.apply) {
     beforeVerification?.();
@@ -5142,8 +4184,6 @@ const reconcileTestFlight = async (
       localizationEvidence,
       testerInventoryState.current,
       expectedInternalBuilds,
-      expectedExternalBuilds,
-      expectedSubmission,
       downstreamDeferred,
       options.app,
     );
@@ -5474,16 +4514,11 @@ interface SnapshotOptions extends ReconcileOptions {
 const snapshotSyncOptions = (options: SyncOptions): SnapshotOptions => {
   const appInput = options.app;
   const apply = options.apply;
-  const submitBetaReview = options.submitBetaReview;
   const internalTesterInput = options.internalTesters;
-  const externalTesterInput = options.externalTesters;
-  const reviewInput = options.reviewInfo;
+  const testInput = options.testInfo;
   const buildInput = options.build;
   const confirmPlanDigest = options.confirmPlanDigest;
-  if (
-    (apply !== true && apply !== false) ||
-    typeof submitBetaReview !== 'boolean'
-  ) {
+  if (apply !== true && apply !== false) {
     throw new Error('Sync options are invalid.');
   }
   if (apply && !PLAN_DIGEST_PATTERN.test(confirmPlanDigest ?? '')) {
@@ -5499,18 +4534,10 @@ const snapshotSyncOptions = (options: SyncOptions): SnapshotOptions => {
     'Internal tester input',
     MAX_INTERNAL_TESTERS,
   );
-  const externalTesters = snapshotTesterList(
-    externalTesterInput,
-    'External tester input',
-    MAX_APPROVED_TESTERS,
-  );
-  if (internalTesters.length + externalTesters.length > MAX_APPROVED_TESTERS) {
-    throw new Error('Combined tester input exceeds the approved PSD limit.');
-  }
-  const reviewInfo =
-    reviewInput === undefined
+  const testInfo =
+    testInput === undefined
       ? undefined
-      : Object.freeze(parseReviewInfo(reviewInput));
+      : Object.freeze(parseTestInfo(testInput));
   const build =
     buildInput === undefined
       ? undefined
@@ -5521,31 +4548,19 @@ const snapshotSyncOptions = (options: SyncOptions): SnapshotOptions => {
     appName: requireString(appInput?.appName, 'App name', 255),
     appSku: requireString(appInput?.appSku, 'App SKU', 255),
     bundleId: requireString(appInput?.bundleId, 'Bundle ID', 255),
-    externalGroupName: requireString(
-      appInput?.externalGroupName,
-      'External group name',
-      255,
-    ),
     internalGroupName: requireString(
       appInput?.internalGroupName,
       'Internal group name',
       255,
     ),
   });
-  if (app.internalGroupName === app.externalGroupName) {
-    throw new Error(
-      'Internal and external TestFlight group names must differ.',
-    );
-  }
   return Object.freeze({
     app,
     apply,
-    externalTesters,
     internalTesters,
-    submitBetaReview,
     ...(build === undefined ? {} : { build }),
     ...(confirmPlanDigest === undefined ? {} : { confirmPlanDigest }),
-    ...(reviewInfo === undefined ? {} : { reviewInfo }),
+    ...(testInfo === undefined ? {} : { testInfo }),
   });
 };
 const digestPlan = (
@@ -5562,13 +4577,11 @@ const digestPlan = (
     observations,
     operations: {
       build: options.build ?? null,
-      externalTesters: options.externalTesters,
       internalTesters: options.internalTesters,
-      reviewInfo: options.reviewInfo ?? null,
-      submitBetaReview: options.submitBetaReview,
+      testInfo: options.testInfo ?? null,
     },
     plan,
-    schemaVersion: 14,
+    schemaVersion: 15,
   };
   return `sha256:${createHash('sha256').update(canonicalJson(material)).digest('hex')}`;
 };
