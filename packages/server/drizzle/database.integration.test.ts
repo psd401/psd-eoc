@@ -3351,6 +3351,26 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       // dropped, endpoint_status_records had no has_table_privilege check
       // anywhere in this file, so the protection was left entirely unasserted.
       // It is asserted here rather than claimed in a comment.
+      // Migration 0010 revoked INSERT here because every intent had to go
+      // through a SECURITY DEFINER function bound to a fan-out control record.
+      // Migration 0023 removed that gate and dropped the function without
+      // restoring the privilege, which left the application with no way to
+      // record an intent at all: every activation failed with
+      // insufficient_privilege, so a confirmed drill or incident reached
+      // nobody.
+      const notificationIntentInsert = await createdConnection.db.execute<{
+        can_insert: boolean;
+      }>(sql`
+        select has_table_privilege(
+          'psd_eoc_app',
+          'public.notification_intents',
+          'INSERT'
+        ) as can_insert
+      `);
+      expect(notificationIntentInsert.map((row) => row.can_insert)).toEqual([
+        true,
+      ]);
+
       const endpointStatusDeleteGrant = await createdConnection.db.execute<{
         can_delete: boolean;
       }>(sql`
