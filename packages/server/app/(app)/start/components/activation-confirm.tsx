@@ -22,6 +22,7 @@ import {
 } from '../_lib/client-request';
 import { ClassificationBanner } from './classification-banner';
 import { ClassificationIcon } from './classification-icon';
+import { blockingReasonSentence } from '../../../../lib/events/blocking-reasons';
 
 export interface ConfirmedSelection {
   readonly eventKind: Extract<EventKind, 'incident' | 'drill'>;
@@ -724,10 +725,19 @@ export function ActivationConfirm({
               <section className="error-summary" role="alert">
                 <h2>Notifications are not ready</h2>
                 <p>The event cannot be started from this preview.</p>
-                <p>
-                  One or more server prerequisites are unavailable. Refresh the
-                  preview; if it remains blocked, contact an administrator.
-                </p>
+                {preview.blockingReasonCodes.length > 0 ? (
+                  <ul>
+                    {preview.blockingReasonCodes.map((code) => (
+                      <li key={code}>{blockingReasonSentence(code)}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>
+                    One or more server prerequisites are unavailable. Refresh
+                    the preview; if it remains blocked, contact an
+                    administrator.
+                  </p>
+                )}
                 <p>No event was started and no notification was queued.</p>
               </section>
             ) : (
