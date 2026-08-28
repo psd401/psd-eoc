@@ -22,7 +22,6 @@ import {
   channelConfigurations,
   deviceEnrollments,
   groupSources,
-  integrationChannelChangeAuthorizations,
   integrationStatuses,
   rosterSourceConfigurationFacilities,
   rosterSourceConfigurationGroups,
@@ -48,6 +47,7 @@ import { executeAuditedCapabilityTransaction } from '../../../lib/capabilities/e
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
+  ADMINISTRATOR_ENABLEMENT_REFERENCE,
   SMS_INTEGRATION_ID,
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
@@ -2462,7 +2462,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         integrationId: 'mobile-push',
         label: 'live-verified',
         verifiedByUserId: authenticated.actor.userId,
-        authorizationReference: directVerificationReference,
+        authorizationReference: ADMINISTRATOR_ENABLEMENT_REFERENCE,
       },
     });
     if (authenticated.actor.kind !== 'human') {
@@ -2623,6 +2623,9 @@ describeWithDatabase('facilities administrator database flow', () => {
     releaseOneTimeRaceLock?.();
     await oneTimeRaceBlocker;
 
+    // Enabling is a direct administrator action rather than the consumption of
+    // a single-use artifact, so two concurrent requests for the same desired
+    // state both succeed and converge instead of one losing a race.
     const oneTimeRaceResults = await oneTimeRaceResultsPromise;
     const oneTimeRaceSuccesses = oneTimeRaceResults.filter(
       (result) => result.status === 'fulfilled',
@@ -2630,68 +2633,22 @@ describeWithDatabase('facilities administrator database flow', () => {
     const oneTimeRaceFailures = oneTimeRaceResults.filter(
       (result) => result.status === 'rejected',
     );
-    expect(oneTimeRaceSuccesses).toHaveLength(1);
-    expect(oneTimeRaceFailures).toHaveLength(1);
-    expect(oneTimeRaceFailures[0]?.reason).toBeInstanceOf(AdminCapabilityError);
-    expect(
-      (oneTimeRaceFailures[0]?.reason as AdminCapabilityError).status,
-    ).toBe(403);
-    const oneTimeRaceAuthorizationRows = await database
+    expect(oneTimeRaceSuccesses).toHaveLength(2);
+    expect(oneTimeRaceFailures).toHaveLength(0);
+    for (const raceMetadata of oneTimeRaceMetadata) {
+      requestIds.push(raceMetadata.requestId);
+    }
+    const [oneTimeRaceConfiguration] = await database
       .select({
-        reference: integrationChannelChangeAuthorizations.reference,
-        requestId: integrationChannelChangeAuthorizations.consumedRequestId,
+        enabled: channelConfigurations.enabled,
+        statusLabel: channelConfigurations.statusLabel,
       })
-      .from(integrationChannelChangeAuthorizations)
-      .where(
-        eq(
-          integrationChannelChangeAuthorizations.integrationStatusId,
-          oneTimeRaceStatusId,
-        ),
-      );
-    expect(oneTimeRaceAuthorizationRows).toHaveLength(1);
-    const [oneTimeRaceAuthorizationRow] = oneTimeRaceAuthorizationRows;
-    if (oneTimeRaceAuthorizationRow === undefined) {
-      throw new Error('The one-time authorization evidence row is missing.');
-    }
-    expect(oneTimeRaceAuthorizationRow.reference).toBe(
-      oneTimeRaceAuthorization.reference,
-    );
-    const oneTimeRaceWinnerIndex = oneTimeRaceResults.findIndex(
-      (result) => result.status === 'fulfilled',
-    );
-    const oneTimeRaceWinnerMetadata =
-      oneTimeRaceMetadata[oneTimeRaceWinnerIndex];
-    if (oneTimeRaceWinnerMetadata === undefined) {
-      throw new Error('The one-time authorization race has no winner.');
-    }
-    expect(oneTimeRaceAuthorizationRow.requestId).toBe(
-      oneTimeRaceWinnerMetadata.requestId,
-    );
-    requestIds.push(oneTimeRaceWinnerMetadata.requestId);
-    const oneTimeRaceLoserIndex = oneTimeRaceResults.findIndex(
-      (result) => result.status === 'rejected',
-    );
-    const oneTimeRaceLoserMetadata = oneTimeRaceMetadata[oneTimeRaceLoserIndex];
-    if (oneTimeRaceLoserMetadata === undefined) {
-      throw new Error('The one-time authorization race has no loser.');
-    }
-    const [oneTimeRaceFailureAudit] = await database
-      .select({
-        action: securityAuditEntries.action,
-        category: securityAuditEntries.category,
-        outcome: securityAuditEntries.outcome,
-        reasonCode: securityAuditEntries.reasonCode,
-      })
-      .from(securityAuditEntries)
-      .where(
-        eq(securityAuditEntries.requestId, oneTimeRaceLoserMetadata.requestId),
-      )
+      .from(channelConfigurations)
+      .where(eq(channelConfigurations.integrationId, oneTimeRaceIntegrationId))
       .limit(1);
-    expect(oneTimeRaceFailureAudit).toEqual({
-      action: 'set-channel-enabled',
-      category: 'access-denial',
-      outcome: 'denied',
-      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+    expect(oneTimeRaceConfiguration).toEqual({
+      enabled: true,
+      statusLabel: 'live-verified',
     });
 
     const statusRaceIntegrationId = `synthetic-live-status-race-${suffix}`;
@@ -2790,16 +2747,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       statusId: statusRaceBlockedStatusId,
       statusLabel: 'blocked',
     });
-    const statusRaceAuthorizationRows = await database
-      .select({ id: integrationChannelChangeAuthorizations.id })
-      .from(integrationChannelChangeAuthorizations)
-      .where(
-        eq(
-          integrationChannelChangeAuthorizations.integrationStatusId,
-          statusRaceLiveStatusId,
-        ),
-      );
-    expect(statusRaceAuthorizationRows).toHaveLength(1);
 
     const liveIntegrationId = `synthetic-live-${suffix}`;
     const liveStatusId = randomUUID();
@@ -2875,43 +2822,6 @@ describeWithDatabase('facilities administrator database flow', () => {
         metadata: replayMetadata(liveMetadata, requestIds),
       }),
     ).toEqual(liveChannelResult);
-    const authorizationRows = await database
-      .select({
-        reference: integrationChannelChangeAuthorizations.reference,
-        requestId: integrationChannelChangeAuthorizations.consumedRequestId,
-      })
-      .from(integrationChannelChangeAuthorizations)
-      .where(
-        eq(
-          integrationChannelChangeAuthorizations.integrationStatusId,
-          liveStatusId,
-        ),
-      );
-    expect(authorizationRows).toEqual([
-      { reference, requestId: liveMetadata.requestId },
-    ]);
-
-    const copiedReferenceRequestId = randomUUID();
-    try {
-      await executeSetChannelEnabledCapability({
-        authenticated,
-        store,
-        command: {
-          integrationId: liveIntegrationId,
-          enabled: true,
-          authorization: liveAuthorization,
-        },
-        metadata: {
-          idempotencyKey: `issue-26-live-reuse-${randomUUID()}`,
-          requestId: copiedReferenceRequestId,
-          now: new Date(),
-        },
-      });
-      throw new Error('Expected live authorization reuse to fail closed.');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(403);
-    }
     const [persistedLiveConfiguration] = await database
       .select({
         enabled: channelConfigurations.enabled,
@@ -3001,77 +2911,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       expect(error).toBeInstanceOf(AdminCapabilityError);
       expect((error as AdminCapabilityError).status).toBe(403);
     }
-
-    const expiredIntegrationId = `synthetic-expired-${suffix}`;
-    const expiredStatusId = randomUUID();
-    const expiredIssuedAt = new Date(Date.now() - 20 * 60 * 1_000);
-    const expiredExpiresAt = new Date(
-      expiredIssuedAt.getTime() + 15 * 60 * 1_000,
-    );
-    const expiredBase = {
-      reference: `issue-26-expired-${randomUUID()}`,
-      integrationStatusId: expiredStatusId,
-      integrationId: expiredIntegrationId,
-      desiredEnabled: true,
-      requestDigest: '0'.repeat(64),
-      consequenceDigest: '0'.repeat(64),
-      authorizedByUserId: authenticated.actor.userId,
-      authorizedWithSessionId: authenticated.actor.sessionId,
-      issuedAt: expiredIssuedAt.toISOString(),
-      expiresAt: expiredExpiresAt.toISOString(),
-    } as const;
-    const expiredAuthorization =
-      IntegrationChannelChangeAuthorizationSchema.parse({
-        ...expiredBase,
-        requestDigest: liveChannelChangeRequestDigest(expiredBase),
-        consequenceDigest: liveChannelChangeConsequenceDigest({
-          integrationId: expiredIntegrationId,
-          previousConfiguration: null,
-          desiredEnabled: true,
-          integrationStatusId: expiredStatusId,
-        }),
-      });
-    await database.insert(integrationStatuses).values({
-      id: expiredStatusId,
-      integrationId: expiredIntegrationId,
-      label: 'live-verified',
-      verifiedAt: expiredIssuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference:
-        liveChannelChangeAuthorizationCommitment(expiredAuthorization),
-      reasonCode: null,
-      observedAt: expiredIssuedAt,
-    });
-    for (const authorization of [null, expiredAuthorization]) {
-      try {
-        await executeSetChannelEnabledCapability({
-          authenticated,
-          store,
-          command: {
-            integrationId: expiredIntegrationId,
-            enabled: true,
-            authorization,
-          },
-          metadata: {
-            idempotencyKey: `issue-26-expired-live-${randomUUID()}`,
-            requestId: randomUUID(),
-            now: new Date(),
-          },
-        });
-        throw new Error(
-          'Expected missing or expired live authorization to fail closed.',
-        );
-      } catch (error) {
-        expect(error).toBeInstanceOf(AdminCapabilityError);
-        expect((error as AdminCapabilityError).status).toBe(403);
-      }
-    }
-    expect(
-      await database
-        .select({ id: channelConfigurations.integrationId })
-        .from(channelConfigurations)
-        .where(eq(channelConfigurations.integrationId, expiredIntegrationId)),
-    ).toEqual([]);
 
     await executeUpdateFacilityCapability({
       authenticated,
@@ -3188,272 +3027,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       .where(eq(securityAuditEntries.requestId, missingFacilityRequestId))
       .limit(1);
     expect(missingFacilityAudit?.requestId).toBe(missingFacilityRequestId);
-  });
-
-  test('rejects mismatched live authorization and enforces exact single use', async () => {
-    const database = databaseConnection().db;
-    const authenticated = authenticatedAdministrator();
-    await persistLiveAuthorizationActor(database, authenticated, 'primary');
-    if (authenticated.actor.kind !== 'human') {
-      throw new Error('The primary live authorization actor must be human.');
-    }
-    const differentHuman = authenticatedAdministrator();
-    await persistLiveAuthorizationActor(database, differentHuman, 'other');
-    const differentSession = {
-      ...authenticated,
-      actor: {
-        kind: 'human' as const,
-        userId: authenticated.actor.userId,
-        sessionId: randomUUID(),
-      },
-    } as unknown as AuthenticatedSession;
-    await persistLiveAuthorizationActor(
-      database,
-      differentSession,
-      'different-session',
-    );
-
-    const mismatchIntegrationId = `synthetic-live-mismatch-${randomUUID()}`;
-    const mismatchStatusId = randomUUID();
-    const mismatchIssuedAt = new Date(Date.now() - 1_000);
-    const validAuthorization = liveAuthorizationFor({
-      authenticated,
-      integrationId: mismatchIntegrationId,
-      integrationStatusId: mismatchStatusId,
-      previousConfiguration: null,
-      issuedAt: mismatchIssuedAt,
-    });
-    await database.insert(integrationStatuses).values({
-      id: mismatchStatusId,
-      integrationId: mismatchIntegrationId,
-      label: 'live-verified',
-      verifiedAt: mismatchIssuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference:
-        liveChannelChangeAuthorizationCommitment(validAuthorization),
-      reasonCode: null,
-      observedAt: mismatchIssuedAt,
-    });
-
-    const mismatchCases = [
-      {
-        label: 'different-human',
-        caller: differentHuman,
-        authorization: validAuthorization,
-      },
-      {
-        label: 'different-session',
-        caller: differentSession,
-        authorization: validAuthorization,
-      },
-      {
-        label: 'different-status',
-        caller: authenticated,
-        authorization: {
-          ...validAuthorization,
-          integrationStatusId: randomUUID(),
-        },
-      },
-      {
-        label: 'bad-request-digest',
-        caller: authenticated,
-        authorization: {
-          ...validAuthorization,
-          requestDigest: 'f'.repeat(64),
-        },
-      },
-      {
-        label: 'bad-consequence-digest',
-        caller: authenticated,
-        authorization: {
-          ...validAuthorization,
-          consequenceDigest: 'e'.repeat(64),
-        },
-      },
-      {
-        label: 'different-issued-at',
-        caller: authenticated,
-        authorization: {
-          ...validAuthorization,
-          issuedAt: new Date(mismatchIssuedAt.getTime() + 1).toISOString(),
-        },
-      },
-    ] as const;
-    for (const mismatch of mismatchCases) {
-      const callerStore = createDrizzleAdminCapabilityStore(
-        database,
-        mismatch.caller,
-      );
-      try {
-        await executeSetChannelEnabledCapability({
-          authenticated: mismatch.caller,
-          store: callerStore,
-          command: {
-            integrationId: mismatchIntegrationId,
-            enabled: true,
-            authorization: mismatch.authorization,
-          },
-          metadata: {
-            idempotencyKey: `issue-26-live-mismatch-${mismatch.label}-${randomUUID()}`,
-            requestId: randomUUID(),
-            now: new Date(),
-          },
-        });
-        throw new Error(
-          `Expected ${mismatch.label} live authorization to fail closed.`,
-        );
-      } catch (error) {
-        expect(error).toBeInstanceOf(AdminCapabilityError);
-        expect((error as AdminCapabilityError).status).toBe(403);
-      }
-    }
-    expect(
-      await database
-        .select({ id: integrationChannelChangeAuthorizations.id })
-        .from(integrationChannelChangeAuthorizations)
-        .where(
-          eq(
-            integrationChannelChangeAuthorizations.integrationStatusId,
-            mismatchStatusId,
-          ),
-        ),
-    ).toEqual([]);
-    expect(
-      await database
-        .select({ id: channelConfigurations.integrationId })
-        .from(channelConfigurations)
-        .where(eq(channelConfigurations.integrationId, mismatchIntegrationId)),
-    ).toEqual([]);
-
-    const singleUseIntegrationId = `synthetic-live-single-use-${randomUUID()}`;
-    const singleUseStatusId = randomUUID();
-    const singleUseIssuedAt = new Date(Date.now() - 1_000);
-    const singleUseAuthorization = liveAuthorizationFor({
-      authenticated,
-      integrationId: singleUseIntegrationId,
-      integrationStatusId: singleUseStatusId,
-      previousConfiguration: {
-        enabled: false,
-        statusId: singleUseStatusId,
-      },
-      issuedAt: singleUseIssuedAt,
-      desiredEnabled: false,
-    });
-    await database.insert(integrationStatuses).values({
-      id: singleUseStatusId,
-      integrationId: singleUseIntegrationId,
-      label: 'live-verified',
-      verifiedAt: singleUseIssuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference: liveChannelChangeAuthorizationCommitment(
-        singleUseAuthorization,
-      ),
-      reasonCode: null,
-      observedAt: singleUseIssuedAt,
-    });
-    await database.insert(channelConfigurations).values({
-      integrationId: singleUseIntegrationId,
-      enabled: false,
-      statusId: singleUseStatusId,
-      statusLabel: 'live-verified',
-      changedAt: singleUseIssuedAt,
-    });
-    const primaryStore = createDrizzleAdminCapabilityStore(
-      database,
-      authenticated,
-    );
-    const firstMetadata = {
-      idempotencyKey: `issue-26-live-single-use-${randomUUID()}`,
-      requestId: randomUUID(),
-      now: new Date(),
-    };
-    const firstResult = await executeSetChannelEnabledCapability({
-      authenticated,
-      store: primaryStore,
-      command: {
-        integrationId: singleUseIntegrationId,
-        enabled: false,
-        authorization: singleUseAuthorization,
-      },
-      metadata: firstMetadata,
-    });
-    expect(firstResult).toMatchObject({
-      integrationId: singleUseIntegrationId,
-      enabled: false,
-      status: { label: 'live-verified' },
-    });
-    expect(
-      await executeSetChannelEnabledCapability({
-        authenticated,
-        store: primaryStore,
-        command: {
-          integrationId: singleUseIntegrationId,
-          enabled: false,
-          authorization: singleUseAuthorization,
-        },
-        metadata: {
-          ...firstMetadata,
-          requestId: randomUUID(),
-          now: new Date(),
-        },
-      }),
-    ).toEqual(firstResult);
-
-    const reusedRequestId = randomUUID();
-    try {
-      await executeSetChannelEnabledCapability({
-        authenticated,
-        store: primaryStore,
-        command: {
-          integrationId: singleUseIntegrationId,
-          enabled: false,
-          authorization: singleUseAuthorization,
-        },
-        metadata: {
-          idempotencyKey: `issue-26-live-single-use-reuse-${randomUUID()}`,
-          requestId: reusedRequestId,
-          now: new Date(),
-        },
-      });
-      throw new Error('Expected a consumed live authorization to be refused.');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(403);
-    }
-    const singleUseRows = await database
-      .select({
-        reference: integrationChannelChangeAuthorizations.reference,
-        requestId: integrationChannelChangeAuthorizations.consumedRequestId,
-      })
-      .from(integrationChannelChangeAuthorizations)
-      .where(
-        eq(
-          integrationChannelChangeAuthorizations.integrationStatusId,
-          singleUseStatusId,
-        ),
-      );
-    expect(singleUseRows).toEqual([
-      {
-        reference: singleUseAuthorization.reference,
-        requestId: firstMetadata.requestId,
-      },
-    ]);
-    const [reuseAudit] = await database
-      .select({
-        action: securityAuditEntries.action,
-        category: securityAuditEntries.category,
-        outcome: securityAuditEntries.outcome,
-        reasonCode: securityAuditEntries.reasonCode,
-      })
-      .from(securityAuditEntries)
-      .where(eq(securityAuditEntries.requestId, reusedRequestId))
-      .limit(1);
-    expect(reuseAudit).toEqual({
-      action: 'set-channel-enabled',
-      category: 'access-denial',
-      outcome: 'denied',
-      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
-    });
   });
 
   test('enables SMS with separate carrier readiness evidence and exact live authorization', async () => {
