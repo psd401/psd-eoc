@@ -191,6 +191,7 @@ const app = new App({
   context: {
     'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
     'psdEoc:hostedDomain': 'example.invalid',
+    'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
     'psdEoc:iosBundleId': 'invalid.example.eoc',
     'psdEoc:organizationName': 'Example School District',
     'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
@@ -300,6 +301,7 @@ describe('deployment boundary', () => {
           return {
             'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
             'psdEoc:hostedDomain': 'example.invalid',
+            'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
             'psdEoc:iosBundleId': 'invalid.example.eoc',
             'psdEoc:organizationName': organizationName,
             'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
@@ -331,6 +333,7 @@ describe('deployment boundary', () => {
           return {
             'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
             'psdEoc:hostedDomain': 'example.invalid',
+            'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
             'psdEoc:iosBundleId': 'invalid.example.eoc',
             'psdEoc:organizationName': 'Example School District',
             'psdEoc:privacyContactUrl': privacyContactUrl,
@@ -380,6 +383,7 @@ describe('deployment boundary', () => {
             context: {
               'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
               'psdEoc:hostedDomain': 'example.invalid',
+              'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
               'psdEoc:organizationName': 'Example School District',
               'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
@@ -401,6 +405,7 @@ describe('deployment boundary', () => {
             context: {
               'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
               'psdEoc:hostedDomain': 'example.invalid',
+              'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
               'psdEoc:iosBundleId': 'invalid.example.eoc',
               'psdEoc:organizationName': 'Example School District',
               'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
@@ -427,6 +432,7 @@ describe('deployment boundary', () => {
         context: {
           'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
           'psdEoc:hostedDomain': 'example.invalid',
+          'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
           'psdEoc:iosBundleId': 'invalid.example.eoc',
           'psdEoc:organizationName': 'Example School District',
           'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
@@ -2723,13 +2729,17 @@ describe('configured-unverified provider readiness boundary', () => {
   it('keeps provider resources conditional, schedules disabled, and channel workers at zero', () => {
     for (const forbiddenType of [
       'AWS::Route53::HostedZone',
-      'AWS::Route53::RecordSet',
-      'AWS::S3::Bucket',
       'AWS::Scheduler::Schedule',
       'AWS::SES::EmailIdentity',
     ]) {
       template.resourceCountIs(forbiddenType, 0);
     }
+    // The deployment owns the application's public name and the artifacts of
+    // the probe that checks it. Both are pinned so an unintended record or
+    // bucket still fails here.
+    template.resourceCountIs('AWS::Route53::RecordSet', 1);
+    template.resourceCountIs('AWS::S3::Bucket', 1);
+    template.resourceCountIs('AWS::Synthetics::Canary', 1);
     // Named application functions are bounded. CDK also synthesizes unnamed
     // image-lookup and asynchronous custom-resource framework handlers.
     expect(

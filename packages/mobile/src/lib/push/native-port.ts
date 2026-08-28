@@ -188,11 +188,11 @@ export function currentPushRegistrationConfiguration() {
     applicationVersion: Application.nativeApplicationVersion,
     nativeBuildVersion: Application.nativeBuildVersion,
     expoProjectId: projectId,
-    updateMode:
-      Constants.expoConfig?.updates?.enabled === false &&
-      Updates.isEnabled === false
-        ? 'embedded-only'
-        : 'unverified',
+    // `Updates.isEnabled` is the running binary's own answer about whether it
+    // can take remote code. The application configuration was also required
+    // here, but a release build does not always expose it, so a correct
+    // device was refused registration for a fact it could not restate.
+    updateMode: Updates.isEnabled === false ? 'embedded-only' : 'unverified',
   });
   return parsePushRegistrationConfiguration(
     process.env.EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED,

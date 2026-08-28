@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {
+    "@aws-sdk/client-apprunner": "3.883.0",
     "@psd-eoc/contracts": "workspace:*"
   }
 }

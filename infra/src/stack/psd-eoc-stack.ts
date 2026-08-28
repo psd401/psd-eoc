@@ -19,6 +19,8 @@ import {
   Tags,
   Validations,
   aws_apprunner as apprunner,
+  aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cloudwatchActions,
   aws_ec2 as ec2,
   aws_ecs as ecs,
   aws_ecr as ecr,
@@ -31,7 +33,10 @@ import {
   aws_lambda_event_sources as lambdaEventSources,
   aws_logs as logs,
   aws_rds as rds,
+  aws_route53 as route53,
+  aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
+  aws_synthetics as synthetics,
   aws_ses as ses,
   aws_sns as sns,
   aws_sqs as sqs,
@@ -3290,6 +3295,192 @@ export class PsdEocStack extends Stack {
     Tags.of(appRunnerService).remove('DataScope', { priority: 300 });
     for (const grant of imagePullGrants) grant.applyBefore(appRunnerService);
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
+
+    // The public name and the service it names are deployed together.
+    //
+    // This record used to be made by hand. Nothing then kept it pointing at
+    // the running service, and when it drifted every alarm stayed green while
+    // nobody could reach the application: App Runner was healthy, its health
+    // check passed, and the name resolved to a service that no longer existed.
+    // Deriving the record from the service removes the chance of the two
+    // disagreeing.
+    const applicationHostname = new URL(deploymentIdentity.applicationOrigin)
+      .hostname;
+    const publicHostedZone = route53.HostedZone.fromHostedZoneAttributes(
+      this,
+      'ApplicationHostedZone',
+      {
+        hostedZoneId: deploymentIdentity.hostedZoneId,
+        zoneName: deploymentIdentity.hostedDomain,
+      },
+    );
+    const applicationRecord = new route53.CnameRecord(
+      this,
+      'ApplicationDomainRecord',
+      {
+        zone: publicHostedZone,
+        recordName: applicationHostname,
+        domainName: appRunnerService.attrServiceUrl,
+        // Short enough that a correction is visible in minutes rather than a
+        // working day.
+        ttl: Duration.minutes(5),
+        comment: 'Managed by the PSD EOC deployment. Do not edit by hand.',
+      },
+    );
+    applicationRecord.node.addDependency(appRunnerService);
+    // The service this names is conditional, so the name is too. A deployment
+    // without the application must not publish a record pointing at nothing.
+    (
+      applicationRecord.node.defaultChild as route53.CfnRecordSet
+    ).cfnOptions.condition = shouldProvisionApplication;
+
+    // Reachability by name, which no other alarm covers.
+    //
+    // Every other alarm reads a service metric, so all of them report a
+    // healthy application even when its public name does not resolve. This one
+    // asks the question a person asks: does the application answer at its own
+    // address. Route 53 health checks publish only into us-east-1 and a
+    // CloudWatch alarm cannot read another region's metric, so the probe runs
+    // here instead.
+    const reachabilityArtifacts = new s3.Bucket(this, 'ReachabilityArtifacts', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      lifecycleRules: [{ expiration: Duration.days(30) }],
+    });
+    (
+      reachabilityArtifacts.node.defaultChild as s3.CfnBucket
+    ).cfnOptions.condition = shouldProvisionApplication;
+    const reachabilityRole = new iam.Role(this, 'ReachabilityRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+    (reachabilityRole.node.defaultChild as iam.CfnRole).cfnOptions.condition =
+      shouldProvisionApplication;
+    reachabilityArtifacts.grantWrite(reachabilityRole);
+    reachabilityRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'CloudWatchSynthetics' },
+        },
+      }),
+    );
+    reachabilityRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+        ],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'logs',
+            resource: 'log-group',
+            resourceName: '/aws/lambda/cwsyn-*',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          }),
+        ],
+      }),
+    );
+
+    // Both generated policies reference the conditional bucket, so they carry
+    // the same condition. Without it CloudFormation would resolve a reference
+    // to a resource that was never created.
+    const artifactsBucketPolicy = reachabilityArtifacts.policy;
+    if (artifactsBucketPolicy !== undefined) {
+      (
+        artifactsBucketPolicy.node.defaultChild as s3.CfnBucketPolicy
+      ).cfnOptions.condition = shouldProvisionApplication;
+    }
+    const reachabilityPolicy = reachabilityRole.node.tryFindChild(
+      'DefaultPolicy',
+    ) as iam.Policy | undefined;
+    if (reachabilityPolicy !== undefined) {
+      (
+        reachabilityPolicy.node.defaultChild as iam.CfnPolicy
+      ).cfnOptions.condition = shouldProvisionApplication;
+    }
+
+    const reachabilityCanary = new synthetics.CfnCanary(
+      this,
+      'ApplicationReachabilityCanary',
+      {
+        name: 'psd-eoc-reachability',
+        artifactS3Location: `s3://${reachabilityArtifacts.bucketName}/reachability`,
+        executionRoleArn: reachabilityRole.roleArn,
+        runtimeVersion: 'syn-nodejs-puppeteer-9.1',
+        schedule: { expression: 'rate(5 minutes)' },
+        startCanaryAfterCreation: true,
+        runConfig: { timeoutInSeconds: 60 },
+        successRetentionPeriod: 7,
+        failureRetentionPeriod: 31,
+        code: {
+          handler: 'index.handler',
+          script: [
+            "const https = require('https');",
+            "const synthetics = require('Synthetics');",
+            "const log = require('SyntheticsLogger');",
+            `const HOSTNAME = ${JSON.stringify(applicationHostname)};`,
+            `const PATH = ${JSON.stringify(HEALTH_PATH)};`,
+            'exports.handler = async function () {',
+            '  await synthetics.executeStep("public-health", async function () {',
+            '    await new Promise(function (resolve, reject) {',
+            '      const request = https.request(',
+            '        { hostname: HOSTNAME, path: PATH, method: "GET", timeout: 15000 },',
+            '        function (response) {',
+            '          response.resume();',
+            '          if (response.statusCode === 200) {',
+            '            log.info("reachable");',
+            '            resolve();',
+            '            return;',
+            '          }',
+            '          reject(new Error("Unexpected status " + response.statusCode));',
+            '        },',
+            '      );',
+            '      request.on("timeout", function () {',
+            '        request.destroy(new Error("Timed out reaching the public address."));',
+            '      });',
+            '      request.on("error", reject);',
+            '      request.end();',
+            '    });',
+            '  });',
+            '};',
+          ].join('\n'),
+        },
+      },
+    );
+    reachabilityCanary.node.addDependency(applicationRecord);
+    reachabilityCanary.cfnOptions.condition = shouldProvisionApplication;
+
+    const unreachableAlarm = new cloudwatch.Alarm(
+      this,
+      'ApplicationUnreachableAlarm',
+      {
+        alarmName: 'psd-eoc-public-unreachable',
+        alarmDescription:
+          'The application did not answer at its public address. The service can be healthy while its name is wrong: compare the DNS record against the App Runner service URL.',
+        metric: new cloudwatch.Metric({
+          namespace: 'CloudWatchSynthetics',
+          metricName: 'SuccessPercent',
+          dimensionsMap: { CanaryName: 'psd-eoc-reachability' },
+          statistic: 'Average',
+          period: Duration.minutes(5),
+        }),
+        threshold: 100,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 2,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      },
+    );
+    unreachableAlarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(criticalAlarmTopic),
+    );
+    (
+      unreachableAlarm.node.defaultChild as cloudwatch.CfnAlarm
+    ).cfnOptions.condition = shouldProvisionApplication;
 
     // Alarms. Until the canary and the metrics collector have the credentials
     // they need, only infrastructure publishers and metrics conditionally
