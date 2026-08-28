@@ -83,6 +83,8 @@ const app = new App({
     'psdEoc:facilities': exampleConfiguration.facilities,
     'psdEoc:displayTimeZone': exampleConfiguration.displayTimeZone,
     'psdEoc:hostedDomain': exampleConfiguration.hostedDomain,
+    // A placeholder zone: the example synthesis never reaches Route 53.
+    'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
     'psdEoc:iosBundleId': exampleConfiguration.iosBundleId,
     'psdEoc:monitoringRunbookBaseUrl':
       exampleConfiguration.monitoringRunbookBaseUrl,

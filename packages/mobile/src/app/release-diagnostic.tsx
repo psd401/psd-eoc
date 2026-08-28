@@ -106,11 +106,18 @@ export default function ReleaseDiagnosticScreen() {
             accessibilityRole="alert"
             style={styles.warning}
           >
-            <Text style={styles.warningTitle}>Identity is incomplete</Text>
-            <Text style={styles.warningBody}>
-              Stop release verification and contact District Technology. Do not
-              infer the launched bundle from provider inventory alone.
+            <Text style={styles.warningTitle}>
+              This build could not be confirmed
             </Text>
+            <Text style={styles.warningBody}>
+              Stop and contact District Technology. Do not assume which build is
+              installed from the store listing alone.
+            </Text>
+            {diagnostic.unmetConditions.map((reason) => (
+              <Text key={reason} style={styles.warningBody}>
+                {reason}
+              </Text>
+            ))}
           </View>
         ) : null}
 

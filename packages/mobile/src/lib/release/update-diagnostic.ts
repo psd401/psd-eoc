@@ -19,6 +19,8 @@ export interface LaunchedUpdateDiagnostic {
   readonly applicationVersion: string | null;
   readonly configuredRuntimeVersion: string | null;
   readonly nativeBuildVersion: string | null;
+  /** Why the build could not be confirmed; empty when it was. */
+  readonly unmetConditions: readonly string[];
 }
 
 export interface ReadOnlyUpdateConstants {
@@ -59,15 +61,22 @@ function exactToken(value: unknown, pattern: RegExp): string | null {
 export function createLaunchedUpdateDiagnostic(
   constants: ReadOnlyUpdateConstants,
 ): LaunchedUpdateDiagnostic {
+  // The installed binary is the authority on which application it is. The
+  // configuration only gets a veto: if it is present and disagrees, something
+  // is wrong; if it is absent, that is normal for a release build.
+  const nativeApplicationId = exactToken(
+    constants.applicationId,
+    APPLICATION_ID_PATTERN,
+  );
   const configuredApplicationId = exactToken(
     constants.configuredApplicationId,
     APPLICATION_ID_PATTERN,
   );
   const applicationId =
     configuredApplicationId !== null &&
-    constants.applicationId === configuredApplicationId
-      ? configuredApplicationId
-      : null;
+    configuredApplicationId !== nativeApplicationId
+      ? null
+      : nativeApplicationId;
   const applicationVersion = exactToken(
     constants.applicationVersion,
     APPLICATION_VERSION_PATTERN,
@@ -76,37 +85,35 @@ export function createLaunchedUpdateDiagnostic(
     constants.nativeBuildVersion,
     NATIVE_BUILD_VERSION_PATTERN,
   );
-  const configuredApplicationVersion = exactToken(
-    constants.configuredApplicationVersion,
-    APPLICATION_VERSION_PATTERN,
-  );
-  const usesAppVersionRuntimePolicy =
-    typeof constants.configuredRuntimeVersion === 'object' &&
-    constants.configuredRuntimeVersion !== null &&
-    !Array.isArray(constants.configuredRuntimeVersion) &&
-    Object.keys(constants.configuredRuntimeVersion).length === 1 &&
-    'policy' in constants.configuredRuntimeVersion &&
-    constants.configuredRuntimeVersion.policy === 'appVersion';
+  // Every condition below is read from a native module. The application
+  // configuration is deliberately not consulted: a release build resolves and
+  // rewrites parts of it, so requiring it to echo the build back was the
+  // reason a correct binary reported an incomplete identity.
+  //
+  // Each failure is named. A device that cannot confirm its own build has to
+  // say which fact was missing, otherwise the screen is only capable of
+  // saying "no".
+  const unmetConditions: string[] = [];
+  if (constants.isEnabled !== false) {
+    unmetConditions.push('Remote updates are not switched off.');
+  }
+  if (constants.updateId !== null && constants.updateId !== undefined) {
+    unmetConditions.push('A downloaded update is running.');
+  }
+  if (constants.isEmergencyLaunch === true) {
+    unmetConditions.push('The application started in emergency recovery.');
+  }
+  if (applicationId === null) {
+    unmetConditions.push('The application identifier is unavailable.');
+  }
+  if (applicationVersion === null) {
+    unmetConditions.push('The application version is unavailable.');
+  }
+  if (nativeBuildVersion === null) {
+    unmetConditions.push('The build number is unavailable.');
+  }
 
-  const isVerifiedEmbeddedOnly =
-    constants.configuredUpdatesEnabled === false &&
-    constants.configuredCheckAutomatically === 'NEVER' &&
-    constants.configuredUpdateUrl === undefined &&
-    constants.isEnabled === false &&
-    constants.checkAutomatically === 'NEVER' &&
-    constants.isEmbeddedLaunch === false &&
-    constants.isUsingEmbeddedAssets === true &&
-    constants.isEmergencyLaunch === false &&
-    constants.updateId === null &&
-    constants.runtimeVersion === '' &&
-    constants.channel === '' &&
-    usesAppVersionRuntimePolicy &&
-    applicationId !== null &&
-    applicationVersion !== null &&
-    configuredApplicationVersion === applicationVersion &&
-    nativeBuildVersion !== null;
-
-  if (!isVerifiedEmbeddedOnly) {
+  if (unmetConditions.length > 0) {
     return Object.freeze({
       status: 'unknown',
       mode: 'unknown',
@@ -119,6 +126,7 @@ export function createLaunchedUpdateDiagnostic(
       applicationVersion: null,
       configuredRuntimeVersion: null,
       nativeBuildVersion: null,
+      unmetConditions: Object.freeze([...unmetConditions]),
     });
   }
 
@@ -134,6 +142,7 @@ export function createLaunchedUpdateDiagnostic(
     applicationVersion,
     configuredRuntimeVersion: applicationVersion,
     nativeBuildVersion,
+    unmetConditions: Object.freeze([]),
   });
 }
 
