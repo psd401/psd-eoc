@@ -55,7 +55,10 @@ interface ExpoApplicationModule {
   readonly getPushNotificationServiceEnvironmentAsync?: () => Promise<
     'development' | 'production' | null
   >;
+  readonly getApplicationReleaseTypeAsync?: () => Promise<number>;
 }
+
+import { resolveIosServiceEnvironment } from './service-environment';
 
 // Requiring these native modules does not evaluate expo-notifications' package
 // barrel or its import-time DevicePushTokenAutoRegistration side effect.
@@ -128,12 +131,17 @@ export const expoPushNativePort: PushNativePort = Object.freeze({
       applicationModule?.getPushNotificationServiceEnvironmentAsync ===
       undefined
     ) {
-      throw new Error('The APNs service environment is unavailable.');
+      throw new Error('This build cannot report an APNs environment.');
     }
-    const environment =
+    const entitlement =
       await applicationModule.getPushNotificationServiceEnvironmentAsync();
-    if (environment !== 'development' && environment !== 'production') {
-      throw new Error('The APNs service environment is unavailable.');
+    const releaseType =
+      await applicationModule.getApplicationReleaseTypeAsync?.();
+    const environment = resolveIosServiceEnvironment(entitlement, releaseType);
+    if (environment === null) {
+      throw new Error(
+        'This build carries no APNs entitlement and was not distributed through a store.',
+      );
     }
     return environment;
   },
