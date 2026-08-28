@@ -107,6 +107,7 @@
     "psdEoc:awsAccountAlias": "psd401",
     "psdEoc:awsRegion": "us-west-2",
     "psdEoc:hostedDomain": "psd401.net",
+    "psdEoc:hostedZoneId": "Z2B9XR5HEMTG1R",
     "psdEoc:iosBundleId": "net.psd401.eoc",
     "psdEoc:monitoringRunbookBaseUrl": "https://github.com/psd401/psd-eoc/blob/main/infra/README.md",
     "psdEoc:organizationName": "Peninsula School District",

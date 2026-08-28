@@ -20,6 +20,7 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:displayTimeZone`
 - `psdEoc:facilities`
 - `psdEoc:hostedDomain`
+- `psdEoc:hostedZoneId`
 - `psdEoc:iosBundleId`
 - `psdEoc:monitoringRunbookBaseUrl`
 - `psdEoc:neighborhoods`
@@ -35,6 +36,13 @@ Identity, target account/region, facility data, sender identity, and runbook
 base URL are configuration. `readDeploymentTarget` and
 `readDeploymentIdentity` validate these values during synthesis. Facilities,
 neighborhoods, and synthetic groups are validated again before bootstrap.
+
+`psdEoc:hostedZoneId` names the Route 53 zone that answers for the hosted
+domain. The deployment writes the application's public record there from the
+running service, so the two cannot drift. A record for the same name kept
+anywhere else — a split-horizon resolver inside the district network, for
+example — will shadow it, and `scripts/ops/public-address.ts` reports that from
+wherever it is run.
 
 ## Local runtime environment
 
