@@ -556,6 +556,39 @@ function assertStaticMutationEnvelope(
   }
 }
 
+/** At most this much of an unexpected failure is written to the log. */
+const UNEXPECTED_FAILURE_MESSAGE_LIMIT = 300;
+
+/**
+ * A bounded, value-free description of an unexpected capability failure.
+ *
+ * A schema refusal reports the field paths it rejected rather than its own
+ * message, because a Zod message can quote the value it refused.
+ */
+function unexpectedFailureMessage(error: unknown): string {
+  const issues = (
+    error as { issues?: readonly { path?: readonly unknown[] }[] } | null
+  )?.issues;
+  if (Array.isArray(issues)) {
+    const paths = [
+      ...new Set(
+        issues.map((issue) =>
+          Array.isArray(issue.path) ? issue.path.join('.') : '',
+        ),
+      ),
+    ]
+      .filter((path) => path.length > 0)
+      .sort();
+    return `schema refused: ${paths.join(', ')}`;
+  }
+  if (!(error instanceof Error)) return 'no message';
+  const message = error.message.trim().replace(/\s+/gu, ' ');
+  if (message.length === 0) return 'no message';
+  return message.length > UNEXPECTED_FAILURE_MESSAGE_LIMIT
+    ? `${message.slice(0, UNEXPECTED_FAILURE_MESSAGE_LIMIT)}\u2026`
+    : message;
+}
+
 function errorForUnknownFailure(error: unknown): CapabilityEngineError {
   if (error instanceof CapabilityEngineError) {
     return error;
@@ -572,6 +605,22 @@ function errorForUnknownFailure(error: unknown): CapabilityEngineError {
       403,
     );
   }
+  // The response deliberately says nothing about why: a capability failure can
+  // hold a recipient, a token, or a provider payload. The operator still has to
+  // be able to find out, and this used to be the end of the error's life --
+  // every unexpected failure reached a person as one sentence with no way back
+  // to a cause, which is why diagnosing one took a rebuild.
+  //
+  // The name and a bounded message go to the log, where an operator can read
+  // them and a viewer of the response cannot. Values are never included; a Zod
+  // failure contributes the field paths it refused, never what they held.
+  console.error(
+    JSON.stringify({
+      event: 'capability-failed',
+      error: error instanceof Error ? error.name : typeof error,
+      message: unexpectedFailureMessage(error),
+    }),
+  );
   return new CapabilityEngineError(
     'INTERNAL_ERROR',
     'PERSISTENCE_CONFLICT',
