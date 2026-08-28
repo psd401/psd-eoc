@@ -136,6 +136,14 @@ export interface DeploymentIdentity {
   readonly applicationOrigin: string;
   readonly displayTimeZone: string;
   readonly hostedDomain: string;
+  /**
+   * The Route 53 zone that answers for the hosted domain.
+   *
+   * The public name was a hand-made record, so nothing kept it pointing at the
+   * service it names. Declaring the zone lets the deployment own the record and
+   * removes the chance of the two disagreeing.
+   */
+  readonly hostedZoneId: string;
   readonly iosBundleId: string;
   readonly organizationName: string;
   readonly privacyContactUrl: string;
@@ -311,6 +319,7 @@ export function readDeploymentIdentity(node: {
       'psdEoc:hostedDomain',
       /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
     ),
+    hostedZoneId: read('psdEoc:hostedZoneId', /^[A-Z0-9]{1,32}$/u),
     iosBundleId: read(
       'psdEoc:iosBundleId',
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
