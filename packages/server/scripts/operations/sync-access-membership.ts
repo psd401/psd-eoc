@@ -16,7 +16,7 @@ import {
   type AccessMembershipSyncCapabilityContext,
 } from '../../lib/auth/access-membership-sync';
 import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
-import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/roster/groups-sync';
+import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/auth/google-roster-config';
 import {
   describeFailure,
   invalidConfigurationFields,

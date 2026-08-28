@@ -10,7 +10,7 @@ import {
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
 
-import type { GoogleCloudIdentityRosterConfiguration } from '../roster/groups-sync';
+import type { GoogleCloudIdentityRosterConfiguration } from './google-roster-config';
 
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_CLOUD_IDENTITY_ENDPOINT =

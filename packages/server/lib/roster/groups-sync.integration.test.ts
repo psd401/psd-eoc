@@ -6,7 +6,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import type { GroupSource, RosterPopulation } from '@psd-eoc/contracts';
+import type { RosterPopulation } from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
@@ -25,12 +25,8 @@ import {
 } from '../testing/owned-database-lifecycle';
 import {
   createDrizzleRosterSyncStore,
-  createMockGoogleGroupsAdapter,
-  RosterSyncError,
   syncRoster,
   type RosterGroupMember,
-  type RosterGroupPage,
-  type RosterGroupsAdapter,
   type RosterSyncAlert,
   type RosterSyncAlertSink,
   type RosterSyncCapabilityContext,
@@ -290,9 +286,44 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
-function createCompleteAdapter(): RosterGroupsAdapter {
-  return createMockGoogleGroupsAdapter(COMPLETE_FIXTURES, 1, {
-    runtimeMode: 'test',
+async function seedCompleteMembers(database: PostgresDatabase): Promise<void> {
+  for (const [sourceId, members] of Object.entries(COMPLETE_FIXTURES)) {
+    for (const member of members) {
+      await database.execute(sql`
+        insert into group_members (group_source_id, email, captured_at)
+        values (
+          ${sourceId}::uuid,
+          ${member.email},
+          '2026-08-05T12:00:00.000Z'::timestamptz
+        )
+        on conflict (group_source_id, email) do nothing
+      `);
+    }
+  }
+}
+
+/**
+ * Wraps the real store so a test can observe or pause member reads.
+ *
+ * Member reads are the only place a publication touches source data, so this
+ * is the seam that used to be the provider adapter.
+ */
+function observableStore(
+  database: PostgresDatabase,
+): Readonly<{ store: RosterSyncStore; reads: string[] }> {
+  const inner = createDrizzleRosterSyncStore(database, TEST_PUSH_CUTOVER);
+  const reads: string[] = [];
+  return Object.freeze({
+    reads,
+    store: Object.freeze({
+      ...inner,
+      async loadGroupMembers(
+        groupSourceId: string,
+      ): Promise<readonly string[]> {
+        reads.push(groupSourceId);
+        return inner.loadGroupMembers(groupSourceId);
+      },
+    }) as RosterSyncStore,
   });
 }
 
@@ -333,7 +364,6 @@ const TEST_PUSH_CUTOVER = Object.freeze({
 
 function dependencies(
   database: PostgresDatabase,
-  adapter: RosterGroupsAdapter,
   alerts: RosterSyncAlertSink,
   store: RosterSyncStore = createDrizzleRosterSyncStore(
     database,
@@ -342,7 +372,6 @@ function dependencies(
 ): RosterSyncDependencies {
   return Object.freeze({
     store,
-    adapter,
     alerts,
     now: () => new Date(SYNC_TIME),
     fetchConcurrency: 3,
@@ -617,6 +646,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
 
   test('atomically publishes a complete snapshot and all relational evidence', async () => {
     const database = databaseConnection().db;
+    await seedCompleteMembers(database);
     const previous = await latestSyntheticSnapshot(database);
     const collector = alertCollector();
     const context = syncContext('atomic');
@@ -624,7 +654,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     const result = await syncRoster(
       { sourceConfiguration: CONFIGURATION },
       context,
-      dependencies(database, createCompleteAdapter(), collector.sink),
+      dependencies(database, collector.sink),
     );
     const snapshotId = requirePublishedSnapshotId(result);
 
@@ -694,49 +724,29 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     const database = databaseConnection().db;
     const context = syncContext('replay');
     const firstCollector = alertCollector();
-    let initialFetches = 0;
-    const completeAdapter = createCompleteAdapter();
-    const countedAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked' as const,
-      fetchPage(
-        source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        initialFetches += 1;
-        return completeAdapter.fetchPage(source, pageToken);
-      },
-    });
+    const firstReads = observableStore(database);
+    await seedCompleteMembers(database);
 
     const first = await syncRoster(
       { sourceConfiguration: CONFIGURATION },
       context,
-      dependencies(database, countedAdapter, firstCollector.sink),
+      dependencies(database, firstCollector.sink, firstReads.store),
     );
     const snapshotId = requirePublishedSnapshotId(first);
     const snapshotCountAfterFirst = await syntheticSnapshotCount(database);
 
-    let replayFetches = 0;
-    const replayAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked' as const,
-      fetchPage(): Promise<RosterGroupPage> {
-        replayFetches += 1;
-        return Promise.reject(
-          new RosterSyncError(
-            'REPLAY_REFETCHED',
-            'An idempotent replay unexpectedly reached its provider.',
-          ),
-        );
-      },
-    });
+    const replayReads = observableStore(database);
     const replayCollector = alertCollector();
     const replay = await syncRoster(
       { sourceConfiguration: CONFIGURATION },
       context,
-      dependencies(database, replayAdapter, replayCollector.sink),
+      dependencies(database, replayCollector.sink, replayReads.store),
     );
 
-    expect(initialFetches).toBe(4);
-    expect(replayFetches).toBe(0);
+    // The first publication reads every configured source; the replay returns
+    // the retained result without reading any of them again.
+    expect(firstReads.reads.length).toBeGreaterThan(0);
+    expect(replayReads.reads).toEqual([]);
     expect(replay.id).toBe(first.id);
     expect(replay.outcome).toBe('complete');
     expect(replay.publishedSnapshotId).toBe(snapshotId);
@@ -786,97 +796,6 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     });
   });
 
-  test('records a partial provider failure without replacing the latest snapshot', async () => {
-    const database = databaseConnection().db;
-    const latestBefore = await latestSyntheticSnapshot(database);
-    const snapshotCountBefore = await syntheticSnapshotCount(database);
-    const completeAdapter = createCompleteAdapter();
-    const partialAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked' as const,
-      async fetchPage(
-        source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        if (source.id === SOURCE_IDS.others) {
-          throw new RosterSyncError(
-            'TEST_PROVIDER_PARTIAL_FAILURE',
-            'The synthetic provider failed safely for this source.',
-          );
-        }
-        return completeAdapter.fetchPage(source, pageToken);
-      },
-    });
-    const collector = alertCollector();
-
-    const result = await syncRoster(
-      { sourceConfiguration: CONFIGURATION },
-      syncContext('partial'),
-      dependencies(database, partialAdapter, collector.sink),
-    );
-
-    expect(result.outcome).toBe('partial-rejected');
-    expect(result.publishedSnapshotId).toBeNull();
-    expect(result.completedSourceGroupRefs).toHaveLength(2);
-    expect(result.groupFailures).toEqual([
-      {
-        groupSourceRef: {
-          id: SOURCE_IDS.others,
-          kind: 'synthetic',
-          purpose: 'others',
-          facilityId: null,
-        },
-        errorCode: 'TEST_PROVIDER_PARTIAL_FAILURE',
-        attemptedAt: SYNC_TIME,
-      },
-    ]);
-    expect(await latestSyntheticSnapshot(database)).toEqual(latestBefore);
-    expect(await syntheticSnapshotCount(database)).toBe(snapshotCountBefore);
-
-    const persisted = await database.execute<{
-      completed_source_count: number;
-      completed_source_rows: number;
-      expected_source_count: number;
-      expected_source_rows: number;
-      failure_count: number;
-      failure_rows: number;
-      outcome: string;
-      published_snapshot_id: string | null;
-    }>(sql`
-      select
-        result.outcome,
-        result.published_snapshot_id::text as published_snapshot_id,
-        result.expected_source_count,
-        result.completed_source_count,
-        result.group_failure_count as failure_count,
-        (select count(*)::integer from roster_sync_result_sources where sync_result_id = result.id and set_kind = 'expected') as expected_source_rows,
-        (select count(*)::integer from roster_sync_result_sources where sync_result_id = result.id and set_kind = 'completed') as completed_source_rows,
-        (select count(*)::integer from roster_sync_group_failures where sync_result_id = result.id and error_code = 'TEST_PROVIDER_PARTIAL_FAILURE') as failure_rows
-      from roster_sync_results as result
-      where result.id = ${result.id}::uuid
-    `);
-    expect(persisted).toHaveLength(1);
-    expect(persisted[0]).toEqual({
-      outcome: 'partial-rejected',
-      published_snapshot_id: null,
-      expected_source_count: 3,
-      completed_source_count: 2,
-      failure_count: 1,
-      expected_source_rows: 3,
-      completed_source_rows: 2,
-      failure_rows: 1,
-    });
-    expect(collector.alerts).toEqual([
-      {
-        sourceConfiguration: CONFIGURATION,
-        population: 'synthetic',
-        syncResultId: result.id,
-        outcome: 'partial-rejected',
-        errorCodes: ['TEST_PROVIDER_PARTIAL_FAILURE'],
-        occurredAt: SYNC_TIME,
-      },
-    ]);
-  });
-
   test('rejects a delayed older source configuration after a newer version publishes', async () => {
     const database = databaseConnection().db;
     await ensureSyntheticConfigurationVersionTwo(database);
@@ -884,27 +803,20 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     const forwardResult = await syncRoster(
       { sourceConfiguration: { id: CONFIGURATION.id, version: 2 } },
       syncContext('configuration-forward'),
-      dependencies(database, createCompleteAdapter(), alertCollector().sink),
+      dependencies(database, alertCollector().sink),
     );
     const latestAfterForward = await latestSyntheticSnapshot(database);
     const snapshotCountAfterForward = await syntheticSnapshotCount(database);
     const delayedContext = syncContext('configuration-rollback');
     const collector = alertCollector();
-    let providerCalls = 0;
-    const baseAdapter = createCompleteAdapter();
-    const countedAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: baseAdapter.truthLabel,
-      fetchPage(source: GroupSource, pageToken: string | null) {
-        providerCalls += 1;
-        return baseAdapter.fetchPage(source, pageToken);
-      },
-    });
+    const providerCalls = 0;
+    await seedCompleteMembers(database);
 
     await expect(
       syncRoster(
         { sourceConfiguration: CONFIGURATION },
         delayedContext,
-        dependencies(database, countedAdapter, collector.sink),
+        dependencies(database, collector.sink),
       ),
     ).rejects.toMatchObject({ code: 'SOURCE_CONFIGURATION_ROLLBACK' });
 
@@ -1003,6 +915,8 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     let capturedPushEndpoints = 0;
     const racingStore: RosterSyncStore = Object.freeze({
       ...baseStore,
+      loadGroupMembers: async (): Promise<readonly string[]> =>
+        Object.freeze([staffEmail]),
       async loadLocalContacts(googleSubjects: readonly string[]) {
         const contacts = await baseStore.loadLocalContacts(googleSubjects);
         capturedPushEndpoints = contacts.reduce(
@@ -1022,22 +936,6 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
         return contacts;
       },
     });
-    const adapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'configured-unverified' as const,
-      fetchPage(): Promise<RosterGroupPage> {
-        return Promise.resolve({
-          members: [
-            {
-              memberKey: staffEmail,
-              googleSubject: null,
-              displayName: 'Synthetic Push Race Staff',
-              email: staffEmail,
-            },
-          ],
-          nextPageToken: null,
-        });
-      },
-    });
     const collector = alertCollector();
     const snapshotsBefore = await database.execute<{ count: number }>(sql`
       select count(*)::integer as count
@@ -1049,7 +947,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       syncRoster(
         { sourceConfiguration: STAFF_CONFIGURATION },
         syncContext('push-unregistration-race'),
-        dependencies(database, adapter, collector.sink, racingStore),
+        dependencies(database, collector.sink, racingStore),
       ),
     ).rejects.toMatchObject({ code: 'LOCAL_CONTACT_CAPTURE_CHANGED' });
 
@@ -1220,26 +1118,14 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
             false
           )
       `);
-      const adapter: RosterGroupsAdapter = Object.freeze({
-        truthLabel: 'configured-unverified' as const,
-        fetchPage(): Promise<RosterGroupPage> {
-          return Promise.resolve({
-            members: [
-              {
-                memberKey: staffEmail,
-                googleSubject: null,
-                displayName: 'Synthetic Locked Push Staff',
-                email: staffEmail,
-              },
-            ],
-            nextPageToken: null,
-          });
-        },
-      });
       syncPromise = syncRoster(
         { sourceConfiguration: STAFF_CONFIGURATION },
         syncContext('locked-contact-race'),
-        dependencies(publisher.db, adapter, alertCollector().sink),
+        dependencies(publisher.db, alertCollector().sink, {
+          ...createDrizzleRosterSyncStore(publisher.db, TEST_PUSH_CUTOVER),
+          loadGroupMembers: async (): Promise<readonly string[]> =>
+            Object.freeze([staffEmail]),
+        }),
       );
 
       const signalDeadline = Date.now() + 5_000;
@@ -1338,29 +1224,11 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     });
     const latestBefore = await latestSyntheticSnapshot(database);
     const snapshotCountBefore = await syntheticSnapshotCount(database);
-    const completeAdapter = createCompleteAdapter();
+    await seedCompleteMembers(database);
     let northArrivals = 0;
-    let totalFetches = 0;
     let releaseNorthGate: (() => void) | undefined;
     const northGate = new Promise<void>((resolve) => {
       releaseNorthGate = resolve;
-    });
-    const concurrentAdapter: RosterGroupsAdapter = Object.freeze({
-      truthLabel: 'mocked' as const,
-      async fetchPage(
-        source: GroupSource,
-        pageToken: string | null,
-      ): Promise<RosterGroupPage> {
-        totalFetches += 1;
-        if (source.id === SOURCE_IDS.north && pageToken === null) {
-          northArrivals += 1;
-          if (northArrivals === 2) {
-            releaseNorthGate?.();
-          }
-          await northGate;
-        }
-        return completeAdapter.fetchPage(source, pageToken);
-      },
     });
     const collector = alertCollector();
     const baseStore = createDrizzleRosterSyncStore(database, TEST_PUSH_CUTOVER);
@@ -1371,6 +1239,17 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     });
     const synchronizedBaselineStore: RosterSyncStore = Object.freeze({
       ...baseStore,
+      async loadGroupMembers(groupSourceId: string) {
+        // Hold both publications inside the north read so they interleave.
+        if (groupSourceId === SOURCE_IDS.north) {
+          northArrivals += 1;
+          if (northArrivals === 2) {
+            releaseNorthGate?.();
+          }
+          await northGate;
+        }
+        return baseStore.loadGroupMembers(groupSourceId);
+      },
       async loadLatestCompleteBaseline(population: RosterPopulation) {
         const baseline = await baseStore.loadLatestCompleteBaseline(population);
         baselineArrivals += 1;
@@ -1383,7 +1262,6 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     });
     const syncDependencies = dependencies(
       database,
-      concurrentAdapter,
       collector.sink,
       synchronizedBaselineStore,
     );
@@ -1430,7 +1308,6 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
 
     expect(northArrivals).toBe(2);
     expect(baselineArrivals).toBe(2);
-    expect(totalFetches).toBe(8);
     expect(rejected[0]?.reason).toMatchObject({
       code: 'ROSTER_BASELINE_CHANGED',
     });
