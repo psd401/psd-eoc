@@ -321,6 +321,50 @@ function BuildingGroupForm({
   );
 }
 
+function ManualBuildingGroupForm({
+  csrfToken,
+  facilities,
+}: Readonly<{
+  csrfToken: string;
+  facilities: readonly Facility[];
+}>) {
+  const activeFacilities = facilities.filter((facility) => facility.active);
+  const helpId = 'new-manual-building-group-help';
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="create-manual-building-group" />
+      <fieldset disabled={activeFacilities.length === 0}>
+        <legend>Add a manual building source</legend>
+        <p id={helpId}>
+          A manual source notifies only the people an administrator adds to it,
+          for a site where not every staff member is enrolled. Creating the
+          source does not add anyone; add people to it afterwards.
+        </p>
+        <label>
+          Facility
+          <select aria-describedby={helpId} name="facilityId" required>
+            <option value="">Select a facility</option>
+            {activeFacilities.map((facility) => (
+              <option key={facility.id} value={facility.id}>
+                {facility.code} — {facility.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Display name
+          <input maxLength={160} name="displayName" required type="text" />
+        </label>
+        <button type="submit">Add manual building source</button>
+      </fieldset>
+      {activeFacilities.length === 0 ? (
+        <p role="status">Add an active facility before its building source.</p>
+      ) : null}
+    </form>
+  );
+}
+
 function OthersGroupForm({
   csrfToken,
 }: Readonly<{
@@ -345,9 +389,14 @@ function OthersGroupForm({
 }
 
 function groupSourceIdentity(group: GroupSource): string {
-  return group.kind === 'google-group'
-    ? `${group.googleGroupId} (${group.email})`
-    : group.fixtureKey;
+  if (group.kind === 'google-group') {
+    return `${group.googleGroupId} (${group.email})`;
+  }
+  if (group.kind === 'synthetic') {
+    return group.fixtureKey;
+  }
+  // A manual source carries no external identifier; its members are curated here.
+  return 'Curated in PSD EOC';
 }
 
 function GroupSourceReplacementForm({
@@ -509,6 +558,7 @@ function GroupSourcesSection({
           )
         : null}
       <BuildingGroupForm csrfToken={csrfToken} facilities={facilities} />
+      <ManualBuildingGroupForm csrfToken={csrfToken} facilities={facilities} />
       <h3>Optional others sources</h3>
       <GroupSourceTable
         facilitiesById={facilitiesById}

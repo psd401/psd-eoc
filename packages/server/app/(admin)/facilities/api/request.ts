@@ -30,6 +30,7 @@ export type FacilitiesAdminMutation =
       intent:
         | 'create-google-building-group'
         | 'create-google-others-group'
+        | 'create-manual-building-group'
         | 'create-synthetic-building-group'
         | 'create-synthetic-others-group';
       command: CreateGroupSourceInput;
@@ -107,6 +108,30 @@ function parseSyntheticGroup(
     intent,
     command,
     status: building ? 'building-group-created' : 'others-group-created',
+  };
+}
+
+/**
+ * A manual building source has no provider identifier to supply. The facility
+ * binding and display name are the whole record; its members are curated
+ * separately so a source can exist before anyone is added to it.
+ */
+function parseManualBuildingGroup(form: AdminForm): FacilitiesAdminMutation {
+  form.assertFields([...COMMON_FIELDS, 'facilityId', 'displayName']);
+  const command = CreateGroupSourceInputSchema.parse({
+    kind: 'manual',
+    purpose: 'building',
+    facilityId: form.required('facilityId'),
+    displayName: form.required('displayName'),
+    active: true,
+    googleGroupId: null,
+    email: null,
+    fixtureKey: null,
+  });
+  return {
+    intent: 'create-manual-building-group',
+    command,
+    status: 'building-group-created',
   };
 }
 
@@ -203,6 +228,8 @@ export function parseFacilitiesAdminMutation(
     case 'create-google-building-group':
     case 'create-google-others-group':
       return parseGoogleGroup(form, intent);
+    case 'create-manual-building-group':
+      return parseManualBuildingGroup(form);
     case 'create-synthetic-building-group':
     case 'create-synthetic-others-group':
       return parseSyntheticGroup(form, intent);

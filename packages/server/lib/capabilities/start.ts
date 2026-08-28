@@ -22,6 +22,7 @@ import {
   type DeliveryTestPreview,
   type DeliveryTestTargetSetVersion,
   type FacilityPage,
+  type GroupSourceKind,
   type NotificationChannel,
   type RegisteredCapabilityId,
   type RosterGroupSourceRef,
@@ -378,7 +379,7 @@ async function listFacilitiesFromDatabase(
 function rosterGroupSourceRef(
   value: Readonly<{
     id: string;
-    kind: 'google-group' | 'synthetic';
+    kind: GroupSourceKind;
     purpose: 'building' | 'others';
     facilityId: string | null;
   }>,
