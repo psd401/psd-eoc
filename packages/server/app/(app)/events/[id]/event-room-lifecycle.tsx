@@ -7,6 +7,7 @@ import {
 import { type ReactNode } from 'react';
 
 import { readableDateTime } from './event-room-timeline';
+import { blockingReasonSentence } from '../../../../lib/events/blocking-reasons';
 
 export type DialogState =
   | Readonly<{
@@ -95,9 +96,16 @@ export function PreviewDetails({
           <strong>Sending is blocked.</strong>
           <p>
             The all-clear action remains unavailable until every recipient and
-            channel consequence is ready. Cancel, correct the blocked
-            configuration, and load a fresh preview.
+            channel consequence is ready. Cancel, correct what is named below,
+            and load a fresh preview.
           </p>
+          {preview.blockingReasonCodes.length > 0 ? (
+            <ul>
+              {preview.blockingReasonCodes.map((code) => (
+                <li key={code}>{blockingReasonSentence(code)}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       <details className="technical-consequence-details">
