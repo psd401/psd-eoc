@@ -6,7 +6,6 @@ import {
   CreateNeighborhoodVersionInputSchema,
   FacilityPageSchema,
   FacilitySchema,
-  GroupSourceKindSchema,
   GroupSourcePageSchema,
   ListGroupSourcesInputSchema,
   ListNeighborhoodsInputSchema,
@@ -18,6 +17,7 @@ import {
   UpdateGroupSourceInputSchema,
   UuidSchema,
   groupSourceKindMatchesPopulation,
+  groupSourceKindsForPopulation,
   rosterPopulationForGroupSourceKind,
   type Actor,
   type CapabilityInput,
@@ -802,12 +802,8 @@ async function getGroupSource(
 const POPULATION_KINDS: Readonly<
   Record<RosterPopulation, readonly GroupSourceKind[]>
 > = {
-  staff: GroupSourceKindSchema.options.filter(
-    (kind) => rosterPopulationForGroupSourceKind(kind) === 'staff',
-  ),
-  synthetic: GroupSourceKindSchema.options.filter(
-    (kind) => rosterPopulationForGroupSourceKind(kind) === 'synthetic',
-  ),
+  staff: groupSourceKindsForPopulation('staff'),
+  synthetic: groupSourceKindsForPopulation('synthetic'),
 };
 
 interface RosterConfigurationState {

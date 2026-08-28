@@ -1,6 +1,7 @@
 import {
   ADMIN_READINESS_FRESHNESS_WINDOW_SECONDS,
   AdminReadinessSchema,
+  groupSourceKindsForPopulation,
   type AdminReadiness,
   type CapabilityInput,
 } from '@psd-eoc/contracts';
@@ -258,6 +259,8 @@ async function readDatabaseEvidence(database: AdminQueryDatabase) {
   // The same three conditions `resolveEventRecipients` applies when it reads a
   // school's staff, so a facility this reports as covered is one an activation
   // can actually reach.
+  const STAFF_GROUP_SOURCE_KINDS = groupSourceKindsForPopulation('staff');
+
   const buildingGroupRows =
     activeFacilityIds.length === 0
       ? []
@@ -267,7 +270,10 @@ async function readDatabaseEvidence(database: AdminQueryDatabase) {
           .where(
             and(
               eq(groupSources.purpose, 'building'),
-              eq(groupSources.kind, 'google-group'),
+              // Every kind that names real staff, not Google alone. A manual
+              // source is how a site notifies named people, and naming one
+              // kind here reported such a site as having no building group.
+              inArray(groupSources.kind, STAFF_GROUP_SOURCE_KINDS),
               eq(groupSources.active, true),
               inArray(groupSources.facilityId, activeFacilityIds),
             ),
