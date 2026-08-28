@@ -18,11 +18,9 @@ import {
 import {
   RosterSyncError,
   createDrizzleRosterSyncStore,
-  createGoogleCloudIdentityRosterAdapter,
   createScheduledRosterSyncAuthorizer,
   createStructuredRosterSyncAlertSink,
   createSyncRosterHandler,
-  readGoogleCloudIdentityRosterConfiguration,
   verifyRosterSyncJobToken,
   type RosterSyncAlert,
   type RosterSyncAlertSink,
@@ -510,13 +508,9 @@ async function createDefaultRuntime(
 ): Promise<RosterSyncRouteRuntime> {
   const connection = createDatabaseClient(readDatabaseConfig());
   try {
-    const adapter = createGoogleCloudIdentityRosterAdapter(
-      readGoogleCloudIdentityRosterConfiguration(),
-    );
     return Object.freeze({
       handler: createSyncRosterHandler({
         store: createDrizzleRosterSyncStore(connection.db),
-        adapter,
         alerts,
       }),
       authorizer: createScheduledRosterSyncAuthorizer(),

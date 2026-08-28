@@ -13,10 +13,18 @@ export const GroupSourceIdSchema = UuidSchema;
 export type GroupSourceId = z.infer<typeof GroupSourceIdSchema>;
 
 /**
- * Owns the source-system discriminator for configured groups. Google data is
- * untrusted external input; synthetic data is locally controlled test data.
+ * Owns the source-system discriminator for configured groups.
+ *
+ * Google data is untrusted external input. Synthetic data is locally
+ * controlled test data. Manual data is the staff list an administrator curates
+ * inside this application, for a deployment that notifies named people rather
+ * than everyone who happens to be in a directory group.
  */
-export const GroupSourceKindSchema = z.enum(['google-group', 'synthetic']);
+export const GroupSourceKindSchema = z.enum([
+  'google-group',
+  'manual',
+  'synthetic',
+]);
 
 /** Configured group source-system kind inferred from its schema. */
 export type GroupSourceKind = z.infer<typeof GroupSourceKindSchema>;
@@ -154,6 +162,18 @@ const syntheticGroupDetailsShape = {
 };
 
 /**
+ * A manual source has no external identity to carry. Its members are curated
+ * in this application, so the facility binding and display name are the whole
+ * record; pinning the provider fields to null keeps a Google or synthetic
+ * source from being reinterpreted as a manual one.
+ */
+const manualGroupDetailsShape = {
+  googleGroupId: z.null(),
+  email: z.null(),
+  fixtureKey: z.null(),
+};
+
+/**
  * Owns one administrator-configured Google Group or fail-closed synthetic
  * fixture source. Its union makes every valid kind, purpose, and facility
  * combination explicit; synthetic access groups do not exist.
@@ -191,6 +211,17 @@ export const GroupSourceSchema = z
         ...groupSourceMetadataShape,
         ...noGrantedRoleShape,
         ...googleGroupDetailsShape,
+      })
+      .strict(),
+    z
+      .object({
+        id: GroupSourceIdSchema,
+        kind: z.literal('manual'),
+        purpose: z.literal('building'),
+        facilityId: UuidSchema,
+        ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
+        ...manualGroupDetailsShape,
       })
       .strict(),
     z
@@ -285,6 +316,15 @@ export const CreateGroupSourceInputSchema = z
       .strict(),
     z
       .object({
+        kind: z.literal('manual'),
+        purpose: z.literal('building'),
+        facilityId: UuidSchema,
+        ...groupSourceWriteMetadataShape,
+        ...manualGroupDetailsShape,
+      })
+      .strict(),
+    z
+      .object({
         kind: z.literal('synthetic'),
         purpose: z.literal('building'),
         facilityId: UuidSchema,
@@ -372,4 +412,79 @@ export const UpdateGroupSourceInputSchema = z
 /** Group-source replacement input inferred from its schema. */
 export type UpdateGroupSourceInput = z.infer<
   typeof UpdateGroupSourceInputSchema
+>;
+
+/**
+ * Owns the complete membership of one manual roster source.
+ *
+ * The whole list is stated rather than added to one address at a time, so an
+ * administrator can see exactly who a site will reach before saving and a
+ * removal cannot be forgotten. Addresses are canonicalised to lowercase and
+ * deduplicated, because the same person written two ways is one recipient.
+ *
+ * An empty list is allowed and means the source reaches nobody. That is a
+ * legitimate state for a site being prepared, and the roster sync refuses to
+ * publish a snapshot from it rather than silently reaching no one.
+ */
+export const SetManualRosterMembersInputSchema = z
+  .object({
+    groupSourceId: GroupSourceIdSchema,
+    emails: z
+      .array(
+        z
+          .string()
+          .max(320)
+          .email()
+          // Canonical form is asserted rather than applied. This schema is
+          // published as JSON Schema for the agent surface, which cannot
+          // represent a transform, so the caller canonicalises and the
+          // contract refuses anything that is not already canonical.
+          .refine(
+            (value) => value === value.trim().toLowerCase(),
+            'Staff addresses must be lowercase and trimmed.',
+          ),
+      )
+      .max(1_000)
+      .refine(
+        (values) => new Set(values).size === values.length,
+        'Staff addresses must be unique.',
+      )
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+/** Canonicalises caller-supplied addresses into the form the contract accepts. */
+export function canonicalManualRosterEmails(
+  values: readonly string[],
+): readonly string[] {
+  return Object.freeze(
+    [...new Set(values.map((value) => value.trim().toLowerCase()))]
+      .filter((value) => value.length > 0)
+      .sort(),
+  );
+}
+
+/** Manual roster membership input inferred from its schema. */
+export type SetManualRosterMembersInput = z.infer<
+  typeof SetManualRosterMembersInputSchema
+>;
+
+/**
+ * Owns the retained membership of one manual roster source. Addresses are
+ * staff contact data, so the result carries a count and the capture time
+ * rather than the list itself.
+ */
+export const ManualRosterMembershipSchema = z
+  .object({
+    groupSourceId: GroupSourceIdSchema,
+    memberCount: z.number().int().nonnegative(),
+    capturedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Manual roster membership result inferred from its schema. */
+export type ManualRosterMembership = z.infer<
+  typeof ManualRosterMembershipSchema
 >;

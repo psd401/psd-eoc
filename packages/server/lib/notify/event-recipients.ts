@@ -26,8 +26,8 @@ export type EventReach = 'building' | 'neighborhood';
  * event is contractually bound to `synthetic` by `EventTargetingSchema`, and
  * that binding is worth nothing unless something refuses to look at staff
  * groups when it is set. So population selects `group_sources.kind`: `staff`
- * reads only `google-group` sources, `synthetic` reads only `synthetic` ones,
- * and neither can see the other's members.
+ * reads `google-group` and `manual` sources, `synthetic` reads only
+ * `synthetic` ones, and neither population can see the other's members.
  *
  * The health check and integrations test mode exercise the whole activation
  * path continuously. They can only do that safely because a synthetic
@@ -36,9 +36,9 @@ export type EventReach = 'building' | 'neighborhood';
  */
 export type EventPopulation = 'staff' | 'synthetic';
 
-const SOURCE_KIND_FOR_POPULATION = Object.freeze({
-  staff: 'google-group',
-  synthetic: 'synthetic',
+const SOURCE_KINDS_FOR_POPULATION = Object.freeze({
+  staff: ['google-group', 'manual'],
+  synthetic: ['synthetic'],
 } as const);
 
 /** One school whose staff an event reaches, and when its roster was read. */
@@ -179,7 +179,9 @@ export async function resolveEventRecipients(
     .where(
       and(
         eq(groupSources.purpose, 'building'),
-        eq(groupSources.kind, SOURCE_KIND_FOR_POPULATION[input.population]),
+        inArray(groupSources.kind, [
+          ...SOURCE_KINDS_FOR_POPULATION[input.population],
+        ]),
         eq(groupSources.active, true),
         inArray(groupSources.facilityId, [...facilityIds]),
       ),
