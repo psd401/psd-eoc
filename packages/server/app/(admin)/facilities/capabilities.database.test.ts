@@ -44,6 +44,12 @@ import {
   type PersistInitialWebSessionRequest,
 } from '../../../lib/auth/session-cookie';
 import { executeAuditedCapabilityTransaction } from '../../../lib/capabilities/engine';
+import {
+  createDrizzleRosterSyncStore,
+  createStructuredRosterSyncAlertSink,
+  syncRoster,
+} from '../../../lib/roster/groups-sync';
+import { resetStaffRosterEmailForTests } from '../../../lib/config/staff-email';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
@@ -69,6 +75,7 @@ import {
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
+  executeSetManualRosterMembersCapability,
   executeCreateNeighborhoodVersionCapability,
   executeFacilitiesAdminProjection,
   executeGetNeighborhoodVersionCapability,
@@ -4150,5 +4157,180 @@ describeWithDatabase('facilities administrator database flow', () => {
     ).rejects.toEqual(
       expect.objectContaining({ status: 409, code: 'CONFLICT' }),
     );
+  });
+
+  test('adds a manual building source, saves who it reaches, and publishes', async () => {
+    // The whole path an administrator walks for a site where not every staff
+    // member is enrolled. None of it had coverage, and none of it worked:
+    // creating the source failed, and it would not have reached a snapshot.
+    //
+    // This runs against its own database because publication reads every
+    // configured staff source, and the sources other tests leave behind are
+    // empty, which rejects the publication for reasons unrelated to this.
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    const priorHostedDomain = process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+    const priorCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    // `bun test` sets NODE_ENV=test, so Bun does not load `.env.local`, and
+    // the staff domain and push cutover a publication needs are stated here.
+    process.env.GOOGLE_OIDC_HOSTED_DOMAIN = 'example.invalid';
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
+    resetStaffRosterEmailForTests();
+    try {
+      await withIsolatedFacilitiesDatabase(
+        currentContext.baseDatabaseUrl,
+        async (_isolatedContext, ownerConnection) => {
+          const database = ownerConnection.db;
+          const authenticated = authenticatedAdministrator();
+          const store = createDrizzleAdminCapabilityStore(
+            database,
+            authenticated,
+          );
+          const suffix = randomUUID();
+          const requestIds: string[] = [];
+          await persistAdministratorIdentity(database, authenticated, suffix);
+
+          const facility = await executeCreateFacilityCapability({
+            authenticated,
+            store,
+            command: {
+              code: `MAN${suffix.slice(0, 5).toUpperCase()}`,
+              name: `Manual facility ${suffix.slice(0, 8)}`,
+            },
+            metadata: metadata('manual-facility-create', requestIds),
+          });
+
+          const created = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'manual',
+              purpose: 'building',
+              facilityId: facility.id,
+              displayName: `Manual staff ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: null,
+              email: null,
+              fixtureKey: null,
+            },
+            metadata: metadata('manual-building-create', requestIds),
+          });
+          expect(created).toMatchObject({
+            kind: 'manual',
+            purpose: 'building',
+            facilityId: facility.id,
+            active: true,
+            googleGroupId: null,
+            email: null,
+            fixtureKey: null,
+          });
+
+          // A manual source names real people, so it belongs to the staff
+          // roster. It used to be sorted into the synthetic population and
+          // then dropped, which left it in no configuration at all.
+          const [membership] = await database
+            .select({
+              population: rosterSourceConfigurationGroups.population,
+              kind: rosterSourceConfigurationGroups.groupSourceKind,
+            })
+            .from(rosterSourceConfigurationGroups)
+            .where(
+              eq(rosterSourceConfigurationGroups.groupSourceId, created.id),
+            );
+          expect(membership).toEqual({ population: 'staff', kind: 'manual' });
+
+          const saved = await executeSetManualRosterMembersCapability({
+            authenticated,
+            store,
+            command: {
+              groupSourceId: created.id,
+              emails: [
+                `manual-one-${suffix.slice(0, 8)}@example.invalid`,
+                `manual-two-${suffix.slice(0, 8)}@example.invalid`,
+              ],
+            },
+            metadata: metadata('manual-members-set', requestIds),
+          });
+          expect(saved).toMatchObject({
+            groupSourceId: created.id,
+            memberCount: 2,
+          });
+
+          const storedMembers = await database
+            .select({ email: groupMembers.email })
+            .from(groupMembers)
+            .where(eq(groupMembers.groupSourceId, created.id));
+          expect(storedMembers.map(({ email }) => email).sort()).toEqual([
+            `manual-one-${suffix.slice(0, 8)}@example.invalid`,
+            `manual-two-${suffix.slice(0, 8)}@example.invalid`,
+          ]);
+
+          // Publication is what decides whether an activation reaches anyone.
+          // It reads the sources back through a second converter that had the
+          // same defect as the first.
+          const [configuration] = await database
+            .select({
+              id: rosterSourceConfigurations.id,
+              version: rosterSourceConfigurations.version,
+            })
+            .from(rosterSourceConfigurations)
+            .where(eq(rosterSourceConfigurations.population, 'staff'))
+            .orderBy(desc(rosterSourceConfigurations.version))
+            .limit(1);
+          if (configuration === undefined) {
+            throw new Error('No staff roster configuration was created.');
+          }
+
+          const published = await syncRoster(
+            {
+              sourceConfiguration: {
+                id: configuration.id,
+                version: configuration.version,
+              },
+            },
+            {
+              actor: authenticated.actor,
+              source: 'administrator',
+              transport: 'authenticated-session',
+              requestId: randomUUID(),
+              idempotencyKey: randomUUID(),
+            },
+            {
+              store: createDrizzleRosterSyncStore(database),
+              alerts: createStructuredRosterSyncAlertSink(),
+            },
+          );
+          expect(published).toMatchObject({
+            outcome: 'complete',
+            population: 'staff',
+            groupFailures: [],
+          });
+          expect(published.publishedSnapshotId).not.toBeNull();
+
+          const [snapshot] = await database
+            .select({ population: rosterSnapshots.population })
+            .from(rosterSnapshots)
+            .where(eq(rosterSnapshots.population, 'staff'))
+            .orderBy(desc(rosterSnapshots.capturedAt))
+            .limit(1);
+          expect(snapshot?.population).toBe('staff');
+        },
+      );
+    } finally {
+      if (priorHostedDomain === undefined) {
+        delete process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+      } else {
+        process.env.GOOGLE_OIDC_HOSTED_DOMAIN = priorHostedDomain;
+      }
+      if (priorCutover === undefined) {
+        delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+      } else {
+        process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorCutover;
+      }
+      resetStaffRosterEmailForTests();
+    }
   });
 });
