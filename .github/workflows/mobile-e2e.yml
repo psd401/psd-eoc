@@ -1,8 +1,9 @@
 name: Mobile E2E
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    # 09:00 UTC is 02:00 America/Los_Angeles, outside working hours.
+    - cron: '0 9 * * *'
   workflow_call:
   workflow_dispatch:
 
