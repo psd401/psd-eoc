@@ -7,11 +7,10 @@ not authorize a provider write or notification.
 
 ## Configuration and tooling
 
-The configured app name, SKU, bundle ID, internal group, and external group are
-supplied at runtime through `ASC_APP_NAME`, `ASC_APP_SKU`, `ASC_BUNDLE_ID`,
-`ASC_INTERNAL_GROUP_NAME`, and `ASC_EXTERNAL_GROUP_NAME`. Credentials use
-`ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_KEY_PATH` and remain outside the
-repository.
+The configured app name, SKU, bundle ID, and internal group are supplied at
+runtime through `ASC_APP_NAME`, `ASC_APP_SKU`, `ASC_BUNDLE_ID`, and
+`ASC_INTERNAL_GROUP_NAME`. Credentials use `ASC_KEY_ID`, `ASC_ISSUER_ID`, and
+`ASC_KEY_PATH` and remain outside the repository.
 
 `scripts/ops/appstore/asc.ts` is the canonical App Store Connect operator
 surface. Without `--apply` it performs authenticated reads and emits a bounded
@@ -19,15 +18,36 @@ plan. An apply is add-only and binds the configured bundle ID to the exact
 previewed plan digest. Development and CI use mocks and never authenticate to
 Apple.
 
+## Internal distribution only
+
+The tool distributes to the internal TestFlight group and nothing else. It
+cannot create or populate an external group, and it cannot submit a build for
+Beta App Review. Internal distribution needs no Apple review, so a build is
+available to internal testers as soon as processing completes.
+
+Every internal tester must already be an eligible App Store Connect user on the
+team; Apple caps that group at 100. `--test-info` supplies only the TestFlight
+beta description, feedback email, locale, and What to Test text. There is no
+demo-account or review-contact input, because nothing is submitted for review.
+
+An external group that already exists in App Store Connect is ignored: the tool
+reads it when accounting for app-wide tester capacity and never writes to it.
+
+Apple rejected 1.0.5 (12) for external beta testing under Guideline 2.2,
+stating that TestFlight is for beta testing apps intended for public
+distribution and that an internal-use app belongs in Apple Business Manager.
+Distributing this app to a wider audience is a distribution-model decision, not
+a change to this tool.
+
 The presence of `ascAppId` is routing configuration only, never proof of an
 uploaded build, tester exposure, device installation, or provider authority.
 
 ## Procedure
 
 1. Confirm the exact configured app and current readiness row. Keep tester
-   inputs, review metadata, credentials, and private keys outside the
+   inputs, beta test metadata, credentials, and private keys outside the
    repository.
-2. Run a read/preview for the complete intended synthetic tester cohorts and
+2. Run a read/preview for the complete intended internal tester cohort and
    immutable build. Stop on unknown app identity, audience, paging, capacity,
    build, group, or localization state.
 3. Review the plan's exact actions and digest. An authorized human may apply
