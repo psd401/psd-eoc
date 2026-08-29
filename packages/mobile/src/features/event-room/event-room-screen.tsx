@@ -487,6 +487,7 @@ export function TimelineEntryCard({
             ) : null}
           </View>
           {actionEligibility.correction.allowed ||
+          actionEligibility.correction.permanent ||
           actionEligibility.correction.unavailableReason ===
             actionEligibility.redaction.unavailableReason ? null : (
             <Text accessibilityRole="summary" style={styles.entryActionHelp}>
@@ -494,8 +495,20 @@ export function TimelineEntryCard({
               {actionEligibility.correction.unavailableReason}
             </Text>
           )}
+          {/*
+            Only a reason the reader can do something about is worth printing.
+            Saying "System lifecycle facts cannot be corrected or redacted"
+            under every lifecycle entry restated that the absent buttons were
+            absent, on every entry in the timeline. A stale timeline or a
+            superseded entry still explains itself, because the reader can act
+            on it.
+          */}
           {!actionEligibility.correction.allowed &&
-          !actionEligibility.redaction.allowed ? (
+          !actionEligibility.redaction.allowed &&
+          !(
+            actionEligibility.correction.permanent &&
+            actionEligibility.redaction.permanent
+          ) ? (
             <Text accessibilityRole="summary" style={styles.entryActionHelp}>
               Entry actions unavailable:{' '}
               {actionEligibility.correction.unavailableReason ??

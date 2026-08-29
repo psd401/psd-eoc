@@ -45,10 +45,27 @@ export type ExpoPushRuntimeErrorCode =
   | 'ATTEMPT_FAILED';
 
 export class ExpoPushRuntimeError extends Error {
-  public constructor(public readonly code: ExpoPushRuntimeErrorCode) {
+  public constructor(
+    public readonly code: ExpoPushRuntimeErrorCode,
+    /**
+     * The class of whatever failed underneath, when there was one.
+     *
+     * `ATTEMPT_FAILED` is raised for every way an attempt can fail, so the
+     * code alone cannot tell a refused database write from a provider
+     * rejection. Only the cause's class is carried: a provider message can
+     * hold the push token or the recipient it was for, and never reaches here.
+     */
+    public readonly causeName: string | null = null,
+  ) {
     super('The Expo push runtime request failed safely.');
     this.name = 'ExpoPushRuntimeError';
   }
+}
+
+/** The class of a thrown value, for a failure that must not be echoed. */
+function causeClass(error: unknown): string | null {
+  const name = (error as { name?: unknown } | null)?.name;
+  return typeof name === 'string' && name.length > 0 ? name : null;
 }
 
 function delaySeconds(retryAt: string, now = Date.now()): number {
@@ -188,8 +205,8 @@ export class ExpoPushRuntime {
     let result: WorkerAttemptProcessResult;
     try {
       result = await this.#worker.process(workItem);
-    } catch {
-      throw new ExpoPushRuntimeError('ATTEMPT_FAILED');
+    } catch (error) {
+      throw new ExpoPushRuntimeError('ATTEMPT_FAILED', causeClass(error));
     }
     if (result.kind === 'in-progress') {
       throw new ExpoPushRuntimeError('ATTEMPT_IN_PROGRESS');

@@ -42,6 +42,17 @@ export const EMPTY_EVENT_ROOM_MODEL: EventRoomModel = Object.freeze({
 export interface JournalEntryActionAvailability {
   readonly allowed: boolean;
   readonly unavailableReason: string | null;
+  /**
+   * Whether the reason describes this entry's nature rather than the reader's
+   * situation.
+   *
+   * A system lifecycle fact can never be corrected, and a redacted entry can
+   * never be redacted again. Explaining those under every entry says only that
+   * the absent buttons are absent. A stale timeline or an already-superseded
+   * entry is different: the reader can load the timeline or pick the newer
+   * entry, so that is worth saying.
+   */
+  readonly permanent: boolean;
 }
 
 export interface JournalEntryActionEligibility {
@@ -49,13 +60,21 @@ export interface JournalEntryActionEligibility {
   readonly redaction: JournalEntryActionAvailability;
 }
 
-function unavailable(reason: string): JournalEntryActionAvailability {
-  return Object.freeze({ allowed: false, unavailableReason: reason });
+function unavailable(
+  reason: string,
+  permanent = false,
+): JournalEntryActionAvailability {
+  return Object.freeze({
+    allowed: false,
+    unavailableReason: reason,
+    permanent,
+  });
 }
 
 const AVAILABLE_ACTION = Object.freeze({
   allowed: true,
   unavailableReason: null,
+  permanent: false,
 });
 
 /**
@@ -79,15 +98,15 @@ export function journalEntryActionEligibility(
   if (target.visibility === 'redacted') {
     const reason = 'This entry is already redacted.';
     return Object.freeze({
-      correction: unavailable(reason),
-      redaction: unavailable(reason),
+      correction: unavailable(reason, true),
+      redaction: unavailable(reason, true),
     });
   }
   if (target.entry.kind === 'system') {
     const reason = 'System lifecycle facts cannot be corrected or redacted.';
     return Object.freeze({
-      correction: unavailable(reason),
-      redaction: unavailable(reason),
+      correction: unavailable(reason, true),
+      redaction: unavailable(reason, true),
     });
   }
 
@@ -105,6 +124,7 @@ export function journalEntryActionEligibility(
     target.entry.kind !== 'text' && target.entry.kind !== 'location'
       ? unavailable(
           'Photos cannot be replaced as corrections. Redact the photo and post a new one instead.',
+          true,
         )
       : supersessions.length > 0
         ? unavailable(
