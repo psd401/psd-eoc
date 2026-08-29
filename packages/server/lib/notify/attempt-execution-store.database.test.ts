@@ -9,6 +9,8 @@ import {
   test,
 } from 'bun:test';
 
+import { sql } from 'drizzle-orm';
+
 import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
@@ -301,5 +303,75 @@ describeWithDatabase('durable channel attempt execution leases', () => {
     expect(claims.filter((claim) => claim.kind === 'in-progress')).toHaveLength(
       7,
     );
+  });
+  /**
+   * These tests connect as the database owner, so every case above would pass
+   * with the application role holding no privileges at all. That is not
+   * hypothetical: migration 0026 created this table after the blanket
+   * application grant, PostgreSQL did not extend that grant to it, and the
+   * table sat with a null ACL. Workers claim an execution lease here before
+   * calling any provider, so the refusal landed on the first step of every
+   * send and no notification was ever delivered.
+   */
+  test('the application role can claim, complete, and release a lease', async () => {
+    const database = connection?.db;
+    if (database === undefined) throw new Error('database is required');
+    const [privileges] = await database.execute<{
+      can_select: boolean;
+      can_insert_lease: boolean;
+      can_update_lease: boolean;
+      can_update_completion: boolean;
+      can_delete: boolean;
+    }>(sql`
+      select
+        has_table_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'SELECT'
+        ) as can_select,
+        has_column_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'lease_token', 'INSERT'
+        ) as can_insert_lease,
+        has_column_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'lease_expires_at', 'UPDATE'
+        ) as can_update_lease,
+        has_column_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'completion', 'UPDATE'
+        ) as can_update_completion,
+        has_table_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'DELETE'
+        ) as can_delete
+    `);
+    expect(privileges).toEqual({
+      can_select: true,
+      can_insert_lease: true,
+      can_update_lease: true,
+      can_update_completion: true,
+      can_delete: true,
+    });
+  });
+
+  /**
+   * The same defect has now reached production twice: "notification_intents"
+   * in migration 0040 and this table in 0041. Both were a table the
+   * application role could not touch, found only after a confirmed activation
+   * reached nobody. This asserts the general property instead of waiting for
+   * the third one.
+   */
+  test('every table grants the application role some privilege', async () => {
+    const database = connection?.db;
+    if (database === undefined) throw new Error('database is required');
+    const unreachable = await database.execute<{ relname: string }>(sql`
+      select relation.relname
+      from pg_catalog.pg_class as relation
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public'
+        and relation.relkind = 'r'
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'SELECT')
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'INSERT')
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'UPDATE')
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'DELETE')
+      order by relation.relname
+    `);
+    expect([...unreachable].map((row) => row.relname)).toEqual([]);
   });
 });
