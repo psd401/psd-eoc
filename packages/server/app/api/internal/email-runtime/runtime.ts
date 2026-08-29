@@ -241,6 +241,7 @@ export function createEmailRuntimeRouteHandler(
           JSON.stringify({
             event: 'email-runtime-conflict',
             code: error.code,
+            detail: error.detail,
           }),
         );
         return errorResponse(409, error.code, error.message);
