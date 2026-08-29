@@ -3076,6 +3076,20 @@ export class PsdEocStack extends Stack {
         resources: [mediaObjects.bucketArn, mediaObjects.arnForObjects('*')],
       }),
     );
+    // GuardDuty proves it can write to the bucket by putting a single
+    // validation object and removing it again, and reports the plan as
+    // degraded when it cannot. Scoped to that one key: the scan role can
+    // write its own probe and nothing else, and cannot touch a staff photo.
+    mediaScanRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject', 's3:DeleteObject'],
+        resources: [
+          mediaObjects.arnForObjects(
+            'malware-protection-resource-validation-object*',
+          ),
+        ],
+      }),
+    );
     mediaScanRole.addToPolicy(
       new iam.PolicyStatement({
         actions: [
