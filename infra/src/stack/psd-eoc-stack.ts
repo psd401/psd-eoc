@@ -3066,6 +3066,12 @@ export class PsdEocStack extends Stack {
           's3:GetObjectVersionTagging',
           's3:PutObjectTagging',
           's3:PutObjectVersionTagging',
+          // GuardDuty learns about a new object through EventBridge, and turns
+          // that delivery on itself when the plan is created. Without the
+          // notification pair it refuses the plan outright rather than
+          // attaching one that would never see an upload.
+          's3:GetBucketNotification',
+          's3:PutBucketNotification',
         ],
         resources: [mediaObjects.bucketArn, mediaObjects.arnForObjects('*')],
       }),
