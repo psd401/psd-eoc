@@ -313,10 +313,16 @@ describe('Expo push long-poll service', () => {
     expect(
       commands.some((command) => command instanceof DeleteMessageCommand),
     ).toBe(false);
+    // The failure is classified so an operator can tell a malformed payload
+    // from a refused callback, but the classification is drawn only from what
+    // this system assigns. The provider's own message is never echoed: it can
+    // carry the push token or the recipient the message was for.
     expect(logs).toContainEqual({
       event: 'push-worker-message-failed',
       count: 1,
+      detail: 'Error',
     });
     expect(JSON.stringify(logs)).not.toContain('provider-controlled');
+    expect(JSON.stringify(logs)).not.toContain('secret detail');
   });
 });
