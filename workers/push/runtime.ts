@@ -62,10 +62,29 @@ export class ExpoPushRuntimeError extends Error {
   }
 }
 
-/** The class of a thrown value, for a failure that must not be echoed. */
+/**
+ * The class and code of a thrown value, for a failure that must not be echoed.
+ *
+ * The class alone was not enough. Every distinct processing refusal is a
+ * WorkerProcessingError, so a log line naming only the class said no more than
+ * "the attempt failed" -- an adapter mismatch, a denied provider send, and an
+ * unwritable idempotency record all read identically. The code is one of a
+ * fixed set this system assigns, so it carries no provider or recipient text.
+ */
 function causeClass(error: unknown): string | null {
-  const name = (error as { name?: unknown } | null)?.name;
-  return typeof name === 'string' && name.length > 0 ? name : null;
+  const carried = error as { name?: unknown; code?: unknown } | null;
+  const name =
+    typeof carried?.name === 'string' && carried.name.length > 0
+      ? carried.name
+      : null;
+  const code =
+    typeof carried?.code === 'string' && carried.code.length > 0
+      ? carried.code
+      : null;
+  if (name === null && code === null) return null;
+  if (name === null) return code;
+  if (code === null) return name;
+  return `${name}/${code}`;
 }
 
 function delaySeconds(retryAt: string, now = Date.now()): number {
