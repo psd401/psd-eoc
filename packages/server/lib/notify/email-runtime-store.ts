@@ -58,7 +58,17 @@ export type EmailRuntimeStoreErrorCode =
   | 'RETRY_NOT_FOUND';
 
 export class EmailRuntimeStoreError extends Error {
-  public constructor(public readonly code: EmailRuntimeStoreErrorCode) {
+  public constructor(
+    public readonly code: EmailRuntimeStoreErrorCode,
+    /**
+     * Which refusal this is, for the log only.
+     *
+     * `BATCH_CONFLICT` is raised at seven places that mean seven different
+     * things, and the code is all the worker receives. This never leaves the
+     * server: the HTTP response still carries the code alone.
+     */
+    public readonly detail: string | null = null,
+  ) {
     super('Email runtime state could not be handled safely.');
     this.name = 'EmailRuntimeStoreError';
   }
@@ -137,7 +147,10 @@ export function assertEmailBatch(batch: DispatchBatch): void {
     batch.integrationStatus.integrationId !== 'ses-email' ||
     batch.integrationStatus.label !== 'live-verified'
   ) {
-    throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'not-a-sendable-email-batch',
+    );
   }
 }
 
@@ -163,7 +176,10 @@ export function assertControlledCanaryBatch(batch: DispatchBatch): void {
     batch.rosterPopulation !== 'staff' ||
     batch.endpointCount !== 1
   ) {
-    throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'not-a-controlled-canary',
+    );
   }
 }
 
@@ -190,7 +206,10 @@ async function persistedBatch(
     (candidate) => candidate.channel === record.batch.channel,
   );
   if (planned === undefined) {
-    throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'no-planned-channel-in-outbox-message',
+    );
   }
   const batch = DispatchBatchSchema.parse({
     id: record.batch.id,
@@ -232,7 +251,10 @@ async function resolveCurrentEndpoints(
     batch.rosterSnapshotId,
   );
   if (roster === null) {
-    throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'pinned-roster-snapshot-unavailable',
+    );
   }
   return resolveEmailEndpoints(
     {
@@ -354,7 +376,12 @@ async function databaseNow(database: Database): Promise<Date> {
     .select({ value: sql<Date | string>`runtime_clock.value` })
     .from(sql`(select clock_timestamp() as value) as runtime_clock`)
     .limit(1);
-  if (row === undefined) throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+  if (row === undefined) {
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'database-clock-unreadable',
+    );
+  }
   const value = row.value instanceof Date ? row.value : new Date(row.value);
   if (!Number.isFinite(value.getTime())) {
     throw new EmailRuntimeStoreError('BATCH_CONFLICT');
