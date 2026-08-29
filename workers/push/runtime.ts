@@ -283,8 +283,31 @@ export class ExpoPushRuntime {
       const settled = await Promise.allSettled(
         page.items.map((item) => this.#processAttempt(item)),
       );
-      if (settled.some((result) => result.status === 'rejected')) {
-        throw new ExpoPushRuntimeError('ATTEMPT_FAILED');
+      const rejections = settled.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason as unknown] : [],
+      );
+      if (rejections.length > 0) {
+        // Every attempt in the page is settled before any is reported, so the
+        // reasons are collected rather than rethrown one at a time. Without
+        // this the page's failure replaced each attempt's own reason with a
+        // bare `ATTEMPT_FAILED`, which is what the log showed.
+        const reasons = [
+          ...new Set(
+            rejections.map((reason) => {
+              const carried = reason as {
+                code?: unknown;
+                causeName?: unknown;
+              } | null;
+              const code =
+                typeof carried?.code === 'string' ? carried.code : 'unknown';
+              return typeof carried?.causeName === 'string' &&
+                carried.causeName.length > 0
+                ? `${code}/${carried.causeName}`
+                : code;
+            }),
+          ),
+        ].sort();
+        throw new ExpoPushRuntimeError('ATTEMPT_FAILED', reasons.join(' '));
       }
       for (const result of settled) {
         if (result.status !== 'fulfilled') continue;

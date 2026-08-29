@@ -384,7 +384,10 @@ async function databaseNow(database: Database): Promise<Date> {
   }
   const value = row.value instanceof Date ? row.value : new Date(row.value);
   if (!Number.isFinite(value.getTime())) {
-    throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'database-clock-not-a-time',
+    );
   }
   return value;
 }
@@ -663,13 +666,30 @@ export function createDrizzleEmailRuntimeStore(
 
     async resolveBatch(input) {
       const batch = await persistedBatch(database, input.batch.id);
-      if (
-        input.cursor !== 0 ||
-        !sameJson(batch, input.batch) ||
-        !emailBatchMatchesDeploymentAuthorization(batch, deployment) ||
-        Date.parse(input.enqueuedAt) < Date.parse(batch.createdAt)
-      ) {
-        throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+      // Four separate reasons to refuse, each meaning something different to
+      // whoever has to act on it: a resumed cursor, a queued batch that no
+      // longer matches what is stored, a deployment authorization that has
+      // moved on, and a message older than the batch it names.
+      if (input.cursor !== 0) {
+        throw new EmailRuntimeStoreError('BATCH_CONFLICT', 'resumed-cursor');
+      }
+      if (!sameJson(batch, input.batch)) {
+        throw new EmailRuntimeStoreError(
+          'BATCH_CONFLICT',
+          'queued-batch-differs-from-stored',
+        );
+      }
+      if (!emailBatchMatchesDeploymentAuthorization(batch, deployment)) {
+        throw new EmailRuntimeStoreError(
+          'BATCH_CONFLICT',
+          'deployment-authorization-moved-on',
+        );
+      }
+      if (Date.parse(input.enqueuedAt) < Date.parse(batch.createdAt)) {
+        throw new EmailRuntimeStoreError(
+          'BATCH_CONFLICT',
+          'message-older-than-its-batch',
+        );
       }
       const endpoints = await resolveCurrentEndpoints(database, batch);
       const now = await databaseNow(database);
