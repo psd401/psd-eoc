@@ -284,9 +284,18 @@ export async function handleCompleteMediaUpload(
     runtime,
     'complete-media-upload',
     true,
-    () => {
+    async () => {
       assertNoQueryParameters(request);
-      if (request.body !== null) {
+      // Completion carries nothing but the intent in its path, and a body here
+      // would mean the caller believes it is supplying something this route
+      // would silently ignore. Refuse one -- but refuse an actual body.
+      //
+      // Testing `request.body !== null` refused every real request instead. A
+      // POST sent with no body still arrives with a non-null empty stream, so
+      // the browser's completion call was rejected as malformed and no photo
+      // could ever be posted: the bytes reached storage and the record was
+      // never created.
+      if ((await request.text()).length > 0) {
         throw new SyntaxError('Media completion does not accept a body.');
       }
       return CompleteMediaUploadInputSchema.parse({ uploadIntentId });

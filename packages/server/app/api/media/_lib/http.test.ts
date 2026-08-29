@@ -285,6 +285,43 @@ describe('media REST helper boundary', () => {
     });
   });
 
+  /**
+   * A browser POST sent with no body still arrives with a non-null empty
+   * stream. The case above constructs its request with body null, which no
+   * real client produces, so a guard that tested `request.body !== null`
+   * passed here while refusing every actual completion: the photo bytes
+   * reached storage and the media record was never created.
+   */
+  test('completes an upload sent the way a browser sends it', async () => {
+    const accepted = testRuntime();
+    const response = await handleCompleteMediaUpload(
+      completionRequest('', ''),
+      ids.uploadIntent,
+      accepted.runtime,
+    );
+
+    expect(response.status).toBe(200);
+    expect(accepted.executions[0]).toMatchObject({
+      capabilityId: 'complete-media-upload',
+      input: { uploadIntentId: ids.uploadIntent },
+    });
+  });
+
+  test('refuses a completion that actually carries a body', async () => {
+    const refused = testRuntime();
+    const response = await handleCompleteMediaUpload(
+      completionRequest(
+        '',
+        JSON.stringify({ uploadIntentId: ids.uploadIntent }),
+      ),
+      ids.uploadIntent,
+      refused.runtime,
+    );
+
+    await expectSafeValidationError(response);
+    expect(refused.executions).toHaveLength(0);
+  });
+
   test('completes an upload only with a bodyless mutation', async () => {
     const accepted = testRuntime();
     const response = await handleCompleteMediaUpload(
