@@ -640,8 +640,12 @@ export async function runExpoPushService(
           count: result.incompleteCount,
         });
       }
-    } catch {
-      log({ event: 'push-worker-message-failed', count: 1 });
+    } catch (error) {
+      log({
+        event: 'push-worker-message-failed',
+        count: 1,
+        detail: failureDetail(error),
+      });
     } finally {
       clearInterval(heartbeat);
     }

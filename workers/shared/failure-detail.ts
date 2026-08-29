@@ -1,18 +1,23 @@
-/** At most this much of a failure is written to a worker log. */
-const FAILURE_DETAIL_LIMIT = 300;
-
 /**
- * A bounded, value-free description of why a worker could not handle a message.
+ * Why a worker could not handle a message, using only classifications this
+ * system controls.
  *
- * A delivery message names a recipient and carries a provider token, so the
- * failure itself must never be echoed. A schema refusal contributes the field
- * paths it rejected -- a Zod message can quote the value it refused, and here
- * that value is exactly the address or token that must not be logged.
+ * An error's message is never echoed. A delivery failure often originates at a
+ * provider, and a provider-controlled string may carry the push token or the
+ * recipient the message was for; `workers/push/service.test.ts` asserts that
+ * such text never reaches a log line. Nothing here is drawn from a message,
+ * a payload, or a provider response body.
  *
- * Workers used to log these failures as a bare count. A message that could not
- * be handled looked identical whether the queue payload was malformed, a
- * provider rejected it, or a database write was refused, and the message
- * retried until its redrive policy gave up.
+ * What is safe is what the system itself assigned: the error's class, the
+ * error code these clients raise (`RETRYABLE_RESPONSE`, `INVALID_RESPONSE`),
+ * an HTTP status, and the field paths a schema refused. That is also what
+ * actually identifies a failure -- these clients raise one fixed sentence and
+ * put the useful part in a code, so the message was never the answer.
+ *
+ * Workers previously logged these failures as a bare count. A message that
+ * could not be handled looked identical whether the payload was malformed, a
+ * provider rejected it, or a callback was refused, and it retried until its
+ * redrive policy gave up.
  */
 export function failureDetail(error: unknown): string {
   const issues = (
@@ -32,10 +37,19 @@ export function failureDetail(error: unknown): string {
       ? `schema refused: ${paths.join(', ')}`
       : 'schema refused the message';
   }
-  if (!(error instanceof Error)) return 'no message';
-  const message = error.message.trim().replace(/\s+/gu, ' ');
-  if (message.length === 0) return 'no message';
-  return message.length > FAILURE_DETAIL_LIMIT
-    ? `${message.slice(0, FAILURE_DETAIL_LIMIT)}…`
-    : message;
+  const carried = error as {
+    name?: unknown;
+    code?: unknown;
+    status?: unknown;
+  } | null;
+  const parts = [
+    typeof carried?.name === 'string' && carried.name.length > 0
+      ? [carried.name]
+      : [],
+    typeof carried?.code === 'string' && carried.code.length > 0
+      ? [`code ${carried.code}`]
+      : [],
+    typeof carried?.status === 'number' ? [`status ${carried.status}`] : [],
+  ].flat();
+  return parts.length === 0 ? 'unclassified failure' : parts.join(' — ');
 }
