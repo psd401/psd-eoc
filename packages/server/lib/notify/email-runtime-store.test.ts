@@ -7,6 +7,8 @@ import {
   emailDeliveryTestWorkItem,
 } from '../testing/email-runtime';
 import {
+  assertControlledCanaryBatch,
+  assertEmailBatch,
   createDrizzleEmailRuntimeStore,
   emailBatchMatchesDeploymentAuthorization,
 } from './email-runtime-store';
@@ -152,5 +154,59 @@ describe('email runtime deployment authorization', () => {
       kind: 'ineligible',
     });
     expect(readOrder).toEqual(['attempt', 'batch']);
+  });
+});
+
+describe('which email batches this store will send', () => {
+  test('accepts an ordinary activation that is not a controlled canary', () => {
+    // The canary's conditions were applied to every batch, so a confirmed
+    // activation queued its email and was refused on arrival: an ordinary
+    // drill notified nobody, and a REAL incident would have sent no email at
+    // all. This is that batch.
+    const activation = {
+      ...batch,
+      eventKind: 'incident' as const,
+      templateMode: 'real' as const,
+      purpose: 'activation' as const,
+      endpointCount: 42,
+      deliveryTest: null,
+    };
+    expect(() => assertEmailBatch(activation)).not.toThrow();
+  });
+
+  test('accepts an all-clear, which is not an activation', () => {
+    expect(() =>
+      assertEmailBatch({ ...batch, purpose: 'all-clear' as const }),
+    ).not.toThrow();
+  });
+
+  test('still refuses a batch this store must never send', () => {
+    // A human confirmed it, it is the verified SES integration, and it is an
+    // email batch. These remain the conditions for sending anything.
+    expect(() =>
+      assertEmailBatch({ ...batch, channel: 'push' as const }),
+    ).toThrow();
+    expect(() =>
+      assertEmailBatch({
+        ...batch,
+        integrationStatus: { ...batch.integrationStatus, label: 'mocked' },
+      }),
+    ).toThrow();
+  });
+
+  test('holds a controlled canary to every condition it always had', () => {
+    expect(() => assertControlledCanaryBatch(batch)).not.toThrow();
+    expect(() =>
+      assertControlledCanaryBatch({ ...batch, endpointCount: 2 }),
+    ).toThrow();
+    expect(() =>
+      assertControlledCanaryBatch({ ...batch, eventKind: 'incident' as const }),
+    ).toThrow();
+    expect(() =>
+      assertControlledCanaryBatch({ ...batch, templateMode: 'real' as const }),
+    ).toThrow();
+    expect(() =>
+      assertControlledCanaryBatch({ ...batch, purpose: 'all-clear' as const }),
+    ).toThrow();
   });
 });
