@@ -3018,6 +3018,33 @@ export class PsdEocStack extends Stack {
       enforceSSL: true,
       versioned: true,
       removalPolicy: RemovalPolicy.RETAIN,
+      // A staff photo is uploaded by the browser straight to S3 with a signed
+      // grant, so the upload is cross-origin and the bucket has to say so.
+      // Without this the upload fails at the transport with no provider
+      // answer, which the event room reports as an upload that ended without
+      // a confirmed result.
+      //
+      // One origin: this deployment's own. PUT for the upload, GET for the
+      // signed read-back, HEAD for the size probe the client makes first. The
+      // allowed headers are exactly what the signed request carries.
+      cors: [
+        {
+          allowedOrigins: [deploymentIdentity.applicationOrigin],
+          allowedMethods: [
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.GET,
+            s3.HttpMethods.HEAD,
+          ],
+          allowedHeaders: [
+            'content-type',
+            'if-none-match',
+            'x-amz-checksum-sha256',
+            'x-amz-sdk-checksum-algorithm',
+          ],
+          exposedHeaders: ['etag'],
+          maxAge: 3_000,
+        },
+      ],
     });
     (mediaObjects.node.defaultChild as s3.CfnBucket).cfnOptions.condition =
       shouldProvisionApplication;
