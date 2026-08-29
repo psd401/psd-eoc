@@ -233,8 +233,24 @@ export function createEmailRuntimeRouteHandler(
       return await runOperation(await dependencies.openStore(), body);
     } catch (error) {
       if (error instanceof EmailRuntimeStoreError) {
+        // The worker cancels an error body rather than reading it, so this
+        // code reaches it only as the status. Whichever conflict it was
+        // decides what an operator does about it, and it is a fixed
+        // classification rather than content.
+        console.error(
+          JSON.stringify({
+            event: 'email-runtime-conflict',
+            code: error.code,
+          }),
+        );
         return errorResponse(409, error.code, error.message);
       }
+      console.error(
+        JSON.stringify({
+          event: 'email-runtime-unavailable',
+          error: error instanceof Error ? error.name : typeof error,
+        }),
+      );
       return errorResponse(
         503,
         'EMAIL_RUNTIME_UNAVAILABLE',

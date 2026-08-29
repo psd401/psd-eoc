@@ -41,6 +41,7 @@ export function failureDetail(error: unknown): string {
     name?: unknown;
     code?: unknown;
     status?: unknown;
+    causeName?: unknown;
   } | null;
   const parts = [
     typeof carried?.name === 'string' && carried.name.length > 0
@@ -50,6 +51,9 @@ export function failureDetail(error: unknown): string {
       ? [`code ${carried.code}`]
       : [],
     typeof carried?.status === 'number' ? [`status ${carried.status}`] : [],
+    typeof carried?.causeName === 'string' && carried.causeName.length > 0
+      ? [`caused by ${carried.causeName}`]
+      : [],
   ].flat();
   return parts.length === 0 ? 'unclassified failure' : parts.join(' — ');
 }

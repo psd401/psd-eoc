@@ -1106,8 +1106,16 @@ describe('mobile event-room timeline accessibility', () => {
     const card = render(
       <TimelineEntryCard
         actionEligibility={{
-          correction: { allowed: true, unavailableReason: null },
-          redaction: { allowed: true, unavailableReason: null },
+          correction: {
+            allowed: true,
+            unavailableReason: null,
+            permanent: false,
+          },
+          redaction: {
+            allowed: true,
+            unavailableReason: null,
+            permanent: false,
+          },
         }}
         onCorrect={onCorrect}
         onRedact={onRedact}
