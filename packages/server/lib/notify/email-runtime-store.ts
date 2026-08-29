@@ -123,18 +123,45 @@ function deterministicAttemptId(
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function assertControlledEmailBatch(batch: DispatchBatch): void {
+/**
+ * What must hold for this store to send any email at all.
+ *
+ * A human confirmed the consequence, the integration is the verified SES one,
+ * and the batch is an email batch. Nothing here describes what kind of event
+ * it is: a real incident sends email for the same reasons a drill does.
+ */
+export function assertEmailBatch(batch: DispatchBatch): void {
   if (
     batch.channel !== 'email' ||
+    batch.authorization.kind !== 'human-confirmed' ||
+    batch.integrationStatus.integrationId !== 'ses-email' ||
+    batch.integrationStatus.label !== 'live-verified'
+  ) {
+    throw new EmailRuntimeStoreError('BATCH_CONFLICT');
+  }
+}
+
+/**
+ * What must additionally hold for a controlled canary.
+ *
+ * These conditions used to be applied to every batch, which meant the email
+ * path accepted only the monthly canary: a batch with no delivery test was
+ * refused as a conflict, and so was anything that was not a drill. A confirmed
+ * activation queued its email and the worker rejected it on arrival, so an
+ * ordinary drill notified nobody and a REAL incident would have sent no email
+ * whatsoever.
+ *
+ * They are the canary's conditions and they still hold exactly, for the
+ * canary: one endpoint, opted in through a delivery test, and never rendered
+ * as anything but a drill.
+ */
+export function assertControlledCanaryBatch(batch: DispatchBatch): void {
+  if (
     batch.eventKind !== 'drill' ||
     batch.templateMode !== 'drill' ||
     batch.purpose !== 'activation' ||
     batch.rosterPopulation !== 'staff' ||
-    batch.endpointCount !== 1 ||
-    batch.deliveryTest == null ||
-    batch.authorization.kind !== 'human-confirmed' ||
-    batch.integrationStatus.integrationId !== 'ses-email' ||
-    batch.integrationStatus.label !== 'live-verified'
+    batch.endpointCount !== 1
   ) {
     throw new EmailRuntimeStoreError('BATCH_CONFLICT');
   }
@@ -189,7 +216,8 @@ async function persistedBatch(
     endpointCount: record.batch.endpointCount,
     createdAt: iso(record.batch.createdAt),
   });
-  assertControlledEmailBatch(batch);
+  assertEmailBatch(batch);
+  if (batch.deliveryTest != null) assertControlledCanaryBatch(batch);
   return batch;
 }
 
