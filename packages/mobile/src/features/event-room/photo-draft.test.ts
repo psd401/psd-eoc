@@ -103,6 +103,7 @@ function canonicalEntry(): JournalEntry {
       userId: ids.user,
       sessionId: ids.session,
     },
+    authorDisplayName: null,
     source: 'mobile',
     serverTime: '2026-08-11T20:02:00.000Z',
     clientTime: null,
@@ -899,6 +900,7 @@ describe('durable photo draft', () => {
           userId: ids.user,
           sessionId: ids.otherSession,
         },
+        authorDisplayName: null,
       };
     };
     const controller = await readyController(testHarness);

@@ -501,6 +501,80 @@ describeWithDatabase('event journal database guarantees', () => {
     await connection?.close();
   });
 
+  /**
+   * During an incident the reader has to know who sent an update without
+   * opening anything. Before this, every human entry rendered as
+   * "Authenticated staff member".
+   *
+   * The name is resolved when the entry is read, not copied in when it is
+   * written, so this also asserts that renaming the account changes what the
+   * timeline shows for history already recorded.
+   *
+   * The entry is inserted directly under an author created for this test. The
+   * shared HUMAN_ACTOR identity is deliberately untouched: other cases in this
+   * file create and assert on it, and a name changed here would follow them.
+   */
+  test('resolves the author display name when the timeline is read', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const authorId = randomUUID();
+    await database.insert(users).values({
+      id: authorId,
+      googleSubject: `synthetic-author-name-${suffix}`,
+      email: `synthetic.author.${suffix}@example.invalid`,
+      displayName: 'Dana Reyes',
+      facilityScopeKind: 'district',
+      createdAt: new Date(),
+      disabledAt: null,
+    });
+    const entryId = randomUUID();
+    await database.insert(journalEntries).values({
+      id: entryId,
+      eventId,
+      sequence: 1_000,
+      kind: 'text',
+      author: { kind: 'human', userId: authorId, sessionId: randomUUID() },
+      source: 'web',
+      serverTime: new Date(),
+      clientTime: null,
+      payload: { text: 'Front office is clear.' },
+      mediaId: null,
+      transitionId: null,
+      supersedesEntryId: null,
+      supersedesEntrySequence: null,
+      supersessionKind: null,
+      supersessionReason: null,
+    });
+
+    const listed = await listJournal(journalStore, eventId, null, 50);
+    expect(
+      listed.items.find((item) => item.entry.id === entryId)?.entry
+        .authorDisplayName,
+    ).toBe('Dana Reyes');
+
+    // Read-time resolution: the recorded entry never changes, but the name it
+    // shows follows the account.
+    await database
+      .update(users)
+      .set({ displayName: 'Dana Reyes-Okonkwo' })
+      .where(eq(users.id, authorId));
+    const relisted = await listJournal(journalStore, eventId, null, 50);
+    expect(
+      relisted.items.find((item) => item.entry.id === entryId)?.entry
+        .authorDisplayName,
+    ).toBe('Dana Reyes-Okonkwo');
+
+    // A system entry has no person behind it and falls back to its actor kind.
+    const systemEntry = relisted.items.find(
+      (item) => item.entry.author.kind === 'system',
+    );
+    if (systemEntry !== undefined) {
+      expect(systemEntry.entry.authorDisplayName).toBeNull();
+    }
+  });
+
   test('gives late joiners the complete server order and resumes an event-bound keyset cursor across concurrent posts', async () => {
     const journalStore = store();
     const eventId = await createActiveSyntheticEvent();
@@ -931,6 +1005,7 @@ describeWithDatabase('event journal database guarantees', () => {
         sequence: correctedOriginal.sequence,
         kind: correctedOriginal.kind,
         author: correctedOriginal.author,
+        authorDisplayName: correctedOriginal.authorDisplayName,
         source: correctedOriginal.source,
         serverTime: correctedOriginal.serverTime,
         clientTime: correctedOriginal.clientTime,

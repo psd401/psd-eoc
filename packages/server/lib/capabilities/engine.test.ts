@@ -583,6 +583,7 @@ function createCloseRegistration(): Readonly<{
             sequence: 3,
             kind: 'system' as const,
             author: context.invocation.actor,
+            authorDisplayName: null,
             source: context.invocation.source,
             serverTime: occurredAt,
             clientTime: null,

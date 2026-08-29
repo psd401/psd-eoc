@@ -668,6 +668,7 @@ function syntheticAllClearResult() {
         sequence: 2,
         kind: 'system',
         author: agentActor,
+        authorDisplayName: null,
         source: 'mcp',
         serverTime: times.later,
         clientTime: null,
@@ -684,6 +685,7 @@ function syntheticAllClearResult() {
         sequence: 3,
         kind: 'system',
         author: agentActor,
+        authorDisplayName: null,
         source: 'mcp',
         serverTime: times.later,
         clientTime: null,
@@ -733,6 +735,7 @@ function syntheticCloseResult() {
         sequence: 4,
         kind: 'system',
         author: agentActor,
+        authorDisplayName: null,
         source: 'mcp',
         serverTime: times.confirmationExpiry,
         clientTime: null,
@@ -1691,6 +1694,7 @@ describe('human-only capability boundary', () => {
       sequence: 1,
       kind: 'text',
       author: humanActor,
+      authorDisplayName: null,
       source: 'web',
       serverTime: times.activated,
       clientTime: null,
@@ -1818,6 +1822,7 @@ describe('human-only capability boundary', () => {
       sequence: 1,
       kind: 'photo',
       author: humanActor,
+      authorDisplayName: null,
       source: 'web',
       serverTime: times.activated,
       clientTime: null,
@@ -1884,6 +1889,7 @@ describe('human-only capability boundary', () => {
           {
             ...allClear.journalEntries[0],
             author: humanActor,
+            authorDisplayName: null,
             source: 'web',
           },
           allClear.journalEntries[1],
@@ -1939,6 +1945,7 @@ describe('human-only capability boundary', () => {
             sequence: 4,
             kind: 'text',
             author: agentActor,
+            authorDisplayName: null,
             source: 'mcp',
             serverTime: times.confirmationExpiry,
             clientTime: null,
@@ -3152,6 +3159,7 @@ describe('append-only journal contract', () => {
     eventId: ids.event,
     sequence: 2,
     author: humanActor,
+    authorDisplayName: null,
     source: 'mobile',
     serverTime: times.later,
     clientTime: times.activated,
@@ -3202,6 +3210,7 @@ describe('append-only journal contract', () => {
       JournalEntrySchema.safeParse({
         ...textEntry,
         author: agentActor,
+        authorDisplayName: null,
         source: 'web',
       }).success,
     ).toBe(false);
@@ -3234,6 +3243,7 @@ describe('append-only journal contract', () => {
       eventId: ids.event,
       sequence: 3,
       author: humanActor,
+      authorDisplayName: null,
       source: 'web',
       serverTime: times.later,
       clientTime: null,
@@ -3250,6 +3260,7 @@ describe('append-only journal contract', () => {
       JournalEntrySchema.safeParse({
         ...lifecycleEntry,
         author: agentActor,
+        authorDisplayName: null,
         source: 'mcp',
         payload: {
           ...lifecycleEntry.payload,
@@ -3269,6 +3280,7 @@ describe('append-only journal contract', () => {
       JournalEntrySchema.safeParse({
         ...lifecycleEntry,
         author: agentActor,
+        authorDisplayName: null,
         source: 'mcp',
         payload: {
           ...lifecycleEntry.payload,

@@ -1198,6 +1198,7 @@ describe('App Runner runtime safety boundary', () => {
         'AWS_REGION',
         'DATABASE_CONNECT_TIMEOUT_SECONDS',
         'DATABASE_DRIVER',
+        'MEDIA_BUCKET_NAME',
         'DATABASE_HOST',
         'GOOGLE_OIDC_APPLICATION_ORIGIN',
         'GOOGLE_OIDC_HOSTED_DOMAIN',
@@ -1330,7 +1331,10 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('SES_SEND');
     expect(serialized).not.toContain('SMS_ORIGINATION');
     expect(serialized).not.toContain('SMS_MAX_PRICE');
-    expect(serialized).not.toContain('MEDIA_BUCKET');
+    // MEDIA_BUCKET_NAME is present and is deliberately not asserted absent
+    // here. This list guards provider credentials; a bucket name is not one,
+    // and reaching the bucket still requires the scoped role grant asserted in
+    // the runtime permission test.
 
     // The application holds every internal worker bearer, because verifying a
     // bearer means comparing against it. That is not a provider credential and
@@ -1617,6 +1621,13 @@ describe('App Runner runtime safety boundary', () => {
 
     expect(actions).toEqual(
       [
+        // The three s3 actions are the private media bucket and nothing else:
+        // the runtime signs upload and read grants, writes the sanitized
+        // object, and reads the malware-scan tag. There is no DeleteObject --
+        // a media record is append-only truth.
+        's3:GetObject',
+        's3:GetObjectTagging',
+        's3:PutObject',
         'secretsmanager:DescribeSecret',
         'secretsmanager:GetSecretValue',
         'sns:ListSubscriptionsByTopic',
@@ -1624,6 +1635,7 @@ describe('App Runner runtime safety boundary', () => {
         'sqs:SendMessage',
       ].sort(),
     );
+    expect(actions).not.toContain('s3:DeleteObject');
     // sqs:SendMessage is deliberate and is not a provider grant: an activation
     // hands its own notification batch to its own delivery queue after the
     // event commits. Reaching a person still requires a channel worker, and the
@@ -1634,11 +1646,17 @@ describe('App Runner runtime safety boundary', () => {
       false,
     );
     expect(actions.every((action) => !action.includes('*'))).toBe(true);
-    for (const forbiddenPrefix of ['events:', 'lambda:', 'ses:', 's3:']) {
+    for (const forbiddenPrefix of ['events:', 'lambda:', 'ses:']) {
       expect(actions.some((action) => action.startsWith(forbiddenPrefix))).toBe(
         false,
       );
     }
+    // s3 is no longer forbidden outright, because staff attach photos to an
+    // event and the runtime signs and writes those objects. It stays confined:
+    // read and write of objects, no bucket-level administration, and no delete.
+    expect(actions.filter((action) => action.startsWith('s3:')).sort()).toEqual(
+      ['s3:GetObject', 's3:GetObjectTagging', 's3:PutObject'],
+    );
     expect(actions.filter((action) => action.startsWith('sns:'))).toEqual([
       'sns:ListSubscriptionsByTopic',
     ]);
@@ -2738,7 +2756,10 @@ describe('configured-unverified provider readiness boundary', () => {
     // the probe that checks it. Both are pinned so an unintended record or
     // bucket still fails here.
     template.resourceCountIs('AWS::Route53::RecordSet', 1);
-    template.resourceCountIs('AWS::S3::Bucket', 1);
+    // Two buckets, both pinned: the reachability probe's artifacts and the
+    // private media bucket staff photos are written to. A third would fail
+    // here.
+    template.resourceCountIs('AWS::S3::Bucket', 2);
     template.resourceCountIs('AWS::Synthetics::Canary', 1);
     // Named application functions are bounded. CDK also synthesizes unnamed
     // image-lookup and asynchronous custom-resource framework handlers.
