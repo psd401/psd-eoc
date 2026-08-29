@@ -504,11 +504,9 @@ export function createSetChannelEnabledRegistration(): ServerCapabilityRegistrat
             label: 'live-verified',
             verifiedAt: changedAt,
             verifiedByUserId: context.invocation.actor.userId,
-            // The retained truth constraint requires a reference on every
-            // live-verified observation. Who enabled the channel and when are
-            // already carried by verifiedByUserId and verifiedAt, so this
-            // names the mechanism rather than repeating them.
-            authorizationReference: ADMINISTRATOR_ENABLEMENT_REFERENCE,
+            authorizationReference:
+              deploymentVerificationReference(input.integrationId) ??
+              ADMINISTRATOR_ENABLEMENT_REFERENCE,
             reasonCode: null,
             observedAt: changedAt,
           })
@@ -599,6 +597,26 @@ export function createSetChannelEnabledRegistration(): ServerCapabilityRegistrat
 
 export const setChannelEnabledRegistration =
   createSetChannelEnabledRegistration();
+
+/**
+ * The verification reference this deployment already holds for an integration.
+ *
+ * A send is refused unless the status the batch pinned names the same
+ * verification the deployment was configured with -- `resolveBatch` compares
+ * them, and the email worker cannot send through credentials nobody verified.
+ *
+ * Enabling a channel used to record `ADMINISTRATOR_ENABLEMENT_REFERENCE`
+ * regardless, which is a different string, so every email queued after an
+ * administrator enabled the channel was refused as
+ * `deployment-authorization-moved-on`. Adopting the deployment's own reference
+ * keeps enablement working without inventing a verification that did not
+ * happen: the SES credentials were verified out of band and recorded as this
+ * value. Where a deployment holds no reference, the enablement reference
+ * remains the honest answer.
+ */
+function deploymentVerificationReference(integrationId: string): string | null {
+  return integrationId === 'ses-email' ? readSesVerificationReference() : null;
+}
 
 function readSesVerificationReference(
   environment: Readonly<Record<string, string | undefined>> = process.env,
