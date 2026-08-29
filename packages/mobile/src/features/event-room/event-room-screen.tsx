@@ -240,6 +240,8 @@ function isAbortError(error: unknown): boolean {
 }
 
 function actorText(projection: JournalEntryReadProjection): string {
+  const name = projection.entry.authorDisplayName;
+  if (name !== null) return name;
   switch (projection.entry.author.kind) {
     case 'human':
       return 'Staff member';

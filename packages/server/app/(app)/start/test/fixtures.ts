@@ -156,6 +156,7 @@ export function activationResultFixture(
         eventId: PLAYWRIGHT_IDS.activatedEvent,
         sequence: 1,
         author: actor,
+        authorDisplayName: null,
         source: 'web',
         serverTime: occurredAt,
         clientTime: null,

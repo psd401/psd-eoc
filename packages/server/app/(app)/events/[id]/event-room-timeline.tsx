@@ -28,7 +28,13 @@ export function readableDateTime(value: string, timeZone: string): string {
 
 type JournalReadMetadata = JournalEntryReadProjection['entry'];
 
+/**
+ * During an incident the reader has to know immediately who sent an update.
+ * The resolved name is shown whenever there is one; the actor's kind is the
+ * fallback for the system actor and for an account that no longer resolves.
+ */
 function actorLabel(entry: JournalReadMetadata): string {
+  if (entry.authorDisplayName !== null) return entry.authorDisplayName;
   switch (entry.author.kind) {
     case 'human':
       return 'Authenticated staff member';

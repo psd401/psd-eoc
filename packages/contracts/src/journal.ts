@@ -193,6 +193,19 @@ const journalCommonShape = {
   eventId: EventIdSchema,
   sequence: z.number().int().positive(),
   author: ActorSchema,
+  /**
+   * Who wrote this, by name, for whoever is reading the timeline.
+   *
+   * An actor identifies an account; it does not say who that is. During an
+   * incident the person reading an update has to know immediately who sent it,
+   * and "Authenticated staff member" on every entry does not answer that.
+   *
+   * Resolved when the entry is read rather than copied in when it is written,
+   * so a corrected name is correct everywhere rather than frozen into history.
+   * Null when there is no name to show -- the system actor, or an account that
+   * no longer resolves -- and readers fall back to the actor's kind.
+   */
+  authorDisplayName: z.string().trim().min(1).max(200).nullable(),
   source: InvocationSourceSchema,
   serverTime: TimestampSchema,
   clientTime: TimestampSchema.nullable(),

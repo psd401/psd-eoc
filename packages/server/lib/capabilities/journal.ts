@@ -106,6 +106,10 @@ import {
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
+import {
+  authorDisplayNameForRow,
+  resolveAuthorDisplayNames,
+} from './journal-author-names';
 import type { DrillRecordCsvRow } from './records/csv';
 import type { EventSummarySnapshot } from './records/pdf';
 import {
@@ -336,13 +340,17 @@ function lifecyclePreviewFromRow(
   });
 }
 
-function journalFromRow(row: typeof journalEntries.$inferSelect): JournalEntry {
+function journalFromRow(
+  row: typeof journalEntries.$inferSelect,
+  authorDisplayName: string | null = null,
+): JournalEntry {
   return JournalEntrySchema.parse({
     id: row.id,
     eventId: row.eventId,
     sequence: row.sequence,
     kind: row.kind,
     author: row.author,
+    authorDisplayName,
     source: row.source,
     serverTime: dateIso(row.serverTime),
     clientTime: row.clientTime === null ? null : dateIso(row.clientTime),
@@ -939,6 +947,9 @@ async function buildJournalEntry(
     eventId: input.eventId,
     sequence: locked.nextSequence,
     author: context.invocation.actor,
+    // The write does not resolve a name. Nothing is stored for it, and every
+    // read resolves it from the account so a later rename is reflected.
+    authorDisplayName: null,
     source: context.invocation.source,
     serverTime: serverTime.toISOString(),
     clientTime: input.clientTime,
@@ -1492,7 +1503,9 @@ async function getJournalEntryFromDatabase(
     .from(journalEntries)
     .where(and(...conditions))
     .limit(1);
-  return row === undefined ? null : journalFromRow(row);
+  if (row === undefined) return null;
+  const resolved = await resolveAuthorDisplayNames(database, [row]);
+  return journalFromRow(row, authorDisplayNameForRow(row, resolved));
 }
 
 async function hasJournalSupersessionFromDatabase(
@@ -1553,8 +1566,12 @@ async function listJournalEntriesFromDatabase(
       entryId === null ? [] : [entryId],
     ),
   );
+  const authorNames = await resolveAuthorDisplayNames(database, visibleRows);
   const visible = visibleRows.map((row) =>
-    projectJournalEntryForRead(journalFromRow(row), redactedIds.has(row.id)),
+    projectJournalEntryForRead(
+      journalFromRow(row, authorDisplayNameForRow(row, authorNames)),
+      redactedIds.has(row.id),
+    ),
   );
   const last = visible.at(-1);
   return JournalEntryPageSchema.parse({
@@ -1661,10 +1678,17 @@ async function searchJournalEntriesFromDatabase(
   const hasMore = rows.length > input.limit;
   const visibleRows = rows.slice(0, input.limit);
   const last = visibleRows.at(-1)?.entry;
+  const recordAuthorNames = await resolveAuthorDisplayNames(
+    database,
+    visibleRows.map((row) => row.entry),
+  );
   return JournalEntryPageSchema.parse({
     items: visibleRows.map((row) =>
       projectJournalEntryForRead(
-        journalFromRow(row.entry),
+        journalFromRow(
+          row.entry,
+          authorDisplayNameForRow(row.entry, recordAuthorNames),
+        ),
         row.redacted === true,
       ),
     ),
