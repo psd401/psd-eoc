@@ -212,7 +212,20 @@ export class ExpoPushRuntime {
       throw new ExpoPushRuntimeError('ATTEMPT_IN_PROGRESS');
     }
     if (result.kind === 'dlq') {
-      throw new ExpoPushRuntimeError('ATTEMPT_FAILED');
+      // The provider answered and the answer was terminal. Its state and
+      // reason code are this system's own classifications of that answer --
+      // not the provider's text, which can name the token or the recipient --
+      // and they are the difference between a rejected device, an expired
+      // attempt, and an outcome nobody can account for.
+      throw new ExpoPushRuntimeError(
+        'ATTEMPT_FAILED',
+        `${result.outcome.state}${
+          result.outcome.reasonCode === null ||
+          result.outcome.reasonCode === undefined
+            ? ''
+            : `/${result.outcome.reasonCode}`
+        }`,
+      );
     }
     if (result.kind === 'retry') {
       await this.#scheduleWorkerRetry(workItem, result);
