@@ -368,16 +368,18 @@ describe('event-room model', () => {
         allowed: false,
         unavailableReason:
           'Load the complete timeline before correcting or redacting an entry.',
+        permanent: false,
       },
       redaction: {
         allowed: false,
         unavailableReason:
           'Load the complete timeline before correcting or redacting an entry.',
+        permanent: false,
       },
     });
     expect(journalEntryActionEligibility(original, [original], true)).toEqual({
-      correction: { allowed: true, unavailableReason: null },
-      redaction: { allowed: true, unavailableReason: null },
+      correction: { allowed: true, unavailableReason: null, permanent: false },
+      redaction: { allowed: true, unavailableReason: null, permanent: false },
     });
     expect(
       journalEntryActionEligibility(original, [original, correction], true)
@@ -386,6 +388,7 @@ describe('event-room model', () => {
       allowed: false,
       unavailableReason:
         'This entry is already superseded. Refresh and choose the latest entry.',
+      permanent: false,
     });
     expect(
       journalEntryActionEligibility(correction, [original, correction], true)
@@ -513,5 +516,38 @@ describe('event-room model', () => {
         nearLiveEdge: true,
       }),
     ).toThrow('different event room');
+  });
+
+  test('marks a reason permanent only when the entry can never be acted on', () => {
+    // The screen prints an explanation only for a reason the reader can do
+    // something about. An entry that can never be acted on was explaining
+    // itself under every entry in the timeline, which said only that the
+    // absent buttons were absent.
+    const entry = textEntry(1);
+    // A redacted projection carries no payload: the content is what redaction
+    // removes.
+    const redactedEntry = Object.fromEntries(
+      Object.entries(entry.entry).filter(([key]) => key !== 'payload'),
+    );
+    const redacted = JournalEntryReadProjectionSchema.parse({
+      visibility: 'redacted',
+      entry: redactedEntry,
+    });
+    const alreadyRedacted = journalEntryActionEligibility(
+      redacted,
+      [redacted],
+      true,
+    );
+    expect(alreadyRedacted.correction.permanent).toBe(true);
+    expect(alreadyRedacted.redaction.permanent).toBe(true);
+
+    // A timeline that has not finished loading is the reader's situation
+    // rather than the entry's nature, so it still explains itself.
+    const incomplete = journalEntryActionEligibility(entry, [entry], false);
+    expect(incomplete.correction.allowed).toBe(false);
+    expect(incomplete.correction.permanent).toBe(false);
+    expect(incomplete.correction.unavailableReason).toContain(
+      'Load the complete timeline',
+    );
   });
 });
