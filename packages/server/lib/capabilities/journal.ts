@@ -108,6 +108,7 @@ import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
 import {
   authorDisplayNameForRow,
+  resolveActorDisplayName,
   resolveAuthorDisplayNames,
 } from './journal-author-names';
 import type { DrillRecordCsvRow } from './records/csv';
@@ -127,6 +128,7 @@ export interface LockedJournalEvent {
 export interface JournalCapabilityTransaction
   extends CapabilityEngineTransaction {
   resolveEventFacilityId(eventId: string): Promise<string | null>;
+  resolveAuthorDisplayName(actor: unknown): Promise<string | null>;
   lockEventForJournal(eventId: string): Promise<LockedJournalEvent | null>;
   getJournalEntry(
     eventId: string,
@@ -947,9 +949,13 @@ async function buildJournalEntry(
     eventId: input.eventId,
     sequence: locked.nextSequence,
     author: context.invocation.actor,
-    // The write does not resolve a name. Nothing is stored for it, and every
-    // read resolves it from the account so a later rename is reflected.
-    authorDisplayName: null,
+    // Resolved for the returned entry only; nothing is stored for it, and
+    // every read resolves it again so a later rename is reflected. Without
+    // this the poster sees the fallback label on their own new entry until
+    // the page reloads.
+    authorDisplayName: await context.transaction.resolveAuthorDisplayName(
+      context.invocation.actor,
+    ),
     source: context.invocation.source,
     serverTime: serverTime.toISOString(),
     clientTime: input.clientTime,
@@ -2289,6 +2295,8 @@ function createDrizzleJournalTransaction(
       appendCapabilityAuditEntry(database, event),
     resolveEventFacilityId: (eventId) =>
       resolveEventFacilityIdFromDatabase(database, eventId),
+    resolveAuthorDisplayName: (actor) =>
+      resolveActorDisplayName(database, actor),
     lockEventForJournal: (eventId) =>
       lockEventForJournalFromDatabase(database, eventId),
     getJournalEntry: (eventId, entryId, sequence) =>

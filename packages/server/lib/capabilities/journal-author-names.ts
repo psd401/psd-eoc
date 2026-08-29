@@ -1,5 +1,5 @@
 import { ActorSchema } from '@psd-eoc/contracts';
-import { inArray } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 
 import type { DatabaseQuery, PostgresDatabase } from '../../db/client';
 import { agents, users } from '../../db/schema';
@@ -61,6 +61,42 @@ export function authorDisplayNameForRow(
       return resolved.get(author.data.userId) ?? null;
     case 'agent':
       return resolved.get(author.data.agentId) ?? null;
+    case 'system':
+      return null;
+  }
+}
+
+/**
+ * The display name for one actor, for the entry a mutation returns.
+ *
+ * A posted entry comes back from the write and is rendered before any read
+ * refreshes it, so without this the person who just posted an update sees the
+ * fallback label on their own entry until the page reloads -- the one place
+ * the name matters most.
+ */
+export async function resolveActorDisplayName(
+  database: DatabaseQuery | PostgresDatabase,
+  actorValue: unknown,
+): Promise<string | null> {
+  const actor = ActorSchema.safeParse(actorValue);
+  if (!actor.success) return null;
+  switch (actor.data.kind) {
+    case 'human': {
+      const [row] = await database
+        .select({ displayName: users.displayName })
+        .from(users)
+        .where(eq(users.id, actor.data.userId))
+        .limit(1);
+      return row?.displayName ?? null;
+    }
+    case 'agent': {
+      const [row] = await database
+        .select({ displayName: agents.displayName })
+        .from(agents)
+        .where(eq(agents.id, actor.data.agentId))
+        .limit(1);
+      return row?.displayName ?? null;
+    }
     case 'system':
       return null;
   }
