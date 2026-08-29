@@ -210,6 +210,17 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    const enableMediaMalwareScanning = new CfnParameter(
+      this,
+      'EnableMediaMalwareScanning',
+      {
+        allowedValues: ['false', 'true'],
+        default: 'false',
+        description:
+          'Attach the GuardDuty malware-protection plan to the media bucket. Enable only after a deployment in which the scan role already exists: GuardDuty validates bucket ownership when the plan is created, and that check fails against a role IAM has not finished propagating.',
+        type: 'String',
+      },
+    );
     const enableExpoPushWorker = new CfnParameter(
       this,
       'EnableExpoPushWorker',
@@ -559,6 +570,12 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldScanMedia = new CfnCondition(this, 'ShouldScanMedia', {
+      expression: Fn.conditionAnd(
+        Fn.conditionEquals(enableMediaMalwareScanning.valueAsString, 'true'),
+        shouldProvisionApplication,
+      ),
+    });
     const shouldRunEmailWorker = new CfnCondition(
       this,
       'ShouldRunEmailWorker',
@@ -3078,6 +3095,15 @@ export class PsdEocStack extends Stack {
         mediaScanPolicy.node.defaultChild as iam.CfnPolicy
       ).cfnOptions.condition = shouldProvisionApplication;
     }
+    // The plan is created in a later deployment than the role it uses.
+    //
+    // GuardDuty validates that the caller owns the bucket at the moment the
+    // plan is created, and that check runs against IAM's view of the role. In
+    // the same update that creates the role and its policy, that view is not
+    // yet consistent, and the create fails with "does not have the required
+    // permissions to validate S3 bucket ownership" -- which then rolls back
+    // every unrelated change in the deployment. Enabling this only once the
+    // role already exists removes the race rather than retrying into it.
     const mediaScanPlan = new guardduty.CfnMalwareProtectionPlan(
       this,
       'MediaMalwareScanPlan',
@@ -3089,7 +3115,10 @@ export class PsdEocStack extends Stack {
         actions: { tagging: { status: 'ENABLED' } },
       },
     );
-    mediaScanPlan.cfnOptions.condition = shouldProvisionApplication;
+    mediaScanPlan.cfnOptions.condition = shouldScanMedia;
+    if (mediaScanPolicy !== undefined) {
+      mediaScanPlan.node.addDependency(mediaScanPolicy);
+    }
 
     const runtimeRole = new iam.Role(this, 'AppRunnerRuntimeRole', {
       assumedBy: new iam.ServicePrincipal('tasks.apprunner.amazonaws.com'),
