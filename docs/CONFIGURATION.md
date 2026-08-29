@@ -89,6 +89,7 @@ The current synthesized stack contains exactly these parameters:
 - `EnableDirectPush`
 - `EnableEmailWorker`
 - `EnableExpoPushWorker`
+- `EnableMediaMalwareScanning`
 - `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
 - `GoogleOauthSecretArn`
