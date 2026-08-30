@@ -34,7 +34,8 @@ describe('parseIgnoringNewServerFields', () => {
   });
 
   test('still rejects an entry that is missing a field this build needs', () => {
-    const { payload: _payload, ...withoutPayload } = textEntry();
+    const withoutPayload = textEntry();
+    delete withoutPayload.payload;
     expect(() =>
       parseIgnoringNewServerFields(JournalEntrySchema, withoutPayload),
     ).toThrow();

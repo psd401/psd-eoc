@@ -271,7 +271,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
         mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY',
       );
       expect(confirmButton?.props.accessibilityHint).toContain(
-        'Final human confirmation',
+        'Starts the event',
       );
       expect(confirmButton?.props.accessibilityState).toEqual({
         busy: false,
@@ -334,7 +334,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
         String(node.props.accessibilityLabel).startsWith('Start a separate'),
     );
     expect(confirmButton?.props.accessibilityLabel).toBe(
-      'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients',
+      'Start a separate DRILL — TRAINING ONLY and notify 2 synthetic recipients',
     );
     if (confirmButton === undefined) {
       throw new Error('The final human confirmation is missing.');
@@ -365,12 +365,10 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     const confirmButton = nodes.find(
       (node) =>
         node.type === 'Pressable' &&
-        String(node.props.accessibilityHint).startsWith(
-          'Final human confirmation',
-        ),
+        String(node.props.accessibilityHint).startsWith('Starts the event'),
     );
 
-    expect(text).toContain('Exact notification consequences');
+    expect(text).toContain('Who gets notified');
     expect(text).toContain('DRILL — TRAINING ONLY · Push notifications');
     expect(text).toContain('[DRILL] Synthetic earthquake drill');
     expect(text).toContain('[DRILL] Synthetic recipients only.');
@@ -378,9 +376,9 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(text).toContain('Mocked — training data only');
     expect(text).toContain('Text messages');
     expect(text).toContain('Not included.');
-    expect(text).toContain('no SMS notification intent');
+    expect(text).toContain('No text message is sent.');
     expect(confirmButton?.props.accessibilityHint).toContain(
-      'exact messages, endpoints, and integration truth labels above',
+      'sends the messages shown above',
     );
   });
 
@@ -540,9 +538,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       ),
     ).toBe(true);
     expect(resultText).toContain('Drill started');
-    expect(resultText).toContain(
-      'Provider acceptance and human receipt are tracked separately',
-    );
+    expect(resultText).toContain('Opening the drill…');
     expect(announcements).toEqual([
       expect.stringContaining(
         'Drill started. DRILL — TRAINING ONLY. Synthetic earthquake drill.',

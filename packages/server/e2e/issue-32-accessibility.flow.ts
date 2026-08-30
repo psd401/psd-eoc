@@ -286,7 +286,7 @@ async function openDrillConfirmation(
   );
   await expect(page).toHaveURL(/\/start\/confirm\?/u);
   await expect(
-    page.getByRole('status').filter({ hasText: /Consequence preview ready/u }),
+    page.getByRole('status').filter({ hasText: /Ready to start\./u }),
   ).toBeVisible({ timeout: 30_000 });
   if (options.scanAxe !== false) await expectAxeClean(page);
 }
@@ -308,22 +308,15 @@ test.describe('issue-32-accessibility-evidence', () => {
     });
     await openDrillConfirmation(page);
     const start = page.getByRole('button', {
-      name: /Start a separate DRILL and create notification intents/u,
+      name: /Start a separate DRILL and notify/u,
     });
     await activateByKeyboard(page, start);
-    await expect(
-      page.getByRole('heading', { name: 'Drill started' }),
-    ).toBeVisible();
+    // Starting an event lands in its room; there is no interstitial to click.
+    await page.waitForURL(/\/events\/[0-9a-f-]+$/u);
     expect(activationBridge.activationRequests()).toBe(1);
     await expectAxeClean(page);
 
-    const openEvent = page.getByRole('link', { name: 'Open event' });
-    const eventPath = await openEvent.getAttribute('href');
-    if (eventPath === null || !/^\/events\/[0-9a-f-]+$/u.test(eventPath)) {
-      throw new Error(
-        'The activated synthetic drill did not expose its event route.',
-      );
-    }
+    const eventPath = new URL(page.url()).pathname;
     const eventId = eventPath.slice('/events/'.length);
 
     const lateJoinContext = await browser.newContext({
@@ -337,18 +330,12 @@ test.describe('issue-32-accessibility-evidence', () => {
         .filter({ hasText: eventId.slice(-8) });
       await expect(join).toHaveCount(1);
       await join.press('Enter');
-      const joined = lateJoinPage
-        .getByRole('status')
-        .filter({ hasText: 'DRILL — TRAINING ONLY event joined.' });
-      await expect(joined).toBeFocused();
-      await joined.getByRole('link', { name: 'Open event' }).press('Enter');
-      await expect(lateJoinPage).toHaveURL(eventPath);
+      await lateJoinPage.waitForURL(eventPath);
       await expectAxeClean(lateJoinPage);
     } finally {
       await lateJoinContext.close();
     }
 
-    await activateByKeyboard(page, openEvent);
     await expect(page).toHaveURL(eventPath);
     await expect(
       page.getByText('DRILL — TRAINING ONLY', { exact: true }),
@@ -527,12 +514,10 @@ test.describe('issue-32-accessibility-evidence', () => {
     await activateByKeyboard(
       page,
       page.getByRole('button', {
-        name: /Start (?:a separate )?DRILL and create notification intents/u,
+        name: /Start (?:a separate )?DRILL and notify/u,
       }),
     );
-    await expect(
-      page.getByRole('heading', { name: 'Drill started' }),
-    ).toBeVisible();
+    await page.waitForURL(/\/events\/[0-9a-f-]+$/u);
     expect(activationBridge.activationRequests()).toBe(1);
     await expect
       .poll(async () =>
@@ -591,7 +576,7 @@ test.describe('issue-32-accessibility-evidence', () => {
     ).toBeVisible();
     await expect(
       page.getByRole('button', {
-        name: /Start (?:a separate )?REAL incident and create notification intents/u,
+        name: /Start (?:a separate )?REAL incident and notify/u,
       }),
     ).toBeVisible();
     await expectAxeClean(page);
@@ -603,18 +588,13 @@ test.describe('issue-32-accessibility-evidence', () => {
     await activateByKeyboard(
       page,
       page.getByRole('button', {
-        name: /Start (?:a separate )?REAL incident and create notification intents/u,
+        name: /Start (?:a separate )?REAL incident and notify/u,
       }),
     );
-    await expect(
-      page.getByRole('heading', { name: 'Incident started' }),
-    ).toBeVisible();
+    await page.waitForURL(`/events/${ISSUE_32_MOCK_INCIDENT_ID}`);
     await expect(
       page.getByText('REAL INCIDENT', { exact: true }).first(),
     ).toBeVisible();
-    await expect(
-      page.getByRole('link', { name: 'Open event' }),
-    ).toHaveAttribute('href', `/events/${ISSUE_32_MOCK_INCIDENT_ID}`);
     expect(activationBridge.activationRequests()).toBe(1);
     await expectAxeClean(page);
     await page.screenshot({
