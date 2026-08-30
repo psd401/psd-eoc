@@ -308,6 +308,15 @@ dd {
 
 .participants {
   margin-top: 0.75rem;
+  padding-left: 1.25rem;
+}
+
+.participants-heading {
+  margin: 0 0 0.35rem;
+  color: #526174;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-transform: none;
 }
 
 .participant-chips {

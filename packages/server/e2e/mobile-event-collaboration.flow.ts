@@ -71,7 +71,7 @@ test.describe('mobile-event-collaboration', () => {
       name: /Redact entry/u,
     });
     await expect(redactionDialog).toContainText(
-      'The original journal record, sequence, timing, and provenance are never deleted.',
+      'The original record, its time, and who wrote it are kept and are never deleted.',
     );
     await redactionDialog
       .getByLabel('Reason for redaction')
@@ -82,7 +82,7 @@ test.describe('mobile-event-collaboration', () => {
 
     await expect(
       page.getByText(
-        'Original content is hidden because a later append-only redaction supersedes this entry. Its sequence, timing, and provenance remain in the journal.',
+        'This content was hidden later. Who wrote it and when are kept on the record.',
       ),
     ).toBeVisible();
     await expect(page.getByText(REDACTION_REASON)).toBeVisible();

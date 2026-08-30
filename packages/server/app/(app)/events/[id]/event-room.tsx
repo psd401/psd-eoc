@@ -465,28 +465,31 @@ export function EventRoom({
                 ? 'Waiting for first refresh'
                 : `Updated ${readableDateTime(lastUpdatedAt, displayTimeZone)}`}
             </p>
+            {participants.length === 0 ? null : (
+              <section
+                aria-labelledby="participants-heading"
+                className="participants"
+              >
+                <h2 className="participants-heading" id="participants-heading">
+                  In this event
+                </h2>
+                <ul className="participant-chips">
+                  {participants.map((participant) => (
+                    <li key={participant.id}>
+                      <span
+                        className="participant-chip"
+                        title={participant.name}
+                      >
+                        <span aria-hidden="true">{participant.initials}</span>
+                        <span className="sr-only">{participant.name}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
           </div>
         </div>
-        {participants.length === 0 ? null : (
-          <section
-            aria-labelledby="participants-heading"
-            className="participants"
-          >
-            <h2 className="sr-only" id="participants-heading">
-              In this event
-            </h2>
-            <ul className="participant-chips">
-              {participants.map((participant) => (
-                <li key={participant.id}>
-                  <span className="participant-chip" title={participant.name}>
-                    <span aria-hidden="true">{participant.initials}</span>
-                    <span className="sr-only">{participant.name}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
       </header>
 
       <p
@@ -636,8 +639,8 @@ export function EventRoom({
                   />
                 </div>
                 <p className="field-help" id="event-post-help">
-                  Do not include student data. Updates cannot be edited -- post
-                  a correction instead.
+                  Do not include student data. Updates cannot be edited — post a
+                  correction instead.
                 </p>
                 <p
                   aria-hidden="true"
@@ -685,7 +688,7 @@ export function EventRoom({
                   />
                   <p className="field-help">
                     Do not include student data. Post only the precision you can
-                    support. Locations cannot be edited -- post a correction
+                    support. Locations cannot be edited — post a correction
                     instead.
                   </p>
                   <button disabled={locationPayload === null} type="submit">
