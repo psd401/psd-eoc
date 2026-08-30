@@ -337,9 +337,7 @@ describe('event-room sync controller', () => {
 
     await controller.start();
 
-    expect(controller.getSnapshot().error).toContain(
-      'temporarily unavailable',
-    );
+    expect(controller.getSnapshot().error).toContain('temporarily unavailable');
     controller.stop();
   });
 

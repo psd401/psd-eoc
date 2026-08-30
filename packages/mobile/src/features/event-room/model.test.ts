@@ -605,7 +605,13 @@ describe('what the event room shows an operator', () => {
   }
 
   const entries = [
-    systemProjection(1, 'event-created', 'Event record created.', 'Robin Vega', uuid(2)),
+    systemProjection(
+      1,
+      'event-created',
+      'Event record created.',
+      'Robin Vega',
+      uuid(2),
+    ),
     systemProjection(
       2,
       'notification-intent-recorded',

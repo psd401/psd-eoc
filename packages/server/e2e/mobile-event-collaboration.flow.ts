@@ -64,9 +64,7 @@ test.describe('mobile-event-collaboration', () => {
       hasText: CORRECTED,
     });
     await expect(correctionCard).toBeVisible();
-    await expect(originalCard).toContainText(
-      'Edited later — see',
-    );
+    await expect(originalCard).toContainText('Edited later — see');
     await correctionCard.getByRole('button', { name: /Redact entry/u }).click();
 
     const redactionDialog = page.getByRole('dialog', {

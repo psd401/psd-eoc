@@ -69,7 +69,9 @@ export function PreviewDetails({
       </p>
       {preview.channels.map((channel) => (
         <details className="channel-preview" key={channel.channel}>
-          <summary>See the exact {channel.channel.toLowerCase()} message</summary>
+          <summary>
+            See the exact {channel.channel.toLowerCase()} message
+          </summary>
           {renderedMessageContent(channel)}
         </details>
       ))}
@@ -87,9 +89,7 @@ export function PreviewDetails({
               ))}
             </ul>
           ) : (
-            <p>
-              If it stays blocked, contact an administrator.
-            </p>
+            <p>If it stays blocked, contact an administrator.</p>
           )}
         </div>
       ) : null}
