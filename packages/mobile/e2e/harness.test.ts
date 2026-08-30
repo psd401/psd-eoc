@@ -150,7 +150,10 @@ describe('issue-32 mobile E2E harness', () => {
       "element:\n      text: '.*Synthetic mobile issue 32 update.*'\n    direction: UP",
     );
     expect(lifecycle).toContain("inputText: 'ALL CLEAR'");
-    expect(lifecycle).not.toContain('Close event');
+    // Ending an event is one confirmed action, so the flow never reaches a
+    // second lifecycle step.
+    expect(lifecycle).toContain("visible: 'Status: closed'");
+    expect(lifecycle).not.toContain('Finish ending the event');
 
     const syntheticFixture = await Bun.file(
       resolve(mobileRoot, 'src/lib/start/issue-21-synthetic-fixture.ts'),

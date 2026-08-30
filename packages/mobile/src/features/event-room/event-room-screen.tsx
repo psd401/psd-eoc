@@ -60,7 +60,9 @@ import {
   formatLocationPayload,
   isEventComposerVisible,
   isNearLiveEdge,
+  eventRoomParticipants,
   journalEntryActionEligibility,
+  readableTimelineEntries,
   retainPendingTimelineFollow,
   timelineEntryAccessibilityLabel,
   timelineEntryText,
@@ -324,7 +326,7 @@ function EventTargetContext({
         mode={mode}
       />
       <View
-        accessibilityLabel={`Event target. ${target.eventTypeName}. ${target.facilityName}, ${target.facilityCode}. Classification and target are immutable.`}
+        accessibilityLabel={`Event target. ${target.eventTypeName}. ${target.facilityName}, ${target.facilityCode}. Classification and target are fixed.`}
         accessibilityRole="summary"
         accessible
         style={styles.eventTargetCard}
@@ -334,7 +336,7 @@ function EventTargetContext({
           {target.facilityName} · {target.facilityCode}
         </Text>
         <Text style={styles.immutableNotice}>
-          Classification and event target are immutable and cannot be changed
+          Classification and event target are fixed and cannot be changed
           here.
         </Text>
       </View>
@@ -689,8 +691,8 @@ export function JournalActionDialog({
               <Text style={styles.retainedTitle}>Original entry retained</Text>
               <Text style={styles.retainedText}>
                 {action === 'correction'
-                  ? 'Submitting appends a correction linked to the original. It never rewrites or deletes history.'
-                  : 'Redaction hides the original from outward views, but the original remains retained in append-only history.'}
+                  ? 'Your correction is added below the original. Nothing is rewritten or deleted.'
+                  : 'This hides the content from the timeline. The original record is kept and is never deleted.'}
               </Text>
             </View>
             <Text accessibilityRole="summary" style={styles.safetyHelp}>
@@ -841,6 +843,14 @@ export interface LifecycleConfirmationDialogProps {
   readonly onConfirm: () => void;
 }
 
+/**
+ * The exact phrases the server requires for each lifecycle transition. Ending
+ * an event asks the operator to type the all-clear phrase once; the close that
+ * follows is part of the same confirmed decision.
+ */
+const ALL_CLEAR_CONFIRMATION_PHRASE = 'ALL CLEAR';
+const CLOSE_CONFIRMATION_PHRASE = 'CLOSE EVENT';
+
 /** Exact-phrase, foreground-only lifecycle consequence confirmation UI. */
 export function LifecycleConfirmationDialog({
   action,
@@ -857,7 +867,10 @@ export function LifecycleConfirmationDialog({
   target,
   visible,
 }: LifecycleConfirmationDialogProps) {
-  const requiredPhrase = action === 'all-clear' ? 'ALL CLEAR' : 'CLOSE EVENT';
+  const requiredPhrase =
+    action === 'all-clear'
+      ? ALL_CLEAR_CONFIRMATION_PHRASE
+      : CLOSE_CONFIRMATION_PHRASE;
   const [freshnessTick, setFreshnessTick] = useState(0);
   const previewExpiresAt =
     preview === null ? Number.NaN : Date.parse(preview.expiresAt);
@@ -1015,12 +1028,11 @@ export function LifecycleConfirmationDialog({
             ) : (
               <View style={styles.previewCard}>
                 <Text accessibilityRole="header" style={styles.sectionTitle}>
-                  Consequence
+                  What happens
                 </Text>
                 <Text style={styles.previewFact}>
-                  This closes the all-clear event record. Closing does not send
-                  another notification. The append-only timeline remains
-                  retained.
+                  This ends the event. Nobody else is notified. The timeline
+                  stays available.
                 </Text>
               </View>
             )}
@@ -1055,15 +1067,15 @@ export function LifecycleConfirmationDialog({
                 busy
                   ? 'Submitting…'
                   : action === 'all-clear'
-                    ? 'Issue all-clear'
-                    : 'Close event'
+                    ? 'End event and notify staff'
+                    : 'Finish ending the event'
               }
               onPress={onConfirm}
               testID="lifecycle-confirm-button"
             />
             <Text style={styles.noRetryText}>
-              PSD EOC never submits this action in the background and never
-              retries it automatically.
+              PSD EOC never sends this in the background and never retries it
+              on its own.
             </Text>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -2220,7 +2232,10 @@ function AuthenticatedEventRoomScreen({
   const submitLifecycle = useCallback(async () => {
     const action = lifecycleAction;
     const preview = lifecyclePreview;
-    const requiredPhrase = action === 'all-clear' ? 'ALL CLEAR' : 'CLOSE EVENT';
+    const requiredPhrase =
+    action === 'all-clear'
+      ? ALL_CLEAR_CONFIRMATION_PHRASE
+      : CLOSE_CONFIRMATION_PHRASE;
     if (
       action === null ||
       lifecycleBusy ||
@@ -2275,6 +2290,31 @@ function AuthenticatedEventRoomScreen({
       );
       if (nearLiveEdgeRef.current) followOnNextLayoutRef.current = true;
       controller.applyConfirmed(result.event, entries);
+      if (action === 'all-clear') {
+        // Ending an event is one decision. The server still requires the
+        // all-clear and then the close; the operator confirms once. If the
+        // close half fails the event is genuinely in the all-clear state and
+        // the status row offers to finish it.
+        const closeKey = Crypto.randomUUID();
+        const closed = await api.close(
+          eventId,
+          CLOSE_CONFIRMATION_PHRASE,
+          closeKey,
+          abort.signal,
+        );
+        if (
+          generation === lifecycleGenerationRef.current &&
+          !abort.signal.aborted &&
+          AppState.currentState === 'active'
+        ) {
+          controller.applyConfirmed(
+            closed.event,
+            closed.journalEntries.map((entry) =>
+              projectJournalEntryForRead(entry, false),
+            ),
+          );
+        }
+      }
       dismissLifecycle();
     } catch (error) {
       if (
@@ -2386,7 +2426,7 @@ function AuthenticatedEventRoomScreen({
           >
             {sync.error ??
               (online
-                ? 'Reading append-only history…'
+                ? 'Loading the timeline…'
                 : OFFLINE_ACTION_MESSAGE)}
           </Text>
           <ActionButton
@@ -2403,6 +2443,8 @@ function AuthenticatedEventRoomScreen({
 
   const header = sync.model.header;
   const theme = getEventTheme(event.templateMode, event.kind);
+  const timelineEntries = readableTimelineEntries(sync.model.entries);
+  const participants = eventRoomParticipants(sync.model.entries);
   const postingDisabled = !online || !eventAcceptsPosts;
   const target: EventRoomTargetIdentity = {
     eventKind: event.kind,
@@ -2449,7 +2491,7 @@ function AuthenticatedEventRoomScreen({
           {event.status === 'active' ? (
             <ActionButton
               disabled={!online}
-              label="All-clear…"
+              label="End event…"
               onPress={() => {
                 void fetchAllClearPreview();
               }}
@@ -2457,11 +2499,33 @@ function AuthenticatedEventRoomScreen({
           ) : event.status === 'all-clear' ? (
             <ActionButton
               disabled={!online}
-              label="Close event…"
+              label="Finish ending the event…"
               onPress={openCloseConfirmation}
             />
           ) : null}
         </View>
+        {participants.length === 0 ? null : (
+          <View accessible style={styles.participantRow}>
+            <Text
+              accessibilityLabel={`In this event: ${participants
+                .map((participant) => participant.name)
+                .join(', ')}`}
+              style={styles.participantRowLabel}
+            >
+              In this event
+            </Text>
+            {participants.map((participant) => (
+              <Text
+                accessibilityElementsHidden
+                importantForAccessibility="no"
+                key={participant.id}
+                style={styles.participantChip}
+              >
+                {participant.initials}
+              </Text>
+            ))}
+          </View>
+        )}
       </View>
 
       {sync.error === null ? null : (
@@ -2479,28 +2543,25 @@ function AuthenticatedEventRoomScreen({
 
       {journalActionsAuthorized && !sync.model.historyComplete ? (
         <Text accessibilityRole="summary" style={styles.actionUnavailableText}>
-          Corrections and redactions become available after the complete
-          timeline loads.
+          Corrections become available once the whole timeline has loaded.
         </Text>
       ) : null}
 
       <View style={styles.timelineRegion}>
         <FlatList
           contentContainerStyle={
-            sync.model.entries.length === 0
+            timelineEntries.length === 0
               ? styles.emptyTimelineContent
               : styles.timelineContent
           }
-          data={sync.model.entries}
+          data={timelineEntries}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
           keyExtractor={(projection) => projection.entry.id}
           ListEmptyComponent={
             <View accessible style={styles.emptyTimeline}>
-              <Text style={styles.stateTitle}>No timeline updates yet</Text>
-              <Text style={styles.secondaryText}>
-                Pull to refresh. New updates will appear in server order.
-              </Text>
+              <Text style={styles.stateTitle}>No updates yet</Text>
+              <Text style={styles.secondaryText}>Pull to refresh.</Text>
             </View>
           }
           maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
@@ -2553,8 +2614,8 @@ function AuthenticatedEventRoomScreen({
             <>
               <Text accessibilityRole="summary" style={styles.closedNotice}>
                 {eventClosed
-                  ? 'This event is closed. Its append-only timeline remains readable.'
-                  : 'This event no longer accepts timeline posts. Its append-only timeline remains readable.'}
+                  ? 'This event is closed. Its timeline is still here.'
+                  : 'This event no longer accepts updates. Its timeline is still here.'}
               </Text>
               {photo.draft?.stage === 'describe' ? null : (
                 <ActionButton
@@ -2592,7 +2653,7 @@ function AuthenticatedEventRoomScreen({
                 />
               </View>
               <Text accessibilityRole="summary" style={styles.safetyHelp}>
-                Do not include student data. A submitted update is append-only;
+                Do not include student data. Updates cannot be edited;
                 corrections create a new entry.
               </Text>
               {textError === null ? null : (
@@ -2780,6 +2841,31 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     justifyContent: 'space-between',
+  },
+  participantRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 10,
+  },
+  participantRowLabel: {
+    color: '#486581',
+    fontSize: 13,
+    fontWeight: '700',
+    marginRight: 2,
+  },
+  participantChip: {
+    backgroundColor: '#EEF2F7',
+    borderColor: '#AEBACA',
+    borderRadius: 15,
+    borderWidth: 1,
+    color: '#243B53',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 28,
+    minWidth: 30,
+    textAlign: 'center',
   },
   statusText: { flex: 1, fontSize: 15, fontWeight: '800', lineHeight: 21 },
   actionButton: {
