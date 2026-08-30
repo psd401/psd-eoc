@@ -9,6 +9,8 @@ import {
   test,
 } from 'bun:test';
 
+import { sql } from 'drizzle-orm';
+
 import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
@@ -301,5 +303,124 @@ describeWithDatabase('durable channel attempt execution leases', () => {
     expect(claims.filter((claim) => claim.kind === 'in-progress')).toHaveLength(
       7,
     );
+  });
+  /**
+   * These tests connect as the database owner, so every case above would pass
+   * with the application role holding no privileges at all. That is not
+   * hypothetical: migration 0026 created this table after the blanket
+   * application grant, PostgreSQL did not extend that grant to it, and the
+   * table sat with a null ACL. Workers claim an execution lease here before
+   * calling any provider, so the refusal landed on the first step of every
+   * send and no notification was ever delivered.
+   */
+  test('the application role can claim, complete, and release a lease', async () => {
+    const database = connection?.db;
+    if (database === undefined) throw new Error('database is required');
+    const [privileges] = await database.execute<{
+      can_select: boolean;
+      can_insert_lease: boolean;
+      can_update_lease: boolean;
+      can_update_completion: boolean;
+      can_delete: boolean;
+    }>(sql`
+      select
+        has_table_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'SELECT'
+        ) as can_select,
+        has_column_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'lease_token', 'INSERT'
+        ) as can_insert_lease,
+        has_column_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'lease_expires_at', 'UPDATE'
+        ) as can_update_lease,
+        has_column_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'completion', 'UPDATE'
+        ) as can_update_completion,
+        has_table_privilege(
+          'psd_eoc_app', 'public.channel_attempt_executions', 'DELETE'
+        ) as can_delete
+    `);
+    expect(privileges).toEqual({
+      can_select: true,
+      can_insert_lease: true,
+      can_update_lease: true,
+      can_update_completion: true,
+      can_delete: true,
+    });
+  });
+
+  /**
+   * The same defect has now reached production twice: "notification_intents"
+   * in migration 0040 and this table in 0041. Both were a table the
+   * application role could not touch, found only after a confirmed activation
+   * reached nobody. This asserts the general property instead of waiting for
+   * the third one.
+   */
+  test('every table grants the application role some privilege', async () => {
+    const database = connection?.db;
+    if (database === undefined) throw new Error('database is required');
+    const unreachable = await database.execute<{ relname: string }>(sql`
+      select relation.relname
+      from pg_catalog.pg_class as relation
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public'
+        and relation.relkind = 'r'
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'SELECT')
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'INSERT')
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'UPDATE')
+        and not has_table_privilege('psd_eoc_app', relation.oid, 'DELETE')
+      order by relation.relname
+    `);
+    expect([...unreachable].map((row) => row.relname)).toEqual([]);
+  });
+  /**
+   * INSERT must cover every column, not only the ones the caller sets.
+   *
+   * PostgreSQL checks INSERT privilege against every column NAMED in a
+   * statement, and the query builder names all of them, writing DEFAULT for
+   * the ones left out. A grant listing only the columns the application
+   * supplies therefore refuses the insert outright. Migrations 0036 and 0041
+   * both granted those narrow lists, and the result was that no worker on any
+   * channel could claim an execution lease -- the first write of every send.
+   *
+   * The privilege check above passes on a narrow grant, because it asks about
+   * one column at a time. This asks the question that actually matters.
+   */
+  test('the application role can insert every column it writes', async () => {
+    const database = connection?.db;
+    if (database === undefined) throw new Error('database is required');
+    const written = [
+      'channel_attempt_executions',
+      'expo_push_provider_io',
+      'expo_push_receipt_polls',
+      'expo_push_retry_schedules',
+      'ses_email_provider_io',
+      'sms_provider_io',
+      'sms_retry_schedules',
+      'channel_attempts',
+      'delivery_evidence',
+    ];
+    const gaps = await database.execute<{
+      table_name: string;
+      column_name: string;
+    }>(sql`
+      select columns.table_name, columns.column_name
+      from information_schema.columns as columns
+      where columns.table_schema = 'public'
+        and columns.table_name in ${sql.raw(
+          `(${written.map((name) => `'${name}'`).join(', ')})`,
+        )}
+        and not has_column_privilege(
+          'psd_eoc_app',
+          'public.' || columns.table_name,
+          columns.column_name,
+          'INSERT'
+        )
+      order by columns.table_name, columns.column_name
+    `);
+    expect(
+      [...gaps].map((row) => `${row.table_name}.${row.column_name}`),
+    ).toEqual([]);
   });
 });

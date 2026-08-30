@@ -104,6 +104,7 @@ function textEntry(
     eventId: IDS.event,
     sequence: input.sequence,
     author: ACTOR,
+    authorDisplayName: null,
     source: 'web',
     serverTime: input.serverTime,
     clientTime: input.clientTime,
@@ -119,6 +120,7 @@ function photoEntry(): JournalEntry {
     eventId: IDS.event,
     sequence: 5,
     author: ACTOR,
+    authorDisplayName: null,
     source: 'web',
     serverTime: '2026-08-10T16:06:00.000Z',
     clientTime: '2026-08-10T16:05:30.000Z',
@@ -139,6 +141,7 @@ function historicalPhotoEntry(sequence: number): JournalEntry {
     eventId: IDS.event,
     sequence,
     author: ACTOR,
+    authorDisplayName: null,
     source: 'web',
     serverTime: new Date(
       Date.parse('2026-08-10T16:00:00.000Z') + sequence * 1_000,
@@ -167,6 +170,7 @@ function locationEntry(
     eventId: IDS.event,
     sequence: input.sequence,
     author: ACTOR,
+    authorDisplayName: null,
     source: 'web',
     serverTime: new Date(
       Date.parse('2026-08-10T16:00:00.000Z') + input.sequence * 60_000,

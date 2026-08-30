@@ -16,6 +16,11 @@ import {
 import { and, asc, desc, eq, gt, inArray, lte } from 'drizzle-orm';
 
 import {
+  authorDisplayNameForRow,
+  resolveAuthorDisplayNames,
+} from './journal-author-names';
+
+import {
   createDatabaseClient,
   readDatabaseConfig,
   type DatabaseConnection,
@@ -167,13 +172,17 @@ function eventFromRow(row: typeof events.$inferSelect): Event {
   });
 }
 
-function journalFromRow(row: typeof journalEntries.$inferSelect) {
+function journalFromRow(
+  row: typeof journalEntries.$inferSelect,
+  authorDisplayName: string | null = null,
+) {
   return JournalEntrySchema.parse({
     id: row.id,
     eventId: row.eventId,
     sequence: row.sequence,
     kind: row.kind,
     author: row.author,
+    authorDisplayName,
     source: row.source,
     serverTime: dateIso(row.serverTime),
     clientTime: row.clientTime === null ? null : dateIso(row.clientTime),
@@ -326,8 +335,12 @@ async function syncEventRoom(
       entryId === null ? [] : [entryId],
     ),
   );
+  const authorNames = await resolveAuthorDisplayNames(database, visibleRows);
   const entries = visibleRows.map((row) =>
-    projectJournalEntryForRead(journalFromRow(row), redactedIds.has(row.id)),
+    projectJournalEntryForRead(
+      journalFromRow(row, authorDisplayNameForRow(row, authorNames)),
+      redactedIds.has(row.id),
+    ),
   );
   if (afterSequence < snapshotSequence && entries.length === 0) {
     throw persistenceConflict(

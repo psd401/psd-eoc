@@ -383,9 +383,14 @@ export function adjustKnownLocation(
   }) as Extract<LocationPayload, { state: 'known' }>;
 }
 
-function actorLabel(
-  projection: JournalEntryReadProjection,
-): 'Staff member' | 'District agent' | 'PSD EOC system' {
+/**
+ * The reader has to know who sent an update without opening anything, so the
+ * resolved name wins when there is one. The actor's kind stays as the fallback
+ * for the system actor and for an account that no longer resolves.
+ */
+function actorLabel(projection: JournalEntryReadProjection): string {
+  const name = projection.entry.authorDisplayName;
+  if (name !== null) return name;
   switch (projection.entry.author.kind) {
     case 'human':
       return 'Staff member';

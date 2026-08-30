@@ -26,6 +26,7 @@ import {
   aws_ecr as ecr,
   aws_ecr_assets as ecrAssets,
   aws_events as events,
+  aws_guardduty as guardduty,
   aws_events_targets as eventTargets,
   aws_iam as iam,
   aws_kms as kms,
@@ -206,6 +207,17 @@ export class PsdEocStack extends Stack {
         allowedValues: ['false', 'true'],
         description:
           'Explicitly set false for a dark data-plane deployment or true to run App Runner after the CDK-managed bootstrap succeeds.',
+        type: 'String',
+      },
+    );
+    const enableMediaMalwareScanning = new CfnParameter(
+      this,
+      'EnableMediaMalwareScanning',
+      {
+        allowedValues: ['false', 'true'],
+        default: 'false',
+        description:
+          'Attach the GuardDuty malware-protection plan to the media bucket. Enable only after a deployment in which the scan role already exists: GuardDuty validates bucket ownership when the plan is created, and that check fails against a role IAM has not finished propagating.',
         type: 'String',
       },
     );
@@ -558,6 +570,12 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const shouldScanMedia = new CfnCondition(this, 'ShouldScanMedia', {
+      expression: Fn.conditionAnd(
+        Fn.conditionEquals(enableMediaMalwareScanning.valueAsString, 'true'),
+        shouldProvisionApplication,
+      ),
+    });
     const shouldRunEmailWorker = new CfnCondition(
       this,
       'ShouldRunEmailWorker',
@@ -2988,6 +3006,167 @@ export class PsdEocStack extends Stack {
       imageRepository.grantPull(imageAccessRole),
     ];
 
+    // Private storage for photos staff attach to an event.
+    //
+    // Versioned because the media store treats a sanitized object as immutable
+    // truth: it writes with IfNoneMatch and refuses to replace one, and
+    // versioning is the retained defense behind that refusal rather than
+    // permission to overwrite.
+    const mediaObjects = new s3.Bucket(this, 'MediaObjects', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      // A staff photo is uploaded by the browser straight to S3 with a signed
+      // grant, so the upload is cross-origin and the bucket has to say so.
+      // Without this the upload fails at the transport with no provider
+      // answer, which the event room reports as an upload that ended without
+      // a confirmed result.
+      //
+      // One origin: this deployment's own. PUT for the upload, GET for the
+      // signed read-back, HEAD for the size probe the client makes first. The
+      // allowed headers are exactly what the signed request carries.
+      cors: [
+        {
+          allowedOrigins: [deploymentIdentity.applicationOrigin],
+          allowedMethods: [
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.GET,
+            s3.HttpMethods.HEAD,
+          ],
+          allowedHeaders: [
+            'content-type',
+            'if-none-match',
+            'x-amz-checksum-sha256',
+            'x-amz-sdk-checksum-algorithm',
+          ],
+          exposedHeaders: ['etag'],
+          maxAge: 3_000,
+        },
+      ],
+    });
+    (mediaObjects.node.defaultChild as s3.CfnBucket).cfnOptions.condition =
+      shouldProvisionApplication;
+    const mediaBucketPolicy = mediaObjects.policy;
+    if (mediaBucketPolicy !== undefined) {
+      (
+        mediaBucketPolicy.node.defaultChild as s3.CfnBucketPolicy
+      ).cfnOptions.condition = shouldProvisionApplication;
+    }
+
+    // GuardDuty Malware Protection scans each uploaded object and records the
+    // result as an object tag. The media capability reads that tag and refuses
+    // to publish a photo until it says the object is clean, so without this
+    // plan every upload stays pending and no photo is ever posted.
+    const mediaScanRole = new iam.Role(this, 'MediaMalwareScanRole', {
+      // Scoped to this account so the plan's role cannot be assumed on behalf
+      // of another account's GuardDuty.
+      assumedBy: new iam.ServicePrincipal(
+        'malware-protection-plan.guardduty.amazonaws.com',
+        {
+          conditions: {
+            StringEquals: { 'aws:SourceAccount': Stack.of(this).account },
+          },
+        },
+      ),
+      description:
+        'GuardDuty Malware Protection for the private event media bucket.',
+    });
+    (mediaScanRole.node.defaultChild as iam.CfnRole).cfnOptions.condition =
+      shouldProvisionApplication;
+    mediaScanRole.addToPolicy(
+      new iam.PolicyStatement({
+        // GuardDuty validates that the caller owns the bucket before it will
+        // attach a plan, and refuses the plan outright without the ownership
+        // and versioning reads. Omitting them fails at CreateMalwareProtectionPlan
+        // rather than at scan time.
+        actions: [
+          's3:GetBucketLocation',
+          's3:GetBucketOwnershipControls',
+          's3:GetBucketVersioning',
+          's3:ListBucket',
+          's3:ListBucketVersions',
+          's3:GetObject',
+          's3:GetObjectVersion',
+          's3:GetObjectTagging',
+          's3:GetObjectVersionTagging',
+          's3:PutObjectTagging',
+          's3:PutObjectVersionTagging',
+          // GuardDuty learns about a new object through EventBridge, and turns
+          // that delivery on itself when the plan is created. Without the
+          // notification pair it refuses the plan outright rather than
+          // attaching one that would never see an upload.
+          's3:GetBucketNotification',
+          's3:PutBucketNotification',
+        ],
+        resources: [mediaObjects.bucketArn, mediaObjects.arnForObjects('*')],
+      }),
+    );
+    // GuardDuty proves it can write to the bucket by putting a single
+    // validation object and removing it again, and reports the plan as
+    // degraded when it cannot. Scoped to that one key: the scan role can
+    // write its own probe and nothing else, and cannot touch a staff photo.
+    mediaScanRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject', 's3:DeleteObject'],
+        resources: [
+          mediaObjects.arnForObjects(
+            'malware-protection-resource-validation-object*',
+          ),
+        ],
+      }),
+    );
+    mediaScanRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'events:PutRule',
+          'events:DeleteRule',
+          'events:PutTargets',
+          'events:RemoveTargets',
+        ],
+        resources: ['*'],
+        conditions: {
+          StringLike: {
+            'events:ManagedBy':
+              'malware-protection-plan.guardduty.amazonaws.com',
+          },
+        },
+      }),
+    );
+    const mediaScanPolicy = mediaScanRole.node.tryFindChild('DefaultPolicy') as
+      | iam.Policy
+      | undefined;
+    if (mediaScanPolicy !== undefined) {
+      (
+        mediaScanPolicy.node.defaultChild as iam.CfnPolicy
+      ).cfnOptions.condition = shouldProvisionApplication;
+    }
+    // The plan is created in a later deployment than the role it uses.
+    //
+    // GuardDuty validates that the caller owns the bucket at the moment the
+    // plan is created, and that check runs against IAM's view of the role. In
+    // the same update that creates the role and its policy, that view is not
+    // yet consistent, and the create fails with "does not have the required
+    // permissions to validate S3 bucket ownership" -- which then rolls back
+    // every unrelated change in the deployment. Enabling this only once the
+    // role already exists removes the race rather than retrying into it.
+    const mediaScanPlan = new guardduty.CfnMalwareProtectionPlan(
+      this,
+      'MediaMalwareScanPlan',
+      {
+        role: mediaScanRole.roleArn,
+        protectedResource: {
+          s3Bucket: { bucketName: mediaObjects.bucketName },
+        },
+        actions: { tagging: { status: 'ENABLED' } },
+      },
+    );
+    mediaScanPlan.cfnOptions.condition = shouldScanMedia;
+    if (mediaScanPolicy !== undefined) {
+      mediaScanPlan.node.addDependency(mediaScanPolicy);
+    }
+
     const runtimeRole = new iam.Role(this, 'AppRunnerRuntimeRole', {
       assumedBy: new iam.ServicePrincipal('tasks.apprunner.amazonaws.com'),
       description:
@@ -3033,6 +3212,27 @@ export class PsdEocStack extends Stack {
         ],
       }),
     ];
+
+    // The media grant lives in its own policy rather than the role's default
+    // one. The bucket is conditional on the application being provisioned, and
+    // the default policy is not: a reference from an unconditional resource to
+    // a conditional one is a template CloudFormation refuses to validate.
+    //
+    // The application signs upload and read grants, writes the sanitized
+    // object, and reads the malware-scan tag. It never deletes -- a media
+    // record is append-only truth.
+    const mediaAccessPolicy = new iam.Policy(this, 'AppRunnerMediaAccess', {
+      roles: [runtimeRole],
+      statements: [
+        new iam.PolicyStatement({
+          actions: ['s3:GetObject', 's3:GetObjectTagging', 's3:PutObject'],
+          resources: [mediaObjects.arnForObjects('*')],
+        }),
+      ],
+    });
+    (
+      mediaAccessPolicy.node.defaultChild as iam.CfnPolicy
+    ).cfnOptions.condition = shouldProvisionApplication;
 
     const appRunnerScaling = new apprunner.CfnAutoScalingConfiguration(
       this,
@@ -3213,6 +3413,10 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'DATABASE_IDLE_TIMEOUT_SECONDS',
                   value: runtimeDatabaseIdleTimeoutSeconds.valueAsString,
+                },
+                {
+                  name: 'MEDIA_BUCKET_NAME',
+                  value: mediaObjects.bucketName,
                 },
                 {
                   name: 'DELIVERY_QUEUE_URL',
