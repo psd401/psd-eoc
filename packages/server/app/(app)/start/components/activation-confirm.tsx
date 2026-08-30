@@ -416,7 +416,6 @@ export function ActivationConfirm({
         activated,
         preview,
         selection,
-        activationIdempotencyKey,
       );
       setResult({
         eventKind: event.kind,
