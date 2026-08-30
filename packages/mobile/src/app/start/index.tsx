@@ -346,6 +346,18 @@ export default function StartEventScreen() {
   }
 
   const mutationSnapshot = startMutation.snapshot;
+
+  // Starting or joining opens the event room. A confirmation screen in between
+  // is one more tap during the minute that matters most.
+  useEffect(() => {
+    if (!isFocused || mutationSnapshot.phase !== 'succeeded') return;
+    const { eventId } = mutationSnapshot.completion;
+    if (!startMutation.acknowledge()) return;
+    router.replace({
+      pathname: '/events/[id]',
+      params: { id: eventId },
+    } as Href);
+  }, [isFocused, mutationSnapshot, router, startMutation]);
   if (isFocused && mutationSnapshot.phase === 'checking-recovery') {
     return (
       <SafeAreaView style={styles.page}>

@@ -123,7 +123,7 @@ export function ActivationConfirmation({
   const separate = activeEventCount > 0;
   const blocked = sendReadiness === 'blocked';
   const unavailable = disabled || busy || blocked;
-  const action = `${separate ? 'Start a separate ' : 'Start '}${classification} and record notification intents for ${audience}`;
+  const action = `${separate ? 'Start a separate ' : 'Start '}${classification} and notify ${audience}`;
 
   return (
     <View style={styles.container}>
@@ -170,8 +170,8 @@ export function ActivationConfirmation({
               : 'Events are already active here'}
           </Text>
           <Text style={styles.activeChoiceBody}>
-            Choose explicitly: join an existing event below, or start a separate
-            event with another set of notification intents.
+            Join the event below, or start a separate one that notifies staff
+            again.
           </Text>
         </View>
       ) : null}
@@ -180,11 +180,10 @@ export function ActivationConfirmation({
 
       <View style={styles.consequences}>
         <Text accessibilityRole="header" style={styles.consequencesHeading}>
-          Exact notification consequences
+          Who gets notified
         </Text>
         <Text style={styles.consequencesIntroduction}>
-          Your confirmation signs these server-rendered messages, endpoint
-          counts, and integration truth labels for this {classification}.
+          These are the exact messages PSD EOC sends for this {classification}.
         </Text>
 
         {channels.map((channel) => {
@@ -252,16 +251,13 @@ export function ActivationConfirmation({
               <Text style={styles.factLabel}>Not included. </Text>
               Text messaging is not enabled for this preview.
             </Text>
-            <Text style={styles.fact}>
-              This confirmation signs no SMS notification intent and claims no
-              eligible SMS endpoints.
-            </Text>
+            <Text style={styles.fact}>No text message is sent.</Text>
           </View>
         )}
 
         <Text style={styles.endpointTruth}>
-          Endpoint counts describe eligible destinations, not provider
-          acceptance or confirmed human receipt.
+          Counts are the people PSD EOC can reach, not the people who have read
+          it.
         </Text>
       </View>
 
@@ -285,14 +281,13 @@ export function ActivationConfirmation({
 
       <View style={styles.confirmation}>
         <Text accessibilityRole="header" style={styles.confirmationHeading}>
-          Confirm the consequence
+          Start this {mode === 'real' ? 'incident' : 'drill'}
         </Text>
         <Text style={styles.confirmationBody}>
-          This will start a {classification} at {facilityName} and record
-          notification intents for {audience}.
+          Starts a {classification} at {facilityName} and notifies {audience}.
         </Text>
         <Pressable
-          accessibilityHint="Final human confirmation of the exact messages, endpoints, and integration truth labels above. PSD EOC will not queue an automatic retry."
+          accessibilityHint="Starts the event and sends the messages shown above."
           accessibilityLabel={busy ? `${action}. Starting once.` : action}
           accessibilityRole="button"
           accessibilityState={{ busy, disabled: unavailable }}
@@ -312,9 +307,6 @@ export function ActivationConfirmation({
             {busy ? `Starting ${classification} once…` : action}
           </Text>
         </Pressable>
-        <Text style={styles.neverQueue}>
-          PSD EOC never queues this activation for an automatic retry.
-        </Text>
       </View>
     </View>
   );
@@ -447,12 +439,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     lineHeight: 22,
     marginTop: 4,
-  },
-  neverQueue: {
-    color: '#486581',
-    fontSize: 14,
-    lineHeight: 20,
-    textAlign: 'center',
   },
   pressed: {
     opacity: 0.72,
