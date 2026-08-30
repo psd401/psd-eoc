@@ -9,6 +9,8 @@ import {
 
 import {
   ANNOUNCEMENT_LATEST_TEXT_LIMIT,
+  eventRoomParticipants,
+  readableTimelineEntries,
   ANNOUNCEMENT_THROTTLE_MILLISECONDS,
   EMPTY_EVENT_ROOM_MODEL,
   TimelineAnnouncementBatcher,
@@ -551,5 +553,97 @@ describe('event-room model', () => {
     expect(incomplete.correction.unavailableReason).toContain(
       'Load the complete timeline',
     );
+  });
+});
+
+describe('what the event room shows an operator', () => {
+  const uuid = (suffix: number): string =>
+    `17000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
+
+  function systemProjection(
+    sequence: number,
+    code: string,
+    summary: string,
+    displayName: string | null,
+    userId: string,
+  ): JournalEntryReadProjection {
+    return JournalEntryReadProjectionSchema.parse({
+      visibility: 'visible',
+      entry: {
+        id: uuid(100 + sequence),
+        eventId: uuid(1),
+        sequence,
+        kind: 'system',
+        author: { kind: 'human', userId, sessionId: uuid(3) },
+        authorDisplayName: displayName,
+        source: 'mobile',
+        serverTime: `2026-08-10T16:0${sequence}:00.000Z`,
+        clientTime: null,
+        supersedes: null,
+        payload: { code, summary, relatedRecordId: null },
+      },
+    });
+  }
+
+  function textProjection(sequence: number): JournalEntryReadProjection {
+    return JournalEntryReadProjectionSchema.parse({
+      visibility: 'visible',
+      entry: {
+        id: uuid(200 + sequence),
+        eventId: uuid(1),
+        sequence,
+        kind: 'text',
+        author: { kind: 'human', userId: uuid(2), sessionId: uuid(3) },
+        authorDisplayName: 'Robin Vega',
+        source: 'mobile',
+        serverTime: `2026-08-10T16:0${sequence}:00.000Z`,
+        clientTime: null,
+        supersedes: null,
+        payload: { text: 'Synthetic drill update.' },
+      },
+    });
+  }
+
+  const entries = [
+    systemProjection(1, 'event-created', 'Event record created.', 'Robin Vega', uuid(2)),
+    systemProjection(
+      2,
+      'notification-intent-recorded',
+      'Notification send intent recorded.',
+      'Robin Vega',
+      uuid(2),
+    ),
+    systemProjection(
+      3,
+      'participant-joined',
+      'Authenticated participant joined the event.',
+      'Sam Okonkwo',
+      uuid(4),
+    ),
+    systemProjection(
+      4,
+      'participant-joined',
+      'Authenticated participant joined the event.',
+      'Sam Okonkwo',
+      uuid(4),
+    ),
+    textProjection(5),
+  ];
+
+  test('leaves routine bookkeeping out of the timeline', () => {
+    const readable = readableTimelineEntries(entries);
+
+    expect(readable).toHaveLength(1);
+    expect(readable[0]?.entry.kind).toBe('text');
+  });
+
+  test('lists each person once, however often they joined', () => {
+    const participants = eventRoomParticipants(entries);
+
+    expect(participants.map((person) => person.name)).toEqual([
+      'Robin Vega',
+      'Sam Okonkwo',
+    ]);
+    expect(participants.map((person) => person.initials)).toEqual(['RV', 'SO']);
   });
 });

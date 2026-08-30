@@ -134,7 +134,7 @@ export function journalEntryActionEligibility(
   const redaction = supersessions.some(
     (supersession) => supersession?.kind === 'redaction',
   )
-    ? unavailable('This entry already has an append-only redaction.')
+    ? unavailable('This entry is already hidden.')
     : AVAILABLE_ACTION;
   return Object.freeze({ correction, redaction });
 }
@@ -406,7 +406,7 @@ export function timelineEntryText(
 ): string {
   const projection = JournalEntryReadProjectionSchema.parse(projectionValue);
   if (projection.visibility === 'redacted') {
-    return 'Content redacted. The original remains retained in the append-only journal.';
+    return 'This content was hidden later. The original record is kept.';
   }
   const { entry } = projection;
   switch (entry.kind) {
@@ -486,4 +486,67 @@ export class TimelineAnnouncementBatcher {
     this.pendingCount = 0;
     this.latest = '';
   }
+}
+
+/**
+ * System facts PSD EOC records for the record, not for the room. Creating the
+ * event, activating it, recording a send intent, and each join stay in the
+ * journal and in the PDF summary; as timeline rows they bury the updates
+ * people are reading.
+ */
+const BACKGROUND_SYSTEM_CODES: ReadonlySet<string> = new Set([
+  'event-created',
+  'event-activated',
+  'notification-intent-recorded',
+  'participant-joined',
+]);
+
+/** The timeline as an operator should read it: updates and state changes. */
+export function readableTimelineEntries(
+  entries: readonly JournalEntryReadProjection[],
+): readonly JournalEntryReadProjection[] {
+  return entries.filter(
+    (projection) =>
+      projection.visibility !== 'visible' ||
+      projection.entry.kind !== 'system' ||
+      !BACKGROUND_SYSTEM_CODES.has(projection.entry.payload.code),
+  );
+}
+
+export interface EventRoomParticipant {
+  readonly id: string;
+  readonly name: string;
+  readonly initials: string;
+}
+
+function participantInitials(name: string): string {
+  const parts = name.split(/\s+/u).filter((part) => part.length > 0);
+  if (parts.length === 0) return '?';
+  const first = parts[0]?.[0] ?? '';
+  const last = parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? '') : '';
+  return `${first}${last}`.toUpperCase();
+}
+
+/**
+ * Who is in the event, taken from what people have already done in it. There
+ * is no presence heartbeat and no leave signal, so this says who has been
+ * here, never who is looking right now.
+ */
+export function eventRoomParticipants(
+  entries: readonly JournalEntryReadProjection[],
+): readonly EventRoomParticipant[] {
+  const byUser = new Map<string, EventRoomParticipant>();
+  for (const projection of entries) {
+    if (projection.visibility !== 'visible') continue;
+    const { entry } = projection;
+    if (entry.author.kind !== 'human') continue;
+    if (entry.authorDisplayName === null) continue;
+    if (byUser.has(entry.author.userId)) continue;
+    byUser.set(entry.author.userId, {
+      id: entry.author.userId,
+      name: entry.authorDisplayName,
+      initials: participantInitials(entry.authorDisplayName),
+    });
+  }
+  return [...byUser.values()];
 }
