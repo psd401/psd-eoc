@@ -1018,7 +1018,7 @@ describe('mobile event-room timeline accessibility', () => {
     expect(redactedCard.props.accessible).toBe(true);
     expect(redactedCard.props.accessibilityRole).toBe('text');
     expect(redactedCard.props.accessibilityLabel).toContain(
-      'Content redacted. The original remains retained in the append-only journal.',
+      'This content was hidden later. The original record is kept.',
     );
     expect(JSON.stringify(redacted)).not.toContain('payload');
     expect(JSON.stringify(rendered.toJSON())).not.toContain(ids.media);
@@ -1144,7 +1144,7 @@ describe('mobile event-room timeline accessibility', () => {
       />,
     );
     expect(screen.getByText('Original entry retained')).toBeTruthy();
-    expect(screen.getByText(/never rewrites or deletes history/)).toBeTruthy();
+    expect(screen.getByText(/Nothing is rewritten or deleted/)).toBeTruthy();
     fireEvent.changeText(
       screen.getByLabelText('Corrected timeline text'),
       'Corrected synthetic wording',
@@ -1172,7 +1172,7 @@ describe('mobile event-room timeline accessibility', () => {
       />,
     );
     expect(
-      screen.getByText(/original remains retained in append-only history/),
+      screen.getByText(/The original record is kept and is never deleted/),
     ).toBeTruthy();
   });
 
@@ -1209,7 +1209,7 @@ describe('mobile event-room timeline accessibility', () => {
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
-        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are immutable.',
+        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are fixed.',
       ),
     ).toBeTruthy();
     expect(
@@ -1252,7 +1252,7 @@ describe('mobile event-room timeline accessibility', () => {
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
-        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are immutable.',
+        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are fixed.',
       ),
     ).toBeTruthy();
     expect(
@@ -1862,7 +1862,7 @@ describe('mobile event-room lifecycle confirmations', () => {
 
     expect(
       screen.getByText(
-        'This closes the all-clear event record. Closing does not send another notification. The append-only timeline remains retained.',
+        'This ends the event. Nobody else is notified. The timeline stays available.',
       ),
     ).toBeTruthy();
     expectConfirmationDisabled(true);
