@@ -592,9 +592,7 @@ export function EventRoom({
           ) : null}
           {currentEvent.status === 'all-clear' ? (
             <>
-              <p>
-                Staff have the all-clear. This event is not closed yet.
-              </p>
+              <p>Staff have the all-clear. This event is not closed yet.</p>
               <button
                 className="caution"
                 disabled={lifecycleCommandsBlocked}
@@ -665,187 +663,194 @@ export function EventRoom({
 
           <details className="composer-extra">
             <summary>Add a location</summary>
-          <section
-            aria-labelledby="location-post-heading"
-            className="composer-panel location-composer"
-          >
-            <h2 id="location-post-heading">Post a location</h2>
-            <DialogClassification
-              label={classificationLabel}
-              real={realEvent}
-            />
-            <form onSubmit={(submission) => void submitLocation(submission)}>
-              <fieldset
-                disabled={commandsBlocked || !canPost}
-                style={{ border: 0, margin: 0, padding: 0 }}
-              >
-                <legend className="sr-only">Location timeline update</legend>
-                <LocationEditor
-                  draft={locationDraft}
-                  idPrefix="event-location"
-                  onChange={setLocationDraft}
-                />
-                <p className="field-help">
-                  Do not include student data. Post only the precision you can
-                  support. Locations cannot be edited -- post a correction
-                  instead.
+            <section
+              aria-labelledby="location-post-heading"
+              className="composer-panel location-composer"
+            >
+              <h2 id="location-post-heading">Post a location</h2>
+              <DialogClassification
+                label={classificationLabel}
+                real={realEvent}
+              />
+              <form onSubmit={(submission) => void submitLocation(submission)}>
+                <fieldset
+                  disabled={commandsBlocked || !canPost}
+                  style={{ border: 0, margin: 0, padding: 0 }}
+                >
+                  <legend className="sr-only">Location timeline update</legend>
+                  <LocationEditor
+                    draft={locationDraft}
+                    idPrefix="event-location"
+                    onChange={setLocationDraft}
+                  />
+                  <p className="field-help">
+                    Do not include student data. Post only the precision you can
+                    support. Locations cannot be edited -- post a correction
+                    instead.
+                  </p>
+                  <button disabled={locationPayload === null} type="submit">
+                    {pendingOperation === 'post-location'
+                      ? 'Posting location…'
+                      : 'Post location'}
+                  </button>
+                </fieldset>
+              </form>
+              {!canPost ? (
+                <p className="muted">
+                  New location posts are unavailable after this event is closed
+                  or before it is active.
                 </p>
-                <button disabled={locationPayload === null} type="submit">
-                  {pendingOperation === 'post-location'
-                    ? 'Posting location…'
-                    : 'Post location'}
-                </button>
-              </fieldset>
-            </form>
-            {!canPost ? (
-              <p className="muted">
-                New location posts are unavailable after this event is closed or
-                before it is active.
-              </p>
-            ) : null}
-          </section>
+              ) : null}
+            </section>
           </details>
           <details className="composer-extra">
             <summary>Add a photo</summary>
 
-          <section
-            aria-labelledby="photo-post-heading"
-            className="composer-panel photo-composer"
-          >
-            <h2 id="photo-post-heading">Post a photo</h2>
-            <DialogClassification
-              label={classificationLabel}
-              real={realEvent}
-            />
-            <form onSubmit={(submission) => void submitPhoto(submission)}>
-              <fieldset
-                disabled={
-                  commandsBlocked ||
-                  !canPost ||
-                  pendingPhotoCompletion !== null ||
-                  photoRecoveryBlocked
-                }
-                style={{ border: 0, margin: 0, padding: 0 }}
-              >
-                <legend className="sr-only">
-                  Private photo timeline update
-                </legend>
-                <div className="field">
-                  <label htmlFor="event-photo-file">Photo file</label>
-                  <input
-                    accept={ACCEPTED_MEDIA_TYPES}
-                    aria-describedby="event-photo-help"
-                    id="event-photo-file"
-                    onChange={(change) =>
-                      selectPhoto(change.currentTarget.files?.[0] ?? null)
-                    }
-                    ref={photoFileRef}
-                    required
-                    type="file"
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="event-photo-alt">
-                    Photo description (alternative text)
-                  </label>
-                  <input
-                    aria-describedby="event-photo-alt-help"
-                    id="event-photo-alt"
-                    maxLength={500}
-                    onChange={(change) => setPhotoAltText(change.target.value)}
-                    required
-                    type="text"
-                    value={photoAltText}
-                  />
-                  <p className="field-help" id="event-photo-alt-help">
-                    Replace the author-and-time fallback with important visual
-                    details when possible. If it is unchanged, the timeline
-                    states that visual details were not described.
-                  </p>
-                </div>
-                <div className="field">
-                  <label htmlFor="event-photo-caption">
-                    Caption (optional)
-                  </label>
-                  <textarea
-                    id="event-photo-caption"
-                    maxLength={2_000}
-                    onChange={(change) => setPhotoCaption(change.target.value)}
-                    value={photoCaption}
-                  />
-                </div>
-                <p className="field-help" id="event-photo-help">
-                  Do not include student data. JPEG, PNG, WebP, and HEIC up to
-                  25 MiB. PSD EOC scans the file and strips EXIF and GPS data
-                  before posting it.
-                </p>
-                <button
-                  disabled={!photoFileValid || photoAltText.trim().length === 0}
-                  type="submit"
-                >
-                  {photoWorkflowBusy
-                    ? 'Validating private photo…'
-                    : 'Upload and post photo'}
-                </button>
-              </fieldset>
-            </form>
-
-            {photoError === null ? null : (
-              <div
-                className="photo-workflow-error"
-                ref={photoErrorRef}
-                role="alert"
-                tabIndex={-1}
-              >
-                <strong>Photo needs attention</strong>
-                <p>{photoError}</p>
-              </div>
-            )}
-            <p
-              aria-atomic="true"
-              aria-live="polite"
-              className="photo-status"
-              role="status"
+            <section
+              aria-labelledby="photo-post-heading"
+              className="composer-panel photo-composer"
             >
-              {photoStatus}
-            </p>
-            {pendingPhotoCompletion === null && !photoRecoveryBlocked ? null : (
-              <div className="photo-pending">
-                <p>
-                  {pendingPhotoCompletion === null
-                    ? 'A photo from an earlier attempt needs review. PSD EOC will not send it on its own.'
-                    : 'This photo is still being checked. PSD EOC will not retry it on its own.'}
-                </p>
-                <div className="form-actions">
-                  {pendingPhotoCompletion === null ? null : (
-                    <button
-                      disabled={
-                        commandsBlocked || !canPost || photoRecoveryBlocked
+              <h2 id="photo-post-heading">Post a photo</h2>
+              <DialogClassification
+                label={classificationLabel}
+                real={realEvent}
+              />
+              <form onSubmit={(submission) => void submitPhoto(submission)}>
+                <fieldset
+                  disabled={
+                    commandsBlocked ||
+                    !canPost ||
+                    pendingPhotoCompletion !== null ||
+                    photoRecoveryBlocked
+                  }
+                  style={{ border: 0, margin: 0, padding: 0 }}
+                >
+                  <legend className="sr-only">
+                    Private photo timeline update
+                  </legend>
+                  <div className="field">
+                    <label htmlFor="event-photo-file">Photo file</label>
+                    <input
+                      accept={ACCEPTED_MEDIA_TYPES}
+                      aria-describedby="event-photo-help"
+                      id="event-photo-file"
+                      onChange={(change) =>
+                        selectPhoto(change.currentTarget.files?.[0] ?? null)
                       }
-                      onClick={retryPhotoValidation}
+                      ref={photoFileRef}
+                      required
+                      type="file"
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="event-photo-alt">
+                      Photo description (alternative text)
+                    </label>
+                    <input
+                      aria-describedby="event-photo-alt-help"
+                      id="event-photo-alt"
+                      maxLength={500}
+                      onChange={(change) =>
+                        setPhotoAltText(change.target.value)
+                      }
+                      required
+                      type="text"
+                      value={photoAltText}
+                    />
+                    <p className="field-help" id="event-photo-alt-help">
+                      Replace the author-and-time fallback with important visual
+                      details when possible. If it is unchanged, the timeline
+                      states that visual details were not described.
+                    </p>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="event-photo-caption">
+                      Caption (optional)
+                    </label>
+                    <textarea
+                      id="event-photo-caption"
+                      maxLength={2_000}
+                      onChange={(change) =>
+                        setPhotoCaption(change.target.value)
+                      }
+                      value={photoCaption}
+                    />
+                  </div>
+                  <p className="field-help" id="event-photo-help">
+                    Do not include student data. JPEG, PNG, WebP, and HEIC up to
+                    25 MiB. PSD EOC scans the file and strips EXIF and GPS data
+                    before posting it.
+                  </p>
+                  <button
+                    disabled={
+                      !photoFileValid || photoAltText.trim().length === 0
+                    }
+                    type="submit"
+                  >
+                    {photoWorkflowBusy
+                      ? 'Validating private photo…'
+                      : 'Upload and post photo'}
+                  </button>
+                </fieldset>
+              </form>
+
+              {photoError === null ? null : (
+                <div
+                  className="photo-workflow-error"
+                  ref={photoErrorRef}
+                  role="alert"
+                  tabIndex={-1}
+                >
+                  <strong>Photo needs attention</strong>
+                  <p>{photoError}</p>
+                </div>
+              )}
+              <p
+                aria-atomic="true"
+                aria-live="polite"
+                className="photo-status"
+                role="status"
+              >
+                {photoStatus}
+              </p>
+              {pendingPhotoCompletion === null &&
+              !photoRecoveryBlocked ? null : (
+                <div className="photo-pending">
+                  <p>
+                    {pendingPhotoCompletion === null
+                      ? 'A photo from an earlier attempt needs review. PSD EOC will not send it on its own.'
+                      : 'This photo is still being checked. PSD EOC will not retry it on its own.'}
+                  </p>
+                  <div className="form-actions">
+                    {pendingPhotoCompletion === null ? null : (
+                      <button
+                        disabled={
+                          commandsBlocked || !canPost || photoRecoveryBlocked
+                        }
+                        onClick={retryPhotoValidation}
+                        type="button"
+                      >
+                        Retry photo validation
+                      </button>
+                    )}
+                    <button
+                      className="secondary"
+                      disabled={commandsBlocked}
+                      onClick={clearPendingPhotoAttempt}
                       type="button"
                     >
-                      Retry photo validation
+                      Discard the pending photo
                     </button>
-                  )}
-                  <button
-                    className="secondary"
-                    disabled={commandsBlocked}
-                    onClick={clearPendingPhotoAttempt}
-                    type="button"
-                  >
-                    Discard the pending photo
-                  </button>
+                  </div>
                 </div>
-              </div>
-            )}
-            {!canPost ? (
-              <p className="muted">
-                New photo posts are unavailable after this event is closed or
-                before it is active.
-              </p>
-            ) : null}
-          </section>
+              )}
+              {!canPost ? (
+                <p className="muted">
+                  New photo posts are unavailable after this event is closed or
+                  before it is active.
+                </p>
+              ) : null}
+            </section>
           </details>
         </div>
         <section
@@ -864,9 +869,7 @@ export function EventRoom({
               </button>
             ) : null}
           </div>
-          {loadingHistory ? (
-            <p role="status">Loading the timeline…</p>
-          ) : null}
+          {loadingHistory ? <p role="status">Loading the timeline…</p> : null}
           {pollMessage === null ? null : (
             <p className="muted">{pollMessage} PSD EOC will keep checking.</p>
           )}
@@ -880,8 +883,8 @@ export function EventRoom({
           >
             {loadingHistory ? (
               <p className="muted timeline-loading-placeholder">
-                Updates appear once the whole timeline has loaded, so nothing
-                is shown out of order.
+                Updates appear once the whole timeline has loaded, so nothing is
+                shown out of order.
               </p>
             ) : timelineEntries.length === 0 ? (
               <p className="muted">No updates yet.</p>
@@ -905,69 +908,69 @@ export function EventRoom({
                     );
                   }
                   return (
-                  <li key={projection.entry.id}>
-                    <TimelineEntry
-                      classificationLabel={classificationLabel}
-                      displayTimeZone={displayTimeZone}
-                      commandsBlocked={commandsBlocked}
-                      onCorrect={(target, opener) =>
-                        openDialog(
-                          {
-                            kind: 'correct',
-                            entryId: target.id,
-                            entrySequence: target.sequence,
-                          },
-                          opener,
-                        )
-                      }
-                      onRedact={(target, opener) =>
-                        openDialog(
-                          {
-                            kind: 'redact',
-                            entryId: target.id,
-                            entrySequence: target.sequence,
-                          },
-                          opener,
-                        )
-                      }
-                      locationMapVisible={
-                        visibleLocationMapEntryId === projection.entry.id
-                      }
-                      onToggleLocationMap={() =>
-                        setVisibleLocationMapEntryId((visibleEntryId) =>
-                          visibleEntryId === projection.entry.id
-                            ? null
-                            : projection.entry.id,
-                        )
-                      }
-                      onActivateOlderPhoto={(entryId) => {
-                        if (!automaticPrivatePhotoEntryIds.has(entryId)) {
-                          // Reserve one recent slot in a committed render
-                          // before mounting the selected older loader. React
-                          // therefore never transiently owns eleven stateful
-                          // photo components while replacing a selection.
-                          setPendingOlderPhotoEntryId(entryId);
-                          setSelectedOlderPhotoEntryId(null);
+                    <li key={projection.entry.id}>
+                      <TimelineEntry
+                        classificationLabel={classificationLabel}
+                        displayTimeZone={displayTimeZone}
+                        commandsBlocked={commandsBlocked}
+                        onCorrect={(target, opener) =>
+                          openDialog(
+                            {
+                              kind: 'correct',
+                              entryId: target.id,
+                              entrySequence: target.sequence,
+                            },
+                            opener,
+                          )
                         }
-                      }}
-                      photoLoadCoordinator={photoLoadCoordinator}
-                      photoMountMode={
-                        projection.visibility !== 'visible' ||
-                        projection.entry.kind !== 'photo' ||
-                        automaticPrivatePhotoEntryIds.has(projection.entry.id)
-                          ? 'recent'
-                          : selectedOlderPhotoEntryId === projection.entry.id
-                            ? 'selected-older'
-                            : 'deferred-older'
-                      }
-                      projection={projection}
-                      realEvent={realEvent}
-                      supersededBy={
-                        supersessionsByEntry.get(projection.entry.id) ?? []
-                      }
-                      timelineScrollRef={timelineScrollRef}
-                    />
-                  </li>
+                        onRedact={(target, opener) =>
+                          openDialog(
+                            {
+                              kind: 'redact',
+                              entryId: target.id,
+                              entrySequence: target.sequence,
+                            },
+                            opener,
+                          )
+                        }
+                        locationMapVisible={
+                          visibleLocationMapEntryId === projection.entry.id
+                        }
+                        onToggleLocationMap={() =>
+                          setVisibleLocationMapEntryId((visibleEntryId) =>
+                            visibleEntryId === projection.entry.id
+                              ? null
+                              : projection.entry.id,
+                          )
+                        }
+                        onActivateOlderPhoto={(entryId) => {
+                          if (!automaticPrivatePhotoEntryIds.has(entryId)) {
+                            // Reserve one recent slot in a committed render
+                            // before mounting the selected older loader. React
+                            // therefore never transiently owns eleven stateful
+                            // photo components while replacing a selection.
+                            setPendingOlderPhotoEntryId(entryId);
+                            setSelectedOlderPhotoEntryId(null);
+                          }
+                        }}
+                        photoLoadCoordinator={photoLoadCoordinator}
+                        photoMountMode={
+                          projection.visibility !== 'visible' ||
+                          projection.entry.kind !== 'photo' ||
+                          automaticPrivatePhotoEntryIds.has(projection.entry.id)
+                            ? 'recent'
+                            : selectedOlderPhotoEntryId === projection.entry.id
+                              ? 'selected-older'
+                              : 'deferred-older'
+                        }
+                        projection={projection}
+                        realEvent={realEvent}
+                        supersededBy={
+                          supersessionsByEntry.get(projection.entry.id) ?? []
+                        }
+                        timelineScrollRef={timelineScrollRef}
+                      />
+                    </li>
                   );
                 })}
               </ol>
@@ -977,7 +980,6 @@ export function EventRoom({
             </div>
           </div>
         </section>
-
       </div>
 
       <dialog
@@ -1085,8 +1087,8 @@ export function EventRoom({
             />
             {dialogFeedback}
             <p>
-              This hides the content from the timeline. The original record,
-              its time, and who wrote it are kept and are never deleted.
+              This hides the content from the timeline. The original record, its
+              time, and who wrote it are kept and are never deleted.
             </p>
             <fieldset disabled={commandsBlocked}>
               <legend>Redaction details</legend>
@@ -1196,7 +1198,6 @@ export function EventRoom({
             )}
           </form>
         ) : null}
-
       </dialog>
     </main>
   );

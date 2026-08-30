@@ -354,9 +354,7 @@ test.describe('issue-32-accessibility-evidence', () => {
         hasText: 'Synthetic keyboard-only issue 32 update.',
       }),
     ).toBeVisible();
-    await expect(
-      page.getByRole('button', { name: 'End event' }),
-    ).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'End event' })).toBeEnabled();
     await expectAxeClean(page);
 
     const locationReason =

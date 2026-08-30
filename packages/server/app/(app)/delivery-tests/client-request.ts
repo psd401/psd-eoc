@@ -306,16 +306,12 @@ export function requireMatchingDeliveryTestActivationResult(
   }
 
   try {
-    return requireMatchingActivationResult(
-      result,
-      preview.activationPreview,
-      {
-        eventKind: 'drill',
-        eventTypeVersionId: preview.activationPreview.eventTypeVersion.id,
-        facilityId: preview.activationPreview.facilityId,
-        templateMode: 'drill',
-      },
-    );
+    return requireMatchingActivationResult(result, preview.activationPreview, {
+      eventKind: 'drill',
+      eventTypeVersionId: preview.activationPreview.eventTypeVersion.id,
+      facilityId: preview.activationPreview.facilityId,
+      templateMode: 'drill',
+    });
   } catch (error) {
     if (error instanceof StartFlowRequestError) throw resultMismatch();
     throw error;

@@ -534,9 +534,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(originalHtml).toContain('Unknown location');
 
     const correctedHtml = render(activeEvent('real'), [known, correction]);
-    expect(correctedHtml).toContain(
-      'Edited later — see',
-    );
+    expect(correctedHtml).toContain('Edited later — see');
     expect(correctedHtml).toContain(
       'Reduced precision to match verified evidence.',
     );
@@ -594,9 +592,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).toContain('Edited later — see');
     expect(html).toContain('Clarified the verified location.');
     expect(html).toContain('Removed unneeded personal information.');
-    expect(html).toContain(
-      'This content was hidden later.',
-    );
+    expect(html).toContain('This content was hidden later.');
     // Sequence and client-reported time are record-keeping, not reading
     // material during an incident; the entry card no longer carries them.
     expect(html).not.toContain('Client-reported time:');
@@ -801,9 +797,7 @@ describe('event room server-rendered safety and history state', () => {
     });
     const html = render(activeEvent('real'), [photoEntry(), redaction]);
 
-    expect(html).toContain(
-      'This content was hidden later.',
-    );
+    expect(html).toContain('This content was hidden later.');
     expect(html).not.toContain(
       'Exterior assembly area with staff accountability teams',
     );
@@ -841,9 +835,7 @@ describe('event room server-rendered safety and history state', () => {
       />,
     );
 
-    expect(html).toContain(
-      'This content was hidden later.',
-    );
+    expect(html).toContain('This content was hidden later.');
     expect(html).not.toContain(IDS.media);
     expect(html).not.toContain('Load private photo');
     expect(html).not.toContain('<img');

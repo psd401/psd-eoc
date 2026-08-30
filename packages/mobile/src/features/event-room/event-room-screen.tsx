@@ -336,8 +336,7 @@ function EventTargetContext({
           {target.facilityName} · {target.facilityCode}
         </Text>
         <Text style={styles.immutableNotice}>
-          Classification and event target are fixed and cannot be changed
-          here.
+          Classification and event target are fixed and cannot be changed here.
         </Text>
       </View>
     </View>
@@ -1074,8 +1073,8 @@ export function LifecycleConfirmationDialog({
               testID="lifecycle-confirm-button"
             />
             <Text style={styles.noRetryText}>
-              PSD EOC never sends this in the background and never retries it
-              on its own.
+              PSD EOC never sends this in the background and never retries it on
+              its own.
             </Text>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -2233,9 +2232,9 @@ function AuthenticatedEventRoomScreen({
     const action = lifecycleAction;
     const preview = lifecyclePreview;
     const requiredPhrase =
-    action === 'all-clear'
-      ? ALL_CLEAR_CONFIRMATION_PHRASE
-      : CLOSE_CONFIRMATION_PHRASE;
+      action === 'all-clear'
+        ? ALL_CLEAR_CONFIRMATION_PHRASE
+        : CLOSE_CONFIRMATION_PHRASE;
     if (
       action === null ||
       lifecycleBusy ||
@@ -2425,9 +2424,7 @@ function AuthenticatedEventRoomScreen({
             style={styles.secondaryText}
           >
             {sync.error ??
-              (online
-                ? 'Loading the timeline…'
-                : OFFLINE_ACTION_MESSAGE)}
+              (online ? 'Loading the timeline…' : OFFLINE_ACTION_MESSAGE)}
           </Text>
           <ActionButton
             disabled={!online}
