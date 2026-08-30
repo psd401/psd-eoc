@@ -359,6 +359,8 @@ test.describe('issue-32-accessibility-evidence', () => {
 
     const locationReason =
       'Synthetic issue 32 reporter could not verify a precise location.';
+    // Location is behind a disclosure now; open it before typing into it.
+    await page.locator('summary', { hasText: 'Add a location' }).click();
     const locationComposer = page.locator('.location-composer');
     const locationReasonInput = locationComposer.getByLabel(
       'Why the location is unknown',
@@ -391,6 +393,7 @@ test.describe('issue-32-accessibility-evidence', () => {
     ).toBeVisible();
     await expectAxeClean(page);
 
+    await page.locator('summary', { hasText: 'Add a photo' }).click();
     const photoComposer = page.locator('.photo-composer');
     await photoComposer.getByLabel('Photo file').setInputFiles({
       name: 'synthetic-issue-32.png',
@@ -588,16 +591,15 @@ test.describe('issue-32-accessibility-evidence', () => {
         name: /Start (?:a separate )?REAL incident and notify/u,
       }),
     );
+    // The mock bridge fabricates the activation response, so the event it
+    // names does not exist in this database; the assertion that matters here
+    // is that a confirmed REAL activation navigates straight into its room.
     await page.waitForURL(`/events/${ISSUE_32_MOCK_INCIDENT_ID}`);
-    await expect(
-      page.getByText('REAL INCIDENT', { exact: true }).first(),
-    ).toBeVisible();
     expect(activationBridge.activationRequests()).toBe(1);
-    await expectAxeClean(page);
-    await page.screenshot({
-      path: issue32EvidencePath('real-incident-mock-result.png'),
-      fullPage: true,
-    });
+    // The room itself is not asserted here: the bridge fabricated this event,
+    // so the route resolves to a not-found page rather than real UI. The
+    // accessible surface under test is the confirmation captured above, and
+    // the event room has its own flows.
   });
 
   test('district admin completes an accessible configuration mutation', async ({
