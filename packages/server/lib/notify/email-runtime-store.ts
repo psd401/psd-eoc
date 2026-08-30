@@ -40,6 +40,12 @@ export const SES_VERIFICATION_REFERENCE_ENV =
   'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE' as const;
 export const EMAIL_SEND_HORIZON_MILLISECONDS = 15 * 60_000;
 
+/**
+ * One page of an ordinary activation. Matches the SMS page size and stays
+ * inside the 100-item bound the resolution page contract allows.
+ */
+const EMAIL_PAGE_SIZE = 50;
+
 export interface EmailRuntimeDeploymentAuthorization {
   readonly workerEnabled: boolean;
   readonly verificationReference: string | null;
@@ -240,10 +246,7 @@ async function persistedBatch(
   return batch;
 }
 
-async function resolveCurrentEndpoints(
-  database: Database,
-  batch: DispatchBatch,
-) {
+async function pinnedRoster(database: Database, batch: DispatchBatch) {
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],
     'staff',
@@ -256,12 +259,48 @@ async function resolveCurrentEndpoints(
       'pinned-roster-snapshot-unavailable',
     );
   }
+  return roster;
+}
+
+async function resolveCurrentEndpoints(
+  database: Database,
+  batch: DispatchBatch,
+  roster?: Awaited<ReturnType<typeof pinnedRoster>>,
+) {
+  const snapshot = roster ?? (await pinnedRoster(database, batch));
   return resolveEmailEndpoints(
     {
       batch,
-      audience: { facilityId: batch.facilityId, rosterSnapshot: roster },
+      audience: { facilityId: batch.facilityId, rosterSnapshot: snapshot },
     },
     createDrizzleEmailEndpointPolicyStore(database),
+  );
+}
+
+/**
+ * Every email recipient the pinned snapshot names, in one fixed order.
+ *
+ * The cursor indexes this list rather than the eligible endpoints, because
+ * eligibility is read fresh on every page: an address suppressed between page
+ * one and page two would otherwise shift every later index and silently skip
+ * somebody. The snapshot is immutable, so this ordering cannot move.
+ */
+function stableEmailCandidateReferences(
+  roster: Awaited<ReturnType<typeof pinnedRoster>>,
+): readonly Readonly<{ recipientId: string; endpointId: string }>[] {
+  return Object.freeze(
+    roster.recipients.flatMap((recipient) =>
+      recipient.endpoints.flatMap((endpoint) =>
+        endpoint.channel === 'email' && endpoint.status === 'active'
+          ? [
+              Object.freeze({
+                recipientId: recipient.id,
+                endpointId: endpoint.id,
+              }),
+            ]
+          : [],
+      ),
+    ),
   );
 }
 
@@ -412,12 +451,16 @@ async function expectedWorkItem(
   now: Date,
 ): Promise<EmailWorkerAttemptWorkItem | null> {
   const endpoints = await resolveCurrentEndpoints(database, supplied.batch);
-  const resolved = endpoints[0];
+  // Find the endpoint this work item is for, rather than requiring the batch
+  // to have exactly one. Requiring one meant an activation to more than a
+  // single address failed authorization for every recipient in it.
+  const resolved = endpoints.find(
+    (candidate) =>
+      candidate.recipientId === supplied.attempt.recipientId &&
+      candidate.endpoint.id === supplied.endpoint.id,
+  );
   if (
-    endpoints.length !== 1 ||
     resolved === undefined ||
-    resolved.recipientId !== supplied.attempt.recipientId ||
-    resolved.endpoint.id !== supplied.endpoint.id ||
     !sameJson(resolved.endpoint, supplied.endpoint)
   ) {
     return null;
@@ -670,9 +713,6 @@ export function createDrizzleEmailRuntimeStore(
       // whoever has to act on it: a resumed cursor, a queued batch that no
       // longer matches what is stored, a deployment authorization that has
       // moved on, and a message older than the batch it names.
-      if (input.cursor !== 0) {
-        throw new EmailRuntimeStoreError('BATCH_CONFLICT', 'resumed-cursor');
-      }
       if (!sameJson(batch, input.batch)) {
         throw new EmailRuntimeStoreError(
           'BATCH_CONFLICT',
@@ -691,7 +731,8 @@ export function createDrizzleEmailRuntimeStore(
           'message-older-than-its-batch',
         );
       }
-      const endpoints = await resolveCurrentEndpoints(database, batch);
+      const roster = await pinnedRoster(database, batch);
+      const endpoints = await resolveCurrentEndpoints(database, batch, roster);
       const now = await databaseNow(database);
       if (
         now.getTime() > Date.parse(batch.createdAt) + sendHorizonMilliseconds ||
@@ -704,17 +745,57 @@ export function createDrizzleEmailRuntimeStore(
           suppressedCount: 1,
         });
       }
-      if (endpoints.length !== 1) {
+      // A controlled canary is one approved address by construction, and its
+      // contract already refuses any other shape. Leaving that path exact
+      // keeps the monthly delivery test unchanged by this paging.
+      if (batch.deliveryTest != null) {
+        if (endpoints.length !== 1) {
+          return EmailBatchResolutionPageSchema.parse({
+            items: [],
+            nextCursor: null,
+            suppressedCount: 1,
+          });
+        }
         return EmailBatchResolutionPageSchema.parse({
-          items: [],
+          items: [workItemFor(batch, endpoints[0]!, 1, batch.createdAt)],
           nextCursor: null,
-          suppressedCount: 1,
+          suppressedCount: 0,
         });
       }
+      // An ordinary activation reaches everyone the snapshot names. Before
+      // this it reached nobody unless the audience happened to be exactly one
+      // address: a second recipient made the whole send resolve to zero items
+      // and report itself as suppressed, with no failed attempt to notice.
+      const candidates = stableEmailCandidateReferences(roster);
+      if (input.cursor > candidates.length) {
+        throw new EmailRuntimeStoreError('BATCH_CONFLICT', 'cursor-past-end');
+      }
+      const page = candidates.slice(
+        input.cursor,
+        input.cursor + EMAIL_PAGE_SIZE,
+      );
+      const eligible = new Map(
+        endpoints.map((resolved) => [
+          `${resolved.recipientId}:${resolved.endpoint.id}`,
+          resolved,
+        ]),
+      );
+      const items = page.flatMap((candidate) => {
+        const resolved = eligible.get(
+          `${candidate.recipientId}:${candidate.endpointId}`,
+        );
+        return resolved === undefined
+          ? []
+          : [workItemFor(batch, resolved, 1, batch.createdAt)];
+      });
+      const nextCursor =
+        input.cursor + page.length < candidates.length
+          ? input.cursor + page.length
+          : null;
       return EmailBatchResolutionPageSchema.parse({
-        items: [workItemFor(batch, endpoints[0]!, 1, batch.createdAt)],
-        nextCursor: null,
-        suppressedCount: 0,
+        items,
+        nextCursor,
+        suppressedCount: page.length - items.length,
       });
     },
 
