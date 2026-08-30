@@ -291,7 +291,6 @@ function resultMismatch(): DeliveryTestRequestError {
 export function requireMatchingDeliveryTestActivationResult(
   result: StartEventResult,
   preview: DeliveryTestPreview,
-  idempotencyKey: string,
 ): Event {
   const metadata = result.notificationIntent?.deliveryTest;
   if (
@@ -316,7 +315,6 @@ export function requireMatchingDeliveryTestActivationResult(
         facilityId: preview.activationPreview.facilityId,
         templateMode: 'drill',
       },
-      idempotencyKey,
     );
   } catch (error) {
     if (error instanceof StartFlowRequestError) throw resultMismatch();

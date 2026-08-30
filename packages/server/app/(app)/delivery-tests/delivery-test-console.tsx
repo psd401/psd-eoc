@@ -557,7 +557,6 @@ export function DeliveryTestConsole({
       const event = requireMatchingDeliveryTestActivationResult(
         result,
         preview,
-        idempotencyKey,
       );
       setActivatedEventId(event.id);
     } catch (error) {

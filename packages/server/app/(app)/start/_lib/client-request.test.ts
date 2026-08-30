@@ -158,26 +158,23 @@ describe('activation response binding', () => {
     templateMode: ACTIVATION_SELECTION.templateMode,
   };
 
-  test('accepts the exact preview and idempotency-bound browser result', () => {
+  test('accepts the exact preview the browser confirmed', () => {
     const result = activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY);
-    expect(
-      requireMatchingActivationResult(
-        result,
-        preview,
-        selection,
-        ACTIVATION_IDEMPOTENCY_KEY,
-      ),
-    ).toBe(result.event);
+    expect(requireMatchingActivationResult(result, preview, selection)).toBe(
+      result.event,
+    );
   });
 
-  test('treats a result for another idempotent request as unresolved', async () => {
-    await expectUnresolved(() =>
-      requireMatchingActivationResult(
-        activationResultFixture(preview, 'activate:different-request'),
-        preview,
-        selection,
-        ACTIVATION_IDEMPOTENCY_KEY,
-      ),
+  test('accepts the scoped transition key the server actually returns', () => {
+    const result = activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY);
+    // The server never echoes the caller key; it retains a digest scoped by
+    // capability and principal. Requiring equality here rejected every live
+    // activation as an unresolved outcome.
+    expect(result.transition.idempotencyKey).not.toBe(
+      ACTIVATION_IDEMPOTENCY_KEY,
+    );
+    expect(requireMatchingActivationResult(result, preview, selection)).toBe(
+      result.event,
     );
   });
 
@@ -192,7 +189,6 @@ describe('activation response binding', () => {
         activationResultFixture(otherPreview, ACTIVATION_IDEMPOTENCY_KEY),
         preview,
         selection,
-        ACTIVATION_IDEMPOTENCY_KEY,
       ),
     );
   });
@@ -202,12 +198,7 @@ describe('activation response binding', () => {
       activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY),
     );
     await expectUnresolved(() =>
-      requireMatchingActivationResult(
-        result,
-        preview,
-        selection,
-        ACTIVATION_IDEMPOTENCY_KEY,
-      ),
+      requireMatchingActivationResult(result, preview, selection),
     );
   });
 
@@ -231,12 +222,7 @@ describe('activation response binding', () => {
     });
 
     await expectUnresolved(() =>
-      requireMatchingActivationResult(
-        mismatched,
-        preview,
-        selection,
-        ACTIVATION_IDEMPOTENCY_KEY,
-      ),
+      requireMatchingActivationResult(mismatched, preview, selection),
     );
   });
 });

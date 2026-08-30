@@ -136,12 +136,20 @@ function exactChannelConsequencesMatch(
   });
 }
 
-/** Binds a schema-valid activation response to this exact browser decision. */
+/**
+ * Binds a schema-valid activation response to this exact browser decision.
+ *
+ * The transition's idempotency key is deliberately not compared. The server
+ * stores it as a digest scoped by capability and principal
+ * (`scopeTransitionIdempotencyKey`), so it can never equal the raw key the
+ * browser sent, and the browser cannot recompute it. The activation preview ID
+ * and consequence digest below already bind the response to this decision:
+ * both are minted for this preview alone and are signed by the confirmation.
+ */
 export function requireMatchingActivationResult(
   result: StartEventResult,
   preview: ActivationPreview,
   selection: ExpectedActivationSelection,
-  activationIdempotencyKey: string,
 ): Event {
   const event = result.event;
   const authorization = event.activationAuthorization;
@@ -155,7 +163,6 @@ export function requireMatchingActivationResult(
     event.rosterSnapshotId !== preview.rosterSnapshotId ||
     event.rosterPopulation !== preview.rosterPopulation ||
     event.status !== 'active' ||
-    result.transition.idempotencyKey !== activationIdempotencyKey ||
     authorization?.kind !== 'human-confirmed' ||
     authorization.activationPreviewId !== preview.id ||
     authorization.preparedActivationId !== null ||
