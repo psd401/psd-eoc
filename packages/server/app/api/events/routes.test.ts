@@ -249,7 +249,7 @@ describe('event REST handlers', () => {
     expect(second.executions).toHaveLength(0);
   });
 
-  test('rejects body event IDs and unsupported fields instead of overriding the path', async () => {
+  test('rejects unsupported body fields, an event ID among them, on a path-scoped mutation', async () => {
     const { executions, runtime } = testRuntime();
     const response = await handleJoinEvent(
       eventMutationRequest(
@@ -272,9 +272,16 @@ describe('event REST handlers', () => {
 
   test('rejects an oversized body before capability execution', async () => {
     const { executions, runtime } = testRuntime();
+    // Whitespace, so only the size guard can reject it: a body that slipped past
+    // the limit would trim to {}, clear the no-fields check, and join the event.
     const response = await handleJoinEvent(
-      eventMutationRequest(`/api/events/${ids.event}/join`, {
-        padding: 'x'.repeat(64 * 1_024),
+      new Request(`https://eoc.example.test/api/events/${ids.event}/join`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          [IDEMPOTENCY_KEY_HEADER]: idempotencyKey,
+        },
+        body: ' '.repeat(64 * 1_024 + 1),
       }),
       ids.event,
       runtime,
