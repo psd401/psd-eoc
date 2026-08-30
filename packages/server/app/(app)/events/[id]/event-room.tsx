@@ -5,7 +5,7 @@ import {
   type Event,
   type JournalEntryReadProjection,
 } from '@psd-eoc/contracts';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 
 import { DialogClassification } from './event-room-classification';
 import { useEventRoomCommandController } from './event-room-command-controller';
@@ -36,6 +36,80 @@ export {
   locationPayloadFromDraft,
 } from './event-room-location';
 export { PrivatePhotoLoadCoordinator } from './event-room-media';
+
+/**
+ * System facts PSD EOC records for the record, not for the room. Creating the
+ * event, activating it, recording a send intent, and each join are all real
+ * append-only evidence -- they stay in the journal and in the PDF summary --
+ * but as timeline cards they bury the updates people are actually reading.
+ */
+const BACKGROUND_SYSTEM_CODES: ReadonlySet<string> = new Set([
+  'event-created',
+  'event-activated',
+  'notification-intent-recorded',
+  'participant-joined',
+]);
+
+function isBackgroundSystemEntry(
+  projection: JournalEntryReadProjection,
+): boolean {
+  return (
+    projection.visibility === 'visible' &&
+    projection.entry.kind === 'system' &&
+    BACKGROUND_SYSTEM_CODES.has(projection.entry.payload.code)
+  );
+}
+
+/** A state change is worth one line: it is what happened to the event. */
+function stateChangeSummary(
+  projection: JournalEntryReadProjection,
+): string | null {
+  if (projection.visibility !== 'visible') return null;
+  const { entry } = projection;
+  if (entry.kind !== 'system') return null;
+  return BACKGROUND_SYSTEM_CODES.has(entry.payload.code)
+    ? null
+    : entry.payload.summary;
+}
+
+interface RoomParticipant {
+  readonly id: string;
+  readonly name: string;
+  readonly initials: string;
+}
+
+function participantInitials(name: string): string {
+  const parts = name.split(/\s+/u).filter((part) => part.length > 0);
+  if (parts.length === 0) return '?';
+  const first = parts[0]?.[0] ?? '';
+  const last = parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? '') : '';
+  return `${first}${last}`.toUpperCase();
+}
+
+/**
+ * Who else is here, taken from what people have already done in this event:
+ * joining it, starting it, or posting to it. There is no presence heartbeat
+ * and no leave signal, so this says who has been in the event, never who is
+ * looking at it right now -- and the copy has to keep that promise.
+ */
+function roomParticipants(
+  entries: readonly JournalEntryReadProjection[],
+): readonly RoomParticipant[] {
+  const byUser = new Map<string, RoomParticipant>();
+  for (const projection of entries) {
+    if (projection.visibility !== 'visible') continue;
+    const { entry } = projection;
+    if (entry.author.kind !== 'human') continue;
+    if (entry.authorDisplayName === null) continue;
+    if (byUser.has(entry.author.userId)) continue;
+    byUser.set(entry.author.userId, {
+      id: entry.author.userId,
+      name: entry.authorDisplayName,
+      initials: participantInitials(entry.authorDisplayName),
+    });
+  }
+  return [...byUser.values()];
+}
 
 export interface EventRoomProps {
   /** Canonical, facility-authorized event returned by the capability layer. */
@@ -159,6 +233,11 @@ export function EventRoom({
     jumpToLatest,
     acknowledgeVisibleTimelineEnd,
   } = sync;
+  const participants = useMemo(() => roomParticipants(entries), [entries]);
+  const timelineEntries = useMemo(
+    () => entries.filter((projection) => !isBackgroundSystemEntry(projection)),
+    [entries],
+  );
   const [postText, setPostText] = useState('');
   const [locationDraft, setLocationDraft] =
     useState<LocationDraft>(EMPTY_LOCATION_DRAFT);
@@ -230,8 +309,8 @@ export function EventRoom({
     executeNewCommand,
     submitCorrection,
     submitRedaction,
-    submitAllClear,
-    submitClose,
+    submitEndEvent,
+    finishEndingEvent,
     retryRetained,
     discardRecoveryRecord,
   } = command;
@@ -360,8 +439,8 @@ export function EventRoom({
             </dl>
             {currentEvent.correctionOfEventId === null ? null : (
               <p className="supersession-notice">
-                This is a separate correction event. The source event remains
-                retained. Reason: {currentEvent.correctionReason}
+                This is a correction of an earlier event, which is still on
+                file. Reason: {currentEvent.correctionReason}
               </p>
             )}
             <a
@@ -388,6 +467,26 @@ export function EventRoom({
             </p>
           </div>
         </div>
+        {participants.length === 0 ? null : (
+          <section
+            aria-labelledby="participants-heading"
+            className="participants"
+          >
+            <h2 className="sr-only" id="participants-heading">
+              In this event
+            </h2>
+            <ul className="participant-chips">
+              {participants.map((participant) => (
+                <li key={participant.id}>
+                  <span className="participant-chip" title={participant.name}>
+                    <span aria-hidden="true">{participant.initials}</span>
+                    <span className="sr-only">{participant.name}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </header>
 
       <p
@@ -407,26 +506,23 @@ export function EventRoom({
           className="recovery-panel"
           role="alert"
         >
-          <h2 id="recovery-heading">Previous request needs verification</h2>
+          <h2 id="recovery-heading">One earlier request is unresolved</h2>
           <p>
             {retainedCommand === null
-              ? 'The browser recovery record is unreadable.'
-              : `The ${commandLabel(retainedCommand.operation)} outcome is unresolved.`}{' '}
-            PSD EOC will never replay it automatically. Review the current event
-            status and timeline first.
+              ? 'PSD EOC could not read what the last request was.'
+              : `PSD EOC does not know whether your ${commandLabel(retainedCommand.operation)} went through.`}{' '}
+            It will not be sent again on its own. Check the timeline below.
           </p>
           {retainedLifecycleCommand ? (
             <p>
-              A lifecycle action cannot be retried from browser storage. After
-              verification, clear this record. If the action is still needed,
-              PSD EOC will require a fresh consequence review and confirmation.
+              Ending an event is never retried from this browser. Dismiss this,
+              then end the event again if it is still active.
             </p>
           ) : null}
           {retainedPhotoRecoveryConflict ? (
             <p>
-              The retained photo post conflicts with private photo recovery
-              evidence and cannot be retried. Verify the timeline, then clear
-              both browser records explicitly.
+              A photo attempt is also unresolved, so this one cannot be sent
+              again. Check the timeline, then dismiss both.
             </p>
           ) : null}
           <div className="form-actions">
@@ -438,7 +534,7 @@ export function EventRoom({
                 onClick={retryRetained}
                 type="button"
               >
-                Retry exact retained request
+                Send it again
               </button>
             )}
             <button
@@ -447,7 +543,7 @@ export function EventRoom({
               onClick={discardRecoveryRecord}
               type="button"
             >
-              I verified the timeline — clear browser recovery record
+              I checked the timeline — dismiss
             </button>
           </div>
         </section>
@@ -478,10 +574,9 @@ export function EventRoom({
         aria-labelledby="lifecycle-heading"
         className={`lifecycle-panel ${realEvent ? 'mode-real' : 'mode-drill'}`}
       >
-        <h2 id="lifecycle-heading">Event state</h2>
+        <h2 id="lifecycle-heading">Event status</h2>
         <p>
-          Current state: <strong>{statusLabel(currentEvent)}</strong>. State
-          changes append journal evidence; they never rewrite history.
+          <strong>{statusLabel(currentEvent)}</strong>
         </p>
         <div className="lifecycle-actions">
           {currentEvent.status === 'active' ? (
@@ -492,146 +587,33 @@ export function EventRoom({
               onClick={(click) => beginAllClear(click.currentTarget)}
               type="button"
             >
-              Review all-clear
+              End event
             </button>
           ) : null}
           {currentEvent.status === 'all-clear' ? (
-            <button
-              aria-haspopup="dialog"
-              className="caution"
-              disabled={lifecycleCommandsBlocked}
-              onClick={(click) =>
-                openDialog({ kind: 'close' }, click.currentTarget)
-              }
-              type="button"
-            >
-              Review event close
-            </button>
+            <>
+              <p>
+                Staff have the all-clear. This event is not closed yet.
+              </p>
+              <button
+                className="caution"
+                disabled={lifecycleCommandsBlocked}
+                onClick={() => void finishEndingEvent()}
+                type="button"
+              >
+                {pendingOperation === 'close'
+                  ? 'Finishing…'
+                  : 'Finish ending the event'}
+              </button>
+            </>
           ) : null}
           {currentEvent.status === 'closed' ? (
-            <p>The event is closed. Its complete journal remains retained.</p>
+            <p>This event is closed. Its timeline is still here.</p>
           ) : null}
         </div>
       </section>
 
       <div className="room-grid">
-        <section
-          aria-labelledby="timeline-heading"
-          aria-busy={loadingHistory}
-          className="timeline-panel"
-        >
-          <div className="timeline-toolbar">
-            <div>
-              <h2 id="timeline-heading">Event timeline</h2>
-              <p className="muted">
-                Server-assigned sequence determines receipt order.
-                Server-recorded and client-reported times are shown as
-                supporting evidence.
-              </p>
-            </div>
-            {unseenCount > 0 ? (
-              <button onClick={jumpToLatest} type="button">
-                {unseenCount} new {unseenCount === 1 ? 'update' : 'updates'} —
-                jump to latest
-              </button>
-            ) : null}
-          </div>
-          {loadingHistory ? (
-            <p role="status">Loading full authorized event history…</p>
-          ) : null}
-          {pollMessage === null ? null : (
-            <p className="muted">{pollMessage} PSD EOC will keep checking.</p>
-          )}
-          <div
-            aria-label="Chronological event journal"
-            className="timeline-scroll"
-            onScroll={acknowledgeVisibleTimelineEnd}
-            ref={timelineScrollRef}
-            role="region"
-            tabIndex={0}
-          >
-            {loadingHistory ? (
-              <p className="muted timeline-loading-placeholder">
-                Timeline content remains hidden until all authorized history,
-                including later corrections and redactions, has loaded.
-              </p>
-            ) : entries.length === 0 ? (
-              <p className="muted">No journal entries are available yet.</p>
-            ) : (
-              <ol className="timeline-list">
-                {entries.map((projection) => (
-                  <li key={projection.entry.id}>
-                    <TimelineEntry
-                      classificationLabel={classificationLabel}
-                      displayTimeZone={displayTimeZone}
-                      commandsBlocked={commandsBlocked}
-                      onCorrect={(target, opener) =>
-                        openDialog(
-                          {
-                            kind: 'correct',
-                            entryId: target.id,
-                            entrySequence: target.sequence,
-                          },
-                          opener,
-                        )
-                      }
-                      onRedact={(target, opener) =>
-                        openDialog(
-                          {
-                            kind: 'redact',
-                            entryId: target.id,
-                            entrySequence: target.sequence,
-                          },
-                          opener,
-                        )
-                      }
-                      locationMapVisible={
-                        visibleLocationMapEntryId === projection.entry.id
-                      }
-                      onToggleLocationMap={() =>
-                        setVisibleLocationMapEntryId((visibleEntryId) =>
-                          visibleEntryId === projection.entry.id
-                            ? null
-                            : projection.entry.id,
-                        )
-                      }
-                      onActivateOlderPhoto={(entryId) => {
-                        if (!automaticPrivatePhotoEntryIds.has(entryId)) {
-                          // Reserve one recent slot in a committed render
-                          // before mounting the selected older loader. React
-                          // therefore never transiently owns eleven stateful
-                          // photo components while replacing a selection.
-                          setPendingOlderPhotoEntryId(entryId);
-                          setSelectedOlderPhotoEntryId(null);
-                        }
-                      }}
-                      photoLoadCoordinator={photoLoadCoordinator}
-                      photoMountMode={
-                        projection.visibility !== 'visible' ||
-                        projection.entry.kind !== 'photo' ||
-                        automaticPrivatePhotoEntryIds.has(projection.entry.id)
-                          ? 'recent'
-                          : selectedOlderPhotoEntryId === projection.entry.id
-                            ? 'selected-older'
-                            : 'deferred-older'
-                      }
-                      projection={projection}
-                      realEvent={realEvent}
-                      supersededBy={
-                        supersessionsByEntry.get(projection.entry.id) ?? []
-                      }
-                      timelineScrollRef={timelineScrollRef}
-                    />
-                  </li>
-                ))}
-              </ol>
-            )}
-            <div className="timeline-end" ref={timelineEndRef} tabIndex={-1}>
-              <span className="sr-only">Latest timeline position</span>
-            </div>
-          </div>
-        </section>
-
         <div className="side-column">
           <section aria-labelledby="post-heading" className="composer-panel">
             <h2 id="post-heading">Post an update</h2>
@@ -643,7 +625,10 @@ export function EventRoom({
                 <legend className="sr-only">Text timeline update</legend>
                 <div className="field">
                   <label htmlFor="event-post-text">Update text</label>
+                  {/* The composer is why this page is open during an
+                      incident, so it takes focus on arrival. */}
                   <textarea
+                    autoFocus
                     aria-describedby="event-post-help event-post-count"
                     id="event-post-text"
                     maxLength={10_000}
@@ -653,8 +638,8 @@ export function EventRoom({
                   />
                 </div>
                 <p className="field-help" id="event-post-help">
-                  Do not include student data. A submitted update is
-                  append-only; corrections create a new entry.
+                  Do not include student data. Updates cannot be edited -- post
+                  a correction instead.
                 </p>
                 <p
                   aria-hidden="true"
@@ -678,6 +663,8 @@ export function EventRoom({
             ) : null}
           </section>
 
+          <details className="composer-extra">
+            <summary>Add a location</summary>
           <section
             aria-labelledby="location-post-heading"
             className="composer-panel location-composer"
@@ -700,8 +687,8 @@ export function EventRoom({
                 />
                 <p className="field-help">
                   Do not include student data. Post only the precision you can
-                  support. The posted entry is immutable; later corrections
-                  append a superseding entry with a reason.
+                  support. Locations cannot be edited -- post a correction
+                  instead.
                 </p>
                 <button disabled={locationPayload === null} type="submit">
                   {pendingOperation === 'post-location'
@@ -717,6 +704,9 @@ export function EventRoom({
               </p>
             ) : null}
           </section>
+          </details>
+          <details className="composer-extra">
+            <summary>Add a photo</summary>
 
           <section
             aria-labelledby="photo-post-heading"
@@ -785,11 +775,9 @@ export function EventRoom({
                   />
                 </div>
                 <p className="field-help" id="event-photo-help">
-                  Do not include student data. JPEG, PNG, WebP, and HEIC files
-                  up to 25 MiB are accepted as untrusted input. PSD EOC checks
-                  the actual bytes, malware-scans the upload, and rewrites the
-                  image without EXIF or GPS metadata. Location is recorded only
-                  through the explicit location workflow.
+                  Do not include student data. JPEG, PNG, WebP, and HEIC up to
+                  25 MiB. PSD EOC scans the file and strips EXIF and GPS data
+                  before posting it.
                 </p>
                 <button
                   disabled={!photoFileValid || photoAltText.trim().length === 0}
@@ -825,8 +813,8 @@ export function EventRoom({
               <div className="photo-pending">
                 <p>
                   {pendingPhotoCompletion === null
-                    ? 'A private photo recovery record needs explicit review. It will never send or retry automatically.'
-                    : 'The exact uploaded photo is awaiting a confirmed validation result. It will never retry automatically.'}
+                    ? 'A photo from an earlier attempt needs review. PSD EOC will not send it on its own.'
+                    : 'This photo is still being checked. PSD EOC will not retry it on its own.'}
                 </p>
                 <div className="form-actions">
                   {pendingPhotoCompletion === null ? null : (
@@ -846,7 +834,7 @@ export function EventRoom({
                     onClick={clearPendingPhotoAttempt}
                     type="button"
                   >
-                    Clear pending photo attempt after timeline verification
+                    Discard the pending photo
                   </button>
                 </div>
               </div>
@@ -858,7 +846,138 @@ export function EventRoom({
               </p>
             ) : null}
           </section>
+          </details>
         </div>
+        <section
+          aria-labelledby="timeline-heading"
+          aria-busy={loadingHistory}
+          className="timeline-panel"
+        >
+          <div className="timeline-toolbar">
+            <div>
+              <h2 id="timeline-heading">Event timeline</h2>
+            </div>
+            {unseenCount > 0 ? (
+              <button onClick={jumpToLatest} type="button">
+                {unseenCount} new {unseenCount === 1 ? 'update' : 'updates'} —
+                jump to latest
+              </button>
+            ) : null}
+          </div>
+          {loadingHistory ? (
+            <p role="status">Loading the timeline…</p>
+          ) : null}
+          {pollMessage === null ? null : (
+            <p className="muted">{pollMessage} PSD EOC will keep checking.</p>
+          )}
+          <div
+            aria-label="Chronological event journal"
+            className="timeline-scroll"
+            onScroll={acknowledgeVisibleTimelineEnd}
+            ref={timelineScrollRef}
+            role="region"
+            tabIndex={0}
+          >
+            {loadingHistory ? (
+              <p className="muted timeline-loading-placeholder">
+                Updates appear once the whole timeline has loaded, so nothing
+                is shown out of order.
+              </p>
+            ) : timelineEntries.length === 0 ? (
+              <p className="muted">No updates yet.</p>
+            ) : (
+              <ol className="timeline-list">
+                {timelineEntries.map((projection) => {
+                  const stateChange = stateChangeSummary(projection);
+                  if (stateChange !== null) {
+                    return (
+                      <li key={projection.entry.id}>
+                        <p className="timeline-marker">
+                          <span>{stateChange}</span>{' '}
+                          <time dateTime={projection.entry.serverTime}>
+                            {readableDateTime(
+                              projection.entry.serverTime,
+                              displayTimeZone,
+                            )}
+                          </time>
+                        </p>
+                      </li>
+                    );
+                  }
+                  return (
+                  <li key={projection.entry.id}>
+                    <TimelineEntry
+                      classificationLabel={classificationLabel}
+                      displayTimeZone={displayTimeZone}
+                      commandsBlocked={commandsBlocked}
+                      onCorrect={(target, opener) =>
+                        openDialog(
+                          {
+                            kind: 'correct',
+                            entryId: target.id,
+                            entrySequence: target.sequence,
+                          },
+                          opener,
+                        )
+                      }
+                      onRedact={(target, opener) =>
+                        openDialog(
+                          {
+                            kind: 'redact',
+                            entryId: target.id,
+                            entrySequence: target.sequence,
+                          },
+                          opener,
+                        )
+                      }
+                      locationMapVisible={
+                        visibleLocationMapEntryId === projection.entry.id
+                      }
+                      onToggleLocationMap={() =>
+                        setVisibleLocationMapEntryId((visibleEntryId) =>
+                          visibleEntryId === projection.entry.id
+                            ? null
+                            : projection.entry.id,
+                        )
+                      }
+                      onActivateOlderPhoto={(entryId) => {
+                        if (!automaticPrivatePhotoEntryIds.has(entryId)) {
+                          // Reserve one recent slot in a committed render
+                          // before mounting the selected older loader. React
+                          // therefore never transiently owns eleven stateful
+                          // photo components while replacing a selection.
+                          setPendingOlderPhotoEntryId(entryId);
+                          setSelectedOlderPhotoEntryId(null);
+                        }
+                      }}
+                      photoLoadCoordinator={photoLoadCoordinator}
+                      photoMountMode={
+                        projection.visibility !== 'visible' ||
+                        projection.entry.kind !== 'photo' ||
+                        automaticPrivatePhotoEntryIds.has(projection.entry.id)
+                          ? 'recent'
+                          : selectedOlderPhotoEntryId === projection.entry.id
+                            ? 'selected-older'
+                            : 'deferred-older'
+                      }
+                      projection={projection}
+                      realEvent={realEvent}
+                      supersededBy={
+                        supersessionsByEntry.get(projection.entry.id) ?? []
+                      }
+                      timelineScrollRef={timelineScrollRef}
+                    />
+                  </li>
+                  );
+                })}
+              </ol>
+            )}
+            <div className="timeline-end" ref={timelineEndRef} tabIndex={-1}>
+              <span className="sr-only">Latest timeline position</span>
+            </div>
+          </div>
+        </section>
+
       </div>
 
       <dialog
@@ -894,8 +1013,9 @@ export function EventRoom({
             />
             {dialogFeedback}
             <p>
-              The original remains visible and marked as superseded. This form
-              appends a replacement with actor, time, and reason provenance.
+              The original stays on the timeline, marked as corrected. Your
+              replacement is added below it with your name, the time, and the
+              reason.
             </p>
             <fieldset disabled={commandsBlocked}>
               <legend>Correction details</legend>
@@ -940,7 +1060,7 @@ export function EventRoom({
                 }
                 type="submit"
               >
-                Append correction
+                Post correction
               </button>
               <button
                 className="secondary"
@@ -965,9 +1085,8 @@ export function EventRoom({
             />
             {dialogFeedback}
             <p>
-              Redaction appends a superseding entry and hides the original
-              content in this view. The original journal record, sequence,
-              timing, and provenance are never deleted.
+              This hides the content from the timeline. The original record,
+              its time, and who wrote it are kept and are never deleted.
             </p>
             <fieldset disabled={commandsBlocked}>
               <legend>Redaction details</legend>
@@ -989,7 +1108,7 @@ export function EventRoom({
                 disabled={commandsBlocked || dialogReason.trim().length === 0}
                 type="submit"
               >
-                Append redaction
+                Hide this entry
               </button>
               <button
                 className="secondary"
@@ -1004,9 +1123,9 @@ export function EventRoom({
         ) : null}
 
         {dialog?.kind === 'all-clear' ? (
-          <form onSubmit={(submission) => void submitAllClear(submission)}>
+          <form onSubmit={(submission) => void submitEndEvent(submission)}>
             <h2 className="dialog-heading" id="event-dialog-heading">
-              Review and issue all-clear
+              End this event
             </h2>
             <DialogClassification
               label={classificationLabel}
@@ -1014,12 +1133,11 @@ export function EventRoom({
             />
             {dialogFeedback}
             <p>
-              Issuing all-clear changes this event state, appends a distinct
-              journal entry, and sends the previewed notification. It does not
-              close or delete the event.
+              This sends the all-clear to the staff below and ends the event.
+              The timeline stays available afterward.
             </p>
             {dialog.loading ? (
-              <p role="status">Loading a fresh consequence preview…</p>
+              <p role="status">Checking who will be notified…</p>
             ) : null}
             {dialog.error === null ? null : (
               <div className="error-panel" role="alert">
@@ -1038,10 +1156,7 @@ export function EventRoom({
             )}
             {dialog.preview === null ? null : (
               <>
-                <PreviewDetails
-                  displayTimeZone={displayTimeZone}
-                  preview={dialog.preview}
-                />
+                <PreviewDetails preview={dialog.preview} />
                 <div className="form-actions">
                   <button
                     className="danger"
@@ -1052,8 +1167,8 @@ export function EventRoom({
                     type="submit"
                   >
                     {pendingOperation === 'all-clear'
-                      ? 'Issuing all-clear…'
-                      : 'Issue all-clear and notify'}
+                      ? 'Ending event…'
+                      : 'End event and notify staff'}
                   </button>
                   <button
                     className="secondary"
@@ -1082,63 +1197,6 @@ export function EventRoom({
           </form>
         ) : null}
 
-        {dialog?.kind === 'close' ? (
-          <form onSubmit={(submission) => void submitClose(submission)}>
-            <h2 className="dialog-heading" id="event-dialog-heading">
-              Review and close event
-            </h2>
-            <DialogClassification
-              label={classificationLabel}
-              real={realEvent}
-            />
-            {dialogFeedback}
-            <p className="consequence-summary">
-              <strong>
-                No recipients or notification channels are contacted.
-              </strong>{' '}
-              Select “Close event” to append a distinct close entry while
-              preserving the complete journal, or select “Cancel” to make no
-              change.
-            </p>
-            <details className="technical-consequence-details">
-              <summary>Technical close details</summary>
-              <dl className="event-facts">
-                <dt>Event ID</dt>
-                <dd>
-                  <code>{currentEvent.id}</code>
-                </dd>
-                <dt>Current state</dt>
-                <dd>
-                  <code>{currentEvent.status}</code>
-                </dd>
-              </dl>
-              <p>
-                Closing appends a distinct journal entry. It never deletes or
-                rewrites history and does not send another all-clear.
-              </p>
-            </details>
-            <div className="form-actions">
-              <button
-                className="caution"
-                disabled={lifecycleCommandsBlocked}
-                type="submit"
-              >
-                {pendingOperation === 'close'
-                  ? 'Closing event…'
-                  : 'Close event'}
-              </button>
-              <button
-                className="secondary"
-                data-autofocus
-                disabled={pendingOperation !== null}
-                onClick={closeDialog}
-                type="button"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : null}
       </dialog>
     </main>
   );

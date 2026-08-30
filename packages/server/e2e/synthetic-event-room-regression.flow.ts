@@ -82,10 +82,10 @@ test.describe('synthetic-event-room-regression', () => {
       page.getByText('Active', { exact: true }).first(),
     ).toBeVisible();
     await expect(
-      page.getByRole('button', { name: 'Review all-clear' }),
+      page.getByRole('button', { name: 'End event' }),
     ).toBeVisible();
     await expect(
-      page.getByRole('button', { name: 'Review event close' }),
+      page.getByRole('button', { name: 'Finish ending the event' }),
     ).toHaveCount(0);
     await expectAxeClean(page);
     await page.screenshot({

@@ -57,7 +57,7 @@ test.describe('mobile-event-collaboration', () => {
       .getByLabel('Reason for correction')
       .fill(CORRECTION_REASON);
     await correctionDialog
-      .getByRole('button', { name: 'Append correction' })
+      .getByRole('button', { name: 'Post correction' })
       .click();
 
     const correctionCard = page.locator('article.timeline-entry', {
@@ -65,7 +65,7 @@ test.describe('mobile-event-collaboration', () => {
     });
     await expect(correctionCard).toBeVisible();
     await expect(originalCard).toContainText(
-      'This original entry was superseded, not deleted.',
+      'Edited later — see',
     );
     await correctionCard.getByRole('button', { name: /Redact entry/u }).click();
 
@@ -79,7 +79,7 @@ test.describe('mobile-event-collaboration', () => {
       .getByLabel('Reason for redaction')
       .fill(REDACTION_REASON);
     await redactionDialog
-      .getByRole('button', { name: 'Append redaction' })
+      .getByRole('button', { name: 'Hide this entry' })
       .click();
 
     await expect(
