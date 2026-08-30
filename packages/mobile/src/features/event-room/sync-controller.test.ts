@@ -77,6 +77,7 @@ function entry(sequence: number) {
       sequence,
       kind: 'text',
       author: EVENT.createdBy,
+      authorDisplayName: null,
       source: 'mobile',
       serverTime: `2026-08-11T18:00:${String(sequence).padStart(2, '0')}.000Z`,
       clientTime: null,

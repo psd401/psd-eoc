@@ -20,6 +20,9 @@ const journalReadMetadataSchema = z
     sequence: z.number().int().positive(),
     kind: JournalEntryKindSchema,
     author: ActorSchema,
+    // Redaction removes content, not authorship. Who wrote an entry is part of
+    // the provenance a redacted original keeps.
+    authorDisplayName: z.string().trim().min(1).max(200).nullable(),
     source: InvocationSourceSchema,
     serverTime: TimestampSchema,
     clientTime: TimestampSchema.nullable(),
@@ -110,6 +113,7 @@ function projectJournalReadMetadata(
     sequence,
     kind,
     author,
+    authorDisplayName,
     source,
     serverTime,
     clientTime,
@@ -121,6 +125,7 @@ function projectJournalReadMetadata(
     sequence,
     kind,
     author,
+    authorDisplayName,
     source,
     serverTime,
     clientTime,

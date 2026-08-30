@@ -33,10 +33,41 @@ export type EmailQueueRuntimeErrorCode =
   | 'INVALID_QUEUE_MESSAGE';
 
 export class EmailQueueRuntimeError extends Error {
-  public constructor(public readonly code: EmailQueueRuntimeErrorCode) {
+  public constructor(
+    public readonly code: EmailQueueRuntimeErrorCode,
+    /**
+     * What actually ended the attempt, as classifications this system
+     * assigned: the thrown value's class and its own error code. Never a
+     * message and never a provider string -- those can carry the recipient
+     * this attempt was for.
+     *
+     * Without it every distinct failure logged as one bare ATTEMPT_FAILED:
+     * a refused authorization, an unwritable evidence record, and a provider
+     * rejection were indistinguishable, and the only way to tell them apart
+     * was to deploy again and add a line.
+     */
+    public readonly causeName: string | null = null,
+  ) {
     super('The email queue runtime failed safely.');
     this.name = 'EmailQueueRuntimeError';
   }
+}
+
+/** The class and code of a thrown value, for a failure that must not be echoed. */
+function causeClass(error: unknown): string | null {
+  const carried = error as { name?: unknown; code?: unknown } | null;
+  const name =
+    typeof carried?.name === 'string' && carried.name.length > 0
+      ? carried.name
+      : null;
+  const code =
+    typeof carried?.code === 'string' && carried.code.length > 0
+      ? carried.code
+      : null;
+  if (name === null && code === null) return null;
+  if (name === null) return code;
+  if (code === null) return name;
+  return `${name}/${code}`;
 }
 
 function parseQueueMessage(
@@ -114,8 +145,8 @@ export class EmailQueueRuntime {
         sourceArn: this.#queueArn,
         authorization: { kind: 'verified-sqs-source' },
       });
-    } catch {
-      throw new EmailQueueRuntimeError('ATTEMPT_FAILED');
+    } catch (error) {
+      throw new EmailQueueRuntimeError('ATTEMPT_FAILED', causeClass(error));
     }
   }
 
@@ -128,7 +159,18 @@ export class EmailQueueRuntime {
       throw new EmailQueueRuntimeError('ATTEMPT_IN_PROGRESS');
     }
     if (result.kind === 'dlq') {
-      throw new EmailQueueRuntimeError('ATTEMPT_FAILED');
+      // The provider answered and the answer was terminal. Its state and
+      // reason code are this system's own classifications of that answer, not
+      // the provider's text.
+      throw new EmailQueueRuntimeError(
+        'ATTEMPT_FAILED',
+        `${result.outcome.state}${
+          result.outcome.reasonCode === null ||
+          result.outcome.reasonCode === undefined
+            ? ''
+            : `/${result.outcome.reasonCode}`
+        }`,
+      );
     }
     if (result.kind === 'retry') {
       await this.#queue.publishAttemptReference(

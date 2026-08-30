@@ -476,6 +476,8 @@ function makeSystemJournalEntry(
     eventId: input.eventId,
     sequence: input.sequence,
     author: input.context.invocation.actor,
+    // Never stored; every read resolves it from the account.
+    authorDisplayName: null,
     source: input.context.invocation.source,
     serverTime: timestamp(input.context.invocation.serverTime),
     clientTime: null,
@@ -1480,6 +1482,7 @@ function journalFromRow(row: typeof journalEntries.$inferSelect): JournalEntry {
     sequence: row.sequence,
     kind: row.kind,
     author: row.author,
+    authorDisplayName: null,
     source: row.source,
     serverTime: dateIso(row.serverTime),
     clientTime: row.clientTime === null ? null : dateIso(row.clientTime),

@@ -6398,6 +6398,20 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     }
   });
 
+  /**
+   * INSERT is whole-row by necessity, not by oversight.
+   *
+   * PostgreSQL checks INSERT against every column NAMED in a statement, and the
+   * query builder names all of them, writing DEFAULT for the ones the caller
+   * omits. The narrow column grants this test used to assert refused those
+   * inserts outright, which meant no worker could record provider I/O or claim
+   * a lease -- the first write of every send, on every channel.
+   *
+   * UPDATE stays column-scoped, and that is where the confinement now lives: an
+   * UPDATE names only the columns it sets, so the application can complete a
+   * record but not rewrite one. The append-only triggers on the provider I/O
+   * tables enforce the same rule in the database regardless of privileges.
+   */
   test('grants provider runtimes only the durable state access they execute', async () => {
     const db = databaseConnection().db;
     const privileges = await db.execute<{
@@ -6459,7 +6473,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         tableName: 'expo_push_provider_io',
         canSelect: true,
         canInsertAnyColumn: true,
-        canInsertWholeRow: false,
+        canInsertWholeRow: true,
         canUpdateAnyColumn: true,
         canDelete: false,
         canTruncate: false,
@@ -6469,7 +6483,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         tableName: 'expo_push_receipt_polls',
         canSelect: true,
         canInsertAnyColumn: true,
-        canInsertWholeRow: false,
+        canInsertWholeRow: true,
         canUpdateAnyColumn: true,
         canDelete: false,
         canTruncate: false,
@@ -6479,7 +6493,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         tableName: 'expo_push_retry_schedules',
         canSelect: true,
         canInsertAnyColumn: true,
-        canInsertWholeRow: false,
+        canInsertWholeRow: true,
         canUpdateAnyColumn: false,
         canDelete: false,
         canTruncate: false,
@@ -6489,7 +6503,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         tableName: 'sms_provider_io',
         canSelect: true,
         canInsertAnyColumn: true,
-        canInsertWholeRow: false,
+        canInsertWholeRow: true,
         canUpdateAnyColumn: true,
         canDelete: false,
         canTruncate: false,
@@ -6499,7 +6513,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         tableName: 'sms_retry_schedules',
         canSelect: true,
         canInsertAnyColumn: true,
-        canInsertWholeRow: false,
+        canInsertWholeRow: true,
         canUpdateAnyColumn: false,
         canDelete: false,
         canTruncate: false,
@@ -6591,23 +6605,32 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           'next_attempt_id', 'INSERT'
         ) as "canInsertSmsRetryGeneratedId"
     `);
+    // Every INSERT column is now granted. A statement naming a column the role
+    // cannot insert is refused whole, and the query builder names them all, so
+    // withholding one column withheld the entire insert.
+    //
+    // The "canRewrite" expectations are UPDATE and stay false: that is where
+    // the confinement lives. The application may complete a record -- set its
+    // completion and completed_at -- but cannot rewrite the identity or
+    // fingerprint of one already written, and the append-only triggers enforce
+    // that independently of privileges.
     expect(columns).toEqual({
       canCompleteExpoProvider: true,
       canRewriteExpoFingerprint: false,
       canInsertExpoProviderIdentity: true,
-      canInsertExpoProviderCompletion: false,
+      canInsertExpoProviderCompletion: true,
       canLeaseExpoReceipt: true,
       canRewriteExpoReceiptTarget: false,
       canInsertExpoReceiptTarget: true,
-      canInsertExpoReceiptLease: false,
+      canInsertExpoReceiptLease: true,
       canInsertExpoRetrySource: true,
-      canInsertExpoRetryGeneratedId: false,
+      canInsertExpoRetryGeneratedId: true,
       canCompleteSmsProvider: true,
       canRewriteSmsFingerprint: false,
       canInsertSmsProviderIdentity: true,
-      canInsertSmsProviderCompletion: false,
+      canInsertSmsProviderCompletion: true,
       canInsertSmsRetrySource: true,
-      canInsertSmsRetryGeneratedId: false,
+      canInsertSmsRetryGeneratedId: true,
     });
 
     await db.transaction(async (transaction) => {

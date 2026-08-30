@@ -113,6 +113,7 @@ function journalEntryFromRow(
     sequence: row.sequence,
     kind: row.kind,
     author: row.author,
+    authorDisplayName: null,
     source: row.source,
     serverTime: dateIso(row.serverTime),
     clientTime: row.clientTime === null ? null : dateIso(row.clientTime),

@@ -371,6 +371,7 @@ function activationResultFixture(
         eventId: IDS.otherEvent,
         sequence: 1,
         author: actor,
+        authorDisplayName: null,
         source: 'mobile',
         serverTime: NOW,
         clientTime: null,
