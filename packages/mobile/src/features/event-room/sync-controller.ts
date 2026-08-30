@@ -15,6 +15,8 @@ import {
   type EventRoomModel,
 } from './model';
 
+import { AuthenticatedRequestFailure } from '../../lib/api';
+
 export interface EventRoomSyncPort {
   sync(
     eventId: string,
@@ -46,6 +48,22 @@ const DEFAULT_SCHEDULER: EventRoomPollScheduler = Object.freeze({
 
 const TIMELINE_ERROR =
   'The timeline is temporarily unavailable. Reconnect, then pull to refresh.';
+
+const UNREADABLE_TIMELINE_ERROR =
+  'This version of the app cannot read the event timeline. Update the PSD EOC app, then open the event again.';
+
+/**
+ * Separates a response this build cannot read from an ordinary interruption.
+ * A body the schema rejects will be rejected identically every four seconds,
+ * so telling the operator to reconnect and pull to refresh sends them into a
+ * loop; only a newer build resolves it.
+ */
+function timelineErrorMessage(error: unknown): string {
+  return error instanceof AuthenticatedRequestFailure &&
+    error.kind === 'invalid-response'
+    ? UNREADABLE_TIMELINE_ERROR
+    : TIMELINE_ERROR;
+}
 
 type Listener = () => void;
 
@@ -239,13 +257,13 @@ export class EventRoomSyncController {
       if (this.active) {
         this.update({ ...this.snapshotValue, refreshing: false });
       }
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted || !this.active) return;
       this.update({
         ...this.snapshotValue,
         phase: 'error',
         refreshing: false,
-        error: TIMELINE_ERROR,
+        error: timelineErrorMessage(error),
       });
     } finally {
       if (this.abortController === controller) this.abortController = null;
