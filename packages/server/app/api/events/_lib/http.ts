@@ -240,12 +240,8 @@ async function readJsonObject(
   return value as Record<string, unknown>;
 }
 
-function assertOnlyBodyKeys(
-  body: Readonly<Record<string, unknown>>,
-  allowedKeys: readonly string[],
-): void {
-  const allowed = new Set(allowedKeys);
-  if (Object.keys(body).some((key) => !allowed.has(key))) {
+function assertBodyHasNoFields(body: Readonly<Record<string, unknown>>): void {
+  if (Object.keys(body).length > 0) {
     throw new SyntaxError('The event request contains unsupported fields.');
   }
 }
@@ -331,7 +327,7 @@ export async function handleJoinEvent(
   return executeEventRoute(request, runtime, 'join-event', true, async () => {
     assertNoQueryParameters(request);
     const body = await readJsonObject(request);
-    assertOnlyBodyKeys(body, []);
+    assertBodyHasNoFields(body);
     return JoinEventInputSchema.parse({ eventId });
   });
 }
