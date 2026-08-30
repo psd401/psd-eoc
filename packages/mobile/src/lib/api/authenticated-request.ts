@@ -371,12 +371,16 @@ export class AuthenticatedApiClient implements AuthenticatedRequestTransport {
 
       try {
         return request.schema.parse(value);
-      } catch {
-        throw new AuthenticatedRequestFailure(
+      } catch (error) {
+        // Keep why the body was unreadable. Discarding it left the event room
+        // showing "temporarily unavailable" for a permanent schema mismatch.
+        const failure = new AuthenticatedRequestFailure(
           'invalid-response',
           INVALID_RESPONSE_MESSAGE,
           response.status,
         );
+        failure.cause = error;
+        throw failure;
       }
     };
 
