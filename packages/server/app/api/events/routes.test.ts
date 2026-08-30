@@ -4,14 +4,9 @@ import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engi
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
 import { SessionAccessError } from '../../../lib/auth/sessions';
 import {
-  handleAllClearEvent,
-  handleCloseEvent,
   handleGetEvent,
   handleJoinEvent,
   handleListEvents,
-  handleReactivateEvent,
-  handleReopenAsCorrection,
-  handleStartEvent,
   HUMAN_CONFIRMATION_ID_HEADER,
   IDEMPOTENCY_KEY_HEADER,
   type EventRouteInvocationRequest,
@@ -26,7 +21,6 @@ const ids = {
   facility: '00000000-0000-4000-8000-000000000905',
   event: '00000000-0000-4000-8000-000000000906',
   otherEvent: '00000000-0000-4000-8000-000000000907',
-  preview: '00000000-0000-4000-8000-000000000908',
   confirmation: '00000000-0000-4000-8000-000000000909',
 } as const;
 
@@ -159,30 +153,6 @@ describe('event REST handlers', () => {
 
   const mutationCases = [
     {
-      name: 'starts an event',
-      capabilityId: 'start-event',
-      requestPath: '/api/events',
-      requestBody: {
-        source: 'activation-preview',
-        activationPreviewId: ids.preview,
-        activeEventDecision: {
-          decision: 'start-new',
-          activeEventIdsSeen: [],
-        },
-      },
-      expectedInput: {
-        source: 'activation-preview',
-        activationPreviewId: ids.preview,
-        activeEventDecision: {
-          decision: 'start-new',
-          activeEventIdsSeen: [],
-        },
-      },
-      confirmationId: ids.confirmation,
-      invoke: (request: Request, runtime: EventRouteRuntime) =>
-        handleStartEvent(request, runtime),
-    },
-    {
       name: 'joins an event',
       capabilityId: 'join-event',
       requestPath: `/api/events/${ids.event}/join`,
@@ -193,53 +163,14 @@ describe('event REST handlers', () => {
         handleJoinEvent(request, ids.event, runtime),
     },
     {
-      name: 'issues an all-clear',
-      capabilityId: 'all-clear-event',
-      requestPath: `/api/events/${ids.event}/all-clear`,
-      requestBody: { lifecyclePreviewId: ids.preview },
-      expectedInput: {
-        eventId: ids.event,
-        lifecyclePreviewId: ids.preview,
-      },
-      confirmationId: ids.confirmation,
-      invoke: (request: Request, runtime: EventRouteRuntime) =>
-        handleAllClearEvent(request, ids.event, runtime),
-    },
-    {
-      name: 'reactivates an event',
-      capabilityId: 'reactivate-event',
-      requestPath: `/api/events/${ids.event}/reactivate`,
-      requestBody: { lifecyclePreviewId: ids.preview },
-      expectedInput: {
-        eventId: ids.event,
-        lifecyclePreviewId: ids.preview,
-      },
-      confirmationId: ids.confirmation,
-      invoke: (request: Request, runtime: EventRouteRuntime) =>
-        handleReactivateEvent(request, ids.event, runtime),
-    },
-    {
-      name: 'closes an event',
-      capabilityId: 'close-event',
-      requestPath: `/api/events/${ids.event}/close`,
+      name: 'forwards a well-formed human confirmation header',
+      capabilityId: 'join-event',
+      requestPath: `/api/events/${ids.event}/join`,
       requestBody: {},
       expectedInput: { eventId: ids.event },
       confirmationId: ids.confirmation,
       invoke: (request: Request, runtime: EventRouteRuntime) =>
-        handleCloseEvent(request, ids.event, runtime),
-    },
-    {
-      name: 'reopens an event as a correction',
-      capabilityId: 'reopen-as-correction',
-      requestPath: `/api/events/${ids.event}/reopen-as-correction`,
-      requestBody: { reason: 'Correct the retained event record.' },
-      expectedInput: {
-        sourceEventId: ids.event,
-        reason: 'Correct the retained event record.',
-      },
-      confirmationId: null,
-      invoke: (request: Request, runtime: EventRouteRuntime) =>
-        handleReopenAsCorrection(request, ids.event, runtime),
+        handleJoinEvent(request, ids.event, runtime),
     },
   ] as const;
 
@@ -286,15 +217,16 @@ describe('event REST handlers', () => {
   test('rejects missing idempotency and malformed confirmation headers', async () => {
     const first = testRuntime();
     const missingIdempotency = new Request(
-      'https://eoc.example.test/api/events',
+      `https://eoc.example.test/api/events/${ids.event}/join`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({}),
       },
     );
-    const firstResponse = await handleStartEvent(
+    const firstResponse = await handleJoinEvent(
       missingIdempotency,
+      ids.event,
       first.runtime,
     );
     expect(firstResponse.status).toBe(400);
@@ -303,12 +235,13 @@ describe('event REST handlers', () => {
 
     const second = testRuntime();
     const malformedConfirmation = eventMutationRequest(
-      '/api/events',
+      `/api/events/${ids.event}/join`,
       {},
       'not-a-uuid',
     );
-    const secondResponse = await handleStartEvent(
+    const secondResponse = await handleJoinEvent(
       malformedConfirmation,
+      ids.event,
       second.runtime,
     );
     expect(secondResponse.status).toBe(400);
@@ -318,13 +251,10 @@ describe('event REST handlers', () => {
 
   test('rejects body event IDs and unsupported fields instead of overriding the path', async () => {
     const { executions, runtime } = testRuntime();
-    const response = await handleAllClearEvent(
+    const response = await handleJoinEvent(
       eventMutationRequest(
-        `/api/events/${ids.event}/all-clear`,
-        {
-          eventId: ids.otherEvent,
-          lifecyclePreviewId: ids.preview,
-        },
+        `/api/events/${ids.event}/join`,
+        { eventId: ids.otherEvent },
         ids.confirmation,
       ),
       ids.event,
@@ -342,9 +272,9 @@ describe('event REST handlers', () => {
 
   test('rejects an oversized body before capability execution', async () => {
     const { executions, runtime } = testRuntime();
-    const response = await handleReopenAsCorrection(
-      eventMutationRequest(`/api/events/${ids.event}/reopen-as-correction`, {
-        reason: 'x'.repeat(64 * 1_024),
+    const response = await handleJoinEvent(
+      eventMutationRequest(`/api/events/${ids.event}/join`, {
+        padding: 'x'.repeat(64 * 1_024),
       }),
       ids.event,
       runtime,
@@ -387,9 +317,9 @@ describe('event REST handlers', () => {
         409,
       ),
     });
-    const conflictResponse = await handleCloseEvent(
+    const conflictResponse = await handleJoinEvent(
       eventMutationRequest(
-        `/api/events/${ids.event}/close`,
+        `/api/events/${ids.event}/join`,
         {},
         ids.confirmation,
       ),
