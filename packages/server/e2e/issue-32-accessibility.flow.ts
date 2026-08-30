@@ -355,7 +355,7 @@ test.describe('issue-32-accessibility-evidence', () => {
       }),
     ).toBeVisible();
     await expect(
-      page.getByRole('button', { name: 'Review all-clear' }),
+      page.getByRole('button', { name: 'End event' }),
     ).toBeEnabled();
     await expectAxeClean(page);
 
@@ -437,11 +437,9 @@ test.describe('issue-32-accessibility-evidence', () => {
 
     await activateByKeyboard(
       page,
-      page.getByRole('button', { name: 'Review all-clear' }),
+      page.getByRole('button', { name: 'End event' }),
     );
-    const dialog = page.getByRole('dialog', {
-      name: 'Review and issue all-clear',
-    });
+    const dialog = page.getByRole('dialog', { name: 'End this event' });
     await expect(dialog).toBeVisible();
     await expectAxeClean(page);
     await page.screenshot({
@@ -450,10 +448,11 @@ test.describe('issue-32-accessibility-evidence', () => {
     });
     await activateByKeyboard(
       page,
-      dialog.getByRole('button', { name: 'Issue all-clear and notify' }),
+      dialog.getByRole('button', { name: 'End event and notify staff' }),
     );
+    // One action performs the all-clear and the close.
     await expect(
-      page.getByText('All-clear issued', { exact: true }).first(),
+      page.getByText('Closed', { exact: true }).first(),
     ).toBeVisible();
     await expectAxeClean(page);
     await page.screenshot({

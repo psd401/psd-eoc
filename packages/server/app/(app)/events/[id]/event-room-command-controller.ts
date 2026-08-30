@@ -246,12 +246,11 @@ export function useEventRoomCommandController({
     retainedCommand?.operation === 'post-photo' && photoRecovery.blocked;
 
   useEffect(() => {
-    const lifecycleDialog =
-      dialog?.kind === 'all-clear' || dialog?.kind === 'close';
-    if (!lifecycleDialog || pendingRef.current) return;
+    if (dialog?.kind !== 'all-clear' || pendingRef.current) return;
+    // The end-event action performs the all-clear and then the close, so the
+    // all-clear state is expected mid-flight and must not invalidate it.
     const eventStateChanged =
-      (dialog.kind === 'all-clear' && currentEvent.status !== 'active') ||
-      (dialog.kind === 'close' && currentEvent.status !== 'all-clear');
+      currentEvent.status !== 'active' && currentEvent.status !== 'all-clear';
     if (
       !loadingHistory &&
       retainedCommand === null &&
@@ -288,8 +287,7 @@ export function useEventRoomCommandController({
   ]);
 
   function openDialog(next: DialogState, opener: HTMLElement): void {
-    const openingLifecycleDialog =
-      next.kind === 'all-clear' || next.kind === 'close';
+    const openingLifecycleDialog = next.kind === 'all-clear';
     if (openingLifecycleDialog ? lifecycleCommandsBlocked : commandsBlocked) {
       return;
     }
@@ -602,7 +600,19 @@ export function useEventRoomCommandController({
     if (succeeded) closeDialog();
   }
 
-  async function submitAllClear(submission: FormEvent<HTMLFormElement>) {
+  /**
+   * Ends the event in one confirmed action.
+   *
+   * The server still records two transitions -- the all-clear that notifies
+   * staff, then the close -- because that is what the state machine, the
+   * capability, and the database CHECK all require. The operator should not
+   * have to know that: they are ending the event, which is one decision.
+   *
+   * If the close half fails, the event is genuinely in the all-clear state and
+   * the lifecycle panel says so and offers to finish it. It is never silently
+   * half-ended.
+   */
+  async function submitEndEvent(submission: FormEvent<HTMLFormElement>) {
     submission.preventDefault();
     if (
       dialog?.kind !== 'all-clear' ||
@@ -611,22 +621,21 @@ export function useEventRoomCommandController({
     ) {
       return;
     }
-    const succeeded = await executeNewCommand(
+    const notified = await executeNewCommand(
       webLifecycleCommandBody({
         operation: 'all-clear',
         lifecyclePreviewId: dialog.preview.id,
       }),
     );
-    if (succeeded) closeDialog();
+    if (!notified) return;
+    closeDialog();
+    await executeNewCommand(webLifecycleCommandBody({ operation: 'close' }));
   }
 
-  async function submitClose(submission: FormEvent<HTMLFormElement>) {
-    submission.preventDefault();
-    if (dialog?.kind !== 'close') return;
-    const succeeded = await executeNewCommand(
-      webLifecycleCommandBody({ operation: 'close' }),
-    );
-    if (succeeded) closeDialog();
+  /** Completes an event whose all-clear landed but whose close did not. */
+  async function finishEndingEvent(): Promise<void> {
+    if (currentEvent.status !== 'all-clear') return;
+    await executeNewCommand(webLifecycleCommandBody({ operation: 'close' }));
   }
 
   function retryRetained(): void {
@@ -709,8 +718,8 @@ export function useEventRoomCommandController({
     clearPreparedCommand,
     submitCorrection,
     submitRedaction,
-    submitAllClear,
-    submitClose,
+    submitEndEvent,
+    finishEndingEvent,
     retryRetained,
     discardRecoveryRecord,
   };

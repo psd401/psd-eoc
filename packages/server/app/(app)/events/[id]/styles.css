@@ -306,12 +306,73 @@ dd {
   margin: 0.35rem 0 0 1.25rem;
 }
 
+.participants {
+  margin-top: 0.75rem;
+}
+
+.participant-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.participant-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid #aebaca;
+  border-radius: 50%;
+  background: #eef2f7;
+  color: #243b53;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.timeline-marker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+  margin: 0;
+  padding: 0.45rem 0.75rem;
+  color: #526174;
+  font-size: 0.92rem;
+}
+
 .room-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(17rem, 22rem);
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.25rem;
   align-items: start;
   margin-top: 1.25rem;
+}
+
+.composer-extra {
+  border: 1px solid #aebaca;
+  border-radius: 0.7rem;
+  background: #fff;
+  padding: 0.6rem 0.9rem;
+}
+
+.composer-extra > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.composer-extra[open] > summary {
+  margin-bottom: 0.6rem;
+}
+
+.composer-extra > .composer-panel {
+  border: 0;
+  box-shadow: none;
+  padding: 0;
 }
 
 .timeline-panel,
@@ -845,8 +906,7 @@ dialog::backdrop {
 }
 
 @media (max-width: 56rem) {
-  .event-heading,
-  .room-grid {
+  .event-heading {
     grid-template-columns: 1fr;
   }
 
