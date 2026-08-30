@@ -1,17 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  AllClearEventInputSchema,
   ApiErrorSchema,
-  CloseEventInputSchema,
   GetEventInputSchema,
   HumanConfirmationIdSchema,
   IdempotencyKeySchema,
   JoinEventInputSchema,
   ListActiveEventsInputSchema,
-  ReactivateEventInputSchema,
-  ReopenAsCorrectionInputSchema,
-  StartEventInputSchema,
   type ApiErrorCode,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
@@ -196,7 +191,6 @@ function assertJsonContentType(request: Request): void {
 
 async function readJsonObject(
   request: Request,
-  allowEmpty: boolean,
 ): Promise<Record<string, unknown>> {
   assertJsonContentType(request);
   const contentLength = request.headers.get('content-length');
@@ -237,10 +231,7 @@ async function readJsonObject(
     throw new SyntaxError('The event request body is not valid UTF-8.');
   }
   if (text.trim().length === 0) {
-    if (allowEmpty) {
-      return {};
-    }
-    throw new SyntaxError('The event request body is required.');
+    return {};
   }
   const value: unknown = JSON.parse(text);
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -321,16 +312,6 @@ export async function handleListEvents(
   );
 }
 
-export async function handleStartEvent(
-  request: Request,
-  runtime?: EventRouteRuntime,
-): Promise<NextResponse> {
-  return executeEventRoute(request, runtime, 'start-event', true, async () => {
-    assertNoQueryParameters(request);
-    return StartEventInputSchema.parse(await readJsonObject(request, false));
-  });
-}
-
 export async function handleGetEvent(
   request: Request,
   eventId: string,
@@ -349,78 +330,8 @@ export async function handleJoinEvent(
 ): Promise<NextResponse> {
   return executeEventRoute(request, runtime, 'join-event', true, async () => {
     assertNoQueryParameters(request);
-    const body = await readJsonObject(request, true);
+    const body = await readJsonObject(request);
     assertOnlyBodyKeys(body, []);
     return JoinEventInputSchema.parse({ eventId });
   });
-}
-
-export async function handleAllClearEvent(
-  request: Request,
-  eventId: string,
-  runtime?: EventRouteRuntime,
-): Promise<NextResponse> {
-  return executeEventRoute(
-    request,
-    runtime,
-    'all-clear-event',
-    true,
-    async () => {
-      assertNoQueryParameters(request);
-      const body = await readJsonObject(request, false);
-      assertOnlyBodyKeys(body, ['lifecyclePreviewId']);
-      return AllClearEventInputSchema.parse({ eventId, ...body });
-    },
-  );
-}
-
-export async function handleReactivateEvent(
-  request: Request,
-  eventId: string,
-  runtime?: EventRouteRuntime,
-): Promise<NextResponse> {
-  return executeEventRoute(
-    request,
-    runtime,
-    'reactivate-event',
-    true,
-    async () => {
-      assertNoQueryParameters(request);
-      const body = await readJsonObject(request, false);
-      assertOnlyBodyKeys(body, ['lifecyclePreviewId']);
-      return ReactivateEventInputSchema.parse({ eventId, ...body });
-    },
-  );
-}
-
-export async function handleCloseEvent(
-  request: Request,
-  eventId: string,
-  runtime?: EventRouteRuntime,
-): Promise<NextResponse> {
-  return executeEventRoute(request, runtime, 'close-event', true, async () => {
-    assertNoQueryParameters(request);
-    const body = await readJsonObject(request, true);
-    assertOnlyBodyKeys(body, []);
-    return CloseEventInputSchema.parse({ eventId });
-  });
-}
-
-export async function handleReopenAsCorrection(
-  request: Request,
-  sourceEventId: string,
-  runtime?: EventRouteRuntime,
-): Promise<NextResponse> {
-  return executeEventRoute(
-    request,
-    runtime,
-    'reopen-as-correction',
-    true,
-    async () => {
-      assertNoQueryParameters(request);
-      const body = await readJsonObject(request, false);
-      assertOnlyBodyKeys(body, ['reason']);
-      return ReopenAsCorrectionInputSchema.parse({ sourceEventId, ...body });
-    },
-  );
 }
