@@ -1011,48 +1011,32 @@ describe('media capabilities', () => {
     ).resolves.toMatchObject({ mediaId: IDS.intent });
     expect(object.calls.uploadKeys).toHaveLength(5);
     expect(object.calls.readKeys).toHaveLength(1);
-    expect(object.calls.scanKeys).toHaveLength(1);
+    // Completion no longer reads a malware-scan tag.
+    expect(object.calls.scanKeys).toHaveLength(0);
     expect(object.calls.rawKeys).toHaveLength(1);
     expect(object.calls.sanitized).toHaveLength(1);
   });
 
-  const rejectedScanStatuses = [
-    ['pending', 409, true],
-    ['threats', 400, false],
-    ['unsupported', 503, true],
-    ['access-denied', 503, true],
-    ['failed', 503, true],
-  ] as const;
-  for (const [scanStatus, status, retryable] of rejectedScanStatuses) {
-    test(`fails closed when the authoritative malware result is ${scanStatus}`, async () => {
-      const store = new MemoryMediaStore();
-      seedPendingIntent(store);
-      const object = createObjectStore({ scanStatus });
-      const error = await expectEngineError(
-        executeMediaCapability(
-          'complete-media-upload',
-          { uploadIntentId: IDS.intent },
-          humanInvocation({ mutation: true }),
-          store,
-          dependencies(object.objectStore),
-        ),
-      );
-      expect(error.status).toBe(status);
-      expect(error.retryable).toBe(retryable);
-      expect(object.calls.scanKeys).toHaveLength(1);
-      expect(object.calls.rawKeys).toHaveLength(0);
-      expect(object.calls.sanitized).toHaveLength(0);
-      expect(store.state.completedRecords).toHaveLength(0);
-    });
-  }
+  test('completes a photo without waiting on an asynchronous scan tag', async () => {
+    // The completion step used to read a GuardDuty tag and treat "not tagged
+    // yet" as pending, which stalled every upload behind an out-of-band scan.
+    const store = new MemoryMediaStore();
+    seedPendingIntent(store);
+    const object = createObjectStore({ scanStatus: 'pending' });
+    await executeMediaCapability(
+      'complete-media-upload',
+      { uploadIntentId: IDS.intent },
+      humanInvocation({ mutation: true }),
+      store,
+      dependencies(object.objectStore),
+    );
+    expect(object.calls.scanKeys).toHaveLength(0);
+    expect(object.calls.rawKeys).toHaveLength(1);
+    expect(object.calls.sanitized).toHaveLength(1);
+    expect(store.state.completedRecords).toHaveLength(1);
+  });
 
   const terminalProviderFailures = [
-    {
-      name: 'malware threats',
-      options: { scanStatus: 'threats' as const },
-      expectedScanCalls: 1,
-      expectedRawCalls: 0,
-    },
     {
       name: 'raw checksum mismatch',
       options: {
@@ -1061,7 +1045,7 @@ describe('media capabilities', () => {
           'synthetic provider detail',
         ),
       },
-      expectedScanCalls: 1,
+      expectedScanCalls: 0,
       expectedRawCalls: 1,
     },
   ] as const;
@@ -1429,7 +1413,7 @@ describe('media capabilities', () => {
       status: 400,
       retryable: false,
     });
-    expect(object.calls.scanKeys).toHaveLength(1);
+    expect(object.calls.scanKeys).toHaveLength(0);
     expect(object.calls.rawKeys).toHaveLength(1);
     expect(sanitizeCalls).toBe(1);
     expect(object.calls.sanitized).toHaveLength(0);
@@ -1460,6 +1444,9 @@ describe('media capabilities', () => {
     seedPendingIntent(saturatedStore);
     const object = createObjectStore();
     const processingGate = createMediaProcessingGate(1);
+    // The first completion is held inside provider work so the second finds a
+    // saturated gate. That hold used to sit on the malware-scan read; with the
+    // scan gone, the raw object read is the equivalent first provider step.
     let announceScanEntered: (() => void) | undefined;
     const scanEntered = new Promise<void>((resolve) => {
       announceScanEntered = resolve;
@@ -1471,15 +1458,13 @@ describe('media capabilities', () => {
     const blockingObjectStore: MediaObjectStore = {
       createRawUploadGrant: (input) =>
         object.objectStore.createRawUploadGrant(input),
-      async getMalwareScanStatus(storageKey) {
-        const status =
-          await object.objectStore.getMalwareScanStatus(storageKey);
+      getMalwareScanStatus: (storageKey) =>
+        object.objectStore.getMalwareScanStatus(storageKey),
+      async readVerifiedRawObject(input) {
         announceScanEntered?.();
         await scanRelease;
-        return status;
+        return object.objectStore.readVerifiedRawObject(input);
       },
-      readVerifiedRawObject: (input) =>
-        object.objectStore.readVerifiedRawObject(input),
       putSanitizedObject: (input) =>
         object.objectStore.putSanitizedObject(input),
       createPrivateReadGrant: (input) =>
@@ -1527,7 +1512,7 @@ describe('media capabilities', () => {
       status: 503,
       retryable: true,
     });
-    expect(object.calls.scanKeys).toHaveLength(1);
+    expect(object.calls.scanKeys).toHaveLength(0);
     expect(object.calls.rawKeys).toHaveLength(0);
     expect(sanitizeCalls).toBe(0);
     expect(object.calls.sanitized).toHaveLength(0);
@@ -1569,7 +1554,7 @@ describe('media capabilities', () => {
         outcome: 'success',
       }),
     ]);
-    expect(object.calls.scanKeys).toHaveLength(2);
+    expect(object.calls.scanKeys).toHaveLength(0);
     expect(object.calls.rawKeys).toHaveLength(2);
     expect(sanitizeCalls).toBe(2);
     expect(object.calls.sanitized).toHaveLength(2);
