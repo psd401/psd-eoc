@@ -1308,8 +1308,10 @@ describeWithDatabase('media upload production resource budgets', () => {
       retryable: true,
     });
     expect(databaseAvailable).toBe(1);
+    // Completion no longer reads a malware-scan tag, so the first provider
+    // call is the raw object read.
     expect(providerCallsWhileBlocked).toEqual({
-      scan: 1,
+      scan: 0,
       raw: 1,
       sanitize: 1,
       sanitizedWrite: 0,
@@ -1351,7 +1353,7 @@ describeWithDatabase('media upload production resource budgets', () => {
       retryable: false,
     });
     expect(providerCalls).toEqual({
-      scan: 1,
+      scan: 0,
       raw: 1,
       sanitize: 1,
       sanitizedWrite: 0,
