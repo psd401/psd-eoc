@@ -29,6 +29,7 @@ import {
   createDrizzlePushEndpointPolicyStore,
   resolvePushEndpointPage,
   resolvePushEndpoints,
+  rosterSnapshotWithLivePushTokens,
 } from '../capabilities/devices';
 import { loadRosterSnapshot } from '../capabilities/start';
 
@@ -289,10 +290,19 @@ async function resolvedPushEndpoints(database: Database, batch: DispatchBatch) {
   if (roster === null) {
     throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
   }
+  const audienceRoster = await rosterSnapshotWithLivePushTokens(
+    database as unknown as Parameters<
+      typeof rosterSnapshotWithLivePushTokens
+    >[0],
+    roster,
+  );
   return resolvePushEndpoints(
     {
       batch,
-      audience: { facilityId: batch.facilityId, rosterSnapshot: roster },
+      audience: {
+        facilityId: batch.facilityId,
+        rosterSnapshot: audienceRoster,
+      },
     },
     createDrizzlePushEndpointPolicyStore(database),
   );
@@ -312,10 +322,19 @@ async function resolvedPushEndpointPage(
   if (roster === null) {
     throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
   }
+  const audienceRoster = await rosterSnapshotWithLivePushTokens(
+    database as unknown as Parameters<
+      typeof rosterSnapshotWithLivePushTokens
+    >[0],
+    roster,
+  );
   return resolvePushEndpointPage(
     {
       batch,
-      audience: { facilityId: batch.facilityId, rosterSnapshot: roster },
+      audience: {
+        facilityId: batch.facilityId,
+        rosterSnapshot: audienceRoster,
+      },
     },
     createDrizzlePushEndpointPolicyStore(database),
     cursor,

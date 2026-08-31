@@ -69,8 +69,10 @@ import {
   executeDeviceCapability,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
   resolvePushEndpoints,
+  rosterSnapshotWithLivePushTokens,
 } from '../../../lib/capabilities/devices';
 import { createDrizzleRosterSyncStore } from '../../../lib/roster/groups-sync';
+import { loadRosterSnapshot } from '../../../lib/capabilities/start';
 import { createDrizzleExpoPushRuntimeStore } from '../../../lib/notify/expo-push-runtime-store';
 import { createDrizzleAttemptExecutionStore } from '../../../lib/notify/attempt-execution-store';
 import { createPersistedExpoReceiptTarget } from '../../../../../workers/push/receipt-lifecycle';
@@ -2269,6 +2271,12 @@ describeWithDatabase('device push-token persistence', () => {
       },
       crossBoundIdentity,
     );
+    // This snapshot names the same person by Google subject but carries an
+    // unroutable copy of the token. A snapshot pins who is notified, not where:
+    // the endpoint resolves against the recipient's live registration, so it is
+    // deliverable, and it is deliverable to the live token rather than to the
+    // frozen one. Refusing here is what used to drop a reinstalled device out
+    // of push until somebody republished the roster.
     await expect(
       pushPolicyStore.loadEndpointPolicy({
         rosterSnapshotId: crossBoundIdentity.rosterSnapshotId,
@@ -2280,7 +2288,13 @@ describeWithDatabase('device push-token persistence', () => {
           },
         ],
       }),
-    ).rejects.toMatchObject({ code: 'INVALID_PUSH_ENDPOINT_POLICY' });
+    ).resolves.toEqual([
+      {
+        recipientId: crossBoundIdentity.recipientId,
+        endpointId: recoveredRegistration.id,
+        status: 'active',
+      },
+    ]);
 
     const sendTimeIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
@@ -2439,5 +2453,137 @@ describeWithDatabase('device push-token persistence', () => {
         .from(devicePushTokenRegistrations)
         .where(eq(devicePushTokenRegistrations.token, revokedSessionToken)),
     ).toEqual([]);
+  });
+
+  test('reaches a reinstalled device without republishing the roster', async () => {
+    const database = databaseConnection().db;
+    const store = deviceCapabilityStore(database);
+    const supersededToken = `ExponentPushToken[synthetic-${fixtureSuffix}-preinstall]`;
+    const reinstalledToken = `ExponentPushToken[synthetic-${fixtureSuffix}-reinstall]`;
+
+    // The device the roster was published from.
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: supersededToken,
+      },
+      humanInvocation('reinstall-original'),
+      store,
+    );
+    const [published] = await activeRegistrationsForToken(
+      database,
+      supersededToken,
+    );
+    if (published === undefined) {
+      throw new Error('The published registration was not retained.');
+    }
+    const snapshotIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 2,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      { id: published.id, token: supersededToken },
+      snapshotIdentity,
+    );
+
+    // Reinstalling the app enrolls a new installation and mints a new
+    // registration. It does not unregister the install it replaced -- that
+    // install is simply gone -- so the superseded registration stays behind,
+    // still marked active and no longer deliverable.
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.otherDeviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: reinstalledToken,
+      },
+      humanInvocation(
+        'reinstall-replacement',
+        fixture.otherSessionId,
+        fixture.otherConnectivityEpochId,
+      ),
+      store,
+    );
+    const [reinstalled] = await activeRegistrationsForToken(
+      database,
+      reinstalledToken,
+    );
+    if (reinstalled === undefined) {
+      throw new Error('The reinstalled registration was not retained.');
+    }
+    expect(reinstalled.id).not.toBe(published.id);
+    expect(reinstalled.deviceEnrollmentId).not.toBe(
+      published.deviceEnrollmentId,
+    );
+    expect(
+      await database
+        .select({ id: devicePushTokenUnregistrations.id })
+        .from(devicePushTokenUnregistrations)
+        .where(eq(devicePushTokenUnregistrations.registrationId, published.id)),
+    ).toEqual([]);
+
+    // The endpoint the roster froze still resolves. Before this, the policy
+    // matched the endpoint back to a registration by id and compared tokens,
+    // so a reinstall silently produced zero push endpoints and nothing was
+    // ever enqueued. Email kept working, because an address is stable, which
+    // is exactly how this stayed hidden.
+    const policyQuery = Object.freeze({
+      rosterSnapshotId: snapshotIdentity.rosterSnapshotId,
+      rosterPopulation: 'staff' as const,
+      candidates: Object.freeze([
+        Object.freeze({
+          recipientId: snapshotIdentity.recipientId,
+          endpointId: published.id,
+        }),
+      ]),
+    });
+    await expect(
+      createDrizzlePushEndpointPolicyStore(database).loadEndpointPolicy(
+        policyQuery,
+      ),
+    ).resolves.toEqual([
+      {
+        recipientId: snapshotIdentity.recipientId,
+        endpointId: published.id,
+        status: 'active',
+      },
+    ]);
+
+    // Delivery reads the audience, not the policy evidence, so resolving the
+    // policy is only half of it: the endpoint has to be sent to the token the
+    // reinstalled device registered, not the one the snapshot remembers.
+    const snapshot = await loadRosterSnapshot(
+      database as unknown as Parameters<typeof loadRosterSnapshot>[0],
+      'staff',
+      facilityId,
+      snapshotIdentity.rosterSnapshotId,
+    );
+    if (snapshot === null) {
+      throw new Error('The published roster snapshot was not readable.');
+    }
+    expect(
+      snapshot.recipients
+        .flatMap((recipient) => recipient.endpoints)
+        .filter((endpoint) => endpoint.channel === 'push')
+        .map((endpoint) => endpoint.token),
+    ).toEqual([supersededToken]);
+    const live = await rosterSnapshotWithLivePushTokens(
+      database as unknown as Parameters<
+        typeof rosterSnapshotWithLivePushTokens
+      >[0],
+      snapshot,
+    );
+    expect(
+      live.recipients
+        .flatMap((recipient) => recipient.endpoints)
+        .filter((endpoint) => endpoint.channel === 'push')
+        .map((endpoint) => endpoint.token),
+    ).toEqual([reinstalledToken]);
   });
 });
