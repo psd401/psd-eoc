@@ -23,6 +23,7 @@ import {
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
+  type RosterSnapshot,
 } from '@psd-eoc/contracts';
 import {
   and,
@@ -30,6 +31,7 @@ import {
   desc,
   eq,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -57,10 +59,12 @@ import {
   endpointStatusRecords,
   idempotencyRecords,
   rosterEndpoints,
+  rosterRecipients,
   securityAuditChainAnchors,
   securityAuditEntries,
   sessionRevocations,
   sessions,
+  users,
 } from '../../db/schema';
 import {
   buildSecurityAuditEntry,
@@ -782,6 +786,226 @@ function normalizePushEndpointPolicyQuery(
   });
 }
 
+type LivePushRegistration = Readonly<{
+  id: string;
+  deviceEnrollmentId: string;
+  platform: string;
+  provider: string;
+  serviceEnvironment: string;
+  token: string;
+}>;
+
+function pushGroupKey(
+  row: Readonly<{
+    recipientId: string;
+    platform: string | null;
+    provider: string | null;
+    serviceEnvironment: string | null;
+  }>,
+): string {
+  return `${row.recipientId}|${row.platform}|${row.provider}|${row.serviceEnvironment}`;
+}
+
+/**
+ * Resolves the live push registration behind every push endpoint in a roster
+ * snapshot.
+ *
+ * A roster snapshot pins *who* gets notified. It must not also pin *where*.
+ * Each push endpoint used to carry a frozen copy of one registration and was
+ * matched back to it by `registration.id = endpoint.id`, so reinstalling the
+ * app -- which enrolls a new installation and mints a new registration id and
+ * token -- dropped that person out of push entirely until somebody remembered
+ * to republish the roster. Nothing surfaced: the endpoint simply resolved to no
+ * registration and was skipped. Email was unaffected, because an address is
+ * stable, which is exactly how this stayed hidden.
+ *
+ * Registrations are therefore resolved live, from the recipient's identity
+ * rather than from the snapshot. Endpoints and registrations are paired by rank
+ * within (recipient, platform, provider, service environment) so a recipient
+ * with more than one enrolled device still reaches each device exactly once,
+ * and every endpoint still resolves to at most one registration.
+ *
+ * Only registrations that can actually be delivered to are considered: the user
+ * is not disabled, the enrollment is not revoked, the registration has not been
+ * unregistered, and the build identity is complete. An endpoint left with no
+ * live registration is disabled by the caller rather than delivered to a token
+ * that is known to be dead.
+ */
+async function loadLivePushRegistrations(
+  database: DeviceQueryDatabase,
+  rosterSnapshotId: string,
+  rosterPopulation: 'staff' | 'synthetic',
+  recipientIds: readonly string[],
+): Promise<ReadonlyMap<string, LivePushRegistration>> {
+  const uniqueRecipientIds = [...new Set(recipientIds)];
+  if (uniqueRecipientIds.length === 0) return new Map();
+
+  // Every push endpoint these recipients own in the snapshot, not just the
+  // candidates in play, so that paging a batch cannot shift the pairing.
+  const endpointRows = await database
+    .select({
+      endpointId: rosterEndpoints.id,
+      recipientId: rosterEndpoints.recipientId,
+      platform: rosterEndpoints.platform,
+      provider: rosterEndpoints.provider,
+      serviceEnvironment: rosterEndpoints.serviceEnvironment,
+    })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, rosterSnapshotId),
+        eq(rosterEndpoints.population, rosterPopulation),
+        eq(rosterEndpoints.channel, 'push'),
+        inArray(rosterEndpoints.recipientId, uniqueRecipientIds),
+      ),
+    )
+    .orderBy(asc(rosterEndpoints.recipientId), asc(rosterEndpoints.id));
+
+  const registrationRows = await database
+    .select({
+      recipientId: rosterRecipients.id,
+      id: devicePushTokenRegistrations.id,
+      deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+      platform: devicePushTokenRegistrations.platform,
+      provider: devicePushTokenRegistrations.provider,
+      serviceEnvironment: devicePushTokenRegistrations.serviceEnvironment,
+      token: devicePushTokenRegistrations.token,
+    })
+    .from(rosterRecipients)
+    .innerJoin(
+      users,
+      or(
+        eq(users.googleSubject, rosterRecipients.googleSubject),
+        sql`lower(${users.email}) = lower(${rosterRecipients.staffEmail})`,
+      ),
+    )
+    .innerJoin(deviceEnrollments, eq(deviceEnrollments.userId, users.id))
+    .innerJoin(
+      devicePushTokenRegistrations,
+      eq(devicePushTokenRegistrations.deviceEnrollmentId, deviceEnrollments.id),
+    )
+    .leftJoin(
+      devicePushTokenUnregistrations,
+      and(
+        eq(
+          devicePushTokenUnregistrations.registrationId,
+          devicePushTokenRegistrations.id,
+        ),
+        eq(
+          devicePushTokenUnregistrations.deviceEnrollmentId,
+          devicePushTokenRegistrations.deviceEnrollmentId,
+        ),
+      ),
+    )
+    .where(
+      and(
+        eq(rosterRecipients.rosterSnapshotId, rosterSnapshotId),
+        eq(rosterRecipients.population, rosterPopulation),
+        inArray(rosterRecipients.id, uniqueRecipientIds),
+        isNull(users.disabledAt),
+        isNull(deviceEnrollments.revokedAt),
+        isNull(devicePushTokenUnregistrations.id),
+        isNotNull(devicePushTokenRegistrations.applicationId),
+        isNotNull(devicePushTokenRegistrations.applicationVersion),
+        isNotNull(devicePushTokenRegistrations.nativeBuildVersion),
+        isNotNull(devicePushTokenRegistrations.expoProjectId),
+        eq(devicePushTokenRegistrations.updateMode, 'embedded-only'),
+      ),
+    )
+    // Newest registration first. Reinstalling the app does not unregister the
+    // install it replaced -- that install is simply gone -- so the superseded
+    // registration lingers, active and undeliverable, forever. Ranking newest
+    // first means the endpoint pairs with the device the person is actually
+    // carrying, and a stale registration is only ever reached for if there are
+    // more endpoints than the recipient has live devices.
+    .orderBy(
+      asc(rosterRecipients.id),
+      desc(devicePushTokenRegistrations.registeredAt),
+      desc(devicePushTokenRegistrations.id),
+    );
+
+  const seenRegistrationIds = new Set<string>();
+  const available = new Map<string, LivePushRegistration[]>();
+  registrationRows.forEach((row) => {
+    // A recipient whose Google subject and staff email disagree about which
+    // user they are can match twice. Keep the first, deterministic match.
+    if (seenRegistrationIds.has(row.id)) return;
+    seenRegistrationIds.add(row.id);
+    const key = pushGroupKey(row);
+    const registration: LivePushRegistration = Object.freeze({
+      id: row.id,
+      deviceEnrollmentId: row.deviceEnrollmentId,
+      platform: row.platform,
+      provider: row.provider,
+      serviceEnvironment: row.serviceEnvironment,
+      token: row.token,
+    });
+    const bucket = available.get(key);
+    if (bucket === undefined) available.set(key, [registration]);
+    else bucket.push(registration);
+  });
+
+  const resolved = new Map<string, LivePushRegistration>();
+  const consumed = new Map<string, number>();
+  endpointRows.forEach((endpoint) => {
+    const key = pushGroupKey(endpoint);
+    const rank = consumed.get(key) ?? 0;
+    consumed.set(key, rank + 1);
+    const registration = available.get(key)?.[rank];
+    if (registration !== undefined) {
+      resolved.set(endpoint.endpointId, registration);
+    }
+  });
+  return resolved;
+}
+
+/**
+ * Returns the roster snapshot with every push endpoint pointed at the device
+ * the recipient is actually reachable on right now.
+ *
+ * The snapshot's own copy of the token was frozen when the roster was
+ * published. Delivery reads the audience, not the policy evidence -- the policy
+ * store is a deliberately token-free boundary -- so resolving the policy
+ * against live registrations is only half the fix: without this, an endpoint
+ * that correctly resolves to a live device would still be sent to the dead
+ * token the snapshot remembers.
+ *
+ * An endpoint with no live registration keeps its frozen token here and is
+ * reported `disabled` by the policy, so it is dropped before delivery rather
+ * than sent to a token known to be stale.
+ */
+export async function rosterSnapshotWithLivePushTokens(
+  database: DeviceQueryDatabase,
+  snapshot: RosterSnapshot,
+): Promise<RosterSnapshot> {
+  const liveRegistrations = await loadLivePushRegistrations(
+    database,
+    snapshot.id,
+    snapshot.population,
+    snapshot.recipients.map((recipient) => recipient.id),
+  );
+  if (liveRegistrations.size === 0) return snapshot;
+  return Object.freeze({
+    ...snapshot,
+    recipients: Object.freeze(
+      snapshot.recipients.map((recipient) =>
+        Object.freeze({
+          ...recipient,
+          endpoints: Object.freeze(
+            recipient.endpoints.map((endpoint) => {
+              if (endpoint.channel !== 'push') return endpoint;
+              const live = liveRegistrations.get(endpoint.id);
+              return live === undefined || live.token === endpoint.token
+                ? endpoint
+                : Object.freeze({ ...endpoint, token: live.token });
+            }),
+          ),
+        }),
+      ),
+    ),
+  }) as RosterSnapshot;
+}
+
 async function loadDrizzlePushEndpointPolicy(
   database: DeviceQueryDatabase,
   input: PushEndpointPolicyQuery,
@@ -797,11 +1021,25 @@ async function loadDrizzlePushEndpointPolicy(
   const approvedTargets = await loadPushDeliveryTestTargets(database, query);
   if (query.candidates.length === 0) return Object.freeze([]);
   const endpointIds = query.candidates.map(({ endpointId }) => endpointId);
+  // Live resolution applies to staff only. The synthetic population is the
+  // delivery-test path: its endpoints are deliberately pinned to one exact
+  // registration, and its recipients carry no identity to resolve against, so
+  // it keeps the original id-bound registration evidence untouched.
+  const liveRegistrations =
+    query.rosterPopulation === 'staff'
+      ? await loadLivePushRegistrations(
+          database,
+          query.rosterSnapshotId,
+          query.rosterPopulation,
+          query.candidates.map(({ recipientId }) => recipientId),
+        )
+      : new Map<string, LivePushRegistration>();
   const endpointRows = await database
     .select({
       endpointId: rosterEndpoints.id,
       recipientId: rosterEndpoints.recipientId,
       status: rosterEndpoints.status,
+      rosterProvider: rosterEndpoints.provider,
       registrationId: devicePushTokenRegistrations.id,
       registrationDeviceEnrollmentId:
         devicePushTokenRegistrations.deviceEnrollmentId,
@@ -816,7 +1054,6 @@ async function loadDrizzlePushEndpointPolicy(
         devicePushTokenRegistrations.nativeBuildVersion,
       registrationExpoProjectId: devicePushTokenRegistrations.expoProjectId,
       registrationUpdateMode: devicePushTokenRegistrations.updateMode,
-      rosterProvider: rosterEndpoints.provider,
       registrationMatchesEndpoint: sql<boolean | null>`case
         when ${devicePushTokenRegistrations.id} is null then null
         else ${devicePushTokenRegistrations.platform}::text = ${rosterEndpoints.platform}::text
@@ -881,11 +1118,25 @@ async function loadDrizzlePushEndpointPolicy(
     );
   const effectiveStatuses = new Map<string, EndpointStatus>();
   endpointRows.forEach((endpoint) => {
+    if (query.rosterPopulation === 'staff') {
+      // A staff endpoint with no live registration is reachable by nothing
+      // right now: the person reinstalled, re-enrolled, was disabled, or the
+      // device was revoked. That is an ordinary state, not corruption, so it
+      // disables this one endpoint. Raising here would abort the whole
+      // resolution and take an entire notification down because one person
+      // uninstalled the app.
+      effectiveStatuses.set(
+        pushCandidateKey(endpoint),
+        liveRegistrations.has(endpoint.endpointId)
+          ? EndpointStatusSchema.parse(endpoint.status)
+          : 'disabled',
+      );
+      return;
+    }
+    // Delivery-test endpoints stay bound to the exact registration they were
+    // published from, with every original integrity check intact. This is the
+    // path that can be aimed at a chosen device, so it stays strict.
     const hasRegistration = endpoint.registrationId !== null;
-    // A registration must be complete and well formed to receive a send. It is
-    // no longer matched against a list of exact shipped builds: that list was
-    // edited by hand for every release, and a missed edit silently dropped
-    // every device on the new build out of push delivery.
     const registrationIsComplete =
       hasRegistration &&
       (endpoint.registrationPlatform === 'ios' ||
@@ -904,11 +1155,8 @@ async function loadDrizzlePushEndpointPolicy(
       endpoint.unregisteredRegistrationId !== null ||
       endpoint.unregisteredDeviceEnrollmentId !== null;
     if (
-      (query.rosterPopulation === 'staff' && !hasRegistration) ||
       (hasRegistration && endpoint.registrationMatchesEndpoint !== true) ||
-      (query.rosterPopulation === 'staff' &&
-        hasRegistration &&
-        !registrationIsComplete) ||
+      (hasRegistration && !registrationIsComplete && hasUnregistration) ||
       (!hasRegistration &&
         (endpoint.registrationDeviceEnrollmentId !== null ||
           endpoint.registrationMatchesEndpoint !== null ||
@@ -1016,6 +1264,17 @@ async function loadDrizzlePushEndpointSendEligibility(
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }
   const row = rows[0]!;
+  // The live registration is the authority on where this person's device is
+  // reachable. The snapshot's copy of the token is only a fallback for an
+  // endpoint whose owner has no resolvable live device, and such an endpoint is
+  // reported disabled below, so the stale token is never actually delivered to.
+  const liveRegistrations = await loadLivePushRegistrations(
+    database,
+    input.rosterSnapshotId,
+    input.rosterPopulation,
+    [input.recipientId],
+  );
+  const token = liveRegistrations.get(row.endpointId)?.token ?? row.token;
   if (
     (row.platform !== 'ios' && row.platform !== 'android') ||
     (row.provider !== 'expo' &&
@@ -1023,7 +1282,7 @@ async function loadDrizzlePushEndpointSendEligibility(
       row.provider !== 'fcm') ||
     (row.serviceEnvironment !== 'development' &&
       row.serviceEnvironment !== 'production') ||
-    typeof row.token !== 'string'
+    typeof token !== 'string'
   ) {
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }
@@ -1045,7 +1304,7 @@ async function loadDrizzlePushEndpointSendEligibility(
     platform: row.platform,
     provider: row.provider,
     serviceEnvironment: row.serviceEnvironment,
-    tokenDigest: createHash('sha256').update(row.token, 'utf8').digest('hex'),
+    tokenDigest: createHash('sha256').update(token, 'utf8').digest('hex'),
     endpointStatus: EndpointStatusSchema.parse(row.endpointStatus),
     effectiveStatus: policy[0]!.status,
   });
