@@ -895,12 +895,10 @@ describe('mobile event-room API', () => {
     const allClearResultValue = await api.allClear(
       IDS.event,
       IDS.lifecyclePreview,
-      'ALL CLEAR',
       'caller-all-clear-key-0001',
     );
     const closeResultValue = await api.close(
       IDS.event,
-      'CLOSE EVENT',
       'caller-close-key-0001',
     );
 
@@ -911,17 +909,13 @@ describe('mobile event-room API', () => {
         body: {
           operation: 'all-clear',
           lifecyclePreviewId: IDS.lifecyclePreview,
-          confirmationPhrase: 'ALL CLEAR',
         },
         idempotencyKey: 'caller-all-clear-key-0001',
       },
       {
         method: 'POST',
         path: `/events/${IDS.event}/api`,
-        body: {
-          operation: 'close',
-          confirmationPhrase: 'CLOSE EVENT',
-        },
+        body: { operation: 'close' },
         idempotencyKey: 'caller-close-key-0001',
       },
     ]);
@@ -961,7 +955,6 @@ describe('mobile event-room API', () => {
       wrongPreview.api.allClear(
         IDS.event,
         IDS.lifecyclePreview,
-        'ALL CLEAR',
         'caller-all-clear-key-0003',
       ),
     ).rejects.toThrow('another event');
@@ -973,14 +966,13 @@ describe('mobile event-room API', () => {
       rawAllClearKey.api.allClear(
         IDS.event,
         IDS.lifecyclePreview,
-        'ALL CLEAR',
         'caller-all-clear-key-0003',
       ),
     ).rejects.toThrow('another event');
 
     const rawCloseKey = requestHarness(closeResult('caller-close-key-0003'));
     await expect(
-      rawCloseKey.api.close(IDS.event, 'CLOSE EVENT', 'caller-close-key-0003'),
+      rawCloseKey.api.close(IDS.event, 'caller-close-key-0003'),
     ).rejects.toThrow('another event');
   });
 
@@ -994,7 +986,6 @@ describe('mobile event-room API', () => {
       missingIntent.api.allClear(
         IDS.event,
         IDS.lifecyclePreview,
-        'ALL CLEAR',
         'caller-all-clear-key-0002',
       ),
     ).rejects.toThrow();
@@ -1005,11 +996,7 @@ describe('mobile event-room API', () => {
       notificationIntent: allClear.notificationIntent,
     });
     await expect(
-      inventedIntent.api.close(
-        IDS.event,
-        'CLOSE EVENT',
-        'caller-close-key-0002',
-      ),
+      inventedIntent.api.close(IDS.event, 'caller-close-key-0002'),
     ).rejects.toThrow();
   });
 
