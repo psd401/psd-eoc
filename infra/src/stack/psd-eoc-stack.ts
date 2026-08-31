@@ -1168,21 +1168,6 @@ export class PsdEocStack extends Stack {
         secretName: `${SECRET_PREFIX}/providers/fcm-direct`,
       },
     );
-    const pushRegistrationBuildAllowlistSecret = new secretsmanager.Secret(
-      this,
-      'PushRegistrationBuildAllowlistSecret',
-      {
-        description:
-          'Protected JSON allowlist of exact native application, version, build, and EAS project identities permitted to register for push.',
-        generateSecretString: {
-          excludePunctuation: true,
-          passwordLength: 64,
-        },
-        removalPolicy: RemovalPolicy.RETAIN,
-        secretName: `${SECRET_PREFIX}/mobile/push-build-allowlist`,
-      },
-    );
-
     const bootstrapIdentitySecret = new secretsmanager.Secret(
       this,
       'BootstrapIdentitySecret',
@@ -3184,7 +3169,6 @@ export class PsdEocStack extends Stack {
       expoPushRuntimeWorkerSecret.grantRead(runtimeRole),
       emailRuntimeWorkerSecret.grantRead(runtimeRole),
       smsRuntimeWorkerSecret.grantRead(runtimeRole),
-      pushRegistrationBuildAllowlistSecret.grantRead(runtimeRole),
       iam.Grant.addToPrincipal({
         actions: ['sqs:GetQueueAttributes'],
         grantee: runtimeRole,
@@ -3330,10 +3314,6 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
                   value: smsRuntimeWorkerSecret.secretArn,
-                },
-                {
-                  name: 'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST',
-                  value: pushRegistrationBuildAllowlistSecret.secretArn,
                 },
                 {
                   name: 'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
@@ -3882,9 +3862,6 @@ export class PsdEocStack extends Stack {
     });
     new CfnOutput(this, 'ExpoAccessTokenSecretArn', {
       value: expoAccessTokenSecret.secretArn,
-    });
-    new CfnOutput(this, 'PushRegistrationBuildAllowlistSecretArn', {
-      value: pushRegistrationBuildAllowlistSecret.secretArn,
     });
     new CfnOutput(this, 'PushWorkerDeploymentState', {
       value: Fn.conditionIf(

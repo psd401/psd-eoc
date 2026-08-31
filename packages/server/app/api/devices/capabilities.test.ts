@@ -23,9 +23,7 @@ import {
   EXPO_DEVICE_NOT_REGISTERED_REASON,
   createDrizzlePushEndpointPolicyStore,
   executeDeviceCapability,
-  parsePushRegistrationBuildAllowlist,
   planPushTokenRegistration,
-  pushRegistrationBuildIsAuthorized,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
   PushEndpointResolutionError,
   resolvePushEndpointPage,
@@ -412,11 +410,6 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
   };
   public endpointStatusReplay: EndpointStatusRecord | null = null;
   public endpointStatusReplayLoads = 0;
-  public registrationAuthorized = true;
-
-  public async authorizePushTokenRegistration(): Promise<boolean> {
-    return this.registrationAuthorized;
-  }
 
   public async readCurrentTime(): Promise<Date> {
     return now;
@@ -798,85 +791,18 @@ describe('canonical device capabilities', () => {
     );
   });
 
-  test('denies missing, malformed, or unlisted protected build configuration', async () => {
-    expect(parsePushRegistrationBuildAllowlist(undefined)).toEqual([]);
-    expect(parsePushRegistrationBuildAllowlist('{')).toEqual([]);
-    expect(
-      parsePushRegistrationBuildAllowlist(
-        JSON.stringify([
-          {
-            platform: 'ios',
-            provider: 'expo',
-            serviceEnvironment: 'production',
-            build,
-          },
-          {
-            platform: 'ios',
-            provider: 'expo',
-            serviceEnvironment: 'production',
-            build,
-          },
-        ]),
-      ),
-    ).toEqual([]);
-
-    const productionAllowlist = parsePushRegistrationBuildAllowlist(
-      JSON.stringify([
-        {
-          platform: 'ios',
-          provider: 'expo',
-          serviceEnvironment: 'production',
-          build,
-        },
-      ]),
+  test('registers a push token for any authenticated staff device', async () => {
+    // The exact-build allowlist that used to gate this is gone: it had to be
+    // hand-edited for every release and silently broke push for every device
+    // on a build nobody remembered to add.
+    const allowed = testStore();
+    await executeDeviceCapability(
+      'register-push-token',
+      registrationInput,
+      humanInvocation(true),
+      allowed.store,
     );
-    expect(
-      pushRegistrationBuildIsAuthorized(registrationInput, productionAllowlist),
-    ).toBe(true);
-    expect(
-      pushRegistrationBuildIsAuthorized(
-        { ...registrationInput, serviceEnvironment: 'development' },
-        productionAllowlist,
-      ),
-    ).toBe(false);
-    const atomicInput = {
-      ...registrationInput,
-      provider: 'apns' as const,
-      token: 'synthetic-apns-token-material',
-      expoFallbackToken: token,
-    };
-    expect(
-      pushRegistrationBuildIsAuthorized(
-        { ...atomicInput, expoFallbackToken: undefined },
-        productionAllowlist,
-      ),
-    ).toBe(false);
-    expect(
-      pushRegistrationBuildIsAuthorized(atomicInput, productionAllowlist),
-    ).toBe(false);
-    expect(
-      pushRegistrationBuildIsAuthorized(atomicInput, [
-        ...productionAllowlist,
-        {
-          platform: 'ios',
-          provider: 'apns',
-          serviceEnvironment: 'production',
-          build,
-        },
-      ]),
-    ).toBe(true);
-
-    const denied = testStore();
-    denied.transaction.registrationAuthorized = false;
-    await expect(
-      executeDeviceCapability(
-        'register-push-token',
-        registrationInput,
-        humanInvocation(true),
-        denied.store,
-      ),
-    ).rejects.toMatchObject({ reasonCode: 'CAPABILITY_INVOCATION_DENIED' });
-    expect(denied.transaction.registrationActor).toBeNull();
+    expect(allowed.transaction.registrationActor).not.toBeNull();
   });
 
   test('allows only the dedicated worker to record the fixed Expo invalidation', async () => {
