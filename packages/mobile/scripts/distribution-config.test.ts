@@ -174,7 +174,7 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain('The current app/runtime is 1.0.6');
     // The store record stays factual: 1.0.6 is not installable until it is
     // built and submitted.
-    expect(release).toContain('1.0.5/build 12 on iOS');
+    expect(release).toContain('1.0.6/build 16 on iOS');
     expect(compactRollback).toContain(
       'The current mobile profiles are embedded-only',
     );
@@ -530,8 +530,8 @@ describe('mobile distribution configuration', () => {
     const update = rowFor('EAS Update');
 
     expect(build).toContain('| `live-verified`');
-    expect(build).toContain('iOS build 12');
-    expect(build).toContain('Android version code 6');
+    expect(build).toContain('iOS build 16');
+    expect(build).toContain('Android version code 8');
     expect(update).toContain('| `blocked`');
     expect(update).toContain('Remote updates are disabled');
     expect(rowFor('EAS Submit')).toContain('| `live-verified`');
@@ -540,15 +540,18 @@ describe('mobile distribution configuration', () => {
     const play = rowFor('Google Play device installation');
     expect(apple).toContain('| `live-verified`');
     expect(play).toContain('| `configured-unverified`');
-    expect(apple).toContain('1.0.5/build 12');
+    expect(apple).toContain('1.0.6/build 16');
     expect(apple).toContain('internal tester group');
     expect(apple).toContain('automatic distribution enabled');
-    expect(apple).toContain('`Waiting for Review`');
+    // Internal distribution needs no Beta App Review, so no review state is
+    // claimed for the current build; the external-group review state recorded
+    // for 1.0.5/build 12 was not re-observed for 1.0.6.
+    expect(apple).toContain('requires no Beta App Review');
     expect(apple).toContain(
-      'No in-app Release diagnostic readback, push registration, or notification observation is retained',
+      'No in-app Release diagnostic readback or notification observation is retained',
     );
-    expect(play).toContain('1.0.5/code 6');
-    expect(play).toContain('saved in the existing Alpha Closed-testing draft');
+    expect(play).toContain('1.0.6/code 8');
+    expect(play).toContain('Alpha Closed-testing draft');
     const privacy = rowFor('Public mobile privacy policy');
     expect(privacy).toContain('| `live-verified`');
     expect(privacy).toContain("configured production origin's `/privacy`");
