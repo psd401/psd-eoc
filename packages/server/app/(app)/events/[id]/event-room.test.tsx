@@ -17,6 +17,7 @@ import {
   locationPayloadFromDraft,
   webLifecycleCommandBody,
 } from './event-room';
+import { retainedCommandLandedInTimeline } from './event-room-transport';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -736,6 +737,48 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).toContain('>RV<');
     expect(html).toContain('>SO<');
     expect(html.match(/>SO</gu)).toHaveLength(1);
+  });
+
+  test('resolves a retained request the timeline already answers', () => {
+    const clientTime = '2026-08-10T16:03:00.000Z';
+    const text = 'Synthetic retained update.';
+    const command = {
+      version: 1 as const,
+      eventId: IDS.event,
+      ownerSessionId: IDS.session,
+      apiUrl: `/events/${IDS.event}/api`,
+      operation: 'post-text' as const,
+      idempotencyKey: 'post-text:10000000-0000-4000-8000-000000000050',
+      bodyJson: JSON.stringify({ operation: 'post-text', text, clientTime }),
+      createdAt: clientTime,
+    };
+    const landed = projectJournalEntryForRead(
+      textEntry({
+        id: IDS.original,
+        sequence: 1,
+        text,
+        serverTime: '2026-08-10T16:03:01.000Z',
+        clientTime,
+        supersedes: null,
+      }),
+      false,
+    );
+    const unrelated = projectJournalEntryForRead(
+      textEntry({
+        id: IDS.correction,
+        sequence: 2,
+        text: 'A different synthetic update.',
+        serverTime: '2026-08-10T16:04:00.000Z',
+        clientTime,
+        supersedes: null,
+      }),
+      false,
+    );
+
+    expect(retainedCommandLandedInTimeline(command, [landed])).toBe(true);
+    // An absent entry proves nothing: the operator still decides.
+    expect(retainedCommandLandedInTimeline(command, [unrelated])).toBe(false);
+    expect(retainedCommandLandedInTimeline(command, [])).toBe(false);
   });
 
   test('renders private photo description without embedding a public URL', () => {
