@@ -32,14 +32,6 @@ tags: [issue-32, synthetic-only, event-room]
 - assertVisible: '.*Integration mocked.*'
 - scrollUntilVisible:
     element:
-      id: 'lifecycle-confirmation-input'
-    direction: DOWN
-- tapOn:
-    id: 'lifecycle-confirmation-input'
-- inputText: 'ALL CLEAR'
-- hideKeyboard
-- scrollUntilVisible:
-    element:
       id: 'lifecycle-confirm-button'
     direction: DOWN
 - assertVisible:
