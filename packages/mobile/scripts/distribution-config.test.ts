@@ -172,9 +172,9 @@ describe('mobile distribution configuration', () => {
       'iOS and Android ship the same app from the same source at the same version.',
     );
     expect(release).toContain('The current app/runtime is 1.0.7');
-    // The store record stays factual: 1.0.7 is not installable until it is
-    // built and submitted, so the last submitted build is still what is named.
-    expect(release).toContain('1.0.6/build 16 on iOS');
+    // The store record names the exact last submitted build, which is now the
+    // current app/runtime because 1.0.7 has been built and submitted.
+    expect(release).toContain('1.0.7/build 17 on iOS');
     expect(compactRollback).toContain(
       'The current mobile profiles are embedded-only',
     );
@@ -540,7 +540,7 @@ describe('mobile distribution configuration', () => {
     const play = rowFor('Google Play device installation');
     expect(apple).toContain('| `live-verified`');
     expect(play).toContain('| `configured-unverified`');
-    expect(apple).toContain('1.0.6/build 16');
+    expect(apple).toContain('1.0.7/build 17');
     expect(apple).toContain('internal tester group');
     expect(apple).toContain('automatic distribution enabled');
     // Internal distribution needs no Beta App Review, so no review state is
@@ -550,7 +550,7 @@ describe('mobile distribution configuration', () => {
     expect(apple).toContain(
       'No in-app Release diagnostic readback or notification observation is retained',
     );
-    expect(play).toContain('1.0.6/code 8');
+    expect(play).toContain('1.0.7/code 9');
     expect(play).toContain('Alpha Closed-testing draft');
     const privacy = rowFor('Public mobile privacy policy');
     expect(privacy).toContain('| `live-verified`');
