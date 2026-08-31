@@ -82,7 +82,7 @@ function previewFailureMessage(error: unknown): string {
   if (error instanceof StartClientError) {
     return `${error.message} No event was started and nothing was queued.`;
   }
-  return 'The consequence preview is unavailable. No event was started and nothing was queued.';
+  return 'PSD EOC could not check who would be notified. No event was started and nothing was sent.';
 }
 
 export function unresolvedOutcomeRefreshError(): string {
@@ -307,13 +307,13 @@ export default function StartEventScreen() {
         nextPreview.kind,
       ).classificationWord;
       AccessibilityInfo.announceForAccessibility(
-        `Consequence preview ready for ${previewClassification}. ${activationAudienceLabel(nextPreview.recipientCount, nextPreview.rosterPopulation)}. ${nextPreview.channels.length} channels list the exact rendered messages, endpoint counts, and integration truth labels. Review before confirming.`,
+        `Ready to start ${previewClassification}. ${activationAudienceLabel(nextPreview.recipientCount, nextPreview.rosterPopulation)} will be notified. The exact messages are shown below.`,
       );
     } catch (error) {
       if (previewRequestGeneration.current !== requestGeneration) return;
       setPreviewError(previewFailureMessage(error));
       AccessibilityInfo.announceForAccessibility(
-        'Consequence preview unavailable. No event was started and nothing was queued.',
+        'PSD EOC could not check who would be notified. No event was started and nothing was sent.',
       );
     } finally {
       if (previewRequestGeneration.current === requestGeneration) {
@@ -672,7 +672,7 @@ export default function StartEventScreen() {
 
             {previewLoading ? (
               <View
-                accessibilityLabel="Loading current consequence preview"
+                accessibilityLabel="Checking who would be notified"
                 accessibilityRole="progressbar"
                 style={styles.loading}
               >
@@ -693,7 +693,7 @@ export default function StartEventScreen() {
                 style={styles.error}
               >
                 <Text accessibilityRole="header" style={styles.errorHeading}>
-                  Consequence preview unavailable
+                  Could not check who would be notified
                 </Text>
                 <Text style={styles.errorText}>{previewError}</Text>
                 <Pressable

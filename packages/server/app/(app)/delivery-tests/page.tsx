@@ -106,9 +106,9 @@ export default async function DeliveryTestsPage() {
         <h2 id="safety-heading">Human-only live-send boundary</h2>
         <p>
           Creating configuration and loading a preview never sends. A live
-          canary requires an exact unexpired consequence preview, live-verified
-          providers and credentials, and a fresh explicit authenticated-human
-          confirmation through canonical start-event. It is always a DRILL.
+          canary requires a current notification check, live-verified providers
+          and credentials, and a fresh explicit authenticated-human confirmation
+          through canonical start-event. It is always a DRILL.
         </p>
       </aside>
 

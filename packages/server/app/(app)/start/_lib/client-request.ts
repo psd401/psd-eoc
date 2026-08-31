@@ -62,7 +62,7 @@ function startFlowTimeoutError(
 ): StartFlowRequestError {
   if (path === '/start/api/preview') {
     return new StartFlowRequestError(
-      'The consequence preview timed out. No event was started and no notification was queued. Load a fresh preview before continuing.',
+      'The check of who would be notified timed out. No event was started and nothing was sent. Try again.',
       true,
       false,
     );
@@ -271,7 +271,7 @@ export async function requestStartFlow<Output>(
     }
     if (path === '/start/api/preview') {
       throw new StartFlowRequestError(
-        'PSD EOC received an unreadable consequence preview. No event was started and no notification was queued. Load a fresh preview before continuing.',
+        'PSD EOC could not read who would be notified. No event was started and nothing was sent. Try again.',
         true,
         false,
       );
@@ -301,7 +301,7 @@ export async function requestStartFlow<Output>(
   } catch {
     if (path === '/start/api/preview') {
       throw new StartFlowRequestError(
-        'PSD EOC received an invalid consequence preview. No event was started and no notification was queued. Load a fresh preview before continuing.',
+        'PSD EOC returned an unusable check of who would be notified. No event was started and nothing was sent. Try again.',
         true,
         false,
       );

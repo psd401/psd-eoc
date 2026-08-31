@@ -528,7 +528,7 @@ export default function HomeScreen() {
               </Text>
               <Text style={styles.sectionIntro}>
                 Choosing a site and mode does not start an event or notify
-                anyone. A separate consequence confirmation is always required.
+                anyone. You confirm before anything is sent.
               </Text>
 
               {data.facilities.length === 0 ? (
