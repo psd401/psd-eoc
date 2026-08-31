@@ -378,7 +378,6 @@ describe('issue-21 synthetic Maestro transport', () => {
     const allClear = await room.allClear(
       started.event.id,
       consequence.id,
-      'ALL CLEAR',
       'issue-32-synthetic-all-clear-0001',
     );
     expect(allClear.event.status).toBe('all-clear');

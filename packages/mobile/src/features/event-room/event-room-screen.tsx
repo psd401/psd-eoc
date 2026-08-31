@@ -817,8 +817,6 @@ export interface LifecycleConfirmationDialogProps {
  * confirmation is the modal and its destructive button -- the same protection
  * the web room has.
  */
-const ALL_CLEAR_CONFIRMATION_PHRASE = 'ALL CLEAR';
-const CLOSE_CONFIRMATION_PHRASE = 'CLOSE EVENT';
 
 /** Foreground-only confirmation for ending an event. */
 export function LifecycleConfirmationDialog({
@@ -1995,10 +1993,6 @@ function AuthenticatedEventRoomScreen({
   const submitLifecycle = useCallback(async () => {
     const action = lifecycleAction;
     const preview = lifecyclePreview;
-    const confirmationPhrase =
-      action === 'all-clear'
-        ? ALL_CLEAR_CONFIRMATION_PHRASE
-        : CLOSE_CONFIRMATION_PHRASE;
     if (
       action === null ||
       lifecycleBusy ||
@@ -2032,14 +2026,8 @@ function AuthenticatedEventRoomScreen({
       lifecycleIdempotencyKeyRef.current = key;
       const result =
         action === 'all-clear'
-          ? await api.allClear(
-              eventId,
-              preview!.id,
-              confirmationPhrase,
-              key,
-              abort.signal,
-            )
-          : await api.close(eventId, confirmationPhrase, key, abort.signal);
+          ? await api.allClear(eventId, preview!.id, key, abort.signal)
+          : await api.close(eventId, key, abort.signal);
       if (
         generation !== lifecycleGenerationRef.current ||
         abort.signal.aborted ||
@@ -2058,12 +2046,7 @@ function AuthenticatedEventRoomScreen({
         // close half fails the event is genuinely in the all-clear state and
         // the status row offers to finish it.
         const closeKey = Crypto.randomUUID();
-        const closed = await api.close(
-          eventId,
-          CLOSE_CONFIRMATION_PHRASE,
-          closeKey,
-          abort.signal,
-        );
+        const closed = await api.close(eventId, closeKey, abort.signal);
         if (
           generation === lifecycleGenerationRef.current &&
           !abort.signal.aborted &&
