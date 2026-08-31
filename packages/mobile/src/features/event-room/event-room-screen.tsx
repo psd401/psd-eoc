@@ -7,7 +7,6 @@ import {
   type EventKind,
   type EventStatus,
   type FacilityScope,
-  type JournalEntry,
   type Role,
   type TemplateMode,
 } from '@psd-eoc/contracts';
@@ -61,7 +60,6 @@ import {
   isEventComposerVisible,
   isNearLiveEdge,
   eventRoomParticipants,
-  journalEntryActionEligibility,
   readableTimelineEntries,
   retainPendingTimelineFollow,
   timelineEntryAccessibilityLabel,
@@ -85,10 +83,6 @@ export const EVENT_ROOM_MUTED_TEXT_COLOR = '#486581';
 type LifecycleAction = 'all-clear' | 'close';
 type LocationMode = 'known' | 'ambiguous' | 'unknown';
 type KnownLocation = Extract<LocationPayload, { state: 'known' }>;
-type CorrectableJournalEntry = Extract<
-  JournalEntry,
-  { kind: 'text' | 'location' }
->;
 type JournalEntryAction = 'correction' | 'redaction';
 
 export function userCanManageEventJournal(
@@ -419,19 +413,18 @@ function TimelinePhoto({
 export interface TimelineEntryCardProps {
   readonly projection: JournalEntryReadProjection;
   readonly api?: Pick<EventRoomApi, 'getMediaReadGrant'>;
-  readonly actionEligibility?: ReturnType<typeof journalEntryActionEligibility>;
-  readonly onCorrect?: () => void;
-  readonly onRedact?: () => void;
 }
 
-/** One timeline entry grouped into a single screen-reader stop. */
-export function TimelineEntryCard({
-  actionEligibility,
-  api,
-  onCorrect,
-  onRedact,
-  projection,
-}: TimelineEntryCardProps) {
+/**
+ * One timeline entry grouped into a single screen-reader stop.
+ *
+ * Entries carry no correct or redact controls on the phone. Nobody amends the
+ * record from a handset mid-incident, and the two buttons plus their
+ * unavailability notices sat under every entry in the timeline. Correcting or
+ * redacting an entry remains available in the web room, which is where that
+ * work is actually done.
+ */
+export function TimelineEntryCard({ api, projection }: TimelineEntryCardProps) {
   const { entry } = projection;
   // A state change is what happened to the event, not something a person
   // wrote, so it gets one line instead of a card with an author on it. Web
@@ -497,47 +490,6 @@ export function TimelineEntryCard({
           mediaId={visiblePhoto.mediaId}
           {...(api === undefined ? {} : { api })}
         />
-      )}
-      {actionEligibility === undefined ? null : (
-        <View style={styles.entryActionArea}>
-          <View style={styles.entryActionRow}>
-            {actionEligibility.correction.allowed && onCorrect !== undefined ? (
-              <ActionButton label="Correct…" onPress={onCorrect} />
-            ) : null}
-            {actionEligibility.redaction.allowed && onRedact !== undefined ? (
-              <ActionButton destructive label="Redact…" onPress={onRedact} />
-            ) : null}
-          </View>
-          {actionEligibility.correction.allowed ||
-          actionEligibility.correction.permanent ||
-          actionEligibility.correction.unavailableReason ===
-            actionEligibility.redaction.unavailableReason ? null : (
-            <Text accessibilityRole="summary" style={styles.entryActionHelp}>
-              Correction unavailable:{' '}
-              {actionEligibility.correction.unavailableReason}
-            </Text>
-          )}
-          {/*
-            Only a reason the reader can do something about is worth printing.
-            Saying "System lifecycle facts cannot be corrected or redacted"
-            under every lifecycle entry restated that the absent buttons were
-            absent, on every entry in the timeline. A stale timeline or a
-            superseded entry still explains itself, because the reader can act
-            on it.
-          */}
-          {!actionEligibility.correction.allowed &&
-          !actionEligibility.redaction.allowed &&
-          !(
-            actionEligibility.correction.permanent &&
-            actionEligibility.redaction.permanent
-          ) ? (
-            <Text accessibilityRole="summary" style={styles.entryActionHelp}>
-              Entry actions unavailable:{' '}
-              {actionEligibility.correction.unavailableReason ??
-                actionEligibility.redaction.unavailableReason}
-            </Text>
-          ) : null}
-        </View>
       )}
     </View>
   );
@@ -1614,17 +1566,6 @@ function AuthenticatedEventRoomScreen({
   const [textError, setTextError] = useState<string | null>(null);
   const textMutationIdentityRef = useRef<JournalMutationIdentity | null>(null);
 
-  const [journalActionTarget, setJournalActionTarget] = useState<Readonly<{
-    action: JournalEntryAction;
-    projection: JournalEntryReadProjection;
-  }> | null>(null);
-  const [journalActionBusy, setJournalActionBusy] = useState(false);
-  const [journalActionErrorText, setJournalActionErrorText] = useState<
-    string | null
-  >(null);
-  const journalActionMutationIdentityRef =
-    useRef<JournalMutationIdentity | null>(null);
-
   const [composer, setComposer] = useState<'location' | 'photo' | null>(null);
   const [locationMode, setLocationMode] = useState<LocationMode>('known');
   const [knownLocation, setKnownLocation] = useState<KnownLocation | null>(
@@ -1685,153 +1626,6 @@ function AuthenticatedEventRoomScreen({
     entries: sync.model.entries,
     onAppended: followConfirmedEntry,
   });
-
-  const journalActionsAuthorized =
-    event !== null &&
-    state.session !== null &&
-    userCanManageEventJournal(
-      state.session.user.roles,
-      state.session.user.facilityScope,
-      event.facilityId,
-    );
-
-  const openJournalAction = useCallback(
-    (action: JournalEntryAction, projection: JournalEntryReadProjection) => {
-      journalActionMutationIdentityRef.current = null;
-      setJournalActionErrorText(null);
-      setJournalActionTarget(Object.freeze({ action, projection }));
-    },
-    [],
-  );
-
-  const dismissJournalAction = useCallback(() => {
-    if (journalActionBusy) return;
-    journalActionMutationIdentityRef.current = null;
-    setJournalActionErrorText(null);
-    setJournalActionTarget(null);
-  }, [journalActionBusy]);
-
-  const submitJournalAction = useCallback(
-    async (submission: JournalActionSubmission) => {
-      const selected = journalActionTarget;
-      if (selected === null || journalActionBusy) return;
-      setJournalActionBusy(true);
-      setJournalActionErrorText(null);
-      try {
-        assertMutationAllowed();
-        const currentModel = controller.getSnapshot().model;
-        const current = currentModel.entries.find(
-          ({ entry }) => entry.id === selected.projection.entry.id,
-        );
-        if (current === undefined || !journalActionsAuthorized) {
-          throw new Error(
-            'This timeline entry is no longer available to your current site access. Refresh and choose it again.',
-          );
-        }
-        const eligibility = journalEntryActionEligibility(
-          current,
-          currentModel.entries,
-          currentModel.historyComplete,
-        );
-        const availability = eligibility[selected.action];
-        if (!availability.allowed) {
-          throw new Error(
-            availability.unavailableReason ??
-              'This entry action is no longer available.',
-          );
-        }
-        if (submission.action !== selected.action) {
-          throw new Error('The selected entry action changed. Open it again.');
-        }
-        const canonicalDraft = JSON.stringify({
-          action: submission.action,
-          entryId: current.entry.id,
-          entrySequence: current.entry.sequence,
-          submission,
-        });
-        const identity = retainJournalMutationIdentity(
-          journalActionMutationIdentityRef.current,
-          canonicalDraft,
-          Crypto.randomUUID,
-          () => new Date().toISOString(),
-        );
-        journalActionMutationIdentityRef.current = identity;
-        const target = {
-          entryId: current.entry.id,
-          entrySequence: current.entry.sequence,
-        };
-        let projection: JournalEntryReadProjection;
-        if (submission.action === 'redaction') {
-          projection = await api.redactEntry(
-            eventId,
-            sessionId,
-            target,
-            submission.reason,
-            identity.idempotencyKey,
-            identity.clientTime,
-          );
-        } else if (
-          current.visibility === 'visible' &&
-          current.entry.kind === 'text' &&
-          submission.replacement.kind === 'text'
-        ) {
-          const correctable: CorrectableJournalEntry = current.entry;
-          projection = await api.correctText(
-            eventId,
-            sessionId,
-            {
-              entryId: correctable.id,
-              entrySequence: correctable.sequence,
-            },
-            submission.replacement.text,
-            submission.reason,
-            identity.idempotencyKey,
-            identity.clientTime,
-          );
-        } else if (
-          current.visibility === 'visible' &&
-          current.entry.kind === 'location' &&
-          submission.replacement.kind === 'location'
-        ) {
-          const correctable: CorrectableJournalEntry = current.entry;
-          projection = await api.correctLocation(
-            eventId,
-            sessionId,
-            {
-              entryId: correctable.id,
-              entrySequence: correctable.sequence,
-            },
-            submission.replacement.payload,
-            submission.reason,
-            identity.idempotencyKey,
-            identity.clientTime,
-          );
-        } else {
-          throw new Error(
-            'The replacement no longer matches this entry. Refresh and choose it again.',
-          );
-        }
-        followConfirmedEntry(projection);
-        journalActionMutationIdentityRef.current = null;
-        setJournalActionTarget(null);
-      } catch (error) {
-        setJournalActionErrorText(journalActionError(error));
-      } finally {
-        setJournalActionBusy(false);
-      }
-    },
-    [
-      api,
-      assertMutationAllowed,
-      controller,
-      eventId,
-      followConfirmedEntry,
-      journalActionBusy,
-      journalActionTarget,
-      journalActionsAuthorized,
-      sessionId,
-    ],
-  );
 
   const dismissLifecycle = useCallback(() => {
     lifecycleGenerationRef.current += 1;
@@ -2341,36 +2135,10 @@ function AuthenticatedEventRoomScreen({
   }, [controller]);
 
   const renderTimelineEntry = useCallback(
-    ({ item }: ListRenderItemInfo<JournalEntryReadProjection>) => {
-      const actionEligibility =
-        journalActionsAuthorized && sync.model.historyComplete
-          ? journalEntryActionEligibility(
-              item,
-              sync.model.entries,
-              sync.model.historyComplete,
-            )
-          : undefined;
-      return (
-        <TimelineEntryCard
-          {...(actionEligibility === undefined
-            ? {}
-            : {
-                actionEligibility,
-                onCorrect: () => openJournalAction('correction', item),
-                onRedact: () => openJournalAction('redaction', item),
-              })}
-          api={api}
-          projection={item}
-        />
-      );
-    },
-    [
-      api,
-      journalActionsAuthorized,
-      openJournalAction,
-      sync.model.entries,
-      sync.model.historyComplete,
-    ],
+    ({ item }: ListRenderItemInfo<JournalEntryReadProjection>) => (
+      <TimelineEntryCard api={api} projection={item} />
+    ),
+    [api],
   );
 
   if (event === null || sync.model.header === null) {
@@ -2505,12 +2273,6 @@ function AuthenticatedEventRoomScreen({
           />
         </View>
       )}
-
-      {journalActionsAuthorized && !sync.model.historyComplete ? (
-        <Text accessibilityRole="summary" style={styles.actionUnavailableText}>
-          Corrections become available once the whole timeline has loaded.
-        </Text>
-      ) : null}
 
       <View style={styles.timelineRegion}>
         <FlatList
@@ -2710,18 +2472,6 @@ function AuthenticatedEventRoomScreen({
             photo.draft?.stage !== 'describe')
         }
       />
-      {journalActionTarget === null ? null : (
-        <JournalActionDialog
-          action={journalActionTarget.action}
-          busy={journalActionBusy}
-          error={journalActionErrorText}
-          onDismiss={dismissJournalAction}
-          onSubmit={(submission) => {
-            void submitJournalAction(submission);
-          }}
-          target={journalActionTarget.projection}
-        />
-      )}
       <LifecycleConfirmationDialog
         action={lifecycleAction ?? 'all-clear'}
         busy={lifecycleBusy}

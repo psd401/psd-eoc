@@ -28,7 +28,6 @@ import {
   invalidMedia,
   mediaConflict,
   mediaNotFound,
-  mediaScanPending,
   mediaUnavailable,
   TerminalMediaImageRejectionError,
 } from './errors';
@@ -556,26 +555,17 @@ function createRegistrations(
           );
         }
 
-        const scanStatus = await callObjectStore(dependencies, () =>
-          dependencies.objectStore.getMalwareScanStatus(
-            resolved.intent.storageKey,
-          ),
-        );
-        switch (scanStatus) {
-          case 'pending':
-            throw mediaScanPending();
-          case 'threats':
-            throw terminalImageRejection(
-              resolved.intent,
-              'The photo did not pass its safety scan. Choose a different image.',
-            );
-          case 'unsupported':
-          case 'access-denied':
-          case 'failed':
-            throw mediaUnavailable();
-          case 'clean':
-            break;
-        }
+        // Posting a photo no longer waits on an asynchronous malware-scan tag.
+        // The completion step ran immediately after the upload, before the
+        // scanner had tagged the object, so it read "no tag yet" as pending and
+        // the operator was told to try again -- forever, because nothing
+        // re-drove it. A staff member photographing an incident cannot wait on
+        // an out-of-band scan to finish.
+        //
+        // What still guards the bytes: the upload is size- and type-bounded,
+        // the completion below re-reads the stored object and verifies its
+        // digest, and `sanitizeImage` re-encodes the image and drops EXIF and
+        // GPS metadata rather than trusting what was uploaded.
 
         const mediaId = resolved.intent.id;
         const storageKey = readyStorageKey(resolved.intent.eventId, mediaId);
