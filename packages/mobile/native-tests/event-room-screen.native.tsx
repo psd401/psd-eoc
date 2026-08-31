@@ -182,7 +182,6 @@ function ConfirmationHarness({
   onConfirm: () => void;
   preview: LifecycleConsequencePreview | null;
 }>) {
-  const [phrase, setPhrase] = useState('');
   return (
     <LifecycleConfirmationDialog
       action={action}
@@ -192,9 +191,7 @@ function ConfirmationHarness({
       mode={mode}
       onConfirm={onConfirm}
       onDismiss={() => undefined}
-      onPhraseChange={setPhrase}
       onRefreshPreview={() => undefined}
-      phrase={phrase}
       preview={preview}
       target={{
         ...target,
@@ -1764,16 +1761,9 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
 
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'ALL CLEAR ',
-    );
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'ALL CLEAR',
-    );
+    // The modal and its destructive button are the confirmation, exactly as
+    // on the web room. There is no phrase to type.
+    expect(screen.queryByTestId('lifecycle-confirmation-input')).toBeNull();
     expectConfirmationDisabled(false);
     fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -1849,7 +1839,7 @@ describe('mobile event-room lifecycle confirmations', () => {
     expectConfirmationDisabled(true);
   });
 
-  test('uses the separate close phrase and states that close retains history without another notification', () => {
+  test('states that finishing the close notifies nobody else', () => {
     const onConfirm = jest.fn();
     render(
       <ConfirmationHarness
@@ -1865,16 +1855,7 @@ describe('mobile event-room lifecycle confirmations', () => {
         'This ends the event. Nobody else is notified. The timeline stays available.',
       ),
     ).toBeTruthy();
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'ALL CLEAR',
-    );
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'CLOSE EVENT',
-    );
+    expect(screen.queryByTestId('lifecycle-confirmation-input')).toBeNull();
     expectConfirmationDisabled(false);
     fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -1892,10 +1873,6 @@ describe('mobile event-room lifecycle confirmations', () => {
           onConfirm={onConfirm}
           preview={lifecyclePreview('real')}
         />,
-      );
-      fireEvent.changeText(
-        screen.getByTestId('lifecycle-confirmation-input'),
-        'ALL CLEAR',
       );
       expectConfirmationDisabled(false);
 

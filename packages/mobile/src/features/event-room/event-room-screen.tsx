@@ -835,17 +835,16 @@ export interface LifecycleConfirmationDialogProps {
   readonly loadingPreview: boolean;
   readonly busy: boolean;
   readonly error: string | null;
-  readonly phrase: string;
-  readonly onPhraseChange: (value: string) => void;
   readonly onDismiss: () => void;
   readonly onRefreshPreview: () => void;
   readonly onConfirm: () => void;
 }
 
 /**
- * The exact phrases the server requires for each lifecycle transition. Ending
- * an event asks the operator to type the all-clear phrase once; the close that
- * follows is part of the same confirmed decision.
+ * The exact phrases the server requires for each lifecycle transition. The
+ * client supplies them, exactly as the web route does, because the deliberate
+ * confirmation is the modal and its destructive button -- the same protection
+ * the web room has.
  */
 const ALL_CLEAR_CONFIRMATION_PHRASE = 'ALL CLEAR';
 const CLOSE_CONFIRMATION_PHRASE = 'CLOSE EVENT';
@@ -859,17 +858,11 @@ export function LifecycleConfirmationDialog({
   mode,
   onConfirm,
   onDismiss,
-  onPhraseChange,
   onRefreshPreview,
-  phrase,
   preview,
   target,
   visible,
 }: LifecycleConfirmationDialogProps) {
-  const requiredPhrase =
-    action === 'all-clear'
-      ? ALL_CLEAR_CONFIRMATION_PHRASE
-      : CLOSE_CONFIRMATION_PHRASE;
   const [freshnessTick, setFreshnessTick] = useState(0);
   const previewExpiresAt =
     preview === null ? Number.NaN : Date.parse(preview.expiresAt);
@@ -879,8 +872,7 @@ export function LifecycleConfirmationDialog({
     Date.now() < previewExpiresAt;
   const previewReady =
     action === 'close' || (preview?.sendReadiness === 'ready' && previewFresh);
-  const canConfirm =
-    !busy && !loadingPreview && previewReady && phrase === requiredPhrase;
+  const canConfirm = !busy && !loadingPreview && previewReady;
 
   useEffect(() => {
     if (action !== 'all-clear' || preview === null) return;
@@ -1036,22 +1028,6 @@ export function LifecycleConfirmationDialog({
               </View>
             )}
 
-            <View style={styles.phraseGroup}>
-              <Text style={styles.inputLabel}>
-                Type {requiredPhrase} exactly
-              </Text>
-              <TextInput
-                accessibilityLabel={`Type ${requiredPhrase} exactly`}
-                autoCapitalize="characters"
-                autoCorrect={false}
-                editable={!busy}
-                onChangeText={onPhraseChange}
-                style={styles.phraseInput}
-                testID="lifecycle-confirmation-input"
-                value={phrase}
-              />
-            </View>
-
             {error === null ? null : (
               <Text accessibilityRole="alert" style={styles.errorText}>
                 {error}
@@ -1059,7 +1035,7 @@ export function LifecycleConfirmationDialog({
             )}
 
             <ActionButton
-              accessibilityHint={`Requires the exact phrase ${requiredPhrase}`}
+              accessibilityHint="Sends the all-clear and ends the event."
               destructive
               disabled={!canConfirm}
               label={
@@ -1673,7 +1649,6 @@ function AuthenticatedEventRoomScreen({
     useState<LifecycleAction | null>(null);
   const [lifecyclePreview, setLifecyclePreview] =
     useState<LifecycleConsequencePreview | null>(null);
-  const [lifecyclePhrase, setLifecyclePhrase] = useState('');
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [lifecycleLoadingPreview, setLifecycleLoadingPreview] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
@@ -1867,7 +1842,6 @@ function AuthenticatedEventRoomScreen({
     lifecycleIdempotencyKeyRef.current = null;
     setLifecycleAction(null);
     setLifecyclePreview(null);
-    setLifecyclePhrase('');
     setLifecycleBusy(false);
     setLifecycleLoadingPreview(false);
     setLifecycleError(null);
@@ -2152,7 +2126,6 @@ function AuthenticatedEventRoomScreen({
     }
     setLifecycleAction('all-clear');
     setLifecyclePreview(null);
-    setLifecyclePhrase('');
     setLifecycleError(null);
     setLifecycleLoadingPreview(true);
     lifecycleIdempotencyKeyRef.current = null;
@@ -2219,7 +2192,6 @@ function AuthenticatedEventRoomScreen({
       lifecycleIdempotencyKeyRef.current = null;
       setLifecycleAction('close');
       setLifecyclePreview(null);
-      setLifecyclePhrase('');
       setLifecycleBusy(false);
       setLifecycleLoadingPreview(false);
       setLifecycleError(null);
@@ -2231,14 +2203,13 @@ function AuthenticatedEventRoomScreen({
   const submitLifecycle = useCallback(async () => {
     const action = lifecycleAction;
     const preview = lifecyclePreview;
-    const requiredPhrase =
+    const confirmationPhrase =
       action === 'all-clear'
         ? ALL_CLEAR_CONFIRMATION_PHRASE
         : CLOSE_CONFIRMATION_PHRASE;
     if (
       action === null ||
       lifecycleBusy ||
-      lifecyclePhrase !== requiredPhrase ||
       AppState.currentState !== 'active'
     ) {
       return;
@@ -2272,11 +2243,11 @@ function AuthenticatedEventRoomScreen({
           ? await api.allClear(
               eventId,
               preview!.id,
-              lifecyclePhrase,
+              confirmationPhrase,
               key,
               abort.signal,
             )
-          : await api.close(eventId, lifecyclePhrase, key, abort.signal);
+          : await api.close(eventId, confirmationPhrase, key, abort.signal);
       if (
         generation !== lifecycleGenerationRef.current ||
         abort.signal.aborted ||
@@ -2341,7 +2312,6 @@ function AuthenticatedEventRoomScreen({
     eventId,
     lifecycleAction,
     lifecycleBusy,
-    lifecyclePhrase,
     lifecyclePreview,
   ]);
 
@@ -2764,14 +2734,9 @@ function AuthenticatedEventRoomScreen({
           void submitLifecycle();
         }}
         onDismiss={dismissLifecycle}
-        onPhraseChange={(value) => {
-          setLifecyclePhrase(value);
-          setLifecycleError(null);
-        }}
         onRefreshPreview={() => {
           void fetchAllClearPreview();
         }}
-        phrase={lifecyclePhrase}
         preview={lifecyclePreview}
         target={target}
         visible={lifecycleAction !== null}
@@ -3101,7 +3066,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  phraseGroup: { gap: 6 },
   inputLabel: {
     color: '#102A43',
     fontSize: 15,
