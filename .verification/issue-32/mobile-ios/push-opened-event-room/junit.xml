@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="1.855" timestamp="2026-08-26T23:13:09">
-    <testcase id="Issue 32 - verify the notification opened its exact drill" name="Issue 32 - verify the notification opened its exact drill" classname="Issue 32 - verify the notification opened its exact drill" file="packages/mobile/e2e/flows/push-opened-event-room.yaml" time="1.85" timestamp="2026-08-26T23:13:09" status="SUCCESS">
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="2.179" timestamp="2026-08-30T18:09:58">
+    <testcase id="Issue 32 - verify the notification opened its exact drill" name="Issue 32 - verify the notification opened its exact drill" classname="Issue 32 - verify the notification opened its exact drill" file="packages/mobile/e2e/flows/push-opened-event-room.yaml" time="2.173" timestamp="2026-08-30T18:09:58" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only, notification"/>
       </properties>

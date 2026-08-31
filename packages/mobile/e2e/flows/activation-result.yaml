@@ -13,10 +13,11 @@ tags: [issue-32, synthetic-only]
           text: 'Allow'
           waitUntilVisible: true
           optional: true
+# Starting a drill opens its event room; there is no confirmation screen to tap
+# through on the way there.
 - extendedWaitUntil:
-    visible:
-      id: 'issue-21-activation-result'
+    visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
     timeout: 15000
-- assertVisible: 'Drill started'
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertNotVisible: '^REAL INCIDENT$'
 - pressKey: HOME

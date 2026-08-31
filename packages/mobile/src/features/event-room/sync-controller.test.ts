@@ -15,6 +15,7 @@ import {
   type EventRoomPollScheduler,
   type EventRoomSyncPort,
 } from './sync-controller';
+import { AuthenticatedRequestFailure } from '../../lib/api';
 
 const IDS = Object.freeze({
   event: '00000000-0000-4000-8000-000000000401',
@@ -289,6 +290,54 @@ describe('event-room sync controller', () => {
       controller.getSnapshot().model.entries.map(({ entry }) => entry.sequence),
     ).toEqual([1, 2]);
     expect(announcements).toEqual([]);
+    controller.stop();
+  });
+
+  test('tells the operator to update when it cannot read the response', async () => {
+    const api: EventRoomSyncPort = {
+      async sync() {
+        throw new AuthenticatedRequestFailure(
+          'invalid-response',
+          'PSD EOC returned a response this app cannot read.',
+          200,
+        );
+      },
+    };
+    const timer = manualScheduler();
+    const controller = new EventRoomSyncController(
+      IDS.event,
+      api,
+      () => {},
+      timer.scheduler,
+    );
+
+    await controller.start();
+
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.phase).toBe('error');
+    // A body this build cannot parse fails identically on every poll, so
+    // "reconnect and pull to refresh" would send the operator into a loop.
+    expect(snapshot.error).toContain('Update the PSD EOC app');
+    controller.stop();
+  });
+
+  test('still reports a recoverable interruption as temporarily unavailable', async () => {
+    const api: EventRoomSyncPort = {
+      async sync() {
+        throw new AuthenticatedRequestFailure('network', 'Network failure.');
+      },
+    };
+    const timer = manualScheduler();
+    const controller = new EventRoomSyncController(
+      IDS.event,
+      api,
+      () => {},
+      timer.scheduler,
+    );
+
+    await controller.start();
+
+    expect(controller.getSnapshot().error).toContain('temporarily unavailable');
     controller.stop();
   });
 

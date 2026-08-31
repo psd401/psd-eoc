@@ -60,7 +60,9 @@ import {
   formatLocationPayload,
   isEventComposerVisible,
   isNearLiveEdge,
+  eventRoomParticipants,
   journalEntryActionEligibility,
+  readableTimelineEntries,
   retainPendingTimelineFollow,
   timelineEntryAccessibilityLabel,
   timelineEntryText,
@@ -324,7 +326,7 @@ function EventTargetContext({
         mode={mode}
       />
       <View
-        accessibilityLabel={`Event target. ${target.eventTypeName}. ${target.facilityName}, ${target.facilityCode}. Classification and target are immutable.`}
+        accessibilityLabel={`Event target. ${target.eventTypeName}. ${target.facilityName}, ${target.facilityCode}. Classification and target are fixed.`}
         accessibilityRole="summary"
         accessible
         style={styles.eventTargetCard}
@@ -334,8 +336,7 @@ function EventTargetContext({
           {target.facilityName} · {target.facilityCode}
         </Text>
         <Text style={styles.immutableNotice}>
-          Classification and event target are immutable and cannot be changed
-          here.
+          Classification and event target are fixed and cannot be changed here.
         </Text>
       </View>
     </View>
@@ -423,7 +424,7 @@ export interface TimelineEntryCardProps {
   readonly onRedact?: () => void;
 }
 
-/** One append-only timeline fact grouped into a single screen-reader stop. */
+/** One timeline entry grouped into a single screen-reader stop. */
 export function TimelineEntryCard({
   actionEligibility,
   api,
@@ -432,6 +433,25 @@ export function TimelineEntryCard({
   projection,
 }: TimelineEntryCardProps) {
   const { entry } = projection;
+  // A state change is what happened to the event, not something a person
+  // wrote, so it gets one line instead of a card with an author on it. Web
+  // renders these the same way.
+  if (
+    projection.visibility === 'visible' &&
+    projection.entry.kind === 'system'
+  ) {
+    const summary = projection.entry.payload.summary;
+    return (
+      <Text
+        accessibilityRole="text"
+        accessible
+        style={styles.timelineMarker}
+        testID={`timeline-entry-${entry.sequence}`}
+      >
+        {summary} {new Date(entry.serverTime).toLocaleTimeString()}
+      </Text>
+    );
+  }
   const visiblePhoto =
     projection.visibility === 'visible' && projection.entry.kind === 'photo'
       ? projection.entry.payload
@@ -689,8 +709,8 @@ export function JournalActionDialog({
               <Text style={styles.retainedTitle}>Original entry retained</Text>
               <Text style={styles.retainedText}>
                 {action === 'correction'
-                  ? 'Submitting appends a correction linked to the original. It never rewrites or deletes history.'
-                  : 'Redaction hides the original from outward views, but the original remains retained in append-only history.'}
+                  ? 'Your correction is added below the original. Nothing is rewritten or deleted.'
+                  : 'This hides the content from the timeline. The original record is kept and is never deleted.'}
               </Text>
             </View>
             <Text accessibilityRole="summary" style={styles.safetyHelp}>
@@ -834,14 +854,21 @@ export interface LifecycleConfirmationDialogProps {
   readonly loadingPreview: boolean;
   readonly busy: boolean;
   readonly error: string | null;
-  readonly phrase: string;
-  readonly onPhraseChange: (value: string) => void;
   readonly onDismiss: () => void;
   readonly onRefreshPreview: () => void;
   readonly onConfirm: () => void;
 }
 
-/** Exact-phrase, foreground-only lifecycle consequence confirmation UI. */
+/**
+ * The exact phrases the server requires for each lifecycle transition. The
+ * client supplies them, exactly as the web route does, because the deliberate
+ * confirmation is the modal and its destructive button -- the same protection
+ * the web room has.
+ */
+const ALL_CLEAR_CONFIRMATION_PHRASE = 'ALL CLEAR';
+const CLOSE_CONFIRMATION_PHRASE = 'CLOSE EVENT';
+
+/** Foreground-only confirmation for ending an event. */
 export function LifecycleConfirmationDialog({
   action,
   busy,
@@ -850,14 +877,11 @@ export function LifecycleConfirmationDialog({
   mode,
   onConfirm,
   onDismiss,
-  onPhraseChange,
   onRefreshPreview,
-  phrase,
   preview,
   target,
   visible,
 }: LifecycleConfirmationDialogProps) {
-  const requiredPhrase = action === 'all-clear' ? 'ALL CLEAR' : 'CLOSE EVENT';
   const [freshnessTick, setFreshnessTick] = useState(0);
   const previewExpiresAt =
     preview === null ? Number.NaN : Date.parse(preview.expiresAt);
@@ -867,8 +891,7 @@ export function LifecycleConfirmationDialog({
     Date.now() < previewExpiresAt;
   const previewReady =
     action === 'close' || (preview?.sendReadiness === 'ready' && previewFresh);
-  const canConfirm =
-    !busy && !loadingPreview && previewReady && phrase === requiredPhrase;
+  const canConfirm = !busy && !loadingPreview && previewReady;
 
   useEffect(() => {
     if (action !== 'all-clear' || preview === null) return;
@@ -923,40 +946,31 @@ export function LifecycleConfirmationDialog({
                 <View accessibilityRole="progressbar" style={styles.loadingBox}>
                   <ActivityIndicator color="#17324D" />
                   <Text style={styles.secondaryText}>
-                    Fetching a fresh consequence preview…
+                    Checking who will be notified…
                   </Text>
                 </View>
               ) : preview === null ? (
                 <View style={styles.warningBox}>
-                  <Text style={styles.warningTitle}>Preview unavailable</Text>
+                  <Text style={styles.warningTitle}>
+                    Could not check who will be notified
+                  </Text>
                   <Text style={styles.warningText}>
-                    A fresh server preview is required before all-clear.
+                    PSD EOC has to check before it can end the event.
                   </Text>
                   <ActionButton
                     disabled={busy}
-                    label="Fetch fresh preview"
+                    label="Try again"
                     onPress={onRefreshPreview}
                   />
                 </View>
               ) : (
                 <View style={styles.previewCard} testID="all-clear-preview">
                   <Text accessibilityRole="header" style={styles.sectionTitle}>
-                    Server consequence preview
+                    Who gets notified
                   </Text>
                   <Text style={styles.previewFact}>
-                    Recipients: {preview.recipientCount}
-                  </Text>
-                  <Text style={styles.previewFact}>
-                    Readiness:{' '}
-                    {preview.sendReadiness === 'ready' ? 'Ready' : 'Blocked'}
-                  </Text>
-                  <Text style={styles.previewFact}>
-                    Consequence: change this event to all-clear and create a{' '}
-                    {
-                      getEventTheme(preview.templateMode, preview.kind)
-                        .classificationWord
-                    }{' '}
-                    all-clear notification for the channel plan below.
+                    {preview.recipientCount} staff get the all-clear below, and
+                    the event ends.
                   </Text>
                   <View style={styles.channelList}>
                     {preview.channels.map((channel) => {
@@ -965,15 +979,14 @@ export function LifecycleConfirmationDialog({
                         <View
                           key={channel.channel}
                           accessible
-                          accessibilityLabel={`${channel.channel}. ${channel.endpointCount} endpoints. Integration ${channel.integrationStatus.label}. Message preview: ${copy}`}
+                          accessibilityLabel={`${channel.channel}. ${channel.endpointCount} people. Message: ${copy}`}
                           style={styles.channelRow}
                         >
                           <Text style={styles.channelName}>
                             {channel.channel}
                           </Text>
                           <Text style={styles.channelDetail}>
-                            {channel.endpointCount} endpoints ·{' '}
-                            {channel.integrationStatus.label}
+                            {channel.endpointCount} people
                           </Text>
                           <Text style={styles.channelMessage}>{copy}</Text>
                         </View>
@@ -982,30 +995,23 @@ export function LifecycleConfirmationDialog({
                   </View>
                   {preview.blockingReasonCodes.length === 0 ? null : (
                     <Text accessibilityRole="alert" style={styles.warningText}>
-                      This action is unavailable because one or more server
-                      prerequisites are not ready. Refresh the preview; if it
-                      remains blocked, contact an administrator.
+                      PSD EOC cannot notify anyone right now, so the event
+                      cannot be ended. Try again; if it stays blocked, contact
+                      an administrator.
                     </Text>
                   )}
-                  <Text selectable style={styles.digestText}>
-                    Consequence reference: {preview.consequenceDigest}
-                  </Text>
-                  <Text style={styles.expiryText}>
-                    Preview expires{' '}
-                    {new Date(preview.expiresAt).toLocaleString()}.
-                  </Text>
                   {previewFresh ? null : (
                     <View style={styles.warningBox}>
                       <Text
                         accessibilityRole="alert"
                         style={styles.warningText}
                       >
-                        This consequence preview expired. Fetch and review a
-                        fresh preview before confirming.
+                        This check is out of date. Refresh it before ending the
+                        event.
                       </Text>
                       <ActionButton
                         disabled={busy}
-                        label="Fetch fresh preview"
+                        label="Refresh"
                         onPress={onRefreshPreview}
                       />
                     </View>
@@ -1015,31 +1021,14 @@ export function LifecycleConfirmationDialog({
             ) : (
               <View style={styles.previewCard}>
                 <Text accessibilityRole="header" style={styles.sectionTitle}>
-                  Consequence
+                  What happens
                 </Text>
                 <Text style={styles.previewFact}>
-                  This closes the all-clear event record. Closing does not send
-                  another notification. The append-only timeline remains
-                  retained.
+                  This ends the event. Nobody else is notified. The timeline
+                  stays available.
                 </Text>
               </View>
             )}
-
-            <View style={styles.phraseGroup}>
-              <Text style={styles.inputLabel}>
-                Type {requiredPhrase} exactly
-              </Text>
-              <TextInput
-                accessibilityLabel={`Type ${requiredPhrase} exactly`}
-                autoCapitalize="characters"
-                autoCorrect={false}
-                editable={!busy}
-                onChangeText={onPhraseChange}
-                style={styles.phraseInput}
-                testID="lifecycle-confirmation-input"
-                value={phrase}
-              />
-            </View>
 
             {error === null ? null : (
               <Text accessibilityRole="alert" style={styles.errorText}>
@@ -1048,23 +1037,19 @@ export function LifecycleConfirmationDialog({
             )}
 
             <ActionButton
-              accessibilityHint={`Requires the exact phrase ${requiredPhrase}`}
+              accessibilityHint="Sends the all-clear and ends the event."
               destructive
               disabled={!canConfirm}
               label={
                 busy
                   ? 'Submitting…'
                   : action === 'all-clear'
-                    ? 'Issue all-clear'
-                    : 'Close event'
+                    ? 'End event and notify staff'
+                    : 'Finish ending the event'
               }
               onPress={onConfirm}
               testID="lifecycle-confirm-button"
             />
-            <Text style={styles.noRetryText}>
-              PSD EOC never submits this action in the background and never
-              retries it automatically.
-            </Text>
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -1662,7 +1647,6 @@ function AuthenticatedEventRoomScreen({
     useState<LifecycleAction | null>(null);
   const [lifecyclePreview, setLifecyclePreview] =
     useState<LifecycleConsequencePreview | null>(null);
-  const [lifecyclePhrase, setLifecyclePhrase] = useState('');
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [lifecycleLoadingPreview, setLifecycleLoadingPreview] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
@@ -1856,7 +1840,6 @@ function AuthenticatedEventRoomScreen({
     lifecycleIdempotencyKeyRef.current = null;
     setLifecycleAction(null);
     setLifecyclePreview(null);
-    setLifecyclePhrase('');
     setLifecycleBusy(false);
     setLifecycleLoadingPreview(false);
     setLifecycleError(null);
@@ -2141,7 +2124,6 @@ function AuthenticatedEventRoomScreen({
     }
     setLifecycleAction('all-clear');
     setLifecyclePreview(null);
-    setLifecyclePhrase('');
     setLifecycleError(null);
     setLifecycleLoadingPreview(true);
     lifecycleIdempotencyKeyRef.current = null;
@@ -2174,7 +2156,7 @@ function AuthenticatedEventRoomScreen({
         preview.rosterPopulation !== currentEvent.rosterPopulation
       ) {
         throw new Error(
-          'PSD EOC rejected a consequence preview that did not match this event.',
+          'PSD EOC returned a notification check for another event.',
         );
       }
       setLifecyclePreview(preview);
@@ -2208,7 +2190,6 @@ function AuthenticatedEventRoomScreen({
       lifecycleIdempotencyKeyRef.current = null;
       setLifecycleAction('close');
       setLifecyclePreview(null);
-      setLifecyclePhrase('');
       setLifecycleBusy(false);
       setLifecycleLoadingPreview(false);
       setLifecycleError(null);
@@ -2220,11 +2201,13 @@ function AuthenticatedEventRoomScreen({
   const submitLifecycle = useCallback(async () => {
     const action = lifecycleAction;
     const preview = lifecyclePreview;
-    const requiredPhrase = action === 'all-clear' ? 'ALL CLEAR' : 'CLOSE EVENT';
+    const confirmationPhrase =
+      action === 'all-clear'
+        ? ALL_CLEAR_CONFIRMATION_PHRASE
+        : CLOSE_CONFIRMATION_PHRASE;
     if (
       action === null ||
       lifecycleBusy ||
-      lifecyclePhrase !== requiredPhrase ||
       AppState.currentState !== 'active'
     ) {
       return;
@@ -2238,7 +2221,7 @@ function AuthenticatedEventRoomScreen({
       lifecycleIdempotencyKeyRef.current = null;
       setLifecyclePreview(null);
       setLifecycleError(
-        'The consequence preview expired. Fetch and review a fresh preview before confirming.',
+        'That check is out of date. Refresh it before ending the event.',
       );
       return;
     }
@@ -2258,11 +2241,11 @@ function AuthenticatedEventRoomScreen({
           ? await api.allClear(
               eventId,
               preview!.id,
-              lifecyclePhrase,
+              confirmationPhrase,
               key,
               abort.signal,
             )
-          : await api.close(eventId, lifecyclePhrase, key, abort.signal);
+          : await api.close(eventId, confirmationPhrase, key, abort.signal);
       if (
         generation !== lifecycleGenerationRef.current ||
         abort.signal.aborted ||
@@ -2275,6 +2258,31 @@ function AuthenticatedEventRoomScreen({
       );
       if (nearLiveEdgeRef.current) followOnNextLayoutRef.current = true;
       controller.applyConfirmed(result.event, entries);
+      if (action === 'all-clear') {
+        // Ending an event is one decision. The server still requires the
+        // all-clear and then the close; the operator confirms once. If the
+        // close half fails the event is genuinely in the all-clear state and
+        // the status row offers to finish it.
+        const closeKey = Crypto.randomUUID();
+        const closed = await api.close(
+          eventId,
+          CLOSE_CONFIRMATION_PHRASE,
+          closeKey,
+          abort.signal,
+        );
+        if (
+          generation === lifecycleGenerationRef.current &&
+          !abort.signal.aborted &&
+          AppState.currentState === 'active'
+        ) {
+          controller.applyConfirmed(
+            closed.event,
+            closed.journalEntries.map((entry) =>
+              projectJournalEntryForRead(entry, false),
+            ),
+          );
+        }
+      }
       dismissLifecycle();
     } catch (error) {
       if (
@@ -2302,7 +2310,6 @@ function AuthenticatedEventRoomScreen({
     eventId,
     lifecycleAction,
     lifecycleBusy,
-    lifecyclePhrase,
     lifecyclePreview,
   ]);
 
@@ -2385,9 +2392,7 @@ function AuthenticatedEventRoomScreen({
             style={styles.secondaryText}
           >
             {sync.error ??
-              (online
-                ? 'Reading append-only history…'
-                : OFFLINE_ACTION_MESSAGE)}
+              (online ? 'Loading the timeline…' : OFFLINE_ACTION_MESSAGE)}
           </Text>
           <ActionButton
             disabled={!online}
@@ -2403,6 +2408,8 @@ function AuthenticatedEventRoomScreen({
 
   const header = sync.model.header;
   const theme = getEventTheme(event.templateMode, event.kind);
+  const timelineEntries = readableTimelineEntries(sync.model.entries);
+  const participants = eventRoomParticipants(sync.model.entries);
   const postingDisabled = !online || !eventAcceptsPosts;
   const target: EventRoomTargetIdentity = {
     eventKind: event.kind,
@@ -2449,7 +2456,7 @@ function AuthenticatedEventRoomScreen({
           {event.status === 'active' ? (
             <ActionButton
               disabled={!online}
-              label="All-clear…"
+              label="End event…"
               onPress={() => {
                 void fetchAllClearPreview();
               }}
@@ -2457,11 +2464,33 @@ function AuthenticatedEventRoomScreen({
           ) : event.status === 'all-clear' ? (
             <ActionButton
               disabled={!online}
-              label="Close event…"
+              label="Finish ending the event…"
               onPress={openCloseConfirmation}
             />
           ) : null}
         </View>
+        {participants.length === 0 ? null : (
+          <View accessible style={styles.participantRow}>
+            <Text
+              accessibilityLabel={`In this event: ${participants
+                .map((participant) => participant.name)
+                .join(', ')}`}
+              style={styles.participantRowLabel}
+            >
+              In this event
+            </Text>
+            {participants.map((participant) => (
+              <Text
+                accessibilityElementsHidden
+                importantForAccessibility="no"
+                key={participant.id}
+                style={styles.participantChip}
+              >
+                {participant.initials}
+              </Text>
+            ))}
+          </View>
+        )}
       </View>
 
       {sync.error === null ? null : (
@@ -2479,28 +2508,25 @@ function AuthenticatedEventRoomScreen({
 
       {journalActionsAuthorized && !sync.model.historyComplete ? (
         <Text accessibilityRole="summary" style={styles.actionUnavailableText}>
-          Corrections and redactions become available after the complete
-          timeline loads.
+          Corrections become available once the whole timeline has loaded.
         </Text>
       ) : null}
 
       <View style={styles.timelineRegion}>
         <FlatList
           contentContainerStyle={
-            sync.model.entries.length === 0
+            timelineEntries.length === 0
               ? styles.emptyTimelineContent
               : styles.timelineContent
           }
-          data={sync.model.entries}
+          data={timelineEntries}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
           keyExtractor={(projection) => projection.entry.id}
           ListEmptyComponent={
             <View accessible style={styles.emptyTimeline}>
-              <Text style={styles.stateTitle}>No timeline updates yet</Text>
-              <Text style={styles.secondaryText}>
-                Pull to refresh. New updates will appear in server order.
-              </Text>
+              <Text style={styles.stateTitle}>No updates yet</Text>
+              <Text style={styles.secondaryText}>Pull to refresh.</Text>
             </View>
           }
           maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
@@ -2553,8 +2579,8 @@ function AuthenticatedEventRoomScreen({
             <>
               <Text accessibilityRole="summary" style={styles.closedNotice}>
                 {eventClosed
-                  ? 'This event is closed. Its append-only timeline remains readable.'
-                  : 'This event no longer accepts timeline posts. Its append-only timeline remains readable.'}
+                  ? 'This event is closed. Its timeline is still here.'
+                  : 'This event no longer accepts updates. Its timeline is still here.'}
               </Text>
               {photo.draft?.stage === 'describe' ? null : (
                 <ActionButton
@@ -2592,7 +2618,7 @@ function AuthenticatedEventRoomScreen({
                 />
               </View>
               <Text accessibilityRole="summary" style={styles.safetyHelp}>
-                Do not include student data. A submitted update is append-only;
+                Do not include student data. Updates cannot be edited;
                 corrections create a new entry.
               </Text>
               {textError === null ? null : (
@@ -2706,14 +2732,9 @@ function AuthenticatedEventRoomScreen({
           void submitLifecycle();
         }}
         onDismiss={dismissLifecycle}
-        onPhraseChange={(value) => {
-          setLifecyclePhrase(value);
-          setLifecycleError(null);
-        }}
         onRefreshPreview={() => {
           void fetchAllClearPreview();
         }}
-        phrase={lifecyclePhrase}
         preview={lifecyclePreview}
         target={target}
         visible={lifecycleAction !== null}
@@ -2780,6 +2801,31 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     justifyContent: 'space-between',
+  },
+  participantRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 10,
+  },
+  participantRowLabel: {
+    color: '#486581',
+    fontSize: 13,
+    fontWeight: '700',
+    marginRight: 2,
+  },
+  participantChip: {
+    backgroundColor: '#EEF2F7',
+    borderColor: '#AEBACA',
+    borderRadius: 15,
+    borderWidth: 1,
+    color: '#243B53',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 28,
+    minWidth: 30,
+    textAlign: 'center',
   },
   statusText: { flex: 1, fontSize: 15, fontWeight: '800', lineHeight: 21 },
   actionButton: {
@@ -2851,6 +2897,13 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  timelineMarker: {
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
+    fontSize: 14,
+    lineHeight: 20,
+    paddingHorizontal: 4,
+    paddingVertical: 8,
   },
   timelineMetaRow: {
     flexDirection: 'row',
@@ -3018,7 +3071,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  phraseGroup: { gap: 6 },
   inputLabel: {
     color: '#102A43',
     fontSize: 15,
@@ -3035,12 +3087,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     minHeight: 48,
     paddingHorizontal: 12,
-  },
-  noRetryText: {
-    color: EVENT_ROOM_MUTED_TEXT_COLOR,
-    fontSize: 13,
-    lineHeight: 19,
-    textAlign: 'center',
   },
   errorText: {
     color: '#8B1526',

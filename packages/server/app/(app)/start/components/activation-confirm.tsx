@@ -11,6 +11,7 @@ import {
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
 import {
@@ -109,6 +110,15 @@ function integrationLabel(
     case 'blocked':
       return 'Blocked';
   }
+}
+
+function notifiedByLabel(preview: ActivationPreview): string {
+  const names = preview.channels.map((channel) =>
+    channelName(channel.channel).toLowerCase(),
+  );
+  if (names.length === 0) return 'no channel';
+  if (names.length === 1) return names[0] as string;
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
 function audienceLabel(preview: ActivationPreview): string {
@@ -227,7 +237,7 @@ function requireMatchingPreview(
     preview.rosterPopulation !== 'staff'
   ) {
     throw new StartFlowRequestError(
-      'The server returned a consequence preview for a different event selection. No event was started and no notification was queued.',
+      'PSD EOC checked a different event than the one you selected. No event was started and nothing was sent.',
       false,
       false,
     );
@@ -280,6 +290,15 @@ export function ActivationConfirm({
   const mutationInFlight = useRef(false);
   const joinIdempotencyKeys = useRef(new Map<string, string>());
   const mutationPending = pendingOperation !== null;
+  const router = useRouter();
+
+  // Starting or joining an event puts the operator in the event room, ready to
+  // post. An interstitial between the two is one more click during the minute
+  // that matters most.
+  useEffect(() => {
+    if (result === null) return;
+    router.replace(`/events/${result.eventId}`);
+  }, [result, router]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -339,7 +358,7 @@ export function ActivationConfirm({
         setPreviewError(
           error instanceof Error
             ? error.message
-            : 'The consequence preview could not be loaded.',
+            : 'PSD EOC could not check who would be notified.',
         );
       })
       .finally(() => {
@@ -416,7 +435,6 @@ export function ActivationConfirm({
         activated,
         preview,
         selection,
-        activationIdempotencyKey,
       );
       setResult({
         eventKind: event.kind,
@@ -518,33 +536,10 @@ export function ActivationConfirm({
                 : 'Drill started'
               : 'Event joined'}
           </h2>
+          <p role="status">Opening the event room…</p>
           <p>
-            <strong>{result.eventTypeName}</strong> —{' '}
-            <span
-              className={`classification-label classification-label--${result.templateMode}`}
-            >
-              <ClassificationIcon
-                kind={result.eventKind}
-                mode={result.templateMode}
-              />{' '}
-              {classificationLabel(result.eventKind, result.templateMode)}
-            </span>
-          </p>
-          <p role="status">
-            {result.kind === 'activated'
-              ? `PSD EOC durably accepted the ${result.templateMode === 'real' ? 'incident' : 'drill'} and recorded its notification intent.`
-              : 'You joined the existing event. Joining did not create another event or notification.'}
-          </p>
-          <p>
-            Provider acceptance and human receipt are tracked separately; this
-            screen does not claim either one.
-          </p>
-          <p className="action-grid">
             <Link className="button" href={`/events/${result.eventId}`}>
               Open event
-            </Link>
-            <Link className="button button--secondary" href="/">
-              Return to dashboard
             </Link>
           </p>
         </section>
@@ -581,17 +576,17 @@ export function ActivationConfirm({
           tabIndex={-1}
         >
           {previewLoading
-            ? 'Loading the current roster snapshot, active events, and channel consequences…'
-            : previewError !== null
-              ? 'Consequence preview unavailable.'
-              : preview === null
-                ? 'Consequence preview is not available.'
-                : `Consequence preview ready: ${preview.recipientCount} selected ${audienceLabel(preview)}, ${preview.channels.length} included channel preview${preview.channels.length === 1 ? '' : 's'}, notifications ${preview.sendReadiness}.`}
+            ? 'Checking who will be notified…'
+            : previewError !== null || preview === null
+              ? 'PSD EOC could not check who will be notified.'
+              : preview.sendReadiness === 'ready'
+                ? `Ready to start. ${preview.recipientCount} ${audienceLabel(preview)} will be notified by ${notifiedByLabel(preview)}.`
+                : 'Notifications are not ready, so this event cannot be started yet.'}
         </p>
 
         {previewError !== null ? (
           <section className="error-summary" role="alert">
-            <h2>Consequence preview unavailable</h2>
+            <h2>Could not check who will be notified</h2>
             <p>{previewError}</p>
             <p>No event was started and no notification was queued.</p>
             <button
@@ -599,7 +594,7 @@ export function ActivationConfirm({
               type="button"
               onClick={retryPreview}
             >
-              Load a fresh preview
+              Try again
             </button>
           </section>
         ) : null}
@@ -607,58 +602,29 @@ export function ActivationConfirm({
         {preview !== null ? (
           <>
             <section aria-labelledby="audience-heading">
-              <h2 id="audience-heading">
-                Notification audience and eligible endpoints
-              </h2>
+              <h2 id="audience-heading">Who gets notified</h2>
               <p>
                 <strong>
-                  {preview.recipientCount} selected {audienceLabel(preview)}
+                  {preview.recipientCount} {audienceLabel(preview)}
                 </strong>{' '}
-                resolved from immutable roster snapshot{' '}
-                <code>{preview.rosterSnapshotId}</code>.
+                at {selection.facilityName}, by {notifiedByLabel(preview)}.
               </p>
-              <div className="channel-grid">
-                {preview.channels.map((channel) => (
-                  <article className="channel-card" key={channel.channel}>
-                    <h3>{channelName(channel.channel)}</h3>
-                    <p>
-                      <strong>{channel.endpointCount}</strong> active endpoint
-                      {channel.endpointCount === 1 ? '' : 's'} in the pinned
-                      roster
-                    </p>
-                    <p>{integrationLabel(channel.integrationStatus.label)}</p>
-                    <ExactChannelMessage channel={channel} />
-                  </article>
-                ))}
-                {preview.channels.some(
-                  (channel) => channel.channel === 'sms',
-                ) ? null : (
-                  <article className="channel-card channel-card--disabled">
-                    <h3>Text messages</h3>
-                    <p>
-                      <strong>Not included</strong>
-                    </p>
-                    <p>
-                      Text messaging is not enabled for this preview.{' '}
-                      <strong>
-                        The notification intent will contain no SMS channel
-                      </strong>{' '}
-                      and no SMS messages will be queued from this confirmation.
-                    </p>
-                    <p>
-                      No eligible SMS endpoint count is claimed by this preview.
-                    </p>
-                  </article>
-                )}
-              </div>
-              <p>
-                Preview expires{' '}
-                <time dateTime={preview.expiresAt}>
-                  {TIME_FORMATTER.format(new Date(preview.expiresAt))}
-                </time>
-                . Counts describe eligible endpoints, not confirmed human
-                receipt.
-              </p>
+              <details className="message-preview">
+                <summary>See the exact message</summary>
+                <div className="channel-grid">
+                  {preview.channels.map((channel) => (
+                    <article className="channel-card" key={channel.channel}>
+                      <h3>{channelName(channel.channel)}</h3>
+                      <p>
+                        <strong>{channel.endpointCount}</strong> recipient
+                        {channel.endpointCount === 1 ? '' : 's'} —{' '}
+                        {integrationLabel(channel.integrationStatus.label)}
+                      </p>
+                      <ExactChannelMessage channel={channel} />
+                    </article>
+                  ))}
+                </div>
+              </details>
             </section>
 
             {preview.activeEventIds.length > 0 ? (
@@ -742,18 +708,10 @@ export function ActivationConfirm({
               </section>
             ) : (
               <section aria-labelledby="confirm-heading">
-                <h2 id="confirm-heading">Confirm the consequence</h2>
-                <p>
-                  This will start a{' '}
-                  {selection.templateMode === 'real' ? (
-                    <strong>REAL INCIDENT</strong>
-                  ) : (
-                    <strong>DRILL — TRAINING ONLY</strong>
-                  )}{' '}
-                  at {selection.facilityName} and record notification intents
-                  using the eligible endpoints shown above for an audience of{' '}
-                  {preview.recipientCount} {audienceLabel(preview)}.
-                </p>
+                <h2 id="confirm-heading">
+                  Start this{' '}
+                  {selection.templateMode === 'real' ? 'incident' : 'drill'}
+                </h2>
                 <button
                   className={`button ${
                     selection.templateMode === 'real'
@@ -770,11 +728,8 @@ export function ActivationConfirm({
                         selection.templateMode === 'real'
                           ? 'REAL incident'
                           : 'DRILL'
-                      } and create notification intents for ${preview.recipientCount} selected ${audienceLabel(preview)}`}
+                      } and notify ${preview.recipientCount} ${audienceLabel(preview)}`}
                 </button>
-                <p className="supporting-text">
-                  PSD EOC never queues this activation for an automatic retry.
-                </p>
               </section>
             )}
           </>

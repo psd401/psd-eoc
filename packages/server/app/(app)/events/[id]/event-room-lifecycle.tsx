@@ -6,7 +6,6 @@ import {
 } from '@psd-eoc/contracts';
 import { type ReactNode } from 'react';
 
-import { readableDateTime } from './event-room-timeline';
 import { blockingReasonSentence } from '../../../../lib/events/blocking-reasons';
 
 export type DialogState =
@@ -26,8 +25,7 @@ export type DialogState =
       loading: boolean;
       preview: LifecycleConsequencePreview | null;
       error: string | null;
-    }>
-  | Readonly<{ kind: 'close' }>;
+    }>;
 
 function renderedMessageContent(channel: ChannelConsequencePreview): ReactNode {
   const message = channel.renderedMessage;
@@ -57,47 +55,32 @@ function renderedMessageContent(channel: ChannelConsequencePreview): ReactNode {
 
 export function PreviewDetails({
   preview,
-  displayTimeZone,
 }: Readonly<{
   preview: LifecycleConsequencePreview;
-  displayTimeZone: string;
 }>) {
   const channelSummary = preview.channels
-    .map(
-      (channel) =>
-        `${channel.channel.toUpperCase()} (${channel.endpointCount} endpoint${
-          channel.endpointCount === 1 ? '' : 's'
-        })`,
-    )
-    .join(', ');
+    .map((channel) => channel.channel.toLowerCase())
+    .join(' and ');
   return (
-    <section aria-labelledby="all-clear-consequences-heading">
-      <h3 id="all-clear-consequences-heading">Notification consequences</h3>
+    <section aria-labelledby="all-clear-audience-heading">
+      <h3 id="all-clear-audience-heading">Who gets notified</h3>
       <p className="consequence-summary">
-        <strong>
-          {preview.recipientCount} authorized recipients across{' '}
-          {preview.channels.length} channels:
-        </strong>{' '}
-        {channelSummary}. Select “Issue all-clear and notify” to send the exact
-        messages shown below and append the all-clear, or select “Cancel” to
-        make no change.
+        <strong>{preview.recipientCount} staff</strong> by {channelSummary}.
       </p>
       {preview.channels.map((channel) => (
         <details className="channel-preview" key={channel.channel}>
           <summary>
-            {channel.channel.toUpperCase()}: {channel.endpointCount} endpoints —{' '}
-            {channel.integrationStatus.label}
+            See the exact {channel.channel.toLowerCase()} message
           </summary>
           {renderedMessageContent(channel)}
         </details>
       ))}
       {preview.sendReadiness === 'blocked' ? (
         <div className="blocked-preview" role="alert">
-          <strong>Sending is blocked.</strong>
+          <strong>PSD EOC cannot notify anyone right now.</strong>
           <p>
-            The all-clear action remains unavailable until every recipient and
-            channel consequence is ready. Cancel, correct what is named below,
-            and load a fresh preview.
+            The event cannot be ended until this is fixed. Cancel, resolve what
+            is listed below, and try again.
           </p>
           {preview.blockingReasonCodes.length > 0 ? (
             <ul>
@@ -105,53 +88,11 @@ export function PreviewDetails({
                 <li key={code}>{blockingReasonSentence(code)}</li>
               ))}
             </ul>
-          ) : null}
+          ) : (
+            <p>If it stays blocked, contact an administrator.</p>
+          )}
         </div>
       ) : null}
-      <details className="technical-consequence-details">
-        <summary>Technical consequence details</summary>
-        <dl className="event-facts">
-          <dt>Preview ID</dt>
-          <dd>
-            <code>{preview.id}</code>
-          </dd>
-          <dt>Event ID</dt>
-          <dd>
-            <code>{preview.eventId}</code>
-          </dd>
-          <dt>Event type version ID</dt>
-          <dd>
-            <code>{preview.eventTypeVersion.id}</code>
-          </dd>
-          <dt>Roster snapshot ID</dt>
-          <dd>
-            <code>{preview.rosterSnapshotId}</code>
-          </dd>
-          <dt>Consequence digest</dt>
-          <dd>
-            <code>{preview.consequenceDigest}</code>
-          </dd>
-          <dt>Preview expires</dt>
-          <dd>
-            <time dateTime={preview.expiresAt}>
-              {readableDateTime(preview.expiresAt, displayTimeZone)}
-            </time>
-          </dd>
-        </dl>
-        <p>
-          Roster population: <code>{preview.rosterPopulation}</code>
-          {preview.rosterPopulation === 'synthetic'
-            ? ' — provably unroutable training data.'
-            : '.'}
-        </p>
-        {preview.blockingReasonCodes.length > 0 ? (
-          <p role="alert">
-            This action is unavailable because one or more server prerequisites
-            are not ready. Refresh the preview; if it remains blocked, contact
-            an administrator.
-          </p>
-        ) : null}
-      </details>
     </section>
   );
 }

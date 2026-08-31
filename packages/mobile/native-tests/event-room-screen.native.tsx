@@ -182,7 +182,6 @@ function ConfirmationHarness({
   onConfirm: () => void;
   preview: LifecycleConsequencePreview | null;
 }>) {
-  const [phrase, setPhrase] = useState('');
   return (
     <LifecycleConfirmationDialog
       action={action}
@@ -192,9 +191,7 @@ function ConfirmationHarness({
       mode={mode}
       onConfirm={onConfirm}
       onDismiss={() => undefined}
-      onPhraseChange={setPhrase}
       onRefreshPreview={() => undefined}
-      phrase={phrase}
       preview={preview}
       target={{
         ...target,
@@ -1018,7 +1015,7 @@ describe('mobile event-room timeline accessibility', () => {
     expect(redactedCard.props.accessible).toBe(true);
     expect(redactedCard.props.accessibilityRole).toBe('text');
     expect(redactedCard.props.accessibilityLabel).toContain(
-      'Content redacted. The original remains retained in the append-only journal.',
+      'This content was hidden later. The original record is kept.',
     );
     expect(JSON.stringify(redacted)).not.toContain('payload');
     expect(JSON.stringify(rendered.toJSON())).not.toContain(ids.media);
@@ -1144,7 +1141,7 @@ describe('mobile event-room timeline accessibility', () => {
       />,
     );
     expect(screen.getByText('Original entry retained')).toBeTruthy();
-    expect(screen.getByText(/never rewrites or deletes history/)).toBeTruthy();
+    expect(screen.getByText(/Nothing is rewritten or deleted/)).toBeTruthy();
     fireEvent.changeText(
       screen.getByLabelText('Corrected timeline text'),
       'Corrected synthetic wording',
@@ -1172,7 +1169,7 @@ describe('mobile event-room timeline accessibility', () => {
       />,
     );
     expect(
-      screen.getByText(/original remains retained in append-only history/),
+      screen.getByText(/The original record is kept and is never deleted/),
     ).toBeTruthy();
   });
 
@@ -1209,7 +1206,7 @@ describe('mobile event-room timeline accessibility', () => {
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
-        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are immutable.',
+        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are fixed.',
       ),
     ).toBeTruthy();
     expect(
@@ -1252,7 +1249,7 @@ describe('mobile event-room timeline accessibility', () => {
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
-        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are immutable.',
+        'Event target. Synthetic lockdown. Synthetic School, SYN. Classification and target are fixed.',
       ),
     ).toBeTruthy();
     expect(
@@ -1737,20 +1734,17 @@ describe('mobile event-room lifecycle confirmations', () => {
         'REAL INCIDENT. This is a real incident. Staff notifications are not a drill.',
       ),
     ).toBeTruthy();
-    expect(screen.getByText('Recipients: 42')).toBeTruthy();
     expect(
-      screen.getByText(
-        /Consequence: change this event to all-clear and create a REAL INCIDENT all-clear notification/,
+      screen.getByText(/42 staff get the all-clear below, and the event ends/),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText(
+        'push. 42 people. Message: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic push all-clear instructions.',
       ),
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
-        'push. 42 endpoints. Integration live-verified. Message preview: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic push all-clear instructions.',
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByLabelText(
-        'email. 40 endpoints. Integration live-verified. Message preview: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic email all-clear instructions.',
+        'email. 40 people. Message: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic email all-clear instructions.',
       ),
     ).toBeTruthy();
     expect(
@@ -1764,16 +1758,9 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
 
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'ALL CLEAR ',
-    );
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'ALL CLEAR',
-    );
+    // The modal and its destructive button are the confirmation, exactly as
+    // on the web room. There is no phrase to type.
+    expect(screen.queryByTestId('lifecycle-confirmation-input')).toBeNull();
     expectConfirmationDisabled(false);
     fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -1795,9 +1782,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /Consequence: change this event to all-clear and create a DRILL — TRAINING ONLY all-clear notification/,
-      ),
+      screen.getByText(/2 staff get the all-clear below, and the event ends/),
     ).toBeTruthy();
     expect(
       screen.getByText(
@@ -1823,9 +1808,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /Consequence: change this event to all-clear and create a TEST — NOT A REAL INCIDENT all-clear notification/,
-      ),
+      screen.getByText(/2 staff get the all-clear below, and the event ends/),
     ).toBeTruthy();
     expect(screen.queryByText('DRILL — TRAINING ONLY')).toBeNull();
   });
@@ -1842,14 +1825,14 @@ describe('mobile event-room lifecycle confirmations', () => {
 
     expect(
       screen.getByText(
-        /one or more server prerequisites are not ready.*Refresh the preview.*contact an administrator/su,
+        /cannot notify anyone right now.*Try again.*contact an administrator/su,
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/PUSH_NOT_LIVE_VERIFIED/u)).toBeNull();
     expectConfirmationDisabled(true);
   });
 
-  test('uses the separate close phrase and states that close retains history without another notification', () => {
+  test('states that finishing the close notifies nobody else', () => {
     const onConfirm = jest.fn();
     render(
       <ConfirmationHarness
@@ -1862,19 +1845,10 @@ describe('mobile event-room lifecycle confirmations', () => {
 
     expect(
       screen.getByText(
-        'This closes the all-clear event record. Closing does not send another notification. The append-only timeline remains retained.',
+        'This ends the event. Nobody else is notified. The timeline stays available.',
       ),
     ).toBeTruthy();
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'ALL CLEAR',
-    );
-    expectConfirmationDisabled(true);
-    fireEvent.changeText(
-      screen.getByTestId('lifecycle-confirmation-input'),
-      'CLOSE EVENT',
-    );
+    expect(screen.queryByTestId('lifecycle-confirmation-input')).toBeNull();
     expectConfirmationDisabled(false);
     fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
@@ -1893,10 +1867,6 @@ describe('mobile event-room lifecycle confirmations', () => {
           preview={lifecyclePreview('real')}
         />,
       );
-      fireEvent.changeText(
-        screen.getByTestId('lifecycle-confirmation-input'),
-        'ALL CLEAR',
-      );
       expectConfirmationDisabled(false);
 
       act(() => {
@@ -1906,7 +1876,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       expectConfirmationDisabled(true);
       expect(
         screen.getByText(
-          'This consequence preview expired. Fetch and review a fresh preview before confirming.',
+          'This check is out of date. Refresh it before ending the event.',
         ),
       ).toBeTruthy();
       fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));

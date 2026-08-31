@@ -6,6 +6,7 @@ import {
   type Event,
 } from '@psd-eoc/contracts';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
 import {
@@ -34,6 +35,13 @@ export function JoinEventButton({
   const [joinedEventId, setJoinedEventId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [outcomeUnknown, setOutcomeUnknown] = useState(false);
+  const router = useRouter();
+
+  // Joining lands in the event room. Nothing useful happens on the way there.
+  useEffect(() => {
+    if (joinedEventId === null) return;
+    router.replace(`/events/${joinedEventId}`);
+  }, [joinedEventId, router]);
 
   useEffect(() => {
     if (joinedEventId !== null || error !== null) {
@@ -82,7 +90,7 @@ export function JoinEventButton({
         role="status"
         tabIndex={-1}
       >
-        {classification.label} event joined.{' '}
+        {classification.label} event joined. Opening the event room…{' '}
         <Link href={`/events/${joinedEventId}`}>Open event</Link>
       </p>
     );

@@ -38,8 +38,8 @@ function resultCopy({ kind, mode }: ResultIdentity) {
         : 'Drill started'
       : 'Event joined',
     status: activated
-      ? `PSD EOC durably accepted the ${mode === 'real' ? 'incident' : 'drill'} and recorded its notification intent.`
-      : 'You joined the existing event. Joining did not create another event or notification.',
+      ? `Opening the ${mode === 'real' ? 'incident' : 'drill'}…`
+      : 'Opening the event…',
   });
 }
 
@@ -109,7 +109,6 @@ export function ActivationResultContent({
   testID,
 }: ActivationResultProps) {
   const theme = getEventTheme(mode, eventKind);
-  const activated = kind === 'activated';
   const { heading, status } = resultCopy({
     eventKind,
     eventTypeName,
@@ -146,12 +145,6 @@ export function ActivationResultContent({
         <Text style={[styles.status, { color: theme.colors.textMuted }]}>
           {status}
         </Text>
-        {activated ? (
-          <Text style={[styles.truth, { color: theme.colors.textMuted }]}>
-            Provider acceptance and human receipt are tracked separately; this
-            screen does not claim either one.
-          </Text>
-        ) : null}
       </View>
 
       {onOpenEvent === undefined && onReturnHome === undefined ? null : (

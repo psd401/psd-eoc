@@ -194,7 +194,7 @@ export default function UnlockScreen() {
             ) : (
               <>
                 <Pressable
-                  accessibilityHint="Opens a consequence warning before any local credential is removed"
+                  accessibilityHint="Asks you to confirm before any local credential is removed"
                   accessibilityLabel="Sign out on this device"
                   accessibilityRole="button"
                   accessibilityState={{ busy, disabled: busy }}
@@ -213,8 +213,8 @@ export default function UnlockScreen() {
                   </Text>
                 </Pressable>
                 <Text style={styles.removalHelp}>
-                  Review the consequences before removing this locked device's
-                  encrypted session.
+                  You will be asked to confirm before this locked device's
+                  encrypted session is removed.
                 </Text>
               </>
             )}

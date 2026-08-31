@@ -43,6 +43,9 @@ test.describe('synthetic-event-room-regression', () => {
     await expect(
       page.getByRole('status').filter({ hasText: 'Connected' }),
     ).toBeVisible({ timeout: 30_000 });
+    // Photo and location are secondary to posting an update, so they sit
+    // behind disclosures.
+    await page.locator('summary', { hasText: 'Add a photo' }).click();
     await expect(
       page.getByRole('heading', { name: 'Post a photo' }),
     ).toBeVisible();
@@ -74,6 +77,7 @@ test.describe('synthetic-event-room-regression', () => {
       page.getByRole('status').filter({ hasText: 'Connected' }),
     ).toBeVisible({ timeout: 35_000 });
 
+    await page.locator('summary', { hasText: 'Add a location' }).click();
     await page.getByRole('radio', { name: 'Unknown location' }).check();
     await page.getByLabel('Why the location is unknown').fill(UNKNOWN_REASON);
     await page.getByRole('button', { name: 'Post location' }).click();
@@ -81,11 +85,9 @@ test.describe('synthetic-event-room-regression', () => {
     await expect(
       page.getByText('Active', { exact: true }).first(),
     ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'End event' })).toBeVisible();
     await expect(
-      page.getByRole('button', { name: 'Review all-clear' }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole('button', { name: 'Review event close' }),
+      page.getByRole('button', { name: 'Finish ending the event' }),
     ).toHaveCount(0);
     await expectAxeClean(page);
     await page.screenshot({

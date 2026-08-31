@@ -513,7 +513,7 @@ export function parseMutationResult(
         authorization?.lifecyclePreviewId !== expectedPreviewId
       ) {
         throw new EventRoomRequestError(
-          'PSD EOC returned lifecycle evidence for a different consequence preview. The exact request is retained for verification.',
+          'PSD EOC answered a different request than the one you confirmed. Your request is kept so you can check the timeline.',
           true,
         );
       }
@@ -581,6 +581,29 @@ export function parseMutationResult(
   };
 }
 
+/**
+ * Reports whether the fully loaded timeline already contains the entry a
+ * retained request was trying to create.
+ *
+ * A retained record exists because a request's outcome was unknown. Once the
+ * entry it would have written is visibly on the timeline, the outcome is not
+ * unknown any more, and continuing to block every composer behind a manual
+ * "I checked the timeline" button asks the operator to confirm something the
+ * client can already see. Only ever call this with complete history: a
+ * half-drained timeline cannot prove an absence, and this must never be used
+ * to conclude that a request did *not* land.
+ */
+export function retainedCommandLandedInTimeline(
+  command: RetainedCommand,
+  entries: readonly JournalEntryReadProjection[],
+): boolean {
+  return entries.some(
+    (projection) =>
+      projection.visibility === 'visible' &&
+      journalEntryProvesCommand(command, projection.entry),
+  );
+}
+
 interface DeadlineSignal {
   readonly signal: AbortSignal;
   readonly didExpire: () => boolean;
@@ -632,7 +655,7 @@ function parseLifecyclePreview(
     parsed.data.rosterPopulation !== baselineEvent.rosterPopulation
   ) {
     throw new EventRoomRequestError(
-      'PSD EOC returned an invalid all-clear consequence preview.',
+      'PSD EOC returned an unusable check of who would be notified.',
       false,
     );
   }

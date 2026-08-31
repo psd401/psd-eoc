@@ -17,6 +17,7 @@ import {
   locationPayloadFromDraft,
   webLifecycleCommandBody,
 } from './event-room';
+import { retainedCommandLandedInTimeline } from './event-room-transport';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -226,6 +227,40 @@ const ENTRIES = [
     },
   }),
 ] as const;
+
+function systemEntry(
+  input: Readonly<{
+    id: string;
+    sequence: number;
+    code: string;
+    summary: string;
+    serverTime: string;
+    displayName?: string | null;
+    userId?: string;
+  }>,
+): JournalEntry {
+  return JournalEntrySchema.parse({
+    id: input.id,
+    eventId: IDS.event,
+    sequence: input.sequence,
+    author: {
+      kind: 'human',
+      userId: input.userId ?? IDS.user,
+      sessionId: IDS.session,
+    },
+    authorDisplayName: input.displayName ?? null,
+    source: 'web',
+    serverTime: input.serverTime,
+    clientTime: null,
+    supersedes: null,
+    kind: 'system',
+    payload: {
+      code: input.code,
+      summary: input.summary,
+      relatedRecordId: null,
+    },
+  });
+}
 
 function render(
   event: Event,
@@ -500,9 +535,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(originalHtml).toContain('Unknown location');
 
     const correctedHtml = render(activeEvent('real'), [known, correction]);
-    expect(correctedHtml).toContain(
-      'This original entry was superseded, not deleted.',
-    );
+    expect(correctedHtml).toContain('Edited later — see');
     expect(correctedHtml).toContain(
       'Reduced precision to match verified evidence.',
     );
@@ -547,7 +580,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(paginated).toContain('<span>Loading event history</span>');
     expect(paginated).toContain('aria-busy="true"');
     expect(paginated).toContain(
-      'Timeline content remains hidden until all authorized history',
+      'Updates appear once the whole timeline has loaded',
     );
   });
 
@@ -557,16 +590,14 @@ describe('event room server-rendered safety and history state', () => {
     expect(html.indexOf('Entry 1:')).toBeLessThan(html.indexOf('Entry 2:'));
     expect(html.indexOf('Entry 2:')).toBeLessThan(html.indexOf('Entry 3:'));
     expect(html.indexOf('Entry 3:')).toBeLessThan(html.indexOf('Entry 4:'));
-    expect(html).toContain('This original entry was superseded, not deleted.');
+    expect(html).toContain('Edited later — see');
     expect(html).toContain('Clarified the verified location.');
     expect(html).toContain('Removed unneeded personal information.');
-    expect(html).toContain(
-      'Original content is hidden because a later append-only redaction',
-    );
-    expect(html).toContain('Client-reported time:');
-    expect(html).toContain(
-      'Server-assigned sequence determines receipt order. Server-recorded and client-reported times are shown as supporting evidence.',
-    );
+    expect(html).toContain('This content was hidden later.');
+    // Sequence and client-reported time are record-keeping, not reading
+    // material during an incident; the entry card no longer carries them.
+    expect(html).not.toContain('Client-reported time:');
+    expect(html).not.toContain('Server-assigned sequence');
     expect(html).toContain('Redact entry 1');
     expect(html).not.toContain('Correct entry 1');
     expect(html).not.toContain('Redact entry 3');
@@ -603,20 +634,151 @@ describe('event room server-rendered safety and history state', () => {
     });
     const closedHtml = render(closed, []);
 
-    expect(active).toContain('Review all-clear');
-    expect(active).not.toContain('Review event close');
-    expect(active.indexOf('Review all-clear')).toBeLessThan(
+    // Ending an event is one action from the room, whatever half-finished
+    // state a previous attempt left behind.
+    expect(active).toContain('End event');
+    expect(active).not.toContain('Finish ending the event');
+    expect(active.indexOf('End event')).toBeLessThan(
       active.indexOf('Post an update'),
     );
-    expect(allClearHtml).toContain('Review event close');
-    expect(allClearHtml).not.toContain('Review all-clear');
-    expect(allClearHtml.indexOf('Review event close')).toBeLessThan(
-      allClearHtml.indexOf('Post an update'),
-    );
+    expect(allClearHtml).toContain('Finish ending the event');
+    expect(allClearHtml).toContain('Staff have the all-clear');
     expect(closedHtml).toContain('14 minutes');
-    expect(closedHtml).toContain(
-      'The event is closed. Its complete journal remains retained.',
+    expect(closedHtml).toContain('This event is closed.');
+    expect(closedHtml).not.toContain('End event');
+  });
+
+  test('keeps routine system bookkeeping out of the timeline', () => {
+    const html = render(activeEvent('drill'), [
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000030',
+        sequence: 1,
+        code: 'event-created',
+        summary: 'Event record created.',
+        serverTime: '2026-08-10T16:01:00.000Z',
+        displayName: 'Robin Vega',
+      }),
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000031',
+        sequence: 2,
+        code: 'notification-intent-recorded',
+        summary: 'Notification send intent recorded.',
+        serverTime: '2026-08-10T16:01:01.000Z',
+        displayName: 'Robin Vega',
+      }),
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000032',
+        sequence: 3,
+        code: 'participant-joined',
+        summary: 'Authenticated participant joined the event.',
+        serverTime: '2026-08-10T16:02:00.000Z',
+        displayName: 'Sam Okonkwo',
+        userId: '10000000-0000-4000-8000-000000000040',
+      }),
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000033',
+        sequence: 4,
+        code: 'participant-joined',
+        summary: 'Authenticated participant joined the event.',
+        serverTime: '2026-08-10T16:02:40.000Z',
+        displayName: 'Sam Okonkwo',
+        userId: '10000000-0000-4000-8000-000000000040',
+      }),
+      textEntry({
+        id: IDS.original,
+        sequence: 5,
+        text: 'Synthetic drill update.',
+        serverTime: '2026-08-10T16:03:00.000Z',
+        clientTime: null,
+        supersedes: null,
+      }),
+    ]);
+
+    expect(html).not.toContain('Event record created.');
+    expect(html).not.toContain('Notification send intent recorded.');
+    expect(html).not.toContain('Authenticated participant joined the event.');
+    expect(html).toContain('Synthetic drill update.');
+    // One card for the one thing a person wrote.
+    expect(html.match(/class="timeline-entry/gu)).toHaveLength(1);
+  });
+
+  test('shows who is in the event once each, however often they joined', () => {
+    const html = render(activeEvent('drill'), [
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000030',
+        sequence: 1,
+        code: 'event-created',
+        summary: 'Event record created.',
+        serverTime: '2026-08-10T16:01:00.000Z',
+        displayName: 'Robin Vega',
+      }),
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000032',
+        sequence: 2,
+        code: 'participant-joined',
+        summary: 'Authenticated participant joined the event.',
+        serverTime: '2026-08-10T16:02:00.000Z',
+        displayName: 'Sam Okonkwo',
+        userId: '10000000-0000-4000-8000-000000000040',
+      }),
+      systemEntry({
+        id: '10000000-0000-4000-8000-000000000033',
+        sequence: 3,
+        code: 'participant-joined',
+        summary: 'Authenticated participant joined the event.',
+        serverTime: '2026-08-10T16:02:40.000Z',
+        displayName: 'Sam Okonkwo',
+        userId: '10000000-0000-4000-8000-000000000040',
+      }),
+    ]);
+
+    expect(html).toContain('In this event');
+    expect(html.match(/class="participant-chip"/gu)).toHaveLength(2);
+    expect(html).toContain('>RV<');
+    expect(html).toContain('>SO<');
+    expect(html.match(/>SO</gu)).toHaveLength(1);
+  });
+
+  test('resolves a retained request the timeline already answers', () => {
+    const clientTime = '2026-08-10T16:03:00.000Z';
+    const text = 'Synthetic retained update.';
+    const command = {
+      version: 1 as const,
+      eventId: IDS.event,
+      ownerSessionId: IDS.session,
+      apiUrl: `/events/${IDS.event}/api`,
+      operation: 'post-text' as const,
+      idempotencyKey: 'post-text:10000000-0000-4000-8000-000000000050',
+      bodyJson: JSON.stringify({ operation: 'post-text', text, clientTime }),
+      createdAt: clientTime,
+    };
+    const landed = projectJournalEntryForRead(
+      textEntry({
+        id: IDS.original,
+        sequence: 1,
+        text,
+        serverTime: '2026-08-10T16:03:01.000Z',
+        clientTime,
+        supersedes: null,
+      }),
+      false,
     );
+    const unrelated = projectJournalEntryForRead(
+      textEntry({
+        id: IDS.correction,
+        sequence: 2,
+        text: 'A different synthetic update.',
+        serverTime: '2026-08-10T16:04:00.000Z',
+        clientTime,
+        supersedes: null,
+      }),
+      false,
+    );
+
+    expect(retainedCommandLandedInTimeline(command, [landed])).toBe(true);
+    // An absent entry proves nothing: the operator still decides.
+    expect(retainedCommandLandedInTimeline(command, [unrelated])).toBe(false);
+    expect(retainedCommandLandedInTimeline(command, [])).toBe(false);
   });
 
   test('renders private photo description without embedding a public URL', () => {
@@ -678,9 +840,7 @@ describe('event room server-rendered safety and history state', () => {
     });
     const html = render(activeEvent('real'), [photoEntry(), redaction]);
 
-    expect(html).toContain(
-      'Original content is hidden because a later append-only redaction',
-    );
+    expect(html).toContain('This content was hidden later.');
     expect(html).not.toContain(
       'Exterior assembly area with staff accountability teams',
     );
@@ -718,9 +878,7 @@ describe('event room server-rendered safety and history state', () => {
       />,
     );
 
-    expect(html).toContain(
-      'Original content is hidden because a later append-only redaction',
-    );
+    expect(html).toContain('This content was hidden later.');
     expect(html).not.toContain(IDS.media);
     expect(html).not.toContain('Load private photo');
     expect(html).not.toContain('<img');

@@ -76,10 +76,16 @@ test.describe('synthetic-drill-lifecycle', () => {
     await expect(
       page.getByRole('status').filter({ hasText: /Connected|Connecting/ }),
     ).toBeVisible();
-    const lifecycle = page.getByRole('region', { name: 'Event state' });
+    const lifecycle = page.getByRole('region', { name: 'Event status' });
     const composer = page.getByRole('heading', { name: 'Post an update' });
+    const timeline = page.getByRole('heading', { name: 'Event timeline' });
+    // Posting is what the room is for, so the composer comes before the
+    // timeline; the status panel stays above both.
     expect((await lifecycle.boundingBox())?.y).toBeLessThan(
       (await composer.boundingBox())?.y ?? 0,
+    );
+    expect((await composer.boundingBox())?.y).toBeLessThan(
+      (await timeline.boundingBox())?.y ?? 0,
     );
     await expectAxeClean(page);
     await page.screenshot({
@@ -99,69 +105,57 @@ test.describe('synthetic-drill-lifecycle', () => {
       fullPage: true,
     });
 
-    const allClearOpener = page.getByRole('button', {
-      name: 'Review all-clear',
-    });
-    await allClearOpener.focus();
+    const endOpener = page.getByRole('button', { name: 'End event' });
+    await endOpener.focus();
     await page.keyboard.press('Enter');
-    const allClearDialog = page.getByRole('dialog', {
-      name: 'Review and issue all-clear',
-    });
-    await expect(allClearDialog).toBeVisible();
-    const allClearCancel = allClearDialog.getByRole('button', {
-      name: 'Cancel',
-    });
-    await expect(
-      allClearDialog.getByText(/recipients across .* channels/i),
-    ).toBeVisible();
-    await expect(allClearCancel).toBeFocused();
+    const endDialog = page.getByRole('dialog', { name: 'End this event' });
+    await expect(endDialog).toBeVisible();
+    const endCancel = endDialog.getByRole('button', { name: 'Cancel' });
+    await expect(endDialog.getByText(/staff by/iu)).toBeVisible();
+    await expect(endCancel).toBeFocused();
     await page.keyboard.press('Escape');
-    await expect(allClearDialog).toBeHidden();
-    await expect(allClearOpener).toBeFocused();
+    await expect(endDialog).toBeHidden();
+    await expect(endOpener).toBeFocused();
     await page.keyboard.press('Space');
-    await expect(allClearDialog).toBeVisible();
-    await expect(allClearDialog.locator('input')).toHaveCount(0);
-    await expect(allClearDialog.locator('input[type="checkbox"]')).toHaveCount(
-      0,
-    );
+    await expect(endDialog).toBeVisible();
+    await expect(endDialog.locator('input')).toHaveCount(0);
+    // Raw preview identifiers and digests are record-keeping, not operator
+    // reading material.
     await expect(
-      allClearDialog.getByText(/recipients across .* channels/i),
-    ).toBeVisible();
-    await expect(
-      allClearDialog.getByText(/Select “Issue all-clear and notify”/u),
-    ).toBeVisible();
-    await expect(
-      allClearDialog.getByText('Technical consequence details'),
-    ).toBeVisible();
-    await expect(allClearCancel).toBeFocused();
+      endDialog.getByText('Technical consequence details'),
+    ).toHaveCount(0);
+    await expect(endCancel).toBeFocused();
     await expectAxeClean(page);
     await page.screenshot({
       path: evidencePath('synthetic-drill-all-clear-review-mobile-390.png'),
       fullPage: true,
     });
+    // The dialog re-renders when its preview settles; wait for the final
+    // render before asserting where Shift+Tab lands.
+    await expect(
+      endDialog.getByRole('button', { name: 'End event and notify staff' }),
+    ).toBeEnabled();
     await page.keyboard.press('Shift+Tab');
     await expect(
-      allClearDialog.getByRole('button', {
-        name: 'Issue all-clear and notify',
-      }),
+      endDialog.getByRole('button', { name: 'End event and notify staff' }),
     ).toBeFocused();
     const allClearResponsePromise = waitForLifecycleResponse(
       page,
       fixture.eventId,
       'all-clear',
     );
+    const closeResponsePromise = waitForLifecycleResponse(
+      page,
+      fixture.eventId,
+      'close',
+    );
+    // One confirmed action performs both server transitions.
     await page.keyboard.press('Enter');
     const allClearResponse = await allClearResponsePromise;
     expect(allClearResponse.status()).toBe(200);
     const allClearTransition = EventTransitionSchema.parse(
       ((await allClearResponse.json()) as { transition?: unknown }).transition,
     );
-    await expect(
-      page.getByText('All-clear issued', { exact: true }).first(),
-    ).toBeVisible();
-    await expect(
-      page.getByRole('button', { name: 'Review event close' }),
-    ).toBeVisible();
 
     const allClearAudits = await lifecycleAudit(
       'all-clear-event',
@@ -174,43 +168,6 @@ test.describe('synthetic-drill-lifecycle', () => {
       principalKind: 'human',
     });
 
-    const closeOpener = page.getByRole('button', {
-      name: 'Review event close',
-    });
-    await closeOpener.focus();
-    await page.keyboard.press('Enter');
-    const closeDialog = page.getByRole('dialog', {
-      name: 'Review and close event',
-    });
-    await expect(closeDialog).toBeVisible();
-    const closeCancel = closeDialog.getByRole('button', { name: 'Cancel' });
-    await expect(closeCancel).toBeFocused();
-    await page.keyboard.press('Escape');
-    await expect(closeDialog).toBeHidden();
-    await expect(closeOpener).toBeFocused();
-    await page.keyboard.press('Space');
-    await expect(closeDialog).toBeVisible();
-    await expect(closeDialog.locator('input')).toHaveCount(0);
-    await expect(
-      closeDialog.getByText(
-        'No recipients or notification channels are contacted.',
-      ),
-    ).toBeVisible();
-    await expect(
-      closeDialog.getByText('Technical close details'),
-    ).toBeVisible();
-    await expect(closeCancel).toBeFocused();
-    await expectAxeClean(page);
-    await page.keyboard.press('Shift+Tab');
-    await expect(
-      closeDialog.getByRole('button', { name: 'Close event' }),
-    ).toBeFocused();
-    const closeResponsePromise = waitForLifecycleResponse(
-      page,
-      fixture.eventId,
-      'close',
-    );
-    await page.keyboard.press('Enter');
     const closeResponse = await closeResponsePromise;
     expect(closeResponse.status()).toBe(200);
     const closeTransition = EventTransitionSchema.parse(
@@ -219,6 +176,9 @@ test.describe('synthetic-drill-lifecycle', () => {
     await expect(
       page.getByText('Closed', { exact: true }).first(),
     ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'End event' })).toHaveCount(
+      0,
+    );
 
     const closeAudits = await lifecycleAudit(
       'close-event',

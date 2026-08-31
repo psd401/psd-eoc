@@ -11,3 +11,8 @@ coverage/
 *.log
 cdk.out/
 .turbo/
+
+# Maestro writes per-run debug output and device logs next to the retained
+# evidence. Only the JUnit results and screenshots are evidence.
+.verification/**/debug/
+.verification/**/artifacts/

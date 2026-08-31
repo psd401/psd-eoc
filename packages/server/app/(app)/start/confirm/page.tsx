@@ -110,10 +110,7 @@ export default async function ConfirmStartPage({
         <div className="page-heading__copy">
           <p className="eyebrow">{facility.code}</p>
           <h1>Review and confirm</h1>
-          <p className="lede">
-            Review the current roster snapshot and every notification channel
-            before making the final human decision.
-          </p>
+          <p className="lede">Check who gets notified, then start the event.</p>
         </div>
         <Link className="button button--secondary" href={selectionHref}>
           Change event type

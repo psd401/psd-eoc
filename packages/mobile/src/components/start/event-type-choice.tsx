@@ -25,7 +25,7 @@ export function EventTypeChoice({
 
   return (
     <ClassifiedActionButton
-      accessibilityHint="Opens a current consequence preview. No event is started and nothing is queued by this choice."
+      accessibilityHint="Shows who would be notified. No event is started and nothing is sent by this choice."
       accessibilityLabel={`${theme.classificationWord}. Choose ${name}`}
       disabled={disabled}
       mode={mode}

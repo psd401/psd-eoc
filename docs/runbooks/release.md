@@ -63,8 +63,15 @@ native build version, **Disabled — embedded store bundle only**, and
 provider record; a provider version alone is not launch evidence. Update only
 the corresponding readiness row for the boundary actually observed.
 
-The current app/runtime is 1.0.5. Remote updates are disabled, so every code or
-asset change requires another app-version bump and fresh store builds. The
+iOS and Android ship the same app from the same source at the same version.
+Release them together: a platform left behind is running different code from
+the one that was verified, and the version alone will not say so.
+
+The current app/runtime is 1.0.6, and the newest builds the stores hold are
+1.0.5/build 12 on iOS and 1.0.5/code 6 on Android, so 1.0.6 still has to be
+built and submitted before any device runs it. Remote updates are disabled, so
+every code or asset change requires another app-version bump and fresh store
+builds. The
 EAS `production` profile is the exact current store-build path; `production`
 is the iOS submit profile, `internal` is the bounded Android Internal-test
 submit profile, and `production` is the Android Closed-test draft profile.
