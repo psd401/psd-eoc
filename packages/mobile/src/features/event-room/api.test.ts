@@ -470,6 +470,34 @@ describe('mobile event-room API', () => {
     expect(result.cursor).toBe('opaque_cursor_2');
   });
 
+  test('syncs a timeline carrying fields this build has never shipped', async () => {
+    // A shipped build cannot be updated over the air, so a new server field
+    // must not be able to make every timeline page unreadable. Adding
+    // authorDisplayName did exactly that to 1.0.5 in the field.
+    const response = {
+      eventId: IDS.event,
+      header: trustedHeader(),
+      event: { ...activeSyntheticEvent(), acknowledgedByCount: 4 },
+      entries: [
+        {
+          visibility: 'visible',
+          entry: { ...journalEntry('text', 1), reactionSummary: ['ok'] },
+        },
+      ],
+      cursor: 'opaque_cursor_3',
+      hasMore: false,
+      snapshotSequence: 1,
+      serverRegion: 'us-west-2',
+    };
+    const { api } = requestHarness(response);
+
+    const result = await api.sync(IDS.event, null);
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.event?.id).toBe(IDS.event);
+    expect(result.cursor).toBe('opaque_cursor_3');
+  });
+
   test('text, location, and photo operations share one event route and preserve caller idempotency', async () => {
     const text = journalEntry('text', 1);
     const location = journalEntry('location', 2);

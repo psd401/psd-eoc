@@ -214,9 +214,7 @@ export function DeliveryTestPreviewConfirmation({
       >
         {classification.label} · LIVE CANARY
       </p>
-      <h2 id="live-canary-confirm-heading">
-        3. Review consequences and confirm
-      </h2>
+      <h2 id="live-canary-confirm-heading">3. Review and confirm</h2>
       <p>
         This is a real provider send to the exact approved controlled canary
         endpoints. {classification.explanation}
@@ -284,7 +282,7 @@ export function DeliveryTestPreviewConfirmation({
           <dd className="code-value">
             <code>{preview.endpointReferenceDigest}</code>
           </dd>
-          <dt>Consequence digest</dt>
+          <dt>Message fingerprint</dt>
           <dd className="code-value">
             <code>{preview.consequenceDigest}</code>
           </dd>
@@ -524,7 +522,7 @@ export function DeliveryTestConsole({
       setPreviewError(
         error instanceof Error
           ? error.message
-          : 'The consequence preview could not be loaded. No notification was queued.',
+          : 'PSD EOC could not check who would be notified. Nothing was sent.',
       );
     } finally {
       previewInFlight.current = false;
@@ -557,7 +555,6 @@ export function DeliveryTestConsole({
       const event = requireMatchingDeliveryTestActivationResult(
         result,
         preview,
-        idempotencyKey,
       );
       setActivatedEventId(event.id);
     } catch (error) {
@@ -962,7 +959,7 @@ export function DeliveryTestConsole({
       )}
 
       <section className="panel" aria-labelledby="preview-heading">
-        <h2 id="preview-heading">2. Load exact DRILL consequence preview</h2>
+        <h2 id="preview-heading">2. Check who would be notified</h2>
         <p>
           Loading a preview is read-only: it never starts an event, queues a
           notification, or contacts a provider. Only the exact pinned approved
@@ -1029,7 +1026,7 @@ export function DeliveryTestConsole({
               activateOutcomeUnknown
             }
           >
-            {previewPending ? 'Loading consequence preview…' : 'Load preview'}
+            {previewPending ? 'Checking…' : 'Check'}
           </button>
         </form>
       </section>

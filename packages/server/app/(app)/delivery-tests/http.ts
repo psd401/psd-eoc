@@ -258,7 +258,7 @@ export async function handleCreateDeliveryTestPreview(
     assertNoClientConfirmation(request);
     if (request.headers.has(DELIVERY_TEST_IDEMPOTENCY_HEADER)) {
       throw new SyntaxError(
-        'Consequence preview requests cannot carry mutation metadata.',
+        'A notification check cannot carry mutation metadata.',
       );
     }
     const input = CreateDeliveryTestPreviewInputSchema.parse(

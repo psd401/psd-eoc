@@ -60,8 +60,8 @@ tags: [issue-32, synthetic-only]
 - assertVisible: '.*Integration: Mocked — training data only.*'
 - scrollUntilVisible:
     element:
-      text: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
+      text: 'Start a separate DRILL — TRAINING ONLY and notify 2 synthetic recipients'
     direction: DOWN
-- assertVisible: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
-- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
+- assertVisible: 'Start a separate DRILL — TRAINING ONLY and notify 2 synthetic recipients'
+- tapOn: 'Start a separate DRILL — TRAINING ONLY and notify 2 synthetic recipients'
 - runFlow: activation-result.yaml

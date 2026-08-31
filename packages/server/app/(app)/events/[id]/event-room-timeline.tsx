@@ -84,9 +84,8 @@ function EntryContent({
   if (redacted || projection.visibility === 'redacted') {
     return (
       <p className="entry-content redacted-content">
-        Original content is hidden because a later append-only redaction
-        supersedes this entry. Its sequence, timing, and provenance remain in
-        the journal.
+        This content was hidden later. Who wrote it and when are kept on the
+        record.
       </p>
     );
   }
@@ -215,7 +214,7 @@ export function TimelineEntry({
 
       {ownSupersession === null ? null : (
         <p className="supersession-notice">
-          This entry is an appended {ownSupersession.kind} of{' '}
+          {ownSupersession.kind === 'correction' ? 'Corrects' : 'Hides'}{' '}
           <a href={`#entry-${ownSupersession.entryId}`}>
             entry {ownSupersession.entrySequence}
           </a>
@@ -225,10 +224,9 @@ export function TimelineEntry({
 
       {latestSupersession === null ? null : (
         <p className="supersession-notice">
-          This original entry was superseded, not deleted. Latest:{' '}
+          Edited later — see{' '}
           <a href={`#entry-${latestSupersession.entry.id}`}>
-            {latestSupersession.entry.supersedes?.kind ?? 'update'} entry{' '}
-            {latestSupersession.entry.sequence}
+            entry {latestSupersession.entry.sequence}
           </a>
           .
         </p>
@@ -248,13 +246,6 @@ export function TimelineEntry({
       />
       <p className="entry-meta">
         <span>{actorLabel(entry)}</span>
-        <span>Source: {entry.source}</span>
-        <span>
-          Client-reported time:{' '}
-          {entry.clientTime === null
-            ? 'not supplied'
-            : readableDateTime(entry.clientTime, displayTimeZone)}
-        </span>
       </p>
 
       {!mayCorrect && !mayRedact ? null : (

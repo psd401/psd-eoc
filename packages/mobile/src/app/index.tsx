@@ -194,6 +194,18 @@ export default function HomeScreen() {
   }
 
   const mutationSnapshot = startMutation.snapshot;
+
+  // Starting or joining opens the event room. A confirmation screen in between
+  // is one more tap during the minute that matters most.
+  useEffect(() => {
+    if (!isFocused || mutationSnapshot.phase !== 'succeeded') return;
+    const { eventId } = mutationSnapshot.completion;
+    if (!startMutation.acknowledge()) return;
+    router.push({
+      pathname: '/events/[id]',
+      params: { id: eventId },
+    } as Href);
+  }, [isFocused, mutationSnapshot, router, startMutation]);
   if (isFocused && mutationSnapshot.phase === 'checking-recovery') {
     return (
       <SafeAreaView style={styles.page}>
@@ -516,7 +528,7 @@ export default function HomeScreen() {
               </Text>
               <Text style={styles.sectionIntro}>
                 Choosing a site and mode does not start an event or notify
-                anyone. A separate consequence confirmation is always required.
+                anyone. You confirm before anything is sent.
               </Text>
 
               {data.facilities.length === 0 ? (

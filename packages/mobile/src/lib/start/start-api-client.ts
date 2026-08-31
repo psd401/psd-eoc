@@ -29,6 +29,7 @@ import {
   type JsonResponseSchema,
   type RequestAuthenticated,
 } from '../api';
+import { tolerantResponseSchema } from '../api/forward-compatible-parse';
 import { OfflineMutationDeniedError } from '../auth/auth-errors';
 
 export type StartAuthenticatedRequest = RequestAuthenticated;
@@ -274,7 +275,7 @@ async function historicalEventTypeName(
       {
         method: 'GET',
         path: `/event-types/api?operation=version&eventTypeVersionId=${encodeURIComponent(event.eventTypeVersion.id)}`,
-        schema: EventTypeVersionSchema,
+        schema: tolerantResponseSchema(EventTypeVersionSchema),
       },
       'query',
     );
@@ -379,7 +380,7 @@ export async function createPreview(
       path: '/api/mobile/start/preview',
       body: selection,
       idempotencyKey,
-      schema: ActivationPreviewSchema,
+      schema: tolerantResponseSchema(ActivationPreviewSchema),
     },
     'preview',
   );
@@ -513,7 +514,7 @@ export async function activate(
       path: '/api/mobile/start/activate',
       body,
       idempotencyKey,
-      schema: StartEventResultSchema,
+      schema: tolerantResponseSchema(StartEventResultSchema),
     },
     'mutation',
   );
@@ -542,7 +543,7 @@ export async function join(
       path: `/api/events/${encodeURIComponent(eventId)}/join`,
       body: {},
       idempotencyKey,
-      schema: JoinEventResultSchema,
+      schema: tolerantResponseSchema(JoinEventResultSchema),
     },
     'mutation',
   );

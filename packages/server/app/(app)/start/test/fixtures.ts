@@ -14,6 +14,10 @@ import {
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import { z } from 'zod';
+import {
+  digestCapabilityValue,
+  scopeTransitionIdempotencyKey,
+} from '../../../../lib/capabilities/engine';
 
 const uuid = (suffix: number): string =>
   `15000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
@@ -88,6 +92,12 @@ export type StartFlowPlaywrightFixture = z.infer<
  * Contract-valid browser-only activation result. The matching POST is
  * intercepted before it can reach the server, database, outbox, or provider.
  */
+/**
+ * Mirrors the production activation response. The retained transition key is
+ * the capability-and-principal scoped digest the server stores, never the raw
+ * caller key -- a fixture that echoed the caller key hid a client-side
+ * mismatch that failed every live activation.
+ */
 export function activationResultFixture(
   preview: ActivationPreview,
   idempotencyKey: string,
@@ -121,7 +131,11 @@ export function activationResultFixture(
     confirmationId: PLAYWRIGHT_IDS.activationConfirmation,
     consequenceDigest: preview.consequenceDigest,
     targeting,
-    idempotencyKey,
+    idempotencyKey: scopeTransitionIdempotencyKey(
+      'start-event',
+      digestCapabilityValue(actor),
+      idempotencyKey,
+    ),
     transition: 'activate' as const,
     eventId: PLAYWRIGHT_IDS.activatedEvent,
     from: 'draft' as const,

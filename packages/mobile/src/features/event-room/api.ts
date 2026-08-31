@@ -25,6 +25,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import type { JsonResponseSchema, RequestAuthenticated } from '../../lib/api';
+import { parseIgnoringNewServerFields } from '../../lib/api/forward-compatible-parse';
 
 function record(value: unknown): Readonly<Record<string, unknown>> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -79,7 +80,10 @@ function journalMutationSchema(
   matchesRequest: (entry: JournalEntry) => boolean,
 ): JsonResponseSchema<JournalEntryReadProjection> {
   return schema((value) => {
-    const entry = JournalEntrySchema.parse(record(value).entry);
+    const entry = parseIgnoringNewServerFields(
+      JournalEntrySchema,
+      record(value).entry,
+    );
     if (
       entry.eventId !== eventId ||
       entry.kind !== kind ||
@@ -107,7 +111,10 @@ function journalSupersessionSchema(
   matchesRequest: (entry: JournalEntry) => boolean,
 ): JsonResponseSchema<JournalEntryReadProjection> {
   return schema((value) => {
-    const entry = JournalEntrySchema.parse(record(value).entry);
+    const entry = parseIgnoringNewServerFields(
+      JournalEntrySchema,
+      record(value).entry,
+    );
     if (
       entry.eventId !== eventId ||
       entry.kind !== kind ||
@@ -141,7 +148,8 @@ function allClearPreviewSchema(
   eventId: string,
 ): JsonResponseSchema<LifecycleConsequencePreview> {
   return schema((value) => {
-    const preview = LifecycleConsequencePreviewSchema.parse(
+    const preview = parseIgnoringNewServerFields(
+      LifecycleConsequencePreviewSchema,
       record(value).preview,
     );
     if (preview.eventId !== eventId || preview.purpose !== 'all-clear') {
@@ -171,7 +179,10 @@ function allClearSchema(
   lifecyclePreviewId: string,
 ): JsonResponseSchema<AllClearEventResult> {
   return schema((value) => {
-    const result = AllClearEventResultSchema.parse(lifecycleFields(value));
+    const result = parseIgnoringNewServerFields(
+      AllClearEventResultSchema,
+      lifecycleFields(value),
+    );
     if (
       result.event.id !== eventId ||
       result.transition.transition !== 'all-clear' ||
@@ -189,7 +200,10 @@ function allClearSchema(
 
 function closeSchema(eventId: string): JsonResponseSchema<CloseEventResult> {
   return schema((value) => {
-    const result = CloseEventResultSchema.parse(lifecycleFields(value));
+    const result = parseIgnoringNewServerFields(
+      CloseEventResultSchema,
+      lifecycleFields(value),
+    );
     if (
       result.event.id !== eventId ||
       result.transition.transition !== 'close' ||
@@ -223,7 +237,10 @@ export class EventRoomApi {
       method: 'GET',
       path: `${eventRoomPath(parsedEventId)}${query}`,
       schema: schema((value) => {
-        const result = EventRoomSyncResultSchema.parse(value);
+        const result = parseIgnoringNewServerFields(
+          EventRoomSyncResultSchema,
+          value,
+        );
         if (result.eventId !== parsedEventId) {
           throw new Error('PSD EOC returned another event room.');
         }
@@ -492,7 +509,10 @@ export class EventRoomApi {
       body: input,
       idempotencyKey,
       schema: schema((value) => {
-        const intent = MediaUploadIntentSchema.parse(value);
+        const intent = parseIgnoringNewServerFields(
+          MediaUploadIntentSchema,
+          value,
+        );
         if (
           intent.eventId !== parsedEventId ||
           intent.byteLength !== input.byteLength ||
@@ -517,7 +537,7 @@ export class EventRoomApi {
       path: `/api/media/upload-intents/${encodeURIComponent(uploadIntentId)}/complete`,
       idempotencyKey,
       schema: schema((value) => {
-        const media = MediaRecordSchema.parse(value);
+        const media = parseIgnoringNewServerFields(MediaRecordSchema, value);
         if (media.uploadIntentId !== uploadIntentId) {
           throw new Error('PSD EOC completed another photo upload.');
         }
@@ -537,7 +557,7 @@ export class EventRoomApi {
       method: 'GET',
       path: `/api/media/events/${parsedEventId}/${encodeURIComponent(mediaId)}/read-grant`,
       schema: schema((value) => {
-        const grant = MediaReadGrantSchema.parse(value);
+        const grant = parseIgnoringNewServerFields(MediaReadGrantSchema, value);
         if (grant.eventId !== parsedEventId || grant.mediaId !== mediaId) {
           throw new Error('PSD EOC returned another photo read grant.');
         }

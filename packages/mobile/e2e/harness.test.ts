@@ -95,10 +95,10 @@ describe('issue-32 mobile E2E harness', () => {
     );
     expect(start.match(/id: 'issue-21-drill-event-type'/gu)).toHaveLength(2);
     expect(start).toContain(
-      "- tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'",
+      "- tapOn: 'Start a separate DRILL — TRAINING ONLY and notify 2 synthetic recipients'",
     );
     expect(start).toContain(
-      "element:\n      text: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'\n    direction: DOWN",
+      "element:\n      text: 'Start a separate DRILL — TRAINING ONLY and notify 2 synthetic recipients'\n    direction: DOWN",
     );
     expect(start).not.toContain("element:\n      id: 'issue-21-confirm-drill'");
     expect(start).toContain('- runFlow: activation-result.yaml');
@@ -109,7 +109,10 @@ describe('issue-32 mobile E2E harness', () => {
     expect(activationResult).toContain("text: 'Allow'");
     expect(activationResult).toContain('waitUntilVisible: true');
     expect(activationResult).toContain('optional: true');
-    expect(activationResult).toContain("id: 'issue-21-activation-result'");
+    expect(activationResult).toContain(
+      'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+    );
+    expect(activationResult).not.toContain("id: 'issue-21-activation-result'");
     const iosNotification = await Bun.file(
       resolve(flowRoot, 'open-push-ios.yaml'),
     ).text();
@@ -146,8 +149,11 @@ describe('issue-32 mobile E2E harness', () => {
     expect(lifecycle).toContain(
       "element:\n      text: '.*Synthetic mobile issue 32 update.*'\n    direction: UP",
     );
-    expect(lifecycle).toContain("inputText: 'ALL CLEAR'");
-    expect(lifecycle).not.toContain('Close event');
+    // Ending an event is one confirmed action with no phrase to type, so the
+    // flow neither types one nor reaches a second lifecycle step.
+    expect(lifecycle).not.toContain('lifecycle-confirmation-input');
+    expect(lifecycle).toContain("visible: 'Status: closed'");
+    expect(lifecycle).not.toContain('Finish ending the event');
 
     const syntheticFixture = await Bun.file(
       resolve(mobileRoot, 'src/lib/start/issue-21-synthetic-fixture.ts'),

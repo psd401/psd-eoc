@@ -349,13 +349,9 @@ describe('monthly delivery-test browser safety', () => {
 
     const idempotencyKey = 'activate:synthetic-delivery-test';
     const result = boundResult(preview, idempotencyKey);
-    expect(
-      requireMatchingDeliveryTestActivationResult(
-        result,
-        preview,
-        idempotencyKey,
-      ),
-    ).toBe(result.event);
+    expect(requireMatchingDeliveryTestActivationResult(result, preview)).toBe(
+      result.event,
+    );
     if (result.notificationIntent === null) {
       throw new Error('Synthetic activation result omitted its intent.');
     }
@@ -370,11 +366,7 @@ describe('monthly delivery-test browser safety', () => {
       },
     });
     expect(() =>
-      requireMatchingDeliveryTestActivationResult(
-        mismatch,
-        preview,
-        idempotencyKey,
-      ),
+      requireMatchingDeliveryTestActivationResult(mismatch, preview),
     ).toThrow(DeliveryTestRequestError);
   });
 

@@ -1,5 +1,5 @@
 appId: ${APP_ID}
-name: Issue 32 - post text and all-clear the opened drill
+name: Issue 32 - post text and end the opened drill
 tags: [issue-32, synthetic-only, event-room]
 ---
 - assertTrue:
@@ -21,7 +21,7 @@ tags: [issue-32, synthetic-only, event-room]
     visible: '.*Synthetic mobile issue 32 update.*'
     timeout: 15000
 - tapOn:
-    text: 'All-clear…'
+    text: 'End event…'
     enabled: true
 - extendedWaitUntil:
     visible:
@@ -29,15 +29,7 @@ tags: [issue-32, synthetic-only, event-room]
     timeout: 15000
 - assertVisible: 'Confirm all-clear'
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
-- assertVisible: '.*Integration mocked.*'
-- scrollUntilVisible:
-    element:
-      id: 'lifecycle-confirmation-input'
-    direction: DOWN
-- tapOn:
-    id: 'lifecycle-confirmation-input'
-- inputText: 'ALL CLEAR'
-- hideKeyboard
+- assertVisible: '.*2 staff get the all-clear below.*'
 - scrollUntilVisible:
     element:
       id: 'lifecycle-confirm-button'
@@ -48,8 +40,9 @@ tags: [issue-32, synthetic-only, event-room]
 - tapOn:
     id: 'lifecycle-confirm-button'
     enabled: true
+# One confirmation performs the all-clear and the close.
 - extendedWaitUntil:
-    visible: 'Status: all clear'
+    visible: 'Status: closed'
     timeout: 15000
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertNotVisible: '^REAL INCIDENT$'

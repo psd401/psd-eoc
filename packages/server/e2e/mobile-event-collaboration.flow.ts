@@ -57,34 +57,32 @@ test.describe('mobile-event-collaboration', () => {
       .getByLabel('Reason for correction')
       .fill(CORRECTION_REASON);
     await correctionDialog
-      .getByRole('button', { name: 'Append correction' })
+      .getByRole('button', { name: 'Post correction' })
       .click();
 
     const correctionCard = page.locator('article.timeline-entry', {
       hasText: CORRECTED,
     });
     await expect(correctionCard).toBeVisible();
-    await expect(originalCard).toContainText(
-      'This original entry was superseded, not deleted.',
-    );
+    await expect(originalCard).toContainText('Edited later — see');
     await correctionCard.getByRole('button', { name: /Redact entry/u }).click();
 
     const redactionDialog = page.getByRole('dialog', {
       name: /Redact entry/u,
     });
     await expect(redactionDialog).toContainText(
-      'The original journal record, sequence, timing, and provenance are never deleted.',
+      'The original record, its time, and who wrote it are kept and are never deleted.',
     );
     await redactionDialog
       .getByLabel('Reason for redaction')
       .fill(REDACTION_REASON);
     await redactionDialog
-      .getByRole('button', { name: 'Append redaction' })
+      .getByRole('button', { name: 'Hide this entry' })
       .click();
 
     await expect(
       page.getByText(
-        'Original content is hidden because a later append-only redaction supersedes this entry. Its sequence, timing, and provenance remain in the journal.',
+        'This content was hidden later. Who wrote it and when are kept on the record.',
       ),
     ).toBeVisible();
     await expect(page.getByText(REDACTION_REASON)).toBeVisible();

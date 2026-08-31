@@ -20,6 +20,8 @@ import {
   type MediaUploadIntent,
 } from '@psd-eoc/contracts';
 
+import { parseIgnoringNewServerFields } from '../../lib/api/forward-compatible-parse';
+
 const PHOTO_DRAFT_VERSION = 1 as const;
 const PHOTO_PAYLOAD_VALIDATION_MEDIA_ID =
   '00000000-0000-4000-8000-000000000000';
@@ -575,7 +577,7 @@ function validateIntent(
   manifest: PhotoDraftManifest,
   expectedIntentId: string | null,
 ): MediaUploadIntent {
-  const intent = MediaUploadIntentSchema.parse(value);
+  const intent = parseIgnoringNewServerFields(MediaUploadIntentSchema, value);
   if (
     intent.eventId !== manifest.eventId ||
     intent.byteLength !== manifest.byteLength ||
@@ -595,7 +597,7 @@ function validateMedia(
   value: unknown,
   manifest: PhotoDraftManifest,
 ): MediaRecord {
-  const media = MediaRecordSchema.parse(value);
+  const media = parseIgnoringNewServerFields(MediaRecordSchema, value);
   if (
     media.eventId !== manifest.eventId ||
     media.uploadIntentId !== manifest.uploadIntentId
@@ -647,7 +649,7 @@ function validateAppendedPhoto(
   value: unknown,
   manifest: PhotoDraftManifest,
 ): JournalEntry {
-  const entry = JournalEntrySchema.parse(value);
+  const entry = parseIgnoringNewServerFields(JournalEntrySchema, value);
   if (!isExactCanonicalPhoto(entry, manifest)) {
     throw new PhotoDraftOperationError(
       'unknown',

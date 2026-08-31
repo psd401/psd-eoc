@@ -69,7 +69,7 @@ function outcomeUnknown(path: DeliveryTestRequestPath, status?: number) {
 
 function safeFailureMessage(path: DeliveryTestRequestPath): string {
   if (path === DELIVERY_TEST_PREVIEW_PATH) {
-    return 'The consequence preview could not be loaded. No event was started and no notification was queued.';
+    return 'PSD EOC could not check who would be notified. No event was started and nothing was sent.';
   }
   return 'The server outcome is unknown. Nothing will retry automatically. Check current events and delivery-test reports before making a fresh decision.';
 }
@@ -162,7 +162,7 @@ export async function requestDeliveryTest<Output>(
     dispose();
     throw new DeliveryTestRequestError(
       response.ok
-        ? `PSD EOC returned an invalid ${path === DELIVERY_TEST_PREVIEW_PATH ? 'consequence preview' : 'action response'}. No automatic retry will occur.`
+        ? `PSD EOC returned an invalid ${path === DELIVERY_TEST_PREVIEW_PATH ? 'notification check' : 'action response'}. No automatic retry will occur.`
         : safeFailureMessage(path),
       path === DELIVERY_TEST_PREVIEW_PATH,
       outcomeUnknown(path, response.status),
@@ -184,7 +184,7 @@ export async function requestDeliveryTest<Output>(
   } catch {
     throw new DeliveryTestRequestError(
       path === DELIVERY_TEST_PREVIEW_PATH
-        ? 'PSD EOC returned an invalid consequence preview. No event was started and no notification was queued.'
+        ? 'PSD EOC returned an unusable notification check. No event was started and nothing was sent.'
         : 'PSD EOC returned an invalid action response. Treat the outcome as unresolved and contact district technology.',
       path === DELIVERY_TEST_PREVIEW_PATH,
       path !== DELIVERY_TEST_PREVIEW_PATH,
@@ -214,7 +214,7 @@ export function requireMatchingDeliveryTestPreview(
     activation.consequenceDigest !== preview.consequenceDigest
   ) {
     throw new DeliveryTestRequestError(
-      'The server returned a consequence preview for a different DRILL target or event type. No event was started and no notification was queued.',
+      'PSD EOC checked a different DRILL target or event type. No event was started and nothing was sent.',
       false,
       false,
     );
@@ -291,7 +291,6 @@ function resultMismatch(): DeliveryTestRequestError {
 export function requireMatchingDeliveryTestActivationResult(
   result: StartEventResult,
   preview: DeliveryTestPreview,
-  idempotencyKey: string,
 ): Event {
   const metadata = result.notificationIntent?.deliveryTest;
   if (
@@ -307,17 +306,12 @@ export function requireMatchingDeliveryTestActivationResult(
   }
 
   try {
-    return requireMatchingActivationResult(
-      result,
-      preview.activationPreview,
-      {
-        eventKind: 'drill',
-        eventTypeVersionId: preview.activationPreview.eventTypeVersion.id,
-        facilityId: preview.activationPreview.facilityId,
-        templateMode: 'drill',
-      },
-      idempotencyKey,
-    );
+    return requireMatchingActivationResult(result, preview.activationPreview, {
+      eventKind: 'drill',
+      eventTypeVersionId: preview.activationPreview.eventTypeVersion.id,
+      facilityId: preview.activationPreview.facilityId,
+      templateMode: 'drill',
+    });
   } catch (error) {
     if (error instanceof StartFlowRequestError) throw resultMismatch();
     throw error;
