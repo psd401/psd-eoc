@@ -8,6 +8,8 @@ docs/archive/
 packages/server/app/(app)/start/test/vendor/
 packages/mobile/android/
 packages/mobile/ios/
+packages/mobile/.expo/
+packages/mobile/expo-env.d.ts
 
 # Next.js creates this production-build output during the root verification gate.
 **/.next/**
