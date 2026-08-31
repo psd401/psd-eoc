@@ -1,9 +1,6 @@
 'use client';
 
-import {
-  type JournalEntry,
-  type JournalEntryReadProjection,
-} from '@psd-eoc/contracts';
+import { type JournalEntryReadProjection } from '@psd-eoc/contracts';
 
 import { LocationEntryContent } from './event-room-location';
 import {
@@ -142,14 +139,11 @@ interface TimelineEntryProps {
   readonly displayTimeZone: string;
   readonly projection: JournalEntryReadProjection;
   readonly supersededBy: readonly JournalEntryReadProjection[];
-  readonly commandsBlocked: boolean;
   readonly photoMountMode: PrivatePhotoMountMode;
   readonly photoLoadCoordinator: PrivatePhotoLoadCoordinator;
   readonly timelineScrollRef: Readonly<{
     current: HTMLDivElement | null;
   }>;
-  readonly onCorrect: (entry: JournalEntry, opener: HTMLElement) => void;
-  readonly onRedact: (entry: JournalEntry, opener: HTMLElement) => void;
   readonly onActivateOlderPhoto: (entryId: string) => void;
   readonly classificationLabel: string;
   readonly realEvent: boolean;
@@ -161,12 +155,9 @@ export function TimelineEntry({
   displayTimeZone,
   projection,
   supersededBy,
-  commandsBlocked,
   photoMountMode,
   photoLoadCoordinator,
   timelineScrollRef,
-  onCorrect,
-  onRedact,
   onActivateOlderPhoto,
   classificationLabel,
   realEvent,
@@ -180,13 +171,6 @@ export function TimelineEntry({
     supersededBy.some(
       (candidate) => candidate.entry.supersedes?.kind === 'redaction',
     );
-  const visibleEntry =
-    projection.visibility === 'visible' ? projection.entry : null;
-  const mayCorrect =
-    (visibleEntry?.kind === 'text' || visibleEntry?.kind === 'location') &&
-    latestSupersession === null;
-  const mayRedact =
-    visibleEntry !== null && entry.kind !== 'system' && !redacted;
   const ownSupersession = entry.supersedes;
   const classes = [
     'timeline-entry',
@@ -247,33 +231,6 @@ export function TimelineEntry({
       <p className="entry-meta">
         <span>{actorLabel(entry)}</span>
       </p>
-
-      {!mayCorrect && !mayRedact ? null : (
-        <div className="entry-actions">
-          {mayCorrect && visibleEntry !== null ? (
-            <button
-              aria-haspopup="dialog"
-              className="secondary"
-              disabled={commandsBlocked}
-              onClick={(event) => onCorrect(visibleEntry, event.currentTarget)}
-              type="button"
-            >
-              Correct entry {entry.sequence}
-            </button>
-          ) : null}
-          {mayRedact && visibleEntry !== null ? (
-            <button
-              aria-haspopup="dialog"
-              className="secondary"
-              disabled={commandsBlocked}
-              onClick={(event) => onRedact(visibleEntry, event.currentTarget)}
-              type="button"
-            >
-              Redact entry {entry.sequence}
-            </button>
-          ) : null}
-        </div>
-      )}
     </article>
   );
 }
