@@ -168,6 +168,9 @@ describe('mobile distribution configuration', () => {
     ]) {
       expect(compact).toContain(expected);
     }
+    expect(release).toContain(
+      'iOS and Android ship the same app from the same source at the same version.',
+    );
     expect(release).toContain('The current app/runtime is 1.0.6');
     // The store record stays factual: 1.0.6 is not installable until it is
     // built and submitted.

@@ -50,5 +50,7 @@ diagnostic subset, not a substitute.
   pull request.
 - Cross-package domain changes start in `packages/contracts`.
 - Web, mobile, REST, and MCP mutations use the server capability engine.
+- Mobile is one app for two stores: land and verify every change on iOS _and_
+  Android, never one of them.
 - Preserve applied migrations and append-only evidence byte-for-byte; correct
   current truth with a superseding record.
