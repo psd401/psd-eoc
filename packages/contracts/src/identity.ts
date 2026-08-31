@@ -1123,34 +1123,6 @@ export type NativePushBuildIdentity = z.infer<
  * Owns one protected server allowlist entry for native push registration.
  * The allowlist is deployment configuration and is empty when omitted.
  */
-export const PushRegistrationBuildAuthorizationSchema = z
-  .object({
-    platform: z.enum(['ios', 'android']),
-    provider: PushProviderSchema,
-    serviceEnvironment: PushServiceEnvironmentSchema,
-    build: NativePushBuildIdentitySchema,
-  })
-  .strict()
-  .superRefine((authorization, context) => {
-    if (
-      !pushProviderMatchesPlatform(
-        authorization.provider,
-        authorization.platform,
-      )
-    ) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Push provider is incompatible with the native platform.',
-        path: ['provider'],
-      });
-    }
-  })
-  .readonly();
-
-/** Protected push-registration build authorization inferred from its schema. */
-export type PushRegistrationBuildAuthorization = z.infer<
-  typeof PushRegistrationBuildAuthorizationSchema
->;
 
 /**
  * Owns native push-token registration input. The token is untrusted contact

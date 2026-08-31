@@ -687,10 +687,11 @@ describe('minimal isolated resource shape', () => {
     // Thirteen queues: health, source/dead-letter pairs for delivery, email,
     // SMS work, SMS receipts, and push, plus the SES callback source/DLQ pair.
     template.resourceCountIs('AWS::SQS::Queue', 13);
-    // Sixteen retained secrets include the live application and bootstrap
-    // credentials, six exact internal worker-route bearers, the build
-    // allowlist, and protected Expo, APNs, and FCM credential placeholders.
-    template.resourceCountIs('AWS::SecretsManager::Secret', 16);
+    // Fifteen retained secrets include the live application and bootstrap
+    // credentials, six exact internal worker-route bearers, and protected
+    // Expo, APNs, and FCM credential placeholders. The push build allowlist
+    // is deliberately not among them.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 15);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
@@ -938,7 +939,6 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/database/admin',
         '/psd-eoc/database/application',
         '/psd-eoc/google-oidc-cookie-secret',
-        '/psd-eoc/mobile/push-build-allowlist',
         '/psd-eoc/providers/apns-direct',
         '/psd-eoc/providers/expo-access-token',
         '/psd-eoc/providers/fcm-direct',
@@ -960,7 +960,6 @@ describe('minimal isolated resource shape', () => {
       '/psd-eoc/database/admin',
       '/psd-eoc/database/application',
       '/psd-eoc/google-oidc-cookie-secret',
-      '/psd-eoc/mobile/push-build-allowlist',
       '/psd-eoc/providers/apns-direct',
       '/psd-eoc/providers/expo-access-token',
       '/psd-eoc/providers/fcm-direct',
@@ -1298,7 +1297,6 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
         'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
         'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN',
-        'PSD_EOC_PUSH_REGISTRATION_BUILD_ALLOWLIST',
         'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
       ].sort(),
     );
@@ -3191,7 +3189,6 @@ describe('configured-unverified provider readiness boundary', () => {
         'PushIntegrationTruth',
         'PushQueueArn',
         'PushQueueUrl',
-        'PushRegistrationBuildAllowlistSecretArn',
         'PushWorkerDeploymentState',
         'PushWorkerLogGroupName',
         'PushWorkerServiceArn',

@@ -179,39 +179,23 @@ log, ticket, workflow, or source file:
 - `/psd-eoc/providers/expo-access-token` is one JSON secret containing the
   exact keys `accessToken` and `status`; `status` must be exactly `verified`.
   The stack-generated `UNCONFIGURED` value makes worker startup fail closed.
-- `/psd-eoc/mobile/push-build-allowlist` is a JSON array of exact build
-  authorizations. Each entry contains `platform`, the literal provider `expo`,
-  and `build.applicationId`, `build.applicationVersion`,
-  `build.nativeBuildVersion`, `build.expoProjectId`, and the literal
-  `build.updateMode` value `embedded-only`.
 - `EXPO_CREDENTIAL_VERIFICATION_REFERENCE` is a bounded, non-secret reference
   to retained EAS/APNs/FCM credential and exact-build evidence. `UNVERIFIED` is
   rejected.
 
-For example, this is the shape of one synthetic allowlist entry; it is not an
-approved build:
+Development and preview EAS profiles set push registration to `false`;
+production sets the public client opt-in to `true`. Registration itself is
+authorized by the caller's authenticated staff session.
 
-```json
-[
-  {
-    "platform": "ios",
-    "provider": "expo",
-    "serviceEnvironment": "production",
-    "build": {
-      "applicationId": "org.example.eoc",
-      "applicationVersion": "1.2.3",
-      "nativeBuildVersion": "42",
-      "expoProjectId": "00000000-0000-4000-8000-000000000278",
-      "updateMode": "embedded-only"
-    }
-  }
-]
-```
-
-Development and preview EAS profiles set push registration to `false`.
-Production sets the public client opt-in to `true`, but that flag alone grants
-nothing: a missing, malformed, duplicate, or nonmatching protected server
-allowlist denies registration.
+There is deliberately no per-build allowlist. One used to exist: every shipped
+application version and native build number had to be added by hand to a
+protected secret before any device running that build could register for push
+or receive a send. It failed silently — a release that nobody remembered to add
+looked completely normal until someone installed it and found notifications
+dead — and the only thing it defended against was a staff member running a
+modified client they could already read everything through. Do not reintroduce
+a mechanism that requires a manual step per release to keep emergency
+notifications working.
 
 Enabling the worker can consume retained queue items. While its desired count
 is still zero, review the queue and append-only attempt state by sanitized ID,
