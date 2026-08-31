@@ -77,6 +77,14 @@ Follow these unless Kris says otherwise:
   first.
 - **One capability layer.** Web, REST, and MCP use the server capability engine.
   Never add a side-door mutation path.
+- **iOS and Android stay in sync.** `packages/mobile` is one app for both
+  stores. A mobile change is not finished when it works on one platform: the
+  same version ships to both, and any behavior, copy, or flow change must land
+  for both and be verified on both. `bun packages/mobile/e2e/run.ts ios` and
+  `bun packages/mobile/e2e/run.ts android` are the check — running one and
+  calling it done is how the two drift apart. Platform-conditional code needs
+  a stated reason in the PR body; keyboard insets and system fonts qualify,
+  product behavior does not.
 - **Accessibility in the same PR.** Activation, event timeline, and all-clear
   must be keyboard- and screen-reader-operable when you build them, not later.
 - **Runtimes:** Bun. `bun install`, `bun run`, `bun test`. Not npm/npx/node.
