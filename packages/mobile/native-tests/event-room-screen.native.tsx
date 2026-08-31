@@ -1102,31 +1102,11 @@ describe('mobile event-room timeline accessibility', () => {
         supersedes: null,
       },
     });
-    const onCorrect = jest.fn();
-    const onRedact = jest.fn();
-    const card = render(
-      <TimelineEntryCard
-        actionEligibility={{
-          correction: {
-            allowed: true,
-            unavailableReason: null,
-            permanent: false,
-          },
-          redaction: {
-            allowed: true,
-            unavailableReason: null,
-            permanent: false,
-          },
-        }}
-        onCorrect={onCorrect}
-        onRedact={onRedact}
-        projection={visible}
-      />,
-    );
-    fireEvent.press(screen.getByRole('button', { name: 'Correct…' }));
-    fireEvent.press(screen.getByRole('button', { name: 'Redact…' }));
-    expect(onCorrect).toHaveBeenCalledTimes(1);
-    expect(onRedact).toHaveBeenCalledTimes(1);
+    // Timeline entries carry no correct or redact controls on the phone; that
+    // work happens in the web room.
+    const card = render(<TimelineEntryCard projection={visible} />);
+    expect(screen.queryByRole('button', { name: 'Correct…' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Redact…' })).toBeNull();
     card.unmount();
 
     const onSubmit = jest.fn();

@@ -764,7 +764,7 @@ function successAuditEvent(
   context: CapabilityHandlerContext<CapabilityEngineTransaction>,
 ): CapabilityAuditEvent {
   const authorization = requireCapabilityAuthorization(context);
-  return {
+  const event: CapabilityAuditEvent = {
     category:
       context.invocation.actor.kind === 'agent'
         ? 'agent-access'
@@ -780,6 +780,39 @@ function successAuditEvent(
     reasonCode: null,
     occurredAt: context.invocation.serverTime,
   };
+  logCapabilityOutcome(event);
+  return event;
+}
+
+/**
+ * Emits one structured line per capability outcome.
+ *
+ * The audit table is the durable record, but it is inside a private VPC and
+ * needs a one-off task to read, so during an incident it answers nothing. The
+ * application log carried only unexpected failures, which meant an *expected*
+ * denial -- a 403, the most common way something legitimately stops working --
+ * produced no trace at all. Diagnosing why a device could not register for
+ * push meant reading source and guessing, because the refusal was silent.
+ *
+ * Identity, payloads, tokens, and recipients are never included: the capability
+ * name, the outcome, the machine-readable reason, the actor's *kind*, and the
+ * correlating IDs are enough to find the failure and are already non-secret.
+ */
+function logCapabilityOutcome(event: CapabilityAuditEvent): void {
+  console.info(
+    JSON.stringify({
+      event: 'capability-outcome',
+      capability: event.action,
+      outcome: event.outcome,
+      reasonCode: event.reasonCode,
+      category: event.category,
+      source: event.source,
+      actorKind: event.actor.kind,
+      facilityId: event.facilityId,
+      requestId: event.requestId,
+      occurredAt: event.occurredAt,
+    }),
+  );
 }
 
 function failureAuditEvent(
@@ -798,7 +831,7 @@ function failureAuditEvent(
   const isDenied = error.status === 401 || error.status === 403;
   const isHumanOnly =
     error.reasonCode === 'HUMAN_ONLY_REQUIRED' && actionIds.length > 0;
-  return {
+  const event: CapabilityAuditEvent = {
     category: isHumanOnly
       ? 'human-only-rejection'
       : isDenied
@@ -815,6 +848,8 @@ function failureAuditEvent(
     reasonCode: error.reasonCode,
     occurredAt: context.invocation.serverTime,
   };
+  logCapabilityOutcome(event);
+  return event;
 }
 
 async function authorizeExecution<
