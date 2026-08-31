@@ -1734,20 +1734,17 @@ describe('mobile event-room lifecycle confirmations', () => {
         'REAL INCIDENT. This is a real incident. Staff notifications are not a drill.',
       ),
     ).toBeTruthy();
-    expect(screen.getByText('Recipients: 42')).toBeTruthy();
     expect(
-      screen.getByText(
-        /Consequence: change this event to all-clear and create a REAL INCIDENT all-clear notification/,
+      screen.getByText(/42 staff get the all-clear below, and the event ends/),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText(
+        'push. 42 people. Message: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic push all-clear instructions.',
       ),
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
-        'push. 42 endpoints. Integration live-verified. Message preview: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic push all-clear instructions.',
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByLabelText(
-        'email. 40 endpoints. Integration live-verified. Message preview: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic email all-clear instructions.',
+        'email. 40 people. Message: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic email all-clear instructions.',
       ),
     ).toBeTruthy();
     expect(
@@ -1785,9 +1782,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /Consequence: change this event to all-clear and create a DRILL — TRAINING ONLY all-clear notification/,
-      ),
+      screen.getByText(/2 staff get the all-clear below, and the event ends/),
     ).toBeTruthy();
     expect(
       screen.getByText(
@@ -1813,9 +1808,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /Consequence: change this event to all-clear and create a TEST — NOT A REAL INCIDENT all-clear notification/,
-      ),
+      screen.getByText(/2 staff get the all-clear below, and the event ends/),
     ).toBeTruthy();
     expect(screen.queryByText('DRILL — TRAINING ONLY')).toBeNull();
   });
@@ -1832,7 +1825,7 @@ describe('mobile event-room lifecycle confirmations', () => {
 
     expect(
       screen.getByText(
-        /one or more server prerequisites are not ready.*Refresh the preview.*contact an administrator/su,
+        /cannot notify anyone right now.*Try again.*contact an administrator/su,
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/PUSH_NOT_LIVE_VERIFIED/u)).toBeNull();
@@ -1883,7 +1876,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       expectConfirmationDisabled(true);
       expect(
         screen.getByText(
-          'This consequence preview expired. Fetch and review a fresh preview before confirming.',
+          'This check is out of date. Refresh it before ending the event.',
         ),
       ).toBeTruthy();
       fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));

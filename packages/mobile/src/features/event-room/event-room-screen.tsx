@@ -849,7 +849,7 @@ export interface LifecycleConfirmationDialogProps {
 const ALL_CLEAR_CONFIRMATION_PHRASE = 'ALL CLEAR';
 const CLOSE_CONFIRMATION_PHRASE = 'CLOSE EVENT';
 
-/** Exact-phrase, foreground-only lifecycle consequence confirmation UI. */
+/** Foreground-only confirmation for ending an event. */
 export function LifecycleConfirmationDialog({
   action,
   busy,
@@ -927,40 +927,31 @@ export function LifecycleConfirmationDialog({
                 <View accessibilityRole="progressbar" style={styles.loadingBox}>
                   <ActivityIndicator color="#17324D" />
                   <Text style={styles.secondaryText}>
-                    Fetching a fresh consequence preview…
+                    Checking who will be notified…
                   </Text>
                 </View>
               ) : preview === null ? (
                 <View style={styles.warningBox}>
-                  <Text style={styles.warningTitle}>Preview unavailable</Text>
+                  <Text style={styles.warningTitle}>
+                    Could not check who will be notified
+                  </Text>
                   <Text style={styles.warningText}>
-                    A fresh server preview is required before all-clear.
+                    PSD EOC has to check before it can end the event.
                   </Text>
                   <ActionButton
                     disabled={busy}
-                    label="Fetch fresh preview"
+                    label="Try again"
                     onPress={onRefreshPreview}
                   />
                 </View>
               ) : (
                 <View style={styles.previewCard} testID="all-clear-preview">
                   <Text accessibilityRole="header" style={styles.sectionTitle}>
-                    Server consequence preview
+                    Who gets notified
                   </Text>
                   <Text style={styles.previewFact}>
-                    Recipients: {preview.recipientCount}
-                  </Text>
-                  <Text style={styles.previewFact}>
-                    Readiness:{' '}
-                    {preview.sendReadiness === 'ready' ? 'Ready' : 'Blocked'}
-                  </Text>
-                  <Text style={styles.previewFact}>
-                    Consequence: change this event to all-clear and create a{' '}
-                    {
-                      getEventTheme(preview.templateMode, preview.kind)
-                        .classificationWord
-                    }{' '}
-                    all-clear notification for the channel plan below.
+                    {preview.recipientCount} staff get the all-clear below, and
+                    the event ends.
                   </Text>
                   <View style={styles.channelList}>
                     {preview.channels.map((channel) => {
@@ -969,15 +960,14 @@ export function LifecycleConfirmationDialog({
                         <View
                           key={channel.channel}
                           accessible
-                          accessibilityLabel={`${channel.channel}. ${channel.endpointCount} endpoints. Integration ${channel.integrationStatus.label}. Message preview: ${copy}`}
+                          accessibilityLabel={`${channel.channel}. ${channel.endpointCount} people. Message: ${copy}`}
                           style={styles.channelRow}
                         >
                           <Text style={styles.channelName}>
                             {channel.channel}
                           </Text>
                           <Text style={styles.channelDetail}>
-                            {channel.endpointCount} endpoints ·{' '}
-                            {channel.integrationStatus.label}
+                            {channel.endpointCount} people
                           </Text>
                           <Text style={styles.channelMessage}>{copy}</Text>
                         </View>
@@ -986,30 +976,23 @@ export function LifecycleConfirmationDialog({
                   </View>
                   {preview.blockingReasonCodes.length === 0 ? null : (
                     <Text accessibilityRole="alert" style={styles.warningText}>
-                      This action is unavailable because one or more server
-                      prerequisites are not ready. Refresh the preview; if it
-                      remains blocked, contact an administrator.
+                      PSD EOC cannot notify anyone right now, so the event
+                      cannot be ended. Try again; if it stays blocked, contact
+                      an administrator.
                     </Text>
                   )}
-                  <Text selectable style={styles.digestText}>
-                    Consequence reference: {preview.consequenceDigest}
-                  </Text>
-                  <Text style={styles.expiryText}>
-                    Preview expires{' '}
-                    {new Date(preview.expiresAt).toLocaleString()}.
-                  </Text>
                   {previewFresh ? null : (
                     <View style={styles.warningBox}>
                       <Text
                         accessibilityRole="alert"
                         style={styles.warningText}
                       >
-                        This consequence preview expired. Fetch and review a
-                        fresh preview before confirming.
+                        This check is out of date. Refresh it before ending the
+                        event.
                       </Text>
                       <ActionButton
                         disabled={busy}
-                        label="Fetch fresh preview"
+                        label="Refresh"
                         onPress={onRefreshPreview}
                       />
                     </View>
@@ -2154,7 +2137,7 @@ function AuthenticatedEventRoomScreen({
         preview.rosterPopulation !== currentEvent.rosterPopulation
       ) {
         throw new Error(
-          'PSD EOC rejected a consequence preview that did not match this event.',
+          'PSD EOC returned a notification check for another event.',
         );
       }
       setLifecyclePreview(preview);
@@ -2219,7 +2202,7 @@ function AuthenticatedEventRoomScreen({
       lifecycleIdempotencyKeyRef.current = null;
       setLifecyclePreview(null);
       setLifecycleError(
-        'The consequence preview expired. Fetch and review a fresh preview before confirming.',
+        'That check is out of date. Refresh it before ending the event.',
       );
       return;
     }

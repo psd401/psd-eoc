@@ -291,7 +291,7 @@ export async function issueStartEventConfirmation(
       now.getTime() < Date.parse(preview.createdAt) ||
       now.getTime() > Date.parse(preview.expiresAt)
     ) {
-      throw conflict('The consequence preview has expired.');
+      throw conflict('The check of who would be notified is out of date.');
     }
     if (rateLimitDecision === 'denied') {
       return { kind: 'rate-limited' as const };
