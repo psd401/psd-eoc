@@ -424,7 +424,7 @@ export interface TimelineEntryCardProps {
   readonly onRedact?: () => void;
 }
 
-/** One append-only timeline fact grouped into a single screen-reader stop. */
+/** One timeline entry grouped into a single screen-reader stop. */
 export function TimelineEntryCard({
   actionEligibility,
   api,
@@ -433,6 +433,25 @@ export function TimelineEntryCard({
   projection,
 }: TimelineEntryCardProps) {
   const { entry } = projection;
+  // A state change is what happened to the event, not something a person
+  // wrote, so it gets one line instead of a card with an author on it. Web
+  // renders these the same way.
+  if (
+    projection.visibility === 'visible' &&
+    projection.entry.kind === 'system'
+  ) {
+    const summary = projection.entry.payload.summary;
+    return (
+      <Text
+        accessibilityRole="text"
+        accessible
+        style={styles.timelineMarker}
+        testID={`timeline-entry-${entry.sequence}`}
+      >
+        {summary} {new Date(entry.serverTime).toLocaleTimeString()}
+      </Text>
+    );
+  }
   const visiblePhoto =
     projection.visibility === 'visible' && projection.entry.kind === 'photo'
       ? projection.entry.payload
@@ -2878,6 +2897,13 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  timelineMarker: {
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
+    fontSize: 14,
+    lineHeight: 20,
+    paddingHorizontal: 4,
+    paddingVertical: 8,
   },
   timelineMetaRow: {
     flexDirection: 'row',

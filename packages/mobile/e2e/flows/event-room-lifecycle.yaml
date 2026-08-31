@@ -29,7 +29,7 @@ tags: [issue-32, synthetic-only, event-room]
     timeout: 15000
 - assertVisible: 'Confirm all-clear'
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
-- assertVisible: '.*Integration mocked.*'
+- assertVisible: '.*2 staff get the all-clear below.*'
 - scrollUntilVisible:
     element:
       id: 'lifecycle-confirm-button'
