@@ -243,7 +243,7 @@ export async function requestStartFlow<Output>(
     }
     if (path === '/start/api/preview') {
       throw new StartFlowRequestError(
-        'PSD EOC could not load the consequence preview. No event was started and no notification was queued. Load a fresh preview before continuing.',
+        'PSD EOC could not check who would be notified. No event was started and nothing was sent. Try again.',
         true,
         false,
       );

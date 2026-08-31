@@ -207,7 +207,7 @@ function assertPreviewHasNoMutationHeaders(request: Request): void {
     request.headers.has(START_FLOW_CONFIRMATION_HEADER)
   ) {
     throw new SyntaxError(
-      'Consequence preview requests cannot carry mutation metadata.',
+      'A notification check cannot carry mutation metadata.',
     );
   }
 }
