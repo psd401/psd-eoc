@@ -32,6 +32,7 @@ import {
   postRetainedCommand,
   readRetainedCommand,
   recoveryStorageKey,
+  retainedCommandLandedInTimeline,
   requestLifecyclePreview,
   retainCommand,
   type RetainedCommand,
@@ -244,6 +245,49 @@ export function useEventRoomCommandController({
     retainedCommand?.operation === 'close';
   const retainedPhotoRecoveryConflict =
     retainedCommand?.operation === 'post-photo' && photoRecovery.blocked;
+
+  /**
+   * Resolves a retained record the timeline has already answered.
+   *
+   * A retained record exists because one request's outcome was unknown, and
+   * while it exists every composer is disabled. That is right while the
+   * outcome is genuinely unknown and wrong once the entry is visibly on the
+   * timeline: at that point the operator is being asked to confirm something
+   * the client can see for itself, and during an incident that costs the next
+   * update. Only complete history can answer this, and only an entry that is
+   * present -- an absent entry proves nothing and still needs a human.
+   */
+  useEffect(() => {
+    if (
+      retainedCommand === null ||
+      loadingHistory ||
+      pendingRef.current ||
+      recoveryBlocked ||
+      !retainedCommandLandedInTimeline(retainedCommand, entries)
+    ) {
+      return;
+    }
+    try {
+      clearRetainedCommand(retainedCommand);
+    } catch {
+      // A record that cannot be cleared stays; the manual control remains.
+      return;
+    }
+    setRetainedCommand(null);
+    if (retainedCommand.operation === 'post-photo') {
+      photoRecovery.clearPending();
+    }
+    setMutationStatus(
+      'Your earlier update is on the timeline, so PSD EOC resolved it. Nothing was sent again.',
+    );
+  }, [
+    entries,
+    loadingHistory,
+    pendingRef,
+    photoRecovery,
+    recoveryBlocked,
+    retainedCommand,
+  ]);
 
   useEffect(() => {
     if (dialog?.kind !== 'all-clear' || pendingRef.current) return;

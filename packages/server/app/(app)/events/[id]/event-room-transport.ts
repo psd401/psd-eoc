@@ -581,6 +581,29 @@ export function parseMutationResult(
   };
 }
 
+/**
+ * Reports whether the fully loaded timeline already contains the entry a
+ * retained request was trying to create.
+ *
+ * A retained record exists because a request's outcome was unknown. Once the
+ * entry it would have written is visibly on the timeline, the outcome is not
+ * unknown any more, and continuing to block every composer behind a manual
+ * "I checked the timeline" button asks the operator to confirm something the
+ * client can already see. Only ever call this with complete history: a
+ * half-drained timeline cannot prove an absence, and this must never be used
+ * to conclude that a request did *not* land.
+ */
+export function retainedCommandLandedInTimeline(
+  command: RetainedCommand,
+  entries: readonly JournalEntryReadProjection[],
+): boolean {
+  return entries.some(
+    (projection) =>
+      projection.visibility === 'visible' &&
+      journalEntryProvesCommand(command, projection.entry),
+  );
+}
+
 interface DeadlineSignal {
   readonly signal: AbortSignal;
   readonly didExpire: () => boolean;
