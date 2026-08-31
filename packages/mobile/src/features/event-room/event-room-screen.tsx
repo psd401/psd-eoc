@@ -1048,10 +1048,6 @@ export function LifecycleConfirmationDialog({
               onPress={onConfirm}
               testID="lifecycle-confirm-button"
             />
-            <Text style={styles.noRetryText}>
-              PSD EOC never sends this in the background and never retries it on
-              its own.
-            </Text>
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -3082,12 +3078,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     minHeight: 48,
     paddingHorizontal: 12,
-  },
-  noRetryText: {
-    color: EVENT_ROOM_MUTED_TEXT_COLOR,
-    fontSize: 13,
-    lineHeight: 19,
-    textAlign: 'center',
   },
   errorText: {
     color: '#8B1526',

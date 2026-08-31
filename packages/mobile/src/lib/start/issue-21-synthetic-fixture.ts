@@ -1,5 +1,6 @@
 import {
   AllClearEventResultSchema,
+  CloseEventResultSchema,
   ActivationPreviewSchema,
   CreateActivationPreviewInputSchema,
   EventPageSchema,
@@ -70,6 +71,8 @@ const IDS = Object.freeze({
   allClearJournal: uuid(23),
   allClearIntentJournal: uuid(24),
   allClearIntent: uuid(25),
+  closeTransition: uuid(26),
+  closeJournal: uuid(27),
 });
 
 const FIXTURE_CREATED_AT = '2026-08-11T17:00:00.000Z';
@@ -392,6 +395,64 @@ function allClearResult(
       },
     ],
     notificationIntent,
+    preparedActivationConsumption: null,
+  });
+}
+
+/**
+ * Mirrors the close half of ending an event. Ending an event is one confirmed
+ * action in the app and two transitions on the server, so the synthetic
+ * fixture has to answer both or the drill stops at all-clear.
+ */
+function closeResult(event: Event, occurredAt: string) {
+  const actor = {
+    kind: 'human' as const,
+    userId: IDS.user,
+    sessionId: IDS.session,
+  };
+  const transition = {
+    id: IDS.closeTransition,
+    sequence: 3,
+    actor,
+    source: 'mobile' as const,
+    occurredAt,
+    requestId: IDS.request,
+    confirmationId: null,
+    consequenceDigest: null,
+    targeting: {
+      kind: 'drill' as const,
+      templateMode: 'drill' as const,
+      rosterPopulation: 'synthetic' as const,
+    },
+    idempotencyKey: 'e'.repeat(64),
+    transition: 'close' as const,
+    eventId: event.id,
+    from: 'all-clear' as const,
+    to: 'closed' as const,
+  };
+  return CloseEventResultSchema.parse({
+    event: { ...event, status: 'closed', closedAt: occurredAt },
+    transition,
+    journalEntries: [
+      {
+        id: IDS.closeJournal,
+        eventId: event.id,
+        sequence: 5,
+        author: actor,
+        authorDisplayName: null,
+        source: 'mobile',
+        serverTime: occurredAt,
+        clientTime: null,
+        supersedes: null,
+        kind: 'system',
+        payload: {
+          code: 'event-closed',
+          summary: 'Synthetic drill event closed.',
+          transition,
+        },
+      },
+    ],
+    notificationIntent: null,
     preparedActivationConsumption: null,
   });
 }
@@ -1069,6 +1130,19 @@ export function createIssue21SyntheticFixtureTransport(
               currentLifecyclePreview,
               now().toISOString(),
             );
+            roomEvent = result.event;
+            roomEntries.push(...result.journalEntries);
+            return input.schema.parse(result);
+          }
+
+          if (command.operation === 'close') {
+            if (
+              currentEvent.status !== 'all-clear' ||
+              command.confirmationPhrase !== 'CLOSE EVENT'
+            ) {
+              throw new TypeError('The synthetic close request is invalid.');
+            }
+            const result = closeResult(currentEvent, now().toISOString());
             roomEvent = result.event;
             roomEntries.push(...result.journalEntries);
             return input.schema.parse(result);

@@ -62,8 +62,8 @@ export function PreviewDetails({
     .map((channel) => channel.channel.toLowerCase())
     .join(' and ');
   return (
-    <section aria-labelledby="all-clear-consequences-heading">
-      <h3 id="all-clear-consequences-heading">Who gets notified</h3>
+    <section aria-labelledby="all-clear-audience-heading">
+      <h3 id="all-clear-audience-heading">Who gets notified</h3>
       <p className="consequence-summary">
         <strong>{preview.recipientCount} staff</strong> by {channelSummary}.
       </p>

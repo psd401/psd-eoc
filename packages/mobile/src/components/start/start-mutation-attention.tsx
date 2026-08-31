@@ -70,7 +70,7 @@ export type StartMutationAttentionProps =
 export interface StartMutationAttentionCopy {
   readonly heading: string;
   readonly status: string;
-  readonly consequence: string;
+  readonly guidance: string;
 }
 
 type CopyInput = Pick<
@@ -98,7 +98,7 @@ export function startMutationAttentionCopy({
           ? 'Start request is still resolving'
           : 'Join request is still resolving',
       status: `Your ${operationName} request for ${classification}: ${eventTypeName} is waiting for the server outcome. Nothing will retry automatically.`,
-      consequence:
+      guidance:
         'Keep this screen open. Do not make another start or join decision while the request resolves.',
     });
   }
@@ -110,7 +110,7 @@ export function startMutationAttentionCopy({
           ? 'Start request was not completed'
           : 'Join request was not completed',
       status: `Your ${operationName} request for ${classification}: ${eventTypeName} failed without a completed action. Nothing was queued and nothing will retry automatically.`,
-      consequence:
+      guidance:
         operation === 'activate'
           ? 'Review the failure below, then return to active events before making a fresh start decision.'
           : 'Review the failure below, then return to active events before making a fresh join or start decision.',
@@ -123,7 +123,7 @@ export function startMutationAttentionCopy({
         ? 'Start outcome needs attention'
         : 'Join outcome needs attention',
     status: `PSD EOC could not determine the server outcome of your ${operationName} request for ${classification}: ${eventTypeName}. Nothing will retry automatically.`,
-    consequence:
+    guidance:
       operation === 'activate'
         ? 'Load fresh active events for situational awareness. The list cannot prove which request created an event or clear this outcome. Checking does not retry the start request.'
         : 'Load fresh active events for situational awareness. The list cannot prove join membership or clear this outcome. Checking does not retry the join request.',
@@ -168,7 +168,7 @@ export function StartMutationAttentionContent(
         accessibilityLabel={
           unresolved || failed
             ? undefined
-            : `${copy.heading}. ${copy.status} ${copy.consequence}`
+            : `${copy.heading}. ${copy.status} ${copy.guidance}`
         }
         accessibilityLiveRegion={unresolved || failed ? 'assertive' : 'polite'}
         accessibilityRole={unresolved || failed ? 'alert' : 'progressbar'}
@@ -200,8 +200,8 @@ export function StartMutationAttentionContent(
         <Text style={[styles.status, { color: theme.colors.textMuted }]}>
           {copy.status}
         </Text>
-        <Text style={[styles.consequence, { color: theme.colors.textPrimary }]}>
-          {copy.consequence}
+        <Text style={[styles.guidance, { color: theme.colors.textPrimary }]}>
+          {copy.guidance}
         </Text>
         {failed ? (
           <Text style={[styles.failure, { color: theme.colors.textPrimary }]}>
@@ -484,7 +484,7 @@ export function StartMutationRecoveryCheckingAttention({
           PSD EOC is checking encrypted recovery information from this device
           before enabling start or join actions.
         </Text>
-        <Text style={[styles.consequence, styles.neutralHeading]}>
+        <Text style={[styles.guidance, styles.neutralHeading]}>
           Nothing will be sent or queued while this check completes.
         </Text>
       </View>
@@ -517,7 +517,7 @@ export function StartMutationRecoveryBlockedAttention({
           Start and join actions are blocked
         </Text>
         <Text style={[styles.status, styles.neutralText]}>{message}</Text>
-        <Text style={[styles.consequence, styles.neutralHeading]}>
+        <Text style={[styles.guidance, styles.neutralHeading]}>
           No request will be sent or queued while recovery is unavailable.
         </Text>
       </View>
@@ -573,7 +573,7 @@ export function OtherSessionStartMutationAttention({
             ? 'PSD EOC could not verify the server outcome of a request from the previous signed-in session. Nothing will retry automatically.'
             : 'A request from the previous signed-in session is still waiting for its server outcome. Nothing will retry automatically.'}
         </Text>
-        <Text style={[styles.consequence, styles.neutralHeading]}>
+        <Text style={[styles.guidance, styles.neutralHeading]}>
           {unresolved
             ? 'New start and join actions are blocked. Sign back into the session that made the request to review fresh active events or contact district technology support.'
             : 'Do not make a new start or join decision while it resolves. Sign back into the session that made the request to see its classified event details.'}
@@ -634,7 +634,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 23,
   },
-  consequence: {
+  guidance: {
     fontSize: 18,
     fontWeight: '700',
     lineHeight: 26,

@@ -513,7 +513,7 @@ export function parseMutationResult(
         authorization?.lifecyclePreviewId !== expectedPreviewId
       ) {
         throw new EventRoomRequestError(
-          'PSD EOC returned lifecycle evidence for a different consequence preview. The exact request is retained for verification.',
+          'PSD EOC answered a different request than the one you confirmed. Your request is kept so you can check the timeline.',
           true,
         );
       }
@@ -655,7 +655,7 @@ function parseLifecyclePreview(
     parsed.data.rosterPopulation !== baselineEvent.rosterPopulation
   ) {
     throw new EventRoomRequestError(
-      'PSD EOC returned an invalid all-clear consequence preview.',
+      'PSD EOC returned an unusable check of who would be notified.',
       false,
     );
   }

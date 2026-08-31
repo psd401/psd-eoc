@@ -237,7 +237,7 @@ function requireMatchingPreview(
     preview.rosterPopulation !== 'staff'
   ) {
     throw new StartFlowRequestError(
-      'The server returned a consequence preview for a different event selection. No event was started and no notification was queued.',
+      'PSD EOC checked a different event than the one you selected. No event was started and nothing was sent.',
       false,
       false,
     );
@@ -358,7 +358,7 @@ export function ActivationConfirm({
         setPreviewError(
           error instanceof Error
             ? error.message
-            : 'The consequence preview could not be loaded.',
+            : 'PSD EOC could not check who would be notified.',
         );
       })
       .finally(() => {
