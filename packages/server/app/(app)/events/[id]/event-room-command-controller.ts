@@ -14,12 +14,6 @@ import {
 
 import { type DialogState } from './event-room-lifecycle';
 import {
-  EMPTY_LOCATION_DRAFT,
-  type LocationDraft,
-  locationDraftFromPayload,
-  locationPayloadFromDraft,
-} from './event-room-location';
-import {
   clearMatchingPhotoCompletion,
   clearRetainedCommand,
   type CommandBody,
@@ -51,10 +45,6 @@ interface EventRoomCommandControllerOptions {
   readonly event: Event;
   readonly currentEvent: Event;
   readonly entries: readonly JournalEntryReadProjection[];
-  readonly supersessionsByEntry: ReadonlyMap<
-    string,
-    readonly JournalEntryReadProjection[]
-  >;
   readonly loadingHistory: boolean;
   readonly apiUrl: string;
   readonly csrfCookieName: string;
@@ -72,7 +62,6 @@ export function useEventRoomCommandController({
   event,
   currentEvent,
   entries,
-  supersessionsByEntry,
   loadingHistory,
   apiUrl,
   csrfCookieName,
@@ -91,10 +80,6 @@ export function useEventRoomCommandController({
     useState<RetainedCommand | null>(null);
   const [recoveryBlocked, setRecoveryBlocked] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
-  const [dialogText, setDialogText] = useState('');
-  const [dialogLocationDraft, setDialogLocationDraft] =
-    useState<LocationDraft>(EMPTY_LOCATION_DRAFT);
-  const [dialogReason, setDialogReason] = useState('');
 
   const dialogRef = useRef<HTMLDialogElement>(null);
   const dialogWasOpenRef = useRef(false);
@@ -167,71 +152,6 @@ export function useEventRoomCommandController({
         : dialogMutationErrorRef.current;
     target?.focus();
   }, [dialog, mutationError]);
-
-  const correctionDialogProjection =
-    dialog?.kind === 'correct'
-      ? entries.find(({ entry }) => entry.id === dialog.entryId)
-      : undefined;
-  const correctionDialogEntry =
-    !loadingHistory &&
-    correctionDialogProjection?.visibility === 'visible' &&
-    (correctionDialogProjection.entry.kind === 'text' ||
-      correctionDialogProjection.entry.kind === 'location') &&
-    (supersessionsByEntry.get(correctionDialogProjection.entry.id)?.length ??
-      0) === 0
-      ? correctionDialogProjection.entry
-      : null;
-  const redactionDialogProjection =
-    dialog?.kind === 'redact'
-      ? entries.find(({ entry }) => entry.id === dialog.entryId)
-      : undefined;
-  const redactionDialogEntry =
-    !loadingHistory &&
-    redactionDialogProjection?.visibility === 'visible' &&
-    redactionDialogProjection.entry.kind !== 'system' &&
-    !(supersessionsByEntry.get(redactionDialogProjection.entry.id) ?? []).some(
-      ({ entry }) => entry.supersedes?.kind === 'redaction',
-    )
-      ? redactionDialogProjection.entry
-      : null;
-
-  useEffect(() => {
-    const invalidatedSequence =
-      dialog?.kind === 'correct' && correctionDialogEntry === null
-        ? dialog.entrySequence
-        : dialog?.kind === 'redact' && redactionDialogEntry === null
-          ? dialog.entrySequence
-          : null;
-    if (invalidatedSequence === null) return;
-    const requestWasAttempted = dialogRequestAttemptedRef.current;
-    previewControllerRef.current?.abort();
-    previewControllerRef.current = null;
-    dialogRequestAttemptedRef.current = false;
-    setDialog(null);
-    setDialogText('');
-    setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
-    setDialogReason('');
-    if (
-      !requestWasAttempted &&
-      !pendingRef.current &&
-      retainedCommand === null
-    ) {
-      setMutationError(null);
-      setMutationStatus(
-        loadingHistory
-          ? 'Timeline synchronization began while the dialog was open. No request was sent; review the complete timeline before trying again.'
-          : `Entry ${invalidatedSequence} changed while the dialog was open. No request was sent; review the current timeline before trying again.`,
-      );
-    }
-  }, [
-    correctionDialogEntry,
-    dialog,
-    setDialog,
-    loadingHistory,
-    pendingRef,
-    redactionDialogEntry,
-    retainedCommand,
-  ]);
 
   const baseCommandsBlocked =
     loadingHistory ||
@@ -308,8 +228,6 @@ export function useEventRoomCommandController({
     previewControllerRef.current = null;
     dialogRequestAttemptedRef.current = false;
     setDialog(null);
-    setDialogText('');
-    setDialogReason('');
     if (!requestWasAttempted && loadingHistory) {
       setMutationError(null);
       setMutationStatus(
@@ -335,27 +253,10 @@ export function useEventRoomCommandController({
     if (openingLifecycleDialog ? lifecycleCommandsBlocked : commandsBlocked) {
       return;
     }
-    const correctionTarget =
-      next.kind === 'correct'
-        ? entries.find(({ entry }) => entry.id === next.entryId)
-        : undefined;
     dialogOpenerRef.current = opener;
     dialogRequestAttemptedRef.current = false;
     setMutationError(null);
     setMutationStatus('');
-    setDialogText(
-      correctionTarget?.visibility === 'visible' &&
-        correctionTarget.entry.kind === 'text'
-        ? correctionTarget.entry.payload.text
-        : '',
-    );
-    setDialogLocationDraft(
-      correctionTarget?.visibility === 'visible' &&
-        correctionTarget.entry.kind === 'location'
-        ? locationDraftFromPayload(correctionTarget.entry.payload)
-        : EMPTY_LOCATION_DRAFT,
-    );
-    setDialogReason('');
     setDialog(next);
   }
 
@@ -365,9 +266,6 @@ export function useEventRoomCommandController({
     previewControllerRef.current = null;
     dialogRequestAttemptedRef.current = false;
     setDialog(null);
-    setDialogText('');
-    setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
-    setDialogReason('');
   }
 
   async function loadAllClearPreview(idempotencyKey: string): Promise<void> {
@@ -529,8 +427,6 @@ export function useEventRoomCommandController({
       );
       if (requestError.ambiguous && dialog !== null) {
         setDialog(null);
-        setDialogText('');
-        setDialogReason('');
       }
       return requestError.ambiguous ? 'ambiguous' : 'rejected';
     } finally {
@@ -575,8 +471,6 @@ export function useEventRoomCommandController({
       setMutationStatus('No request was sent.');
       if (dialog !== null) {
         setDialog(null);
-        setDialogText('');
-        setDialogReason('');
       }
       return null;
     }
@@ -593,55 +487,6 @@ export function useEventRoomCommandController({
     const command = prepareNewCommand(body, options);
     if (command === null) return false;
     return (await sendRetainedCommand(command)) === 'confirmed';
-  }
-
-  async function submitCorrection(submission: FormEvent<HTMLFormElement>) {
-    submission.preventDefault();
-    if (dialog?.kind !== 'correct' || correctionDialogEntry === null) return;
-    const reason = dialogReason.trim();
-    if (reason.length === 0) return;
-    const succeeded =
-      correctionDialogEntry.kind === 'location'
-        ? await (async () => {
-            const payload = locationPayloadFromDraft(dialogLocationDraft);
-            if (payload === null) return false;
-            return executeNewCommand({
-              operation: 'correct-location',
-              entryId: correctionDialogEntry.id,
-              entrySequence: correctionDialogEntry.sequence,
-              payload,
-              reason,
-              clientTime: new Date().toISOString(),
-            });
-          })()
-        : await (async () => {
-            const text = dialogText.trim();
-            if (text.length === 0) return false;
-            return executeNewCommand({
-              operation: 'correct-text',
-              entryId: correctionDialogEntry.id,
-              entrySequence: correctionDialogEntry.sequence,
-              text,
-              reason,
-              clientTime: new Date().toISOString(),
-            });
-          })();
-    if (succeeded) closeDialog();
-  }
-
-  async function submitRedaction(submission: FormEvent<HTMLFormElement>) {
-    submission.preventDefault();
-    if (dialog?.kind !== 'redact' || redactionDialogEntry === null) return;
-    const reason = dialogReason.trim();
-    if (reason.length === 0) return;
-    const succeeded = await executeNewCommand({
-      operation: 'redact-entry',
-      entryId: redactionDialogEntry.id,
-      entrySequence: redactionDialogEntry.sequence,
-      reason,
-      clientTime: new Date().toISOString(),
-    });
-    if (succeeded) closeDialog();
   }
 
   /**
@@ -736,17 +581,9 @@ export function useEventRoomCommandController({
     recoveryBlocked,
     dialog,
     setDialog,
-    dialogText,
-    setDialogText,
-    dialogLocationDraft,
-    setDialogLocationDraft,
-    dialogReason,
-    setDialogReason,
     dialogRef,
     mutationErrorRef,
     dialogMutationErrorRef,
-    correctionDialogEntry,
-    redactionDialogEntry,
     baseCommandsBlocked,
     commandsBlocked,
     lifecycleCommandsBlocked,
@@ -760,8 +597,6 @@ export function useEventRoomCommandController({
     executeNewCommand,
     sendRetainedCommand,
     clearPreparedCommand,
-    submitCorrection,
-    submitRedaction,
     submitEndEvent,
     finishEndingEvent,
     retryRetained,

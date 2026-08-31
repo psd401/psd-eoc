@@ -8,24 +8,13 @@ import { type ReactNode } from 'react';
 
 import { blockingReasonSentence } from '../../../../lib/events/blocking-reasons';
 
-export type DialogState =
-  | Readonly<{
-      kind: 'correct';
-      entryId: string;
-      entrySequence: number;
-    }>
-  | Readonly<{
-      kind: 'redact';
-      entryId: string;
-      entrySequence: number;
-    }>
-  | Readonly<{
-      kind: 'all-clear';
-      idempotencyKey: string;
-      loading: boolean;
-      preview: LifecycleConsequencePreview | null;
-      error: string | null;
-    }>;
+export type DialogState = Readonly<{
+  kind: 'all-clear';
+  idempotencyKey: string;
+  loading: boolean;
+  preview: LifecycleConsequencePreview | null;
+  error: string | null;
+}>;
 
 function renderedMessageContent(channel: ChannelConsequencePreview): ReactNode {
   const message = channel.renderedMessage;

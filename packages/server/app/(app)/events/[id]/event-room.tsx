@@ -263,7 +263,6 @@ export function EventRoom({
     event,
     currentEvent,
     entries,
-    supersessionsByEntry,
     loadingHistory,
     apiUrl,
     csrfCookieName,
@@ -287,28 +286,17 @@ export function EventRoom({
     recoveryBlocked,
     dialog,
     setDialog,
-    dialogText,
-    setDialogText,
-    dialogLocationDraft,
-    setDialogLocationDraft,
-    dialogReason,
-    setDialogReason,
     dialogRef,
     mutationErrorRef,
     dialogMutationErrorRef,
-    correctionDialogEntry,
-    redactionDialogEntry,
     commandsBlocked,
     lifecycleCommandsBlocked,
     retainedLifecycleCommand,
     retainedPhotoRecoveryConflict,
-    openDialog,
     closeDialog,
     beginAllClear,
     loadAllClearPreview,
     executeNewCommand,
-    submitCorrection,
-    submitRedaction,
     submitEndEvent,
     finishEndingEvent,
     retryRetained,
@@ -365,7 +353,6 @@ export function EventRoom({
   const startedAt = currentEvent.activatedAt;
   const canPost = eventAcceptsJournalPosts(currentEvent);
   const locationPayload = locationPayloadFromDraft(locationDraft);
-  const dialogLocationPayload = locationPayloadFromDraft(dialogLocationDraft);
   const dialogFeedback = (
     <>
       {mutationError === null ? null : (
@@ -915,27 +902,6 @@ export function EventRoom({
                       <TimelineEntry
                         classificationLabel={classificationLabel}
                         displayTimeZone={displayTimeZone}
-                        commandsBlocked={commandsBlocked}
-                        onCorrect={(target, opener) =>
-                          openDialog(
-                            {
-                              kind: 'correct',
-                              entryId: target.id,
-                              entrySequence: target.sequence,
-                            },
-                            opener,
-                          )
-                        }
-                        onRedact={(target, opener) =>
-                          openDialog(
-                            {
-                              kind: 'redact',
-                              entryId: target.id,
-                              entrySequence: target.sequence,
-                            },
-                            opener,
-                          )
-                        }
                         locationMapVisible={
                           visibleLocationMapEntryId === projection.entry.id
                         }
@@ -998,135 +964,10 @@ export function EventRoom({
             !pendingRef.current
           ) {
             setDialog(null);
-            setDialogText('');
-            setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
-            setDialogReason('');
           }
         }}
         ref={dialogRef}
       >
-        {dialog?.kind === 'correct' && correctionDialogEntry !== null ? (
-          <form onSubmit={(submission) => void submitCorrection(submission)}>
-            <h2 className="dialog-heading" id="event-dialog-heading">
-              Correct{' '}
-              {correctionDialogEntry.kind === 'location' ? 'location ' : ''}
-              entry {correctionDialogEntry.sequence}
-            </h2>
-            <DialogClassification
-              label={classificationLabel}
-              real={realEvent}
-            />
-            {dialogFeedback}
-            <p>
-              The original stays on the timeline, marked as corrected. Your
-              replacement is added below it with your name, the time, and the
-              reason.
-            </p>
-            <fieldset disabled={commandsBlocked}>
-              <legend>Correction details</legend>
-              {correctionDialogEntry.kind === 'location' ? (
-                <LocationEditor
-                  draft={dialogLocationDraft}
-                  idPrefix="correction-location"
-                  onChange={setDialogLocationDraft}
-                />
-              ) : (
-                <div className="field">
-                  <label htmlFor="correction-text">Corrected text</label>
-                  <textarea
-                    data-autofocus
-                    id="correction-text"
-                    maxLength={10_000}
-                    onChange={(change) => setDialogText(change.target.value)}
-                    required
-                    value={dialogText}
-                  />
-                </div>
-              )}
-              <div className="field">
-                <label htmlFor="correction-reason">Reason for correction</label>
-                <textarea
-                  id="correction-reason"
-                  maxLength={1_000}
-                  onChange={(change) => setDialogReason(change.target.value)}
-                  required
-                  value={dialogReason}
-                />
-              </div>
-            </fieldset>
-            <div className="form-actions">
-              <button
-                disabled={
-                  commandsBlocked ||
-                  (correctionDialogEntry.kind === 'location'
-                    ? dialogLocationPayload === null
-                    : dialogText.trim().length === 0) ||
-                  dialogReason.trim().length === 0
-                }
-                type="submit"
-              >
-                Post correction
-              </button>
-              <button
-                className="secondary"
-                disabled={pendingOperation !== null}
-                onClick={closeDialog}
-                type="button"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : null}
-
-        {dialog?.kind === 'redact' && redactionDialogEntry !== null ? (
-          <form onSubmit={(submission) => void submitRedaction(submission)}>
-            <h2 className="dialog-heading" id="event-dialog-heading">
-              Redact entry {redactionDialogEntry.sequence}
-            </h2>
-            <DialogClassification
-              label={classificationLabel}
-              real={realEvent}
-            />
-            {dialogFeedback}
-            <p>
-              This hides the content from the timeline. The original record, its
-              time, and who wrote it are kept and are never deleted.
-            </p>
-            <fieldset disabled={commandsBlocked}>
-              <legend>Redaction details</legend>
-              <div className="field">
-                <label htmlFor="redaction-reason">Reason for redaction</label>
-                <textarea
-                  data-autofocus
-                  id="redaction-reason"
-                  maxLength={1_000}
-                  onChange={(change) => setDialogReason(change.target.value)}
-                  required
-                  value={dialogReason}
-                />
-              </div>
-            </fieldset>
-            <div className="form-actions">
-              <button
-                className="danger"
-                disabled={commandsBlocked || dialogReason.trim().length === 0}
-                type="submit"
-              >
-                Hide this entry
-              </button>
-              <button
-                className="secondary"
-                disabled={pendingOperation !== null}
-                onClick={closeDialog}
-                type="button"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : null}
-
         {dialog?.kind === 'all-clear' ? (
           <form onSubmit={(submission) => void submitEndEvent(submission)}>
             <h2 className="dialog-heading" id="event-dialog-heading">

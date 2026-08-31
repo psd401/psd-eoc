@@ -528,7 +528,8 @@ describe('event room server-rendered safety and history state', () => {
     });
 
     const originalHtml = render(activeEvent('real'), [known]);
-    expect(originalHtml).toContain('Correct entry 5');
+    // Entries carry no correct or redact controls anywhere any more.
+    expect(originalHtml).not.toContain('Correct entry 5');
     expect(originalHtml).toContain('Post a location');
     expect(originalHtml).toContain('Known coordinates');
     expect(originalHtml).toContain('Ambiguous location');
@@ -598,9 +599,8 @@ describe('event room server-rendered safety and history state', () => {
     // material during an incident; the entry card no longer carries them.
     expect(html).not.toContain('Client-reported time:');
     expect(html).not.toContain('Server-assigned sequence');
-    expect(html).toContain('Redact entry 1');
+    expect(html).not.toContain('Redact entry 1');
     expect(html).not.toContain('Correct entry 1');
-    expect(html).not.toContain('Redact entry 3');
   });
 
   test('labels a draft as created without presenting a running timer', () => {
