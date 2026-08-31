@@ -273,6 +273,28 @@ function mockedAllClearChannels(createdAt: string) {
   ] as const;
 }
 
+/**
+ * Rejects any body field the real event-room route would not accept.
+ *
+ * `app/(app)/events/[id]/api/route.ts` runs `assertOnlyKeys` over every
+ * lifecycle body and answers 400 for a single unexpected field. This fixture
+ * stands in for that route in the mobile suite, so it has to be exactly as
+ * strict -- when it was more permissive, the suite happily proved a request
+ * shape the server rejects.
+ */
+function assertOnlySyntheticKeys(
+  command: object,
+  allowedKeys: readonly string[],
+): void {
+  const allowed = new Set(allowedKeys);
+  const unexpected = Object.keys(command).filter((key) => !allowed.has(key));
+  if (unexpected.length > 0) {
+    throw new TypeError(
+      `The synthetic route rejected unsupported fields: ${unexpected.join(', ')}.`,
+    );
+  }
+}
+
 function lifecyclePreview(event: Event, now: Date) {
   return LifecycleConsequencePreviewSchema.parse({
     id: IDS.lifecyclePreview,
@@ -1104,6 +1126,7 @@ export function createIssue21SyntheticFixtureTransport(
           }
 
           if (command.operation === 'preview-all-clear') {
+            assertOnlySyntheticKeys(command, ['operation']);
             if (currentEvent.status !== 'active') {
               throw new TypeError(
                 'The synthetic event is not active for all-clear preview.',
@@ -1114,11 +1137,19 @@ export function createIssue21SyntheticFixtureTransport(
           }
 
           if (command.operation === 'all-clear') {
+            // The real route runs assertOnlyKeys over the body and rejects
+            // anything it did not ask for. Mirror that here: this fixture
+            // previously required a confirmationPhrase the route forbids, so
+            // the mobile suite proved a contract the server does not honour
+            // and every end-event from the phone failed against production.
+            assertOnlySyntheticKeys(command, [
+              'operation',
+              'lifecyclePreviewId',
+            ]);
             if (
               currentEvent.status !== 'active' ||
               currentLifecyclePreview === null ||
               command.lifecyclePreviewId !== currentLifecyclePreview.id ||
-              command.confirmationPhrase !== 'ALL CLEAR' ||
               !roomEntries.some((entry) => entry.id === IDS.textEntry)
             ) {
               throw new TypeError(
@@ -1136,10 +1167,8 @@ export function createIssue21SyntheticFixtureTransport(
           }
 
           if (command.operation === 'close') {
-            if (
-              currentEvent.status !== 'all-clear' ||
-              command.confirmationPhrase !== 'CLOSE EVENT'
-            ) {
+            assertOnlySyntheticKeys(command, ['operation']);
+            if (currentEvent.status !== 'all-clear') {
               throw new TypeError('The synthetic close request is invalid.');
             }
             const result = closeResult(currentEvent, now().toISOString());

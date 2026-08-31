@@ -460,7 +460,6 @@ export class EventRoomApi {
   public allClear(
     eventId: string,
     lifecyclePreviewId: string,
-    confirmationPhrase: string,
     idempotencyKey: string,
     signal?: AbortSignal,
   ): Promise<AllClearEventResult> {
@@ -469,7 +468,6 @@ export class EventRoomApi {
       {
         operation: 'all-clear',
         lifecyclePreviewId,
-        confirmationPhrase,
       },
       idempotencyKey,
       allClearSchema(EventIdSchema.parse(eventId), lifecyclePreviewId),
@@ -479,13 +477,12 @@ export class EventRoomApi {
 
   public close(
     eventId: string,
-    confirmationPhrase: string,
     idempotencyKey: string,
     signal?: AbortSignal,
   ): Promise<CloseEventResult> {
     return this.mutate(
       eventId,
-      { operation: 'close', confirmationPhrase },
+      { operation: 'close' },
       idempotencyKey,
       closeSchema(EventIdSchema.parse(eventId)),
       signal,
