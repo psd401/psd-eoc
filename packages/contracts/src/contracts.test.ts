@@ -74,7 +74,6 @@ import {
   PushEndpointSendEligibilityInputSchema,
   PushEndpointSendEligibilityResultSchema,
   PushProviderCutoverSchema,
-  PushRegistrationBuildAuthorizationSchema,
   PushTokenRegistrationReceiptSchema,
   RegisterPushTokenInputSchema,
   NotificationIntentSchema,
@@ -3895,14 +3894,6 @@ describe('roster, facility, and identity boundaries', () => {
         provider: 'expo',
       }).success,
     ).toBe(false);
-    expect(
-      PushRegistrationBuildAuthorizationSchema.safeParse({
-        platform: 'android',
-        provider: 'fcm',
-        serviceEnvironment: 'production',
-        build,
-      }).success,
-    ).toBe(true);
     expect(
       PushProviderCutoverSchema.safeParse({
         version: 1,

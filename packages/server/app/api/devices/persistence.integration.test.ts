@@ -136,20 +136,6 @@ const registrationIdentity = Object.freeze({
   serviceEnvironment: 'production' as const,
   build: pushBuild,
 });
-const pushBuildAllowlist = Object.freeze([
-  Object.freeze({
-    platform: 'ios' as const,
-    provider: 'expo' as const,
-    serviceEnvironment: 'production' as const,
-    build: pushBuild,
-  }),
-  Object.freeze({
-    platform: 'ios' as const,
-    provider: 'apns' as const,
-    serviceEnvironment: 'production' as const,
-    build: pushBuild,
-  }),
-]);
 const facilityId = '00000000-0000-4000-8000-000000000001';
 const SEEDED = Object.freeze({
   audienceId: '00000000-0000-4000-8000-000000000020',
@@ -165,7 +151,7 @@ const SEEDED = Object.freeze({
 });
 
 function deviceCapabilityStore(database: PostgresDatabase) {
-  return createDrizzleDeviceCapabilityStore(database, pushBuildAllowlist);
+  return createDrizzleDeviceCapabilityStore(database);
 }
 
 let connection: PostgresDatabaseConnection | undefined;
@@ -1831,11 +1817,13 @@ describeWithDatabase('device push-token persistence', () => {
         }),
       ]),
     });
+    // A complete, well-formed registration is eligible for a send. It is no
+    // longer additionally required to match a hand-maintained list of exact
+    // shipped builds.
     await expect(
-      createDrizzlePushEndpointPolicyStore(
-        database,
-        pushBuildAllowlist,
-      ).loadEndpointPolicy(staffPolicyQuery),
+      createDrizzlePushEndpointPolicyStore(database).loadEndpointPolicy(
+        staffPolicyQuery,
+      ),
     ).resolves.toEqual([
       {
         recipientId: fixture.recipientId,
@@ -1843,11 +1831,6 @@ describeWithDatabase('device push-token persistence', () => {
         status: 'active',
       },
     ]);
-    await expect(
-      createDrizzlePushEndpointPolicyStore(database, []).loadEndpointPolicy(
-        staffPolicyQuery,
-      ),
-    ).rejects.toMatchObject({ code: 'INVALID_PUSH_ENDPOINT_POLICY' });
     await publishSyntheticRosterEndpointFixture(database, [active]);
     const pushResolution = pushResolutionFixture([active]);
     const pushPolicyStore = createDrizzlePushEndpointPolicyStore(database);
@@ -1947,10 +1930,8 @@ describeWithDatabase('device push-token persistence', () => {
         await applicationRoleConnection.db.execute(sql`set role psd_eoc_app`);
         await expect(
           applicationRoleConnection.db.transaction(async (transaction) => {
-            const applicationRoleStore = createDrizzleDeviceCapabilityStore(
-              transaction,
-              pushBuildAllowlist,
-            );
+            const applicationRoleStore =
+              createDrizzleDeviceCapabilityStore(transaction);
             return executeDeviceCapability(
               'record-endpoint-status',
               invalidationInput,
