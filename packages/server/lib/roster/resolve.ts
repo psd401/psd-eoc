@@ -66,9 +66,10 @@ export interface ResolveAudienceInput {
    * activated at all, which is a high price for a configuration object that
    * carried no information.
    *
-   * Reaching beyond one school goes with it for now. Neither `neighborhood` nor
-   * `others` targeting was ever configured, and the domain-based resolver that
-   * replaces this pipeline supports neighborhood reach directly, from
+   * Every `others` source in the snapshot is selected as well: it names the
+   * people who belong at every event at every school. `neighborhood` targeting
+   * was never configured, and the domain-based resolver that replaces this
+   * pipeline supports neighborhood reach directly, from
    * `neighborhood_facilities` rather than from a pinned target list.
    */
   readonly facilityId: string;
@@ -211,8 +212,17 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
     sources.forEach((source) => addSelectedSource(selectedSources, source));
   };
 
-  // The whole selection rule: an event at a school reaches that school's staff.
+  // The selection rule: an event at a school reaches that school's staff and
+  // everyone an others source names, at every school. An others source is the
+  // district-level list, the responders who belong at every event. Every
+  // snapshot carried them and nothing ever selected them, so a person on one
+  // was reached nowhere.
   selectBuildingFacility(facilityId);
+  for (const source of rosterSnapshot.sourceGroupRefs) {
+    if (source.purpose === 'others') {
+      addSelectedSource(selectedSources, source);
+    }
+  }
 
   const endpointOwnerById = new Map<string, RecipientId>();
   const endpointOwnerByDestination = new Map<string, RecipientId>();

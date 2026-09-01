@@ -112,6 +112,34 @@ describe('facilities administration form parsing', () => {
       status: 'others-group-created',
     });
 
+    // A manual others source names no facility and no provider: it is the
+    // district-level list curated in the application.
+    const manualOthers = parseFacilitiesAdminMutation(
+      adminForm('create-manual-others-group', [
+        ['displayName', 'District responders'],
+      ]),
+    );
+    expect(manualOthers).toMatchObject({
+      intent: 'create-manual-others-group',
+      command: {
+        kind: 'manual',
+        purpose: 'others',
+        facilityId: null,
+        googleGroupId: null,
+        email: null,
+        fixtureKey: null,
+      },
+      status: 'others-group-created',
+    });
+    expect(() =>
+      parseFacilitiesAdminMutation(
+        adminForm('create-manual-others-group', [
+          ['displayName', 'District responders'],
+          ['facilityId', '00000000-0000-4000-8000-000000000001'],
+        ]),
+      ),
+    ).toThrow();
+
     const syntheticOthers = parseFacilitiesAdminMutation(
       adminForm('create-synthetic-others-group', [
         ['displayName', 'District test response staff'],

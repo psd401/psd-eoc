@@ -163,9 +163,12 @@ const syntheticGroupDetailsShape = {
 
 /**
  * A manual source has no external identity to carry. Its members are curated
- * in this application, so the facility binding and display name are the whole
- * record; pinning the provider fields to null keeps a Google or synthetic
- * source from being reinterpreted as a manual one.
+ * in this application, so the display name and, for a building source, the
+ * facility binding are the whole record; pinning the provider fields to null
+ * keeps a Google or synthetic source from being reinterpreted as a manual one.
+ *
+ * A manual others source is the district-level list: the people who belong at
+ * every event at every facility, curated here without a Google Group.
  */
 const manualGroupDetailsShape = {
   googleGroupId: z.null(),
@@ -219,6 +222,17 @@ export const GroupSourceSchema = z
         kind: z.literal('manual'),
         purpose: z.literal('building'),
         facilityId: UuidSchema,
+        ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
+        ...manualGroupDetailsShape,
+      })
+      .strict(),
+    z
+      .object({
+        id: GroupSourceIdSchema,
+        kind: z.literal('manual'),
+        purpose: z.literal('others'),
+        facilityId: z.null(),
         ...groupSourceMetadataShape,
         ...noGrantedRoleShape,
         ...manualGroupDetailsShape,
@@ -319,6 +333,15 @@ export const CreateGroupSourceInputSchema = z
         kind: z.literal('manual'),
         purpose: z.literal('building'),
         facilityId: UuidSchema,
+        ...groupSourceWriteMetadataShape,
+        ...manualGroupDetailsShape,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal('manual'),
+        purpose: z.literal('others'),
+        facilityId: z.null(),
         ...groupSourceWriteMetadataShape,
         ...manualGroupDetailsShape,
       })

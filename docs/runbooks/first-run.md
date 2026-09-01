@@ -141,6 +141,16 @@ jobs from different groups, and one working tells you nothing about the other.
 Check under **Integrations** that the roster source is configured and a
 snapshot exists before trusting a consequence preview's recipient count.
 
+Every facility needs its own building source, because an event at a school
+reaches that school's building source and no other. A person who must be
+reached at every school, whichever one an event starts at, belongs on an
+**others** source instead: it is a district-level list that every event
+selects. Others sources come in two kinds. A Google others source draws its
+membership from a Google Group; a manual others source is curated in the
+application, on the Facilities page, with no Google Group, which suits a
+fixed district responder list. Adding people to any source takes effect only
+when the roster is published.
+
 ## 6. Walk the admin surface
 
 | Section          | What it is for                                                                                                                         |

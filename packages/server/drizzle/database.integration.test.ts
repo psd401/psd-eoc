@@ -2378,6 +2378,55 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     }
   });
 
+  test('refuses a manual others source that names a facility or a provider', async () => {
+    // The third layer of the rule: a manual others source binds to no
+    // facility and carries no provider identity, and the database refuses the
+    // row itself so no writer can put one in sideways.
+    const db = databaseConnection().db;
+    const rejected = [
+      {
+        id: '00000000-0000-4000-8000-000000043093',
+        facilityId: '00000000-0000-4000-8000-000000000001',
+        googleGroupId: null,
+        fixtureKey: null,
+      },
+      {
+        id: '00000000-0000-4000-8000-000000043094',
+        facilityId: null,
+        googleGroupId: 'google-manual-others-smuggled',
+        fixtureKey: null,
+      },
+      {
+        id: '00000000-0000-4000-8000-000000043095',
+        facilityId: null,
+        googleGroupId: null,
+        fixtureKey: 'manual-others-smuggled',
+      },
+    ] as const;
+    for (const candidate of rejected) {
+      await expectPostgresRejection(async () => {
+        await db.transaction(async (transaction) => {
+          await transaction.execute(sql`
+              insert into group_sources (
+                id, kind, purpose, facility_id, display_name, active,
+                google_group_id, email, fixture_key
+              ) values (
+                ${candidate.id}::uuid,
+                'manual'::group_source_kind,
+                'others'::group_purpose,
+                ${candidate.facilityId}::uuid,
+                'Smuggled manual others source',
+                true,
+                ${candidate.googleGroupId},
+                null,
+                ${candidate.fixtureKey}
+              )
+            `);
+        });
+      }, /group_sources_valid_variant/u);
+    }
+  });
+
   test('defers retained channel-history scans while enforcing replacement checks', async () => {
     const db = databaseConnection().db;
     const constraints = await db.execute<{

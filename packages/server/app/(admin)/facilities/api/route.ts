@@ -48,6 +48,7 @@ export async function POST(request: Request): Promise<Response> {
       case 'create-google-building-group':
       case 'create-google-others-group':
       case 'create-manual-building-group':
+      case 'create-manual-others-group':
       case 'create-synthetic-building-group':
       case 'create-synthetic-others-group':
         await executeCreateGroupSourceCapability({

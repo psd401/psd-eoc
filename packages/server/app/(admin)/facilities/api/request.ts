@@ -34,6 +34,7 @@ export type FacilitiesAdminMutation =
         | 'create-google-building-group'
         | 'create-google-others-group'
         | 'create-manual-building-group'
+        | 'create-manual-others-group'
         | 'create-synthetic-building-group'
         | 'create-synthetic-others-group';
       command: CreateGroupSourceInput;
@@ -125,16 +126,26 @@ function parseSyntheticGroup(
 }
 
 /**
- * A manual building source has no provider identifier to supply. The facility
- * binding and display name are the whole record; its members are curated
- * separately so a source can exist before anyone is added to it.
+ * A manual source has no provider identifier to supply. The display name and,
+ * for a building source, the facility binding are the whole record; its
+ * members are curated separately so a source can exist before anyone is added
+ * to it. A manual others source binds to no facility: it names the people who
+ * belong at every event.
  */
-function parseManualBuildingGroup(form: AdminForm): FacilitiesAdminMutation {
-  form.assertFields([...COMMON_FIELDS, 'facilityId', 'displayName']);
+function parseManualGroup(
+  form: AdminForm,
+  intent: 'create-manual-building-group' | 'create-manual-others-group',
+): FacilitiesAdminMutation {
+  const building = intent === 'create-manual-building-group';
+  form.assertFields([
+    ...COMMON_FIELDS,
+    ...(building ? (['facilityId'] as const) : []),
+    'displayName',
+  ]);
   const command = CreateGroupSourceInputSchema.parse({
     kind: 'manual',
-    purpose: 'building',
-    facilityId: form.required('facilityId'),
+    purpose: building ? 'building' : 'others',
+    facilityId: building ? form.required('facilityId') : null,
     displayName: form.required('displayName'),
     active: true,
     googleGroupId: null,
@@ -142,9 +153,9 @@ function parseManualBuildingGroup(form: AdminForm): FacilitiesAdminMutation {
     fixtureKey: null,
   });
   return {
-    intent: 'create-manual-building-group',
+    intent,
     command,
-    status: 'building-group-created',
+    status: building ? 'building-group-created' : 'others-group-created',
   };
 }
 
@@ -242,7 +253,8 @@ export function parseFacilitiesAdminMutation(
     case 'create-google-others-group':
       return parseGoogleGroup(form, intent);
     case 'create-manual-building-group':
-      return parseManualBuildingGroup(form);
+    case 'create-manual-others-group':
+      return parseManualGroup(form, intent);
     case 'publish-roster-snapshot':
       form.assertFields([...COMMON_FIELDS]);
       return { intent, command: null, status: 'roster-snapshot-published' };

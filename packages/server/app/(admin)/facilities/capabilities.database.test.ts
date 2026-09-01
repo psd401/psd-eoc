@@ -23,6 +23,8 @@ import {
   deviceEnrollments,
   groupSources,
   integrationStatuses,
+  rosterRecipientGroupSources,
+  rosterRecipients,
   rosterSourceConfigurationFacilities,
   rosterSourceConfigurationGroups,
   rosterSourceConfigurations,
@@ -49,6 +51,8 @@ import {
   createStructuredRosterSyncAlertSink,
   syncRoster,
 } from '../../../lib/roster/groups-sync';
+import { resolveAudience } from '../../../lib/roster/resolve';
+import { loadRosterSnapshot } from '../../../lib/capabilities/start';
 import { resetStaffRosterEmailForTests } from '../../../lib/config/staff-email';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
@@ -4317,6 +4321,227 @@ describeWithDatabase('facilities administrator database flow', () => {
             .orderBy(desc(rosterSnapshots.capturedAt))
             .limit(1);
           expect(snapshot?.population).toBe('staff');
+        },
+      );
+    } finally {
+      if (priorHostedDomain === undefined) {
+        delete process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+      } else {
+        process.env.GOOGLE_OIDC_HOSTED_DOMAIN = priorHostedDomain;
+      }
+      if (priorCutover === undefined) {
+        delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+      } else {
+        process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorCutover;
+      }
+      resetStaffRosterEmailForTests();
+    }
+  });
+
+  test('a manual others source reaches an event at every facility', async () => {
+    // The district-level responder list, curated in the application without a
+    // Google Group. A person on it and on no building source used to be
+    // reached nowhere: every snapshot carried the others source and nothing
+    // ever selected it. This walks the whole path and proves they now resolve
+    // into an event at a facility they have no building membership at.
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    const priorHostedDomain = process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+    const priorCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    process.env.GOOGLE_OIDC_HOSTED_DOMAIN = 'example.invalid';
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
+    resetStaffRosterEmailForTests();
+    try {
+      await withIsolatedFacilitiesDatabase(
+        currentContext.baseDatabaseUrl,
+        async (_isolatedContext, ownerConnection) => {
+          const database = ownerConnection.db;
+          const authenticated = authenticatedAdministrator();
+          const store = createDrizzleAdminCapabilityStore(
+            database,
+            authenticated,
+          );
+          const suffix = randomUUID();
+          const requestIds: string[] = [];
+          await persistAdministratorIdentity(database, authenticated, suffix);
+
+          // A facility with its own building source, so the publication has a
+          // building roster for the facility the event starts at.
+          const facility = await executeCreateFacilityCapability({
+            authenticated,
+            store,
+            command: {
+              code: `OTH${suffix.slice(0, 5).toUpperCase()}`,
+              name: `Others facility ${suffix.slice(0, 8)}`,
+            },
+            metadata: metadata('others-facility-create', requestIds),
+          });
+          const building = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'manual',
+              purpose: 'building',
+              facilityId: facility.id,
+              displayName: `Building staff ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: null,
+              email: null,
+              fixtureKey: null,
+            },
+            metadata: metadata('others-building-create', requestIds),
+          });
+          const buildingEmail = `building-${suffix.slice(0, 8)}@example.invalid`;
+          await executeSetManualRosterMembersCapability({
+            authenticated,
+            store,
+            command: { groupSourceId: building.id, emails: [buildingEmail] },
+            metadata: metadata('others-building-members', requestIds),
+          });
+
+          // The district-level others source, bound to no facility.
+          const others = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'manual',
+              purpose: 'others',
+              facilityId: null,
+              displayName: `District responders ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: null,
+              email: null,
+              fixtureKey: null,
+            },
+            metadata: metadata('others-others-create', requestIds),
+          });
+          expect(others).toMatchObject({
+            kind: 'manual',
+            purpose: 'others',
+            facilityId: null,
+          });
+          // It belongs to the staff roster, exactly as a manual building
+          // source does. A misfiled population is what dropped it before.
+          const [membership] = await database
+            .select({
+              population: rosterSourceConfigurationGroups.population,
+              purpose: rosterSourceConfigurationGroups.groupPurpose,
+            })
+            .from(rosterSourceConfigurationGroups)
+            .where(
+              eq(rosterSourceConfigurationGroups.groupSourceId, others.id),
+            );
+          expect(membership).toEqual({
+            population: 'staff',
+            purpose: 'others',
+          });
+
+          const responderEmail = `responder-${suffix.slice(0, 8)}@example.invalid`;
+          await executeSetManualRosterMembersCapability({
+            authenticated,
+            store,
+            command: { groupSourceId: others.id, emails: [responderEmail] },
+            metadata: metadata('others-others-members', requestIds),
+          });
+
+          const [configuration] = await database
+            .select({
+              id: rosterSourceConfigurations.id,
+              version: rosterSourceConfigurations.version,
+            })
+            .from(rosterSourceConfigurations)
+            .where(eq(rosterSourceConfigurations.population, 'staff'))
+            .orderBy(desc(rosterSourceConfigurations.version))
+            .limit(1);
+          if (configuration === undefined) {
+            throw new Error('No staff roster configuration was created.');
+          }
+          const published = await syncRoster(
+            {
+              sourceConfiguration: {
+                id: configuration.id,
+                version: configuration.version,
+              },
+            },
+            {
+              actor: authenticated.actor,
+              source: 'administrator',
+              transport: 'authenticated-session',
+              requestId: randomUUID(),
+              idempotencyKey: randomUUID(),
+            },
+            {
+              store: createDrizzleRosterSyncStore(database),
+              alerts: createStructuredRosterSyncAlertSink(),
+            },
+          );
+          expect(published).toMatchObject({
+            outcome: 'complete',
+            population: 'staff',
+            groupFailures: [],
+          });
+
+          // The responder is a recipient in the published snapshot, bound to
+          // the others source rather than any building source.
+          const publishedId = published.publishedSnapshotId;
+          if (publishedId === null) {
+            throw new Error('The publication produced no snapshot.');
+          }
+          const recipientRows = await database
+            .select({
+              recipientId: rosterRecipients.id,
+              email: rosterRecipients.staffEmail,
+            })
+            .from(rosterRecipients)
+            .where(eq(rosterRecipients.rosterSnapshotId, publishedId));
+          const responder = recipientRows.find(
+            (row) => row.email === responderEmail,
+          );
+          expect(responder).toBeDefined();
+          const [responderSource] = await database
+            .select({ purpose: rosterRecipientGroupSources.groupPurpose })
+            .from(rosterRecipientGroupSources)
+            .where(
+              and(
+                eq(rosterRecipientGroupSources.rosterSnapshotId, publishedId),
+                eq(
+                  rosterRecipientGroupSources.recipientId,
+                  responder?.recipientId ?? '',
+                ),
+              ),
+            );
+          expect(responderSource).toEqual({ purpose: 'others' });
+
+          // The crux: resolving an event at the facility reaches the responder
+          // even though they have no building membership there.
+          const snapshot = await loadRosterSnapshot(
+            database as unknown as Parameters<typeof loadRosterSnapshot>[0],
+            'staff',
+            facility.id,
+            publishedId,
+          );
+          if (snapshot === null) {
+            throw new Error('The published snapshot was not readable.');
+          }
+          const audience = resolveAudience({
+            facilityId: facility.id,
+            rosterSnapshot: snapshot,
+          });
+          const audienceRecipientIds = new Set(
+            audience.recipients.map((recipient) => recipient.recipientId),
+          );
+          expect(audienceRecipientIds.has(responder?.recipientId ?? '')).toBe(
+            true,
+          );
+          const buildingRecipient = recipientRows.find(
+            (row) => row.email === buildingEmail,
+          );
+          expect(
+            audienceRecipientIds.has(buildingRecipient?.recipientId ?? ''),
+          ).toBe(true);
         },
       );
     } finally {
