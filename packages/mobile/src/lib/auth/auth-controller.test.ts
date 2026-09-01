@@ -979,7 +979,7 @@ describe('mobile auth controller', () => {
     await expect(requesting).resolves.toBe('schema output');
   });
 
-  test('requires a fresh online session for reads and mutations', async () => {
+  test('requires a fresh online session to mutate, but still reads', async () => {
     const storage = new FakeStorage(storedVault());
     let requestCount = 0;
     const authenticatedApi: AuthenticatedRequestTransport = {
@@ -1006,9 +1006,16 @@ describe('mobile auth controller', () => {
     await auth.foreground();
     expect(auth.getSnapshot().phase).toBe('offline-cached');
 
-    await expect(
-      auth.requestAuthenticated(authenticatedGet),
-    ).rejects.toBeInstanceOf(OfflineMutationDeniedError);
+    // A read is attempted. It previously threw here before any request was
+    // made, which is why the event room's timeline silently stopped updating
+    // whenever the app was not strictly online with a live connectivity epoch:
+    // nothing reached the server, so nothing explained it, and the room told
+    // the operator that updates were not arriving during an emergency.
+    await auth.requestAuthenticated(authenticatedGet).catch(() => undefined);
+    expect(requestCount).toBe(1);
+
+    // A mutation still requires the online session that gives it provenance
+    // and idempotency, and is still refused without one.
     await expect(
       auth.requestAuthenticated({
         method: 'POST',
@@ -1018,7 +1025,7 @@ describe('mobile auth controller', () => {
         schema: stringSchema,
       }),
     ).rejects.toBeInstanceOf(OfflineMutationDeniedError);
-    expect(requestCount).toBe(0);
+    expect(requestCount).toBe(1);
   });
 
   test('aborts in-flight feature requests when the app backgrounds', async () => {

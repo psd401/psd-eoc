@@ -803,6 +803,45 @@ export class MobileAuthController {
     });
   }
 
+  /**
+   * The bearer for a read.
+   *
+   * Reads used to go through `currentAuthenticatedBearer`, which asserts the
+   * preconditions for a *mutation*: the `online` phase, a non-null connectivity
+   * epoch, and an epoch matching the vault. Those exist to give a mutation
+   * provenance and idempotency. A timeline read needs none of them.
+   *
+   * The cost of that was severe and invisible. Whenever the app was not
+   * strictly online with a live epoch, the event room's poll threw here before
+   * any request was made -- so the timeline silently stopped updating, the
+   * server recorded nothing because nothing arrived, and the room told the
+   * operator that updates were not arriving during an emergency. It also meant
+   * a read could reach the epoch mismatch branch and expire the session.
+   *
+   * A read still requires a usable session and a bearer; without one there is
+   * nothing to send. What it no longer requires is permission to mutate. If the
+   * network is genuinely unavailable the request now fails as a network error,
+   * which is both truthful and reportable.
+   */
+  private currentReadBearer(): Readonly<{
+    bearer: string;
+    credentialGeneration: number;
+  }> {
+    const session = this.state.session;
+    const vault = this.vault;
+    if (
+      session === null ||
+      vault === null ||
+      !locallyUsableSession(session, this.now())
+    ) {
+      throw new OfflineMutationDeniedError();
+    }
+    return Object.freeze({
+      bearer: vault.refreshToken,
+      credentialGeneration: this.credentialGeneration,
+    });
+  }
+
   private currentAuthenticatedBearer(): Readonly<{
     bearer: string;
     credentialGeneration: number;
@@ -840,7 +879,11 @@ export class MobileAuthController {
   public requestAuthenticated: RequestAuthenticated = async <Output>(
     request: AuthenticatedRequestOptions<Output>,
   ): Promise<Output> => {
-    const credential = this.currentAuthenticatedBearer();
+    // A read is not a mutation and is not gated as one.
+    const credential =
+      request.method === 'GET'
+        ? this.currentReadBearer()
+        : this.currentAuthenticatedBearer();
     const authenticatedApi = this.dependencies.authenticatedApi;
     if (authenticatedApi === undefined) {
       throw new AuthenticatedRequestFailure(
@@ -872,7 +915,11 @@ export class MobileAuthController {
       if (
         controller.signal.aborted ||
         credential.credentialGeneration !== this.credentialGeneration ||
-        this.state.phase !== 'online' ||
+        // A mutation's result is only trusted while the session that authorised
+        // it is still the live online one. A read carries no such claim, and
+        // discarding a timeline page because the phase moved is what left the
+        // room stale with nothing to show for it.
+        (request.method !== 'GET' && this.state.phase !== 'online') ||
         this.vault?.refreshToken !== credential.bearer
       ) {
         throw authenticatedRequestAborted();
