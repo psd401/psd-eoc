@@ -67,9 +67,10 @@ iOS and Android ship the same app from the same source at the same version.
 Release them together: a platform left behind is running different code from
 the one that was verified, and the version alone will not say so.
 
-The current app/runtime is 1.0.7. The last build submitted to both stores is
-1.0.7/build 17 on iOS and 1.0.7/code 9 on Android, on 2026-08-31. Remote updates
-are disabled,
+The current app/runtime is 1.0.8. The last build submitted to both stores is
+1.0.7/build 17 on iOS and 1.0.7/code 9 on Android, on 2026-08-31, so 1.0.8 is
+not installable anywhere until it is built and submitted. Remote updates are
+disabled,
 so every code or asset change requires another app-version bump and fresh store
 builds. The
 EAS `production` profile is the exact current store-build path; `production`
