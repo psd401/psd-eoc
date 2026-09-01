@@ -315,6 +315,31 @@ function rendererOwnedFrame(
   });
 }
 
+/**
+ * The compact frame used for a push title and an email subject.
+ *
+ * A headline is read in a list, on a lock screen, at a glance. The full frame
+ * spends about forty characters before any content, so
+ * `[DRILL] DRILL - TRAINING ONLY - ALL CLEAR: Lockdown Drill` arrived on a
+ * phone as `[DRILL] DRILL - TRAINING ONLY - ALL...` and the operator could not
+ * see which event it was or what had happened to it.
+ *
+ * Both edges stay renderer-owned and the classification marker stays on both,
+ * so configurable text still cannot remove or impersonate it. What is dropped
+ * is only the long spelled-out label, which the body still carries in full --
+ * a headline that says `[DRILL]` twice is already unmistakable, and one that
+ * shows nothing but its own frame is worse than useless during an emergency.
+ */
+function rendererOwnedHeadlineFrame(
+  classification: Classification,
+  purpose: NotificationPurpose,
+): RendererFrame {
+  return Object.freeze({
+    prefix: `[${classification.marker}] ${purposeLabel(purpose)}: `,
+    suffix: ` [${classification.marker}]`,
+  });
+}
+
 function containsUnsafeVisibleCodePoint(value: string): boolean {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -812,6 +837,10 @@ export function renderMessageTemplate(
   }
 
   const frame = rendererOwnedFrame(classification, template.purpose);
+  const headlineFrame = rendererOwnedHeadlineFrame(
+    classification,
+    template.purpose,
+  );
   const common = {
     eventKind: input.eventKind,
     templateMode: classification.templateMode,
@@ -832,7 +861,7 @@ export function renderMessageTemplate(
         ...common,
         channel: 'push',
         title: frameVisibleField(
-          frame,
+          headlineFrame,
           renderInterior(template.title),
           RENDERED_FIELD_LIMITS.pushTitle,
         ),
@@ -847,7 +876,7 @@ export function renderMessageTemplate(
         ...common,
         channel: 'email',
         subject: frameVisibleField(
-          frame,
+          headlineFrame,
           renderInterior(template.subject),
           RENDERED_FIELD_LIMITS.emailSubject,
         ),

@@ -136,6 +136,21 @@ export function eventApiErrorResponse(
       ? 'The event request is invalid.'
       : 'The event request failed.');
 
+  // Rejections here never reach the capability engine, so nothing else records
+  // them. A whole drill ran with the phone reporting an unavailable timeline
+  // while the server logged nothing at all, which left no way to tell a refused
+  // request from one that was never sent. Only the status, the canonical code,
+  // and the request id are recorded -- never the message, which can quote input.
+  console.info(
+    JSON.stringify({
+      event: 'event-api-rejected',
+      status,
+      code,
+      requestId,
+      errorName: error instanceof Error ? error.name : typeof error,
+    }),
+  );
+
   return NextResponse.json(
     ApiErrorSchema.parse({
       code,

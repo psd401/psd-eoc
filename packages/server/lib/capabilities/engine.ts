@@ -581,7 +581,13 @@ function databaseRefusal(error: unknown): string | null {
     constraint_name?: unknown;
     table_name?: unknown;
   } | null;
-  const code = typeof fields?.code === 'string' ? fields.code : null;
+  // A PostgreSQL SQLSTATE is exactly five digits or uppercase letters. Node
+  // uses the same `code` property for its own errors, so without this check a
+  // missing file reported itself as "database refused: code ENOENT" -- which is
+  // how a broken PDF font asset spent production looking like a database fault.
+  const rawCode = typeof fields?.code === 'string' ? fields.code : null;
+  const code =
+    rawCode !== null && /^[0-9A-Z]{5}$/u.test(rawCode) ? rawCode : null;
   const constraint =
     typeof fields?.constraint_name === 'string' ? fields.constraint_name : null;
   const table =
