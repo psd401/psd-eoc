@@ -1554,6 +1554,93 @@ describe('mobile event-room timeline accessibility', () => {
     }
   });
 
+  test('never strands a selected photo without a way to post it', () => {
+    // The regression this pins: capture posts in one action, but when that
+    // post does not run the draft sits at `ready`. `selected` disables both
+    // capture buttons, so with no post control the operator held a photo that
+    // nothing on screen could send, and reopening the sheet restored the same
+    // dead end.
+    const submit = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    render(
+      <PhotoComposerDialog
+        newPostsAllowed
+        onDismiss={() => undefined}
+        online
+        photo={{
+          draft: {
+            altText: 'Synthetic ready draft',
+            caption: null,
+            stage: 'ready',
+            progress: 0,
+            error: null,
+            localCleanupOnly: false,
+          },
+          busy: false,
+          takePhoto: async () => undefined,
+          choosePhoto: async () => undefined,
+          setAltText: () => undefined,
+          setCaption: () => undefined,
+          submit,
+          retry: async () => undefined,
+          discard: async () => undefined,
+        }}
+        target={target}
+        templateMode="drill"
+        visible
+      />,
+    );
+
+    // Both capture buttons are disabled by the selection itself.
+    for (const label of ['Take Photo', 'Choose Photo']) {
+      expect(
+        screen.getByRole('button', { name: label }).props.accessibilityState,
+      ).toEqual({ disabled: true });
+    }
+    // So a control that can actually post it has to be present.
+    const post = screen.getByRole('button', { name: 'Post photo' });
+    expect(post.props.accessibilityState).toEqual({ disabled: false });
+    fireEvent.press(post);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  test('offers no post control in the ordinary one-action flow', () => {
+    // The recovery control must not reappear as a second confirmation: with
+    // nothing selected there is nothing to post.
+    render(
+      <PhotoComposerDialog
+        newPostsAllowed
+        onDismiss={() => undefined}
+        online
+        photo={{
+          draft: {
+            altText: '',
+            caption: null,
+            stage: 'describe',
+            progress: 0,
+            error: null,
+            localCleanupOnly: false,
+          },
+          busy: false,
+          takePhoto: async () => undefined,
+          choosePhoto: async () => undefined,
+          setAltText: () => undefined,
+          setCaption: () => undefined,
+          submit: async () => undefined,
+          retry: async () => undefined,
+          discard: async () => undefined,
+        }}
+        target={target}
+        templateMode="drill"
+        visible
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Post photo' })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Take Photo' }).props
+        .accessibilityState,
+    ).toEqual({ disabled: false });
+  });
+
   test('offers no photo description fields to edit or lock', () => {
     // This replaces a test that proved canonical descriptions became read-only
     // once network work started. There is nothing to lock any more: the sheet

@@ -1404,6 +1404,21 @@ export function PhotoComposerDialog({
                     void photo.choosePhoto();
                   }}
                 />
+                {/* Capturing posts, so this is not a second confirmation in
+                    the ordinary flow -- it never appears there. It exists
+                    because a photo can end up selected and not posted (the
+                    app is briefly inactive as the camera dismisses, for one),
+                    and without it both capture buttons are disabled by
+                    `selected`, leaving the operator holding a photo with no
+                    control that can send it. */}
+                {draft?.stage === 'ready' && !photo.busy ? (
+                  <ActionButton
+                    label="Post photo"
+                    onPress={() => {
+                      void photo.submit();
+                    }}
+                  />
+                ) : null}
               </View>
             )}
 
@@ -1571,7 +1586,13 @@ function AuthenticatedEventRoomScreen({
     newPostsAllowed: eventAcceptsPosts,
     api,
     entries: sync.model.entries,
-    onAppended: followConfirmedEntry,
+    onAppended: (projection: JournalEntryReadProjection) => {
+      followConfirmedEntry(projection);
+      // The photo is posted and on the timeline, so the sheet has nothing
+      // left to do. Leaving it open stranded the operator on a screen whose
+      // capture buttons are disabled by the very draft they just posted.
+      setComposer((current) => (current === 'photo' ? null : current));
+    },
   });
 
   const dismissLifecycle = useCallback(() => {
