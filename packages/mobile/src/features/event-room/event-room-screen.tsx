@@ -1649,6 +1649,15 @@ function AuthenticatedEventRoomScreen({
     if (!online && lifecycleAction !== null) dismissLifecycle();
   }, [dismissLifecycle, lifecycleAction, online]);
 
+  // A photo posted from the composer bar never opened the sheet, so an error
+  // raised on that path had nowhere to appear and the operator saw a photo
+  // silently not post. The sheet is where a draft is explained and recovered,
+  // so it opens itself the moment one needs attention.
+  useEffect(() => {
+    if (photo.draft?.error === null || photo.draft?.error === undefined) return;
+    setComposer((current) => (current === null ? 'photo' : current));
+  }, [photo.draft?.error]);
+
   useEffect(() => {
     if (eventAcceptsPosts) return;
     locationCaptureGenerationRef.current =
@@ -2347,15 +2356,35 @@ function AuthenticatedEventRoomScreen({
                   label="Location…"
                   onPress={() => setComposer('location')}
                 />
-                <ActionButton
-                  disabled={postingDisabled}
-                  label={
-                    photo.draft?.stage === 'describe'
-                      ? 'Photo…'
-                      : 'Photo draft…'
-                  }
-                  onPress={() => setComposer('photo')}
-                />
+                {/* The camera is one tap. Opening a sheet first, then
+                    pressing a button inside it, put a screen between the
+                    operator and the shutter for no decision worth making.
+                    The sheet is still where a retained draft is recovered,
+                    and it opens itself when one needs attention. */}
+                {photo.draft !== null && photo.draft.stage !== 'describe' ? (
+                  <ActionButton
+                    disabled={postingDisabled}
+                    label="Photo draft…"
+                    onPress={() => setComposer('photo')}
+                  />
+                ) : (
+                  <>
+                    <ActionButton
+                      disabled={postingDisabled || photo.busy || !online}
+                      label={photo.busy ? 'Photo…' : 'Photo'}
+                      onPress={() => {
+                        void photo.takePhoto();
+                      }}
+                    />
+                    <ActionButton
+                      disabled={postingDisabled || photo.busy || !online}
+                      label="Library"
+                      onPress={() => {
+                        void photo.choosePhoto();
+                      }}
+                    />
+                  </>
+                )}
               </View>
             </>
           )}
