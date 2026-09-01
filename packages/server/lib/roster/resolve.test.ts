@@ -233,38 +233,68 @@ function expectResolutionError(
 }
 
 describe('roster audience resolution for one school', () => {
+  const recipientById = (
+    result: ReturnType<typeof resolveAudience>,
+    id: string,
+  ) => result.recipients.find((recipient) => recipient.recipientId === id);
+
   test('resolves the school and retains recipients without active endpoints', () => {
     const result = resolveAudience(input(IDS.facilityNorth));
 
-    expect(result.sourceGroupRefs).toEqual([NORTH_GROUP]);
+    // The school's own building source plus every others source, which reach
+    // their people at every school.
+    expect(result.sourceGroupRefs).toEqual([NORTH_GROUP, OTHERS_GROUP]);
     expect(result.facilityId).toBe(IDS.facilityNorth);
-    expect(recipientIds(result)).toEqual([
-      IDS.recipientNorth,
-      IDS.recipientShared,
-      IDS.recipientNoEndpoint,
-    ]);
+    expect(recipientIds(result)).toContain(IDS.recipientNorth);
+    expect(recipientIds(result)).toContain(IDS.recipientNoEndpoint);
     expect(
-      result.recipients[0]?.endpoints.map((endpoint) => endpoint.id),
+      recipientById(result, IDS.recipientNorth)?.endpoints.map(
+        (endpoint) => endpoint.id,
+      ),
     ).toEqual([IDS.endpointNorthEmail]);
     // Kept with no endpoints rather than dropped: somebody at the school with
     // no reachable address is a fact the consequence preview should be able to
     // show, not one to quietly omit.
-    expect(result.recipients[2]?.endpoints).toEqual([]);
+    expect(recipientById(result, IDS.recipientNoEndpoint)?.endpoints).toEqual(
+      [],
+    );
     // Inactive endpoints are excluded from the plan.
     expect(endpointIds(result)).not.toContain(IDS.endpointNorthPush);
   });
 
-  test('reaches only the school it was given', () => {
+  test('reaches the school it was given plus every others source', () => {
     // The rule that replaced twenty configuration rows: an event at a school
-    // reaches that school. Nothing selects a second one, so a recipient who is
-    // only at the other school cannot appear.
+    // reaches that school's building source. It also reaches every others
+    // source, the district-level lists whose people belong at every event, so
+    // both schools resolve the same others group.
     const north = resolveAudience(input(IDS.facilityNorth));
     const south = resolveAudience(input(IDS.facilitySouth));
 
-    expect(north.sourceGroupRefs).toEqual([NORTH_GROUP]);
-    expect(south.sourceGroupRefs).toEqual([SOUTH_GROUP]);
+    expect(north.sourceGroupRefs).toEqual([NORTH_GROUP, OTHERS_GROUP]);
+    expect(south.sourceGroupRefs).toEqual([SOUTH_GROUP, OTHERS_GROUP]);
+    // The other school's building-only recipient still cannot appear.
     expect(recipientIds(north)).not.toContain(IDS.recipientSouth);
     expect(recipientIds(south)).not.toContain(IDS.recipientNorth);
+  });
+
+  test('reaches an others-only recipient at every school and nowhere is empty', () => {
+    // A person on a district others source and no building source is exactly
+    // the case the resolver used to drop: nothing selected the others source,
+    // so they were reached nowhere. They now appear at both schools.
+    const north = resolveAudience(input(IDS.facilityNorth));
+    const south = resolveAudience(input(IDS.facilitySouth));
+
+    expect(recipientIds(north)).toContain(IDS.recipientOthers);
+    expect(recipientIds(south)).toContain(IDS.recipientOthers);
+    // Their group provenance in the plan is the others source they belong to.
+    expect(recipientById(north, IDS.recipientOthers)?.groupSourceRefs).toEqual([
+      OTHERS_GROUP,
+    ]);
+    expect(
+      recipientById(north, IDS.recipientOthers)?.endpoints.map(
+        (endpoint) => endpoint.id,
+      ),
+    ).toEqual([IDS.endpointOthersPush]);
   });
 
   test('a recipient at both schools resolves under either', () => {

@@ -26,6 +26,7 @@ const IDS = Object.freeze({
   neighborhood: uuid(2655),
   othersGoogle: uuid(2656),
   othersInactiveUnselected: uuid(2660),
+  othersManual: uuid(2661),
   othersSynthetic: uuid(2657),
 });
 
@@ -132,6 +133,20 @@ const AUTHORIZED_VIEW_BASE = Object.freeze({
         fixtureKey: 'district-test-response',
         createdAt: AT,
       },
+      {
+        id: IDS.othersManual,
+        kind: 'manual',
+        purpose: 'others',
+        facilityId: null,
+        grantedRole: null,
+        displayName: 'District responders',
+        active: true,
+        membersCapturedAt: null,
+        googleGroupId: null,
+        email: null,
+        fixtureKey: null,
+        createdAt: AT,
+      },
     ],
     pageInfo: { hasMore: false, nextCursor: null },
   }),
@@ -184,12 +199,17 @@ describe('facilities administration view', () => {
       'update-facility',
       'create-google-building-group',
       'create-google-others-group',
+      'create-manual-others-group',
       'replace-google-building-group',
       'replace-google-others-group',
       'create-neighborhood-version',
     ]) {
       expect(markup).toContain(`value="${intent}"`);
     }
+    // The district-level list has an add form and, once it exists, a member
+    // editor: a manual others source is curated in the application.
+    expect(markup).toContain('<legend>Add a manual others source</legend>');
+    expect(markup).toContain('People notified by District responders');
     for (const intent of [
       'create-synthetic-building-group',
       'create-synthetic-others-group',

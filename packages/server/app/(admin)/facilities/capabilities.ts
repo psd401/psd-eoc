@@ -1889,11 +1889,19 @@ async function loadManualSource(
   if (source === undefined) {
     throw conflict('The group source is unavailable.');
   }
-  if (source.kind !== 'manual' || source.purpose !== 'building') {
-    throw conflict('Only a manual building source has curated members.');
+  if (
+    source.kind !== 'manual' ||
+    (source.purpose !== 'building' && source.purpose !== 'others')
+  ) {
+    throw conflict('Only a manual source has curated members.');
   }
-  if (source.facilityId === null) {
+  // A building source names a facility and an others source names none. Either
+  // is a manual list curated here; the variant rule is enforced at creation.
+  if (source.purpose === 'building' && source.facilityId === null) {
     throw conflict('The manual building source has no facility binding.');
+  }
+  if (source.purpose === 'others' && source.facilityId !== null) {
+    throw conflict('A manual others source cannot name a facility.');
   }
   return source;
 }
@@ -1967,7 +1975,7 @@ export const setManualRosterMembersRegistration: ServerCapabilityRegistration<
     }),
   async loadReplay(reference, context) {
     const parsed = parseResultReference(reference);
-    // Refuses a replay whose source is no longer a manual building source.
+    // Refuses a replay whose source is no longer a manual source.
     await loadManualSource(context.transaction.database, parsed.id);
     const [row] = await context.transaction.database
       .select({ memberCount: countDistinct(groupMembers.email) })

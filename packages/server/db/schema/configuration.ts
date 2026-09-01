@@ -193,8 +193,11 @@ export const groupSources = pgTable(
         and ${table.googleGroupId} is null
         and ${table.email} is null
         and ${table.fixtureKey} is null
-        and ${table.purpose} = 'building'
-        and ${table.facilityId} is not null
+        and ${table.purpose} in ('building', 'others')
+        and (
+          (${table.purpose} = 'building' and ${table.facilityId} is not null)
+          or (${table.purpose} = 'others' and ${table.facilityId} is null)
+        )
       )`,
     ),
     check(
