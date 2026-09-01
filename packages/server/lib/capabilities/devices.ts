@@ -819,11 +819,31 @@ const EMPTY_LIVE_PUSH_RESOLUTION: LivePushResolution = Object.freeze({
 /** Matches the per-recipient endpoint ceiling the roster contract enforces. */
 const MAX_ENDPOINTS_PER_RECIPIENT = 10;
 
+/** Platform, provider, and service environment together, order-free. */
+function pushProviderProfile(
+  value: Readonly<{
+    platform: string;
+    provider: string;
+    serviceEnvironment: string;
+  }>,
+): string {
+  return `${value.platform}|${value.provider}|${value.serviceEnvironment}`;
+}
+
 /**
  * Builds push endpoints for the recipient's live devices that no published
  * endpoint covers. Each one carries its own registration id, which is the same
  * identity a published push endpoint carries, so the policy store can resolve
  * it and delivery can record attempts against it exactly as it always has.
+ *
+ * Only a device registered under a provider profile the recipient's snapshot
+ * already uses is added. A device registers under more than one provider at
+ * once -- an APNs registration and an Expo fallback, say -- but the snapshot
+ * was published under one provider cutover, so it carries an endpoint for only
+ * one of them. Fanning out every provider would send the same person the same
+ * notification twice, or send it through a provider this deployment does not
+ * use. A recipient the snapshot holds no push endpoint for has no profile to
+ * infer, so nothing is added until a publish records one.
  *
  * Anything that does not parse as a push endpoint is dropped rather than
  * raised: an unusable registration must not take down an entire notification.
@@ -833,11 +853,23 @@ function additionalPushEndpoints(
   registrations: readonly LivePushRegistration[],
 ): readonly PushEndpoint[] {
   if (registrations.length === 0) return [];
-  const published = new Set(recipient.endpoints.map((endpoint) => endpoint.id));
-  const capturedAt = recipient.endpoints[0]?.capturedAt;
+  const publishedIds = new Set<string>();
+  const publishedProfiles = new Set<string>();
+  let capturedAt: string | undefined;
+  for (const endpoint of recipient.endpoints) {
+    if (endpoint.channel !== 'push') continue;
+    publishedIds.add(endpoint.id);
+    publishedProfiles.add(pushProviderProfile(endpoint));
+    capturedAt ??= endpoint.capturedAt;
+  }
   if (capturedAt === undefined) return [];
   return registrations.flatMap((registration) => {
-    if (published.has(registration.id)) return [];
+    if (
+      publishedIds.has(registration.id) ||
+      !publishedProfiles.has(pushProviderProfile(registration))
+    ) {
+      return [];
+    }
     const parsed = PushEndpointSchema.safeParse({
       id: registration.id,
       status: 'active',
