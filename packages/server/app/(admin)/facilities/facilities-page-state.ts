@@ -10,6 +10,8 @@ const STATUS_MESSAGES = Object.freeze({
     'The building source was replaced with a new immutable source and roster configuration version.',
   'facility-created': 'The facility was added.',
   'facility-updated': 'The facility settings were updated.',
+  'manual-members-published':
+    'The people notified by that manual source were saved and a new roster snapshot was published. Activations now reach them.',
   'manual-members-saved':
     'The people notified by that manual source were saved. Rebuild the roster to put the change into effect.',
   'neighborhood-version-created': 'The neighborhood version was saved.',

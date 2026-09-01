@@ -53,6 +53,8 @@ import {
 } from '../../../lib/roster/groups-sync';
 import { resolveAudience } from '../../../lib/roster/resolve';
 import { loadRosterSnapshot } from '../../../lib/capabilities/start';
+import { AdminFormError } from './admin-request';
+import { publishAfterManualMembersSave } from './roster-publish';
 import { resetStaffRosterEmailForTests } from '../../../lib/config/staff-email';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
@@ -4423,6 +4425,170 @@ describeWithDatabase('facilities administrator database flow', () => {
         ).resolves.toMatchObject({ groupSourceId: others.id, memberCount: 1 });
       },
     );
+  });
+
+  test('saving the people on a manual source publishes the roster, and says so when it cannot', async () => {
+    // A separate publish step is a step someone forgets. Saving is the
+    // publish. When the publication is refused, the people stay saved and the
+    // administrator is told exactly that, instead of a success redirect over
+    // a roster that never changed.
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    const priorHostedDomain = process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+    const priorCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    process.env.GOOGLE_OIDC_HOSTED_DOMAIN = 'example.invalid';
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
+    resetStaffRosterEmailForTests();
+    try {
+      await withIsolatedFacilitiesDatabase(
+        currentContext.baseDatabaseUrl,
+        async (_isolatedContext, ownerConnection) => {
+          const database = ownerConnection.db;
+          const authenticated = authenticatedAdministrator();
+          const store = createDrizzleAdminCapabilityStore(
+            database,
+            authenticated,
+          );
+          const suffix = randomUUID();
+          const requestIds: string[] = [];
+          await persistAdministratorIdentity(database, authenticated, suffix);
+
+          const facility = await executeCreateFacilityCapability({
+            authenticated,
+            store,
+            command: {
+              code: `PUB${suffix.slice(0, 5).toUpperCase()}`,
+              name: `Publish facility ${suffix.slice(0, 8)}`,
+            },
+            metadata: metadata('publish-facility-create', requestIds),
+          });
+          // The building source exists but has nobody in it yet, which the
+          // publication refuses rather than publishing a roster that reaches
+          // nobody at that school.
+          const building = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'manual',
+              purpose: 'building',
+              facilityId: facility.id,
+              displayName: `Building staff ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: null,
+              email: null,
+              fixtureKey: null,
+            },
+            metadata: metadata('publish-building-create', requestIds),
+          });
+          const others = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'manual',
+              purpose: 'others',
+              facilityId: null,
+              displayName: `District responders ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: null,
+              email: null,
+              fixtureKey: null,
+            },
+            metadata: metadata('publish-others-create', requestIds),
+          });
+
+          // Saving the responder commits, then the publication is refused.
+          const responderEmail = `responder-${suffix.slice(0, 8)}@example.invalid`;
+          const saveKey = `publish-on-save-${suffix}`;
+          await executeSetManualRosterMembersCapability({
+            authenticated,
+            store,
+            command: { groupSourceId: others.id, emails: [responderEmail] },
+            metadata: {
+              idempotencyKey: saveKey,
+              requestId: randomUUID(),
+              now: new Date(),
+            },
+          });
+          const refused = await publishAfterManualMembersSave({
+            authenticated,
+            idempotencyKey: saveKey,
+            database,
+          }).then(
+            () => null,
+            (error: unknown) => error,
+          );
+          expect(refused).toBeInstanceOf(AdminFormError);
+          expect((refused as Error).message).toContain(
+            'The people were saved.',
+          );
+          expect((refused as Error).message).toContain('EMPTY_BUILDING_GROUP');
+          expect(
+            (
+              await database
+                .select({ email: groupMembers.email })
+                .from(groupMembers)
+                .where(eq(groupMembers.groupSourceId, others.id))
+            ).map(({ email }) => email),
+          ).toEqual([responderEmail]);
+          expect(
+            await database
+              .select({ id: rosterSnapshots.id })
+              .from(rosterSnapshots)
+              .where(eq(rosterSnapshots.population, 'staff')),
+          ).toEqual([]);
+
+          // Once the building source has someone, saving publishes, and the
+          // published snapshot carries both people without any further step.
+          const buildingEmail = `building-${suffix.slice(0, 8)}@example.invalid`;
+          const secondKey = `publish-on-save-${suffix}-building`;
+          await executeSetManualRosterMembersCapability({
+            authenticated,
+            store,
+            command: { groupSourceId: building.id, emails: [buildingEmail] },
+            metadata: {
+              idempotencyKey: secondKey,
+              requestId: randomUUID(),
+              now: new Date(),
+            },
+          });
+          const published = await publishAfterManualMembersSave({
+            authenticated,
+            idempotencyKey: secondKey,
+            database,
+          });
+          expect(published.outcome).toBe('complete');
+          const publishedId = published.publishedSnapshotId;
+          if (publishedId === null) {
+            throw new Error('The publication produced no snapshot.');
+          }
+          expect(
+            (
+              await database
+                .select({ email: rosterRecipients.staffEmail })
+                .from(rosterRecipients)
+                .where(eq(rosterRecipients.rosterSnapshotId, publishedId))
+            )
+              .map(({ email }) => email)
+              .sort(),
+          ).toEqual([buildingEmail, responderEmail].sort());
+        },
+      );
+    } finally {
+      if (priorHostedDomain === undefined) {
+        delete process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+      } else {
+        process.env.GOOGLE_OIDC_HOSTED_DOMAIN = priorHostedDomain;
+      }
+      if (priorCutover === undefined) {
+        delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+      } else {
+        process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorCutover;
+      }
+      resetStaffRosterEmailForTests();
+    }
   });
 
   test('a manual others source reaches an event at every facility', async () => {
