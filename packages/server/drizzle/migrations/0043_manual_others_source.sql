@@ -19,9 +19,9 @@ ALTER TABLE "group_sources" ADD CONSTRAINT "group_sources_valid_variant" CHECK (
           or ("group_sources"."purpose" = 'others' and "group_sources"."facility_id" is null)
         )
       ) or (
-        -- Compared as text so this constraint can be created in the same
-        -- migration transaction that adds 'manual' to the enum. PostgreSQL
-        -- refuses a new enum value used as an enum literal before it commits.
+        -- Kept as a text comparison so this predicate stays byte-identical to
+        -- the one migration 0037 introduced with 'manual'; the cast is a no-op
+        -- now that the enum value is long committed, but the parity is not.
         "group_sources"."kind"::text = 'manual'
         and "group_sources"."google_group_id" is null
         and "group_sources"."email" is null
