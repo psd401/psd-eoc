@@ -370,15 +370,19 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
 
     expect(text).toContain('Who gets notified');
     expect(text).toContain('DRILL — TRAINING ONLY · Push notifications');
-    expect(text).toContain('[DRILL] Synthetic earthquake drill');
-    expect(text).toContain('[DRILL] Synthetic recipients only.');
-    expect(text).toContain('Eligible endpoints: 2');
+    expect(text).toContain('Reaches: 2');
     expect(text).toContain('Mocked — training data only');
     expect(text).toContain('Text messages');
     expect(text).toContain('Not included.');
     expect(text).toContain('No text message is sent.');
+    // The rendered bodies are deliberately not read out. The operator is
+    // deciding whether to start an event, and the wording is configured per
+    // event type rather than chosen here, so announcing every field buried
+    // the decision -- and made the screen unreadable on a phone.
+    expect(text).not.toContain('[DRILL] Synthetic earthquake drill');
+    expect(text).not.toContain('Exact message preview');
     expect(confirmButton?.props.accessibilityHint).toContain(
-      'sends the messages shown above',
+      'notifies staff on the channels shown above',
     );
   });
 

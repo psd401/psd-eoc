@@ -56,25 +56,6 @@ function integrationLabel(
   }
 }
 
-function renderedMessageFields(
-  message: PreviewChannel['renderedMessage'],
-): readonly Readonly<{ label: string; value: string }>[] {
-  switch (message.channel) {
-    case 'push':
-      return [
-        { label: 'Title', value: message.title },
-        { label: 'Message', value: message.body },
-      ];
-    case 'email':
-      return [
-        { label: 'Subject', value: message.subject },
-        { label: 'Message', value: message.textBody },
-      ];
-    case 'sms':
-      return [{ label: 'Message', value: message.body }];
-  }
-}
-
 export function activationAudienceLabel(
   recipientCount: number,
   rosterPopulation: RosterPopulation,
@@ -183,11 +164,14 @@ export function ActivationConfirmation({
           Who gets notified
         </Text>
         <Text style={styles.consequencesIntroduction}>
-          These are the exact messages PSD EOC sends for this {classification}.
+          {/* Reach, not copy. The operator is deciding whether to start an
+              event; the wording is configured per event type and is not
+              theirs to change here, so printing every rendered body buried
+              the decision under boilerplate. */}
+          Starting this {classification} notifies staff on these channels.
         </Text>
 
         {channels.map((channel) => {
-          const messageFields = renderedMessageFields(channel.renderedMessage);
           const friendlyChannelName = channelName(channel.channel);
 
           return (
@@ -212,26 +196,13 @@ export function ActivationConfirmation({
                 {classification} · {friendlyChannelName}
               </Text>
               <Text style={styles.fact}>
-                <Text style={styles.factLabel}>Channel: </Text>
-                {friendlyChannelName}
-              </Text>
-              <Text style={styles.fact}>
-                <Text style={styles.factLabel}>Eligible endpoints: </Text>
+                <Text style={styles.factLabel}>Reaches: </Text>
                 {channel.endpointCount}
               </Text>
               <Text style={styles.fact}>
                 <Text style={styles.factLabel}>Integration: </Text>
                 {integrationLabel(channel.integrationStatus.label)}
               </Text>
-              <Text accessibilityRole="header" style={styles.messageHeading}>
-                Exact message preview
-              </Text>
-              {messageFields.map((field) => (
-                <Text key={field.label} style={styles.messageField}>
-                  <Text style={styles.factLabel}>{field.label}: </Text>
-                  {field.value}
-                </Text>
-              ))}
             </View>
           );
         })}
@@ -287,7 +258,7 @@ export function ActivationConfirmation({
           Starts a {classification} at {facilityName} and notifies {audience}.
         </Text>
         <Pressable
-          accessibilityHint="Starts the event and sends the messages shown above."
+          accessibilityHint="Starts the event and notifies staff on the channels shown above."
           accessibilityLabel={busy ? `${action}. Starting once.` : action}
           accessibilityRole="button"
           accessibilityState={{ busy, disabled: unavailable }}

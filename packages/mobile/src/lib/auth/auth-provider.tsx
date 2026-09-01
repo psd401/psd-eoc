@@ -1,3 +1,4 @@
+import * as Application from 'expo-application';
 import * as Crypto from 'expo-crypto';
 import type {
   ConnectivityEpochId,
@@ -8,6 +9,11 @@ import type {
   UserId,
 } from '@psd-eoc/contracts';
 import { AppState, Platform } from 'react-native';
+
+import {
+  CLIENT_DIAGNOSTIC_PATH,
+  ClientDiagnostics,
+} from '../api/client-diagnostics';
 import {
   createContext,
   useCallback,
@@ -108,9 +114,38 @@ function createRuntime(): AuthRuntime {
   const baseUrl = () =>
     parseAuthApiBaseUrl(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL, __DEV__);
   const api = new AuthApiClient(baseUrl);
+  // Failures the server never receives are witnessed only here. Without this
+  // the reporter exists but is never given to the client, and every failure is
+  // still invisible -- which is exactly what happened on the first build that
+  // shipped the reporting code.
+  const diagnostics = new ClientDiagnostics(
+    {
+      async send(reports) {
+        await fetch(`${baseUrl()}${CLIENT_DIAGNOSTIC_PATH}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          },
+          body: JSON.stringify({ reports }),
+          credentials: 'omit',
+          cache: 'no-store',
+        });
+      },
+    },
+    () => ({
+      applicationVersion: Application.nativeApplicationVersion,
+      nativeBuildVersion: Application.nativeBuildVersion,
+      platform: Platform.OS === 'android' ? 'android' : 'ios',
+    }),
+  );
   const controller = new MobileAuthController({
     api,
-    authenticatedApi: new AuthenticatedApiClient(baseUrl),
+    authenticatedApi: new AuthenticatedApiClient(
+      baseUrl,
+      undefined,
+      diagnostics,
+    ),
     storage,
     localAuthenticator: createLocalAuthenticator(),
     createIdempotencyKey: () => Crypto.randomUUID(),
