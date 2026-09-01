@@ -18,7 +18,6 @@ export type AudienceResolutionErrorCode =
   | 'MISSING_AUDIENCE_FACILITY'
   | 'MISSING_BUILDING_SOURCE'
   | 'MISSING_NEIGHBORHOOD_VERSION'
-  | 'MISSING_OTHERS_SOURCE'
   | 'MISSING_TARGET_FACILITY';
 
 const ERROR_MESSAGES = Object.freeze({
@@ -37,8 +36,6 @@ const ERROR_MESSAGES = Object.freeze({
     'A targeted facility has no complete building roster source.',
   MISSING_NEIGHBORHOOD_VERSION:
     'The exact audience-pinned neighborhood version is unavailable.',
-  MISSING_OTHERS_SOURCE:
-    'The exact audience-pinned others source is unavailable.',
   MISSING_TARGET_FACILITY:
     'The roster snapshot does not cover a targeted facility.',
 } as const satisfies Readonly<Record<AudienceResolutionErrorCode, string>>);

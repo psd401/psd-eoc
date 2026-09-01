@@ -4338,6 +4338,93 @@ describeWithDatabase('facilities administrator database flow', () => {
     }
   });
 
+  test('a facility-scoped administrator cannot edit a district others list', async () => {
+    // A district list binds to no facility, so the engine's facility-scope
+    // check passes for anyone. The district list is the one thing a
+    // facility-confined administrator must not be able to rewrite.
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    await withIsolatedFacilitiesDatabase(
+      currentContext.baseDatabaseUrl,
+      async (_isolatedContext, ownerConnection) => {
+        const database = ownerConnection.db;
+        const suffix = randomUUID();
+        const requestIds: string[] = [];
+
+        // A district administrator sets the list up.
+        const district = authenticatedAdministrator();
+        await persistAdministratorIdentity(database, district, suffix);
+        const districtStore = createDrizzleAdminCapabilityStore(
+          database,
+          district,
+        );
+        const others = await executeCreateGroupSourceCapability({
+          authenticated: district,
+          store: districtStore,
+          command: {
+            kind: 'manual',
+            purpose: 'others',
+            facilityId: null,
+            displayName: `District responders ${suffix.slice(0, 8)}`,
+            active: true,
+            googleGroupId: null,
+            email: null,
+            fixtureKey: null,
+          },
+          metadata: metadata('scope-others-create', requestIds),
+        });
+
+        // An administrator whose record is confined to facilities.
+        const confined = authenticatedAdministrator();
+        await persistAdministratorIdentity(
+          database,
+          confined,
+          `${suffix}-confined`,
+        );
+        await database
+          .update(users)
+          .set({ facilityScopeKind: 'facilities' })
+          .where(eq(users.id, confined.actor.userId));
+        const confinedStore = createDrizzleAdminCapabilityStore(
+          database,
+          confined,
+        );
+        await expect(
+          executeSetManualRosterMembersCapability({
+            authenticated: confined,
+            store: confinedStore,
+            command: {
+              groupSourceId: others.id,
+              emails: [`smuggled-${suffix.slice(0, 8)}@example.invalid`],
+            },
+            metadata: metadata('scope-others-members', requestIds),
+          }),
+        ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+        expect(
+          await database
+            .select({ email: groupMembers.email })
+            .from(groupMembers)
+            .where(eq(groupMembers.groupSourceId, others.id)),
+        ).toEqual([]);
+
+        // The district administrator still can.
+        await expect(
+          executeSetManualRosterMembersCapability({
+            authenticated: district,
+            store: districtStore,
+            command: {
+              groupSourceId: others.id,
+              emails: [`responder-${suffix.slice(0, 8)}@example.invalid`],
+            },
+            metadata: metadata('scope-others-members-district', requestIds),
+          }),
+        ).resolves.toMatchObject({ groupSourceId: others.id, memberCount: 1 });
+      },
+    );
+  });
+
   test('a manual others source reaches an event at every facility', async () => {
     // The district-level responder list, curated in the application without a
     // Google Group. A person on it and on no building source used to be
