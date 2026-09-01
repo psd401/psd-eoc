@@ -444,11 +444,53 @@ function OthersGroupForm({
       <fieldset>
         <legend>Add a Google others source</legend>
         <p id={helpId}>
-          Others sources are optional, district-level roster extensions. Select
-          them explicitly on each roster source configuration.
+          An others source reaches its people at every event, at every facility.
+          Every active others source is included the next time the roster is
+          published; nothing has to be selected.
         </p>
         <GoogleGroupFields helpId={helpId} />
         <button type="submit">Add Google others source</button>
+      </fieldset>
+    </form>
+  );
+}
+
+/**
+ * A district-level list curated here, without a Google Group.
+ *
+ * This is where the people who belong at every event go: the responders who
+ * must be reached whichever facility an event starts at. One list, maintained
+ * in one place, instead of the same names repeated in every building source.
+ */
+function ManualOthersGroupForm({
+  csrfToken,
+}: Readonly<{
+  csrfToken: string;
+}>) {
+  const helpId = 'new-manual-others-group-help';
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="create-manual-others-group" />
+      <fieldset>
+        <legend>Add a manual others source</legend>
+        <p id={helpId}>
+          A manual others source notifies the people an administrator adds to it
+          at every event, at every facility, without a Google Group. Use it for
+          the district-wide responder list. Creating the source does not add
+          anyone; add people to it afterwards, then publish the roster.
+        </p>
+        <label>
+          Display name
+          <input
+            aria-describedby={helpId}
+            maxLength={160}
+            name="displayName"
+            required
+            type="text"
+          />
+        </label>
+        <button type="submit">Add manual others source</button>
       </fieldset>
     </form>
   );
@@ -650,6 +692,15 @@ function GroupSourcesSection({
           />
         ))}
       </div>
+      <div aria-label="People notified by manual others sources" role="group">
+        {othersGroups.map((group) => (
+          <ManualMembersForm
+            csrfToken={csrfToken}
+            group={group}
+            key={group.id}
+          />
+        ))}
+      </div>
       {othersPage.pageInfo.hasMore
         ? nextPageLink(
             'Next page of others sources',
@@ -659,6 +710,7 @@ function GroupSourcesSection({
           )
         : null}
       <OthersGroupForm csrfToken={csrfToken} />
+      <ManualOthersGroupForm csrfToken={csrfToken} />
     </section>
   );
 }

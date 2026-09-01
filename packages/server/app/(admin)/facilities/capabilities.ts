@@ -1889,11 +1889,19 @@ async function loadManualSource(
   if (source === undefined) {
     throw conflict('The group source is unavailable.');
   }
-  if (source.kind !== 'manual' || source.purpose !== 'building') {
-    throw conflict('Only a manual building source has curated members.');
+  if (
+    source.kind !== 'manual' ||
+    (source.purpose !== 'building' && source.purpose !== 'others')
+  ) {
+    throw conflict('Only a manual source has curated members.');
   }
-  if (source.facilityId === null) {
+  // A building source names a facility and an others source names none. Either
+  // is a manual list curated here; the variant rule is enforced at creation.
+  if (source.purpose === 'building' && source.facilityId === null) {
     throw conflict('The manual building source has no facility binding.');
+  }
+  if (source.purpose === 'others' && source.facilityId !== null) {
+    throw conflict('A manual others source cannot name a facility.');
   }
   return source;
 }
@@ -1930,7 +1938,50 @@ async function replaceManualMembers(
 }
 
 /**
- * Replaces the complete membership of one manual building source.
+ * Refuses anyone but an enabled, district-scoped administrator.
+ *
+ * A source bound to no facility passes the engine's facility-scope check
+ * trivially, because there is no facility to be outside of. For a district
+ * list that is the wrong answer: a facility-scoped administrator must not be
+ * able to rewrite who is reached at every school from a session confined to
+ * one of them.
+ */
+async function requireDistrictAdministrator(
+  database: AdminQueryDatabase,
+  actor: Actor,
+): Promise<void> {
+  if (actor.kind !== 'human') {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'A human district administrator is required to change a district list.',
+      403,
+    );
+  }
+  const [actorRow] = await database
+    .select({
+      disabledAt: users.disabledAt,
+      facilityScopeKind: users.facilityScopeKind,
+    })
+    .from(users)
+    .where(eq(users.id, actor.userId))
+    .limit(1);
+  const actorRoles = await loadEffectiveRoles(database, actor.userId);
+  if (
+    actorRow === undefined ||
+    actorRow.disabledAt !== null ||
+    actorRow.facilityScopeKind !== 'district' ||
+    !actorRoles.includes('admin')
+  ) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'Only an enabled district administrator may change a district list.',
+      403,
+    );
+  }
+}
+
+/**
+ * Replaces the complete membership of one manual source.
  *
  * Stating the whole list keeps a removal from being forgotten, and makes the
  * saved state exactly what an administrator reviewed. This never notifies
@@ -1946,6 +1997,12 @@ export const setManualRosterMembersRegistration: ServerCapabilityRegistration<
       context.transaction.database,
       input.groupSourceId,
     );
+    if (source.purpose === 'others') {
+      await requireDistrictAdministrator(
+        context.transaction.database,
+        context.invocation.actor,
+      );
+    }
     return guard(context, source.facilityId);
   },
   async handler(input, context) {
@@ -1967,7 +2024,7 @@ export const setManualRosterMembersRegistration: ServerCapabilityRegistration<
     }),
   async loadReplay(reference, context) {
     const parsed = parseResultReference(reference);
-    // Refuses a replay whose source is no longer a manual building source.
+    // Refuses a replay whose source is no longer a manual source.
     await loadManualSource(context.transaction.database, parsed.id);
     const [row] = await context.transaction.database
       .select({ memberCount: countDistinct(groupMembers.email) })
