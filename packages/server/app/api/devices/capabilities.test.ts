@@ -588,6 +588,9 @@ describe('pinned push endpoint resolution', () => {
         endpointCount: 1,
         deliveryTest: null,
         candidates: [{ recipientId: ids.recipient, endpointId: ids.endpoint }],
+        // The batch's creation instant, so the policy reads live devices as
+        // of the same moment the audience was resolved.
+        asOf: now.toISOString(),
       },
     ]);
     expect(JSON.stringify(activeStore.queries)).not.toContain(
@@ -648,15 +651,29 @@ describe('pinned push endpoint resolution', () => {
     }
   });
 
-  test('rejects a mismatched endpoint count before reading policy state', async () => {
+  test('rejects an audience smaller than the batch was planned for before reading policy state', async () => {
     const store = new PushPolicyStore();
     await expect(
-      resolvePushEndpoints(resolutionInput(0), store),
+      resolvePushEndpoints(resolutionInput(2), store),
     ).rejects.toBeInstanceOf(PushEndpointResolutionError);
     await expect(
-      resolvePushEndpoints(resolutionInput(0), store),
+      resolvePushEndpoints(resolutionInput(2), store),
     ).rejects.toMatchObject({ code: 'PUSH_ENDPOINT_COUNT_MISMATCH' });
     expect(store.queries).toEqual([]);
+  });
+
+  test('accepts an audience that grew past the planned count and asks policy about every endpoint it holds', async () => {
+    // Devices enrolled after the roster was published join the audience at
+    // send time. The batch's planned count is a floor, not an exact match, and
+    // the policy is asked about what the audience actually holds.
+    const store = new PushPolicyStore();
+    const resolved = await resolvePushEndpoints(resolutionInput(0), store);
+    expect(resolved).toHaveLength(1);
+    expect(store.queries).toHaveLength(1);
+    expect(store.queries[0]).toMatchObject({
+      endpointCount: 1,
+      deliveryTest: null,
+    });
   });
 
   test('returns only the approved canary endpoint from a staff audience', async () => {
