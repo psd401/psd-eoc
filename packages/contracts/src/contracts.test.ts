@@ -45,6 +45,7 @@ import {
   EventTypeVersionDraftSchema,
   ExportDrillRecordsInputSchema,
   ExportEventSummaryInputSchema,
+  CreateGroupSourceInputSchema,
   GroupSourceSchema,
   HUMAN_ONLY_ACTION_IDS,
   HttpsUrlSchema,
@@ -4195,6 +4196,55 @@ describe('roster, facility, and identity boundaries', () => {
         facilityIds: [ids.facility],
         groupSourceRefs: [syntheticBuildingGroupRef],
         createdAt: times.created,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('allows a manual others source and binds it to no facility', () => {
+    // The district-level list curated in the application: the people who
+    // belong at every event. It is an others source, so it binds to no
+    // facility, and it is manual, so it carries no provider identity.
+    const manualOthers = {
+      kind: 'manual',
+      purpose: 'others',
+      facilityId: null,
+      displayName: 'District responders',
+      active: true,
+      googleGroupId: null,
+      email: null,
+      fixtureKey: null,
+    } as const;
+    expect(CreateGroupSourceInputSchema.safeParse(manualOthers).success).toBe(
+      true,
+    );
+    expect(
+      GroupSourceSchema.safeParse({
+        ...manualOthers,
+        id: ids.group,
+        grantedRole: null,
+        membersCapturedAt: null,
+        createdAt: times.created,
+      }).success,
+    ).toBe(true);
+    // An others source at one facility is a building source wearing the
+    // wrong label; a manual access source would let a curated list sign in.
+    expect(
+      CreateGroupSourceInputSchema.safeParse({
+        ...manualOthers,
+        facilityId: ids.facility,
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateGroupSourceInputSchema.safeParse({
+        ...manualOthers,
+        purpose: 'access',
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateGroupSourceInputSchema.safeParse({
+        ...manualOthers,
+        googleGroupId: 'google-district-responders',
+        email: 'responders@example.invalid',
       }).success,
     ).toBe(false);
   });

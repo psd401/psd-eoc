@@ -18,7 +18,6 @@ export type AudienceResolutionErrorCode =
   | 'MISSING_AUDIENCE_FACILITY'
   | 'MISSING_BUILDING_SOURCE'
   | 'MISSING_NEIGHBORHOOD_VERSION'
-  | 'MISSING_OTHERS_SOURCE'
   | 'MISSING_TARGET_FACILITY';
 
 const ERROR_MESSAGES = Object.freeze({
@@ -37,8 +36,6 @@ const ERROR_MESSAGES = Object.freeze({
     'A targeted facility has no complete building roster source.',
   MISSING_NEIGHBORHOOD_VERSION:
     'The exact audience-pinned neighborhood version is unavailable.',
-  MISSING_OTHERS_SOURCE:
-    'The exact audience-pinned others source is unavailable.',
   MISSING_TARGET_FACILITY:
     'The roster snapshot does not cover a targeted facility.',
 } as const satisfies Readonly<Record<AudienceResolutionErrorCode, string>>);
@@ -66,9 +63,10 @@ export interface ResolveAudienceInput {
    * activated at all, which is a high price for a configuration object that
    * carried no information.
    *
-   * Reaching beyond one school goes with it for now. Neither `neighborhood` nor
-   * `others` targeting was ever configured, and the domain-based resolver that
-   * replaces this pipeline supports neighborhood reach directly, from
+   * Every `others` source in the snapshot is selected as well: it names the
+   * people who belong at every event at every school. `neighborhood` targeting
+   * was never configured, and the domain-based resolver that replaces this
+   * pipeline supports neighborhood reach directly, from
    * `neighborhood_facilities` rather than from a pinned target list.
    */
   readonly facilityId: string;
@@ -211,8 +209,17 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
     sources.forEach((source) => addSelectedSource(selectedSources, source));
   };
 
-  // The whole selection rule: an event at a school reaches that school's staff.
+  // The selection rule: an event at a school reaches that school's staff and
+  // everyone an others source names, at every school. An others source is the
+  // district-level list, the responders who belong at every event. Every
+  // snapshot carried them and nothing ever selected them, so a person on one
+  // was reached nowhere.
   selectBuildingFacility(facilityId);
+  for (const source of rosterSnapshot.sourceGroupRefs) {
+    if (source.purpose === 'others') {
+      addSelectedSource(selectedSources, source);
+    }
+  }
 
   const endpointOwnerById = new Map<string, RecipientId>();
   const endpointOwnerByDestination = new Map<string, RecipientId>();

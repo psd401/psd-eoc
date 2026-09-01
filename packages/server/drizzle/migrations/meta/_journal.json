@@ -302,6 +302,13 @@
       "when": 1787939021446,
       "tag": "0042_insert_needs_every_column",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1787939022446,
+      "tag": "0043_manual_others_source",
+      "breakpoints": true
     }
   ]
 }
