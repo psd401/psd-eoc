@@ -295,6 +295,7 @@ async function resolvedPushEndpoints(database: Database, batch: DispatchBatch) {
       typeof rosterSnapshotWithLivePushTokens
     >[0],
     roster,
+    batch.createdAt,
   );
   return resolvePushEndpoints(
     {
@@ -327,6 +328,9 @@ async function resolvedPushEndpointPage(
       typeof rosterSnapshotWithLivePushTokens
     >[0],
     roster,
+    // Pinned to the batch's creation instant so every page of this batch,
+    // each a separate request, computes the identical candidate list.
+    batch.createdAt,
   );
   return resolvePushEndpointPage(
     {

@@ -588,6 +588,9 @@ describe('pinned push endpoint resolution', () => {
         endpointCount: 1,
         deliveryTest: null,
         candidates: [{ recipientId: ids.recipient, endpointId: ids.endpoint }],
+        // The batch's creation instant, so the policy reads live devices as
+        // of the same moment the audience was resolved.
+        asOf: now.toISOString(),
       },
     ]);
     expect(JSON.stringify(activeStore.queries)).not.toContain(
