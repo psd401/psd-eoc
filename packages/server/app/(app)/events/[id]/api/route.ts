@@ -614,6 +614,23 @@ async function executeRoute(
     }
     throw new SyntaxError('The event-room method is not supported.');
   } catch (error) {
+    // A rejection here never reaches the capability engine, so nothing else
+    // records it. Production spent an entire drill with the phone showing "the
+    // timeline is temporarily unavailable" while this route logged nothing at
+    // all, which left no way to tell a refused query from one that was never
+    // sent. The error's own message is a fixed string from this file, and the
+    // request id ties it to the client's failure.
+    console.info(
+      JSON.stringify({
+        event: 'event-room-route-rejected',
+        method: request.method,
+        requestId,
+        errorName: error instanceof Error ? error.name : typeof error,
+        // Only this file's own fixed strings are quoted; anything else could
+        // carry request data.
+        reason: error instanceof SyntaxError ? error.message : null,
+      }),
+    );
     return eventApiErrorResponse(error, requestId);
   }
 }

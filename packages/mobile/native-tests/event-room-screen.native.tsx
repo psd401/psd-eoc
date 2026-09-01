@@ -1233,9 +1233,7 @@ describe('mobile event-room timeline accessibility', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /Do not include student data\. Photos are untrusted input/,
-      ),
+      screen.getByText(/No student data\. EXIF and GPS are stripped\./),
     ).toBeTruthy();
     photo.unmount();
 
@@ -1335,11 +1333,11 @@ describe('mobile event-room timeline accessibility', () => {
         visible
       />,
     );
-    expect(screen.getByText('Working with photo…')).toBeTruthy();
     expect(screen.queryByText('Posting photo…')).toBeNull();
+    expect(screen.queryByText('Posting…')).toBeNull();
   });
 
-  test('wires both native photo sources through explicit upload and retained retry actions', () => {
+  test('posts from both native photo sources in one action and retains retry', () => {
     const takePhoto = jest
       .fn<() => Promise<void>>()
       .mockResolvedValue(undefined);
@@ -1378,46 +1376,17 @@ describe('mobile event-room timeline accessibility', () => {
     );
 
     fireEvent.press(screen.getByRole('button', { name: 'Take Photo' }));
-    fireEvent.press(
-      screen.getByRole('button', { name: 'Choose Existing Photo' }),
-    );
+    fireEvent.press(screen.getByRole('button', { name: 'Choose Photo' }));
     expect(takePhoto).toHaveBeenCalledTimes(1);
     expect(choosePhoto).toHaveBeenCalledTimes(1);
+    // Capturing posts. There is no second confirmation to press, and no
+    // description to type first: an emergency photo is one action.
+    expect(
+      screen.queryByRole('button', { name: 'Upload and post photo' }),
+    ).toBeNull();
+    expect(screen.queryByText('Alternative text (required)')).toBeNull();
+    expect(screen.queryByText('Optional caption')).toBeNull();
     sourceSelection.unmount();
-
-    const upload = render(
-      <PhotoComposerDialog
-        newPostsAllowed
-        onDismiss={() => undefined}
-        online
-        photo={{
-          draft: {
-            altText: 'Validated synthetic selected photo',
-            caption: null,
-            stage: 'ready',
-            progress: 0.2,
-            error: null,
-            localCleanupOnly: false,
-          },
-          busy: false,
-          takePhoto,
-          choosePhoto,
-          setAltText: () => undefined,
-          setCaption: () => undefined,
-          submit,
-          retry,
-          discard: async () => undefined,
-        }}
-        target={target}
-        templateMode="drill"
-        visible
-      />,
-    );
-    fireEvent.press(
-      screen.getByRole('button', { name: 'Upload and post photo' }),
-    );
-    expect(submit).toHaveBeenCalledTimes(1);
-    upload.unmount();
 
     render(
       <PhotoComposerDialog
@@ -1538,36 +1507,21 @@ describe('mobile event-room timeline accessibility', () => {
           />,
         );
 
-        const description = await screen.findByLabelText(
-          'Photo alternative text, required',
-        );
-        await waitFor(() => expect(description.props.editable).toBe(true));
-        const altText = `Validated synthetic ${source} description`;
-        fireEvent.changeText(description, altText);
-        await waitFor(() =>
-          expect(
-            screen.getByLabelText('Photo alternative text, required').props
-              .value,
-          ).toBe(altText),
-        );
-        const sourceButton = screen.getByRole('button', {
-          name: source === 'camera' ? 'Take Photo' : 'Choose Existing Photo',
+        const sourceButton = await screen.findByRole('button', {
+          name: source === 'camera' ? 'Take Photo' : 'Choose Photo',
         });
         await waitFor(() =>
           expect(sourceButton.props.accessibilityState).toEqual({
             disabled: false,
           }),
         );
+        // Pressing the source both selects and posts. There is nothing to
+        // describe first and nothing to confirm afterwards.
         fireEvent.press(sourceButton);
-        await screen.findByText('Stage: ready');
-        expect(selectedSources.at(-1)).toBe(source);
-
-        fireEvent.press(
-          screen.getByRole('button', { name: 'Upload and post photo' }),
-        );
         await screen.findByRole('button', {
           name: 'Retry retained draft',
         });
+        expect(selectedSources.at(-1)).toBe(source);
         expect(createMediaUploadIntent).toHaveBeenCalledTimes(1);
         fireEvent.press(
           screen.getByRole('button', { name: 'Retry retained draft' }),
@@ -1600,7 +1554,13 @@ describe('mobile event-room timeline accessibility', () => {
     }
   });
 
-  test('locks canonical descriptions after network start for failed and unknown drafts', () => {
+  test('offers no photo description fields to edit or lock', () => {
+    // This replaces a test that proved canonical descriptions became read-only
+    // once network work started. There is nothing to lock any more: the sheet
+    // has no description inputs, because requiring alternative text before the
+    // camera would open put typing between an operator and an emergency photo.
+    // The journal contract still requires non-empty alternative text and still
+    // gets it -- `UNDESCRIBED_PHOTO_ALT_TEXT` is supplied by the workflow.
     for (const stage of ['failed', 'unknown'] as const) {
       const setAltText = jest.fn();
       const setCaption = jest.fn();
@@ -1632,25 +1592,16 @@ describe('mobile event-room timeline accessibility', () => {
           visible
         />,
       );
-
       expect(
-        screen.getByLabelText('Photo alternative text, required').props
-          .editable,
-      ).toBe(false);
-      expect(
-        screen.getByLabelText('Optional photo caption').props.editable,
-      ).toBe(false);
-      expect(
-        screen.getByDisplayValue('Canonical retained alternative text'),
-      ).toBeTruthy();
-      expect(
-        screen.getByDisplayValue('Canonical retained caption'),
-      ).toBeTruthy();
-      expect(
-        screen.getByText(/Photo description is locked after network work/),
-      ).toBeTruthy();
+        screen.queryByLabelText('Photo alternative text, required'),
+      ).toBeNull();
+      expect(screen.queryByLabelText('Optional photo caption')).toBeNull();
       expect(setAltText).not.toHaveBeenCalled();
       expect(setCaption).not.toHaveBeenCalled();
+      // A photo that did not send still says so in words, and still offers a
+      // retry rather than an internal stage name.
+      expect(screen.getByText('This photo did not send.')).toBeTruthy();
+      expect(screen.queryByText(`Stage: ${stage}`)).toBeNull();
       rendered.unmount();
     }
   });
@@ -1697,7 +1648,7 @@ describe('mobile event-room timeline accessibility', () => {
 });
 
 describe('mobile event-room lifecycle confirmations', () => {
-  test('shows the real all-clear recipients, consequences, channels, and canonical notification copy before exact-phrase confirmation', () => {
+  test('shows the real all-clear recipients and channel reach before confirmation', () => {
     const preview = lifecyclePreview('real');
     const onConfirm = jest.fn();
     render(
@@ -1717,26 +1668,17 @@ describe('mobile event-room lifecycle confirmations', () => {
     expect(
       screen.getByText(/42 staff get the all-clear below, and the event ends/),
     ).toBeTruthy();
+    expect(screen.getByLabelText('42 by push')).toBeTruthy();
+    expect(screen.getByLabelText('40 by email')).toBeTruthy();
+    // The operator is deciding whether to end the event, not reviewing copy
+    // they cannot change. Printing both full rendered bodies buried the
+    // decision, so the reach is shown and the wording is not.
     expect(
-      screen.getByLabelText(
-        'push. 42 people. Message: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic push all-clear instructions.',
-      ),
-    ).toBeTruthy();
+      screen.queryByText(/Synthetic push all-clear instructions/),
+    ).toBeNull();
     expect(
-      screen.getByLabelText(
-        'email. 40 people. Message: INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic email all-clear instructions.',
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        'INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic push all-clear instructions.',
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        'INCIDENT: [INCIDENT] ALL CLEAR: Synthetic incident. [INCIDENT] Synthetic email all-clear instructions.',
-      ),
-    ).toBeTruthy();
+      screen.queryByText(/Synthetic email all-clear instructions/),
+    ).toBeNull();
 
     // The modal and its destructive button are the confirmation, exactly as
     // on the web room. There is no phrase to type.
@@ -1764,12 +1706,15 @@ describe('mobile event-room lifecycle confirmations', () => {
     expect(
       screen.getByText(/2 staff get the all-clear below, and the event ends/),
     ).toBeTruthy();
-    expect(
-      screen.getByText(
-        'DRILL: [DRILL] ALL CLEAR: Synthetic drill. [DRILL] Synthetic push all-clear instructions.',
-      ),
-    ).toBeTruthy();
+    // The classification banner carries this, not the message body: an
+    // operator must never mistake a drill for a real incident, and that
+    // guarantee cannot depend on copy that is no longer displayed.
+    expect(screen.getByText('push')).toBeTruthy();
     expect(screen.queryByText(/\[INCIDENT\]/)).toBeNull();
+    expect(screen.queryByText(/REAL INCIDENT/)).toBeNull();
+    expect(
+      screen.queryByText(/Synthetic push all-clear instructions/),
+    ).toBeNull();
   });
 
   test('keeps test events distinct from drills in the room banner and lifecycle consequence', () => {

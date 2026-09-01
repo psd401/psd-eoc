@@ -248,20 +248,6 @@ function actorText(projection: JournalEntryReadProjection): string {
   }
 }
 
-function renderedChannelCopy(
-  channel: LifecycleConsequencePreview['channels'][number],
-): string {
-  const message = channel.renderedMessage;
-  switch (message.channel) {
-    case 'push':
-      return `${message.classificationMarker}: ${message.title}. ${message.body}`;
-    case 'email':
-      return `${message.classificationMarker}: ${message.subject}. ${message.textBody}`;
-    case 'sms':
-      return `${message.classificationMarker}: ${message.body}`;
-  }
-}
-
 function ActionButton({
   accessibilityHint,
   accessibilityLabel,
@@ -922,26 +908,26 @@ export function LifecycleConfirmationDialog({
                     {preview.recipientCount} staff get the all-clear below, and
                     the event ends.
                   </Text>
+                  {/* Counts, not copy. The operator is deciding whether to
+                      end the event, and the exact wording of the all-clear is
+                      not theirs to change here -- printing both full rendered
+                      bodies buried that decision in boilerplate. */}
                   <View style={styles.channelList}>
-                    {preview.channels.map((channel) => {
-                      const copy = renderedChannelCopy(channel);
-                      return (
-                        <View
-                          key={channel.channel}
-                          accessible
-                          accessibilityLabel={`${channel.channel}. ${channel.endpointCount} people. Message: ${copy}`}
-                          style={styles.channelRow}
-                        >
-                          <Text style={styles.channelName}>
-                            {channel.channel}
-                          </Text>
-                          <Text style={styles.channelDetail}>
-                            {channel.endpointCount} people
-                          </Text>
-                          <Text style={styles.channelMessage}>{copy}</Text>
-                        </View>
-                      );
-                    })}
+                    {preview.channels.map((channel) => (
+                      <View
+                        key={channel.channel}
+                        accessible
+                        accessibilityLabel={`${channel.endpointCount} by ${channel.channel}`}
+                        style={styles.channelRow}
+                      >
+                        <Text style={styles.channelName}>
+                          {channel.channel}
+                        </Text>
+                        <Text style={styles.channelDetail}>
+                          {channel.endpointCount} people
+                        </Text>
+                      </View>
+                    ))}
                   </View>
                   {preview.blockingReasonCodes.length === 0 ? null : (
                     <Text accessibilityRole="alert" style={styles.warningText}>
@@ -1286,6 +1272,32 @@ export interface PhotoComposerDialogProps {
   readonly visible: boolean;
 }
 
+/**
+ * Says what is happening in words an operator can act on.
+ *
+ * This used to print the internal stage name, so a photo that failed to post
+ * announced itself as "Stage: unknown" -- which reads as a broken app rather
+ * than as a photo that needs another try.
+ */
+function photoStatusLabel(stage: string): string {
+  switch (stage) {
+    case 'creating-intent':
+    case 'uploading':
+    case 'completing-upload':
+    case 'appending':
+      return 'Sending photo…';
+    case 'failed':
+    case 'unknown':
+      return 'This photo did not send.';
+    case 'blocked':
+      return 'This photo cannot be recovered on this device.';
+    case 'cleanup-pending':
+      return 'Finishing up…';
+    default:
+      return 'Ready.';
+  }
+}
+
 export function PhotoComposerDialog({
   newPostsAllowed,
   onDismiss,
@@ -1304,10 +1316,6 @@ export function PhotoComposerDialog({
     draft !== null &&
     ['failed', 'unknown', 'cleanup-pending', 'blocked'].includes(draft.stage);
   const recoveryOnly = !newPostsAllowed || draft?.localCleanupOnly === true;
-  const descriptionEditable =
-    !recoveryOnly &&
-    !photo.busy &&
-    (draft?.stage === 'describe' || draft?.stage === 'ready');
 
   const confirmDiscard = () => {
     Alert.alert(
@@ -1360,92 +1368,49 @@ export function PhotoComposerDialog({
                   pressed && styles.pressed,
                 ]}
               >
-                <Text style={styles.closeButtonText}>Keep & close</Text>
+                <Text style={styles.closeButtonText}>Close</Text>
               </Pressable>
             </View>
 
             <EventTargetContext mode={templateMode} target={target} />
-            <View accessibilityRole="summary" style={styles.retainedNotice}>
-              <Text style={styles.retainedTitle}>Draft retained privately</Text>
-              <Text style={styles.retainedText}>
-                Closing this sheet, losing connection, or backgrounding the app
-                does not silently discard or automatically post the draft.
-              </Text>
-            </View>
-            <Text accessibilityRole="summary" style={styles.safetyHelp}>
-              Do not include student data. Photos are untrusted input; PSD EOC
-              validates their bytes and strips EXIF and GPS metadata. Record
-              location only through the explicit location workflow.
-            </Text>
-
-            <Text style={styles.inputLabel}>Alternative text (required)</Text>
-            <TextInput
-              accessibilityHint="Describe the important visual information for screen-reader users"
-              accessibilityLabel="Photo alternative text, required"
-              editable={descriptionEditable}
-              maxLength={500}
-              multiline
-              onChangeText={photo.setAltText}
-              placeholder="Describe what the photo shows"
-              style={[styles.textField, styles.multilineField]}
-              value={draft?.altText ?? ''}
-            />
-            <Text style={styles.inputLabel}>Optional caption</Text>
-            <TextInput
-              accessibilityLabel="Optional photo caption"
-              editable={descriptionEditable}
-              maxLength={2_000}
-              multiline
-              onChangeText={photo.setCaption}
-              placeholder="Add context for staff"
-              style={[styles.textField, styles.multilineField]}
-              value={draft?.caption ?? ''}
-            />
-
-            {descriptionEditable ? null : (
-              <Text accessibilityRole="summary" style={styles.safetyHelp}>
-                {draft?.localCleanupOnly === true
-                  ? 'The retained description is read-only and cannot be adopted by this event or signed-in session.'
-                  : 'Photo description is locked after network work starts. The retained canonical alternative text and caption cannot be changed during retry, reconciliation, or private cleanup.'}
-              </Text>
+            {draft === null ? null : (
+              <View accessibilityRole="summary" style={styles.retainedNotice}>
+                <Text style={styles.retainedTitle}>
+                  Draft retained privately
+                </Text>
+                <Text style={styles.retainedText}>
+                  This photo did not post. It is kept privately on this device
+                  and is never posted or discarded without you.
+                </Text>
+              </View>
             )}
+            <Text accessibilityRole="summary" style={styles.safetyHelp}>
+              No student data. EXIF and GPS are stripped.
+            </Text>
 
             {recoveryOnly ? null : (
               <View style={styles.actionGroup}>
                 <ActionButton
-                  disabled={
-                    selected ||
-                    photo.busy ||
-                    (draft?.altText.trim().length ?? 0) === 0
-                  }
+                  disabled={selected || photo.busy || !online}
                   label="Take Photo"
                   onPress={() => {
                     void photo.takePhoto();
                   }}
                 />
                 <ActionButton
-                  disabled={
-                    selected ||
-                    photo.busy ||
-                    (draft?.altText.trim().length ?? 0) === 0
-                  }
-                  label="Choose Existing Photo"
+                  disabled={selected || photo.busy || !online}
+                  label="Choose Photo"
                   onPress={() => {
                     void photo.choosePhoto();
                   }}
                 />
-                {selected ? (
-                  <Text accessibilityRole="summary" style={styles.safetyHelp}>
-                    Photo retained privately and ready to upload.
-                  </Text>
-                ) : null}
               </View>
             )}
 
             {draft === null ? null : (
               <View style={styles.progressCard}>
                 <Text style={styles.progressTitle}>
-                  Stage: {draft.stage.replaceAll('-', ' ')}
+                  {photoStatusLabel(draft.stage)}
                 </Text>
                 <View
                   accessibilityLabel={`Photo progress ${progress} percent`}
@@ -1489,22 +1454,6 @@ export function PhotoComposerDialog({
                 }}
               />
             ) : null}
-            {recoveryOnly ? null : (
-              <ActionButton
-                disabled={
-                  !online ||
-                  photo.busy ||
-                  draft?.stage !== 'ready' ||
-                  (draft?.altText.trim().length ?? 0) === 0
-                }
-                label={
-                  photo.busy ? 'Working with photo…' : 'Upload and post photo'
-                }
-                onPress={() => {
-                  void photo.submit();
-                }}
-              />
-            )}
             <Pressable
               accessibilityLabel="Discard retained photo draft"
               accessibilityRole="button"
