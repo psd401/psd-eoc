@@ -4,6 +4,7 @@ export * from './audit';
 export * from './capability-catalog';
 export * from './capability';
 export * from './delivery-test';
+export * from './diagnostics';
 export * from './email-runtime';
 export * from './event';
 export * from './event-room';
