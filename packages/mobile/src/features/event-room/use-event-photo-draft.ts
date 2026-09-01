@@ -26,6 +26,22 @@ import {
   type PhotoSource,
 } from './native-photo';
 
+/**
+ * Stands in for a description the operator did not write.
+ *
+ * The journal contract requires non-empty alternative text, and it should:
+ * the record is read later by people who were not there, sometimes with a
+ * screen reader. What it must not do is stand between someone and the shutter
+ * during an emergency. Posting a photo is now one action, and an operator who
+ * wants to say something about it posts a text entry -- the composer is right
+ * there, and that reads better in a timeline than a caption anyway.
+ *
+ * This text is deliberately honest that no description was written rather than
+ * pretending to describe the image.
+ */
+export const UNDESCRIBED_PHOTO_ALT_TEXT =
+  'Photo posted during the event without a written description.';
+
 export interface EventPhotoDraftView {
   readonly altText: string;
   readonly caption: string | null;
@@ -869,16 +885,9 @@ export function useEventPhotoDraft(
         if (blockedRef.current || controllerRef.current !== null) {
           throw new Error('The retained photo owner changed before selection.');
         }
-        const altText = descriptionRef.current.altText.trim();
+        const altText =
+          descriptionRef.current.altText.trim() || UNDESCRIBED_PHOTO_ALT_TEXT;
         const caption = descriptionRef.current.caption?.trim() || null;
-        if (altText.length === 0) {
-          setDraft((current) => ({
-            ...current,
-            error:
-              'Describe the photo for screen-reader users before selecting it.',
-          }));
-          return;
-        }
         await storage.saveComposer(
           scope.eventId,
           scope.sessionId,
@@ -929,9 +938,6 @@ export function useEventPhotoDraft(
     [createFromFile, input.eventId, input.sessionId, scopeIsCurrent, storage],
   );
 
-  const takePhoto = useCallback(() => selectPhoto('camera'), [selectPhoto]);
-  const choosePhoto = useCallback(() => selectPhoto('library'), [selectPhoto]);
-
   const submit = useCallback(async () => {
     const scope = currentScopeRef.current;
     if (
@@ -961,15 +967,9 @@ export function useEventPhotoDraft(
       }
       const controller = controllerRef.current;
       const manifest = controller?.snapshot().manifest;
-      const altText = descriptionRef.current.altText.trim();
+      const altText =
+        descriptionRef.current.altText.trim() || UNDESCRIBED_PHOTO_ALT_TEXT;
       const caption = descriptionRef.current.caption?.trim() || null;
-      if (altText.length === 0) {
-        setDraft((current) => ({
-          ...current,
-          error: 'Alternative text is required before posting the photo.',
-        }));
-        return;
-      }
       if (
         controller === null ||
         manifest === null ||
@@ -1003,6 +1003,40 @@ export function useEventPhotoDraft(
       }
     }
   }, [input.eventId, input.sessionId, publishValidatedAppend, scopeIsCurrent]);
+
+  /**
+   * Captures a photo and posts it as one action.
+   *
+   * Choosing the image was already the operator's decision; making them
+   * confirm it again afterwards bought nothing and cost time during an
+   * emergency. Selection failures and cancellations are both handled by
+   * declining to post: a cancelled picker leaves no retained manifest, and a
+   * failed one leaves the draft in a stage the existing retry affordance
+   * already covers, so neither turns into a spurious error.
+   */
+  const captureAndPost = useCallback(
+    async (source: 'camera' | 'library') => {
+      await selectPhoto(source);
+      const manifest = controllerRef.current?.snapshot().manifest;
+      if (
+        manifest === null ||
+        manifest === undefined ||
+        manifest.stage !== 'ready'
+      ) {
+        return;
+      }
+      await submit();
+    },
+    [selectPhoto, submit],
+  );
+  const takePhoto = useCallback(
+    () => captureAndPost('camera'),
+    [captureAndPost],
+  );
+  const choosePhoto = useCallback(
+    () => captureAndPost('library'),
+    [captureAndPost],
+  );
 
   const retry = useCallback(async () => {
     const scope = currentScopeRef.current;

@@ -8,6 +8,7 @@ import {
   EVENT_SUMMARY_PDF_MAX_JOURNAL_ENTRIES,
   EVENT_SUMMARY_PDF_MAX_SNAPSHOT_BYTES,
   renderEventSummaryPdf as renderEventSummaryPdfWithOrganization,
+  findEmittedFontFilePath,
   resolveBundledFontFilePath,
   type EventSummaryDeliveryChannelSnapshot,
   type EventSummaryEventSnapshot,
@@ -280,6 +281,42 @@ async function extractText(bytes: Uint8Array): Promise<string> {
 const testWithPoppler = Bun.which('pdftotext') === null ? test.skip : test;
 
 describe('event summary PDF renderer', () => {
+  test('finds the emitted font when the traced path beside the chunk is absent', () => {
+    // Next traces `./assets/NotoSans-Regular.ttf` as a relative dependency of
+    // every route chunk that reaches the renderer, but emits the bytes once
+    // into the content-hashed media directory. Reading the traced path raised
+    // ENOENT at module load, so every production PDF export failed. These
+    // assertions cover the fallback, because the rendering tests that would
+    // otherwise catch it need Poppler and skip when it is absent.
+    const emitted =
+      '/workspace/packages/server/.next/server/chunks/static/media';
+    expect(
+      findEmittedFontFilePath(
+        '/workspace/packages/server/.next/server/app/(app)/records/export/events/[id]/assets',
+        (path) => (path === emitted ? ['NotoSans-Regular.60ef0f25.ttf'] : []),
+      ),
+    ).toBe(`${emitted}/NotoSans-Regular.60ef0f25.ttf`);
+
+    // The search stops at the server root rather than walking the filesystem.
+    expect(
+      findEmittedFontFilePath(
+        '/workspace/packages/server/.next/server/app',
+        (path) =>
+          path === '/workspace/static/media'
+            ? ['NotoSans-Regular.60ef0f25.ttf']
+            : [],
+      ),
+    ).toBeNull();
+
+    // An unrelated font in the media directory is not accepted.
+    expect(
+      findEmittedFontFilePath(
+        '/workspace/packages/server/.next/server/chunks',
+        (path) => (path === emitted ? ['SomeOther-Regular.ttf'] : []),
+      ),
+    ).toBeNull();
+  });
+
   test('resolves emitted fonts from the Next server root, not a nested route', () => {
     expect(
       resolveBundledFontFilePath(

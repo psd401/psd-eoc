@@ -49,6 +49,19 @@ const DEFAULT_SCHEDULER: EventRoomPollScheduler = Object.freeze({
 const TIMELINE_ERROR =
   'The timeline is temporarily unavailable. Reconnect, then pull to refresh.';
 
+/**
+ * Said when entries are already on screen.
+ *
+ * Announcing that the timeline is unavailable while the operator is looking at
+ * it is both false and useless: the timeline is there, it is just not being
+ * added to. Telling them to reconnect is worse than useless when connectivity
+ * is fine, because it sends them chasing a problem they do not have. What they
+ * need to know is that what they are reading may be behind, and that PSD EOC is
+ * still trying.
+ */
+const STALE_TIMELINE_ERROR =
+  'New updates are not arriving. What is shown may be out of date. PSD EOC keeps retrying.';
+
 const UNREADABLE_TIMELINE_ERROR =
   'This version of the app cannot read the event timeline. Update the PSD EOC app, then open the event again.';
 
@@ -58,11 +71,14 @@ const UNREADABLE_TIMELINE_ERROR =
  * so telling the operator to reconnect and pull to refresh sends them into a
  * loop; only a newer build resolves it.
  */
-function timelineErrorMessage(error: unknown): string {
-  return error instanceof AuthenticatedRequestFailure &&
+function timelineErrorMessage(error: unknown, hasEntries: boolean): string {
+  if (
+    error instanceof AuthenticatedRequestFailure &&
     error.kind === 'invalid-response'
-    ? UNREADABLE_TIMELINE_ERROR
-    : TIMELINE_ERROR;
+  ) {
+    return UNREADABLE_TIMELINE_ERROR;
+  }
+  return hasEntries ? STALE_TIMELINE_ERROR : TIMELINE_ERROR;
 }
 
 type Listener = () => void;
@@ -263,7 +279,10 @@ export class EventRoomSyncController {
         ...this.snapshotValue,
         phase: 'error',
         refreshing: false,
-        error: timelineErrorMessage(error),
+        error: timelineErrorMessage(
+          error,
+          this.snapshotValue.model.entries.length > 0,
+        ),
       });
     } finally {
       if (this.abortController === controller) this.abortController = null;

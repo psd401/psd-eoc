@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   EVENT_CLASSIFICATION_PRESENTATIONS,
@@ -146,13 +147,60 @@ export function resolveBundledFontFilePath(
   throw new Error('The emitted Noto Sans PDF font is unavailable.');
 }
 
+/**
+ * Finds the font Next actually emitted, when it is not where it said it was.
+ *
+ * Next traces `./assets/NotoSans-Regular.ttf` as a relative dependency of every
+ * route chunk that reaches this module, but it emits the bytes once, into the
+ * server output's content-hashed media directory. Nothing is written beside the
+ * route chunk, so reading the traced path raises `ENOENT` at module load and
+ * every PDF export fails -- which is exactly what production was doing.
+ *
+ * The search is bounded to the media directories of each ancestor up to the
+ * server root, and the caller verifies the bytes against `FONT_SHA256`, so a
+ * wrong file cannot be accepted quietly.
+ */
+export function findEmittedFontFilePath(
+  startDirectory: string,
+  directoryEntries: (path: string) => readonly string[] = (path) =>
+    existsSync(path) ? readdirSync(path) : [],
+): string | null {
+  let candidateDirectory = startDirectory;
+  for (;;) {
+    for (const mediaDirectory of [
+      join(candidateDirectory, 'static', 'media'),
+      join(candidateDirectory, 'chunks', 'static', 'media'),
+    ]) {
+      const match = directoryEntries(mediaDirectory)
+        .filter(
+          (entry) =>
+            entry.startsWith(`${FONT_NAME}-Regular`) && entry.endsWith('.ttf'),
+        )
+        .sort()
+        .at(0);
+      if (match !== undefined) return join(mediaDirectory, match);
+    }
+    if (
+      basename(candidateDirectory) === 'server' ||
+      dirname(candidateDirectory) === candidateDirectory
+    ) {
+      return null;
+    }
+    candidateDirectory = dirname(candidateDirectory);
+  }
+}
+
 function readFontBytes(): Uint8Array {
   const fontAssetUrl = new URL(
     './assets/NotoSans-Regular.ttf',
     import.meta.url,
   );
   if (fontAssetUrl.protocol === 'file:') {
-    return readFileSync(fontAssetUrl);
+    const tracedPath = fileURLToPath(fontAssetUrl);
+    if (existsSync(tracedPath)) return readFileSync(tracedPath);
+    const emittedPath = findEmittedFontFilePath(dirname(tracedPath));
+    if (emittedPath !== null) return readFileSync(emittedPath);
+    throw new Error('The emitted Noto Sans PDF font is unavailable.');
   }
 
   // Next's server compiler emits a URL-compatible asset object whose path is
