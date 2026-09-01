@@ -114,6 +114,29 @@ export class EventSummaryPdfError extends Error {
   }
 }
 
+/**
+ * Stops PDFKit from loading a built-in default font.
+ *
+ * PDFKit otherwise selects Helvetica at construction and reads
+ * `data/Helvetica.afm` from its own package. The bundler does not trace those
+ * metrics files, so in the deployed build that read raised ENOENT and every
+ * export failed -- on a font this renderer never uses, since every write
+ * selects the embedded Noto Sans by name.
+ *
+ * No unit test can reproduce that: in a test run both the font asset and
+ * `node_modules` resolve, and only the bundled output lacks them. It was
+ * verified by hand instead, by making PDFKit's `data` directory unavailable and
+ * rendering: without this the render fails with the exact production ENOENT,
+ * and with it the render succeeds. What remains testable, and is tested, is the
+ * decision itself -- that no default font is ever requested.
+ *
+ * PDFKit's published types declare `font` as a string, but its runtime tests
+ * the value for truthiness and skips loading when it is absent.
+ */
+export const NO_BUILT_IN_DEFAULT_FONT = Object.freeze({
+  font: null,
+}) as unknown as Readonly<{ font?: string }>;
+
 const FONT_NAME = 'NotoSans';
 const FONT_SHA256 =
   'b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5';
@@ -1130,6 +1153,13 @@ export async function renderEventSummaryPdf(
   const generatedAt = new Date(prepared.generatedAt);
   const document = new PDFDocument({
     autoFirstPage: false,
+    // PDFKit otherwise loads Helvetica as its default font at construction,
+    // reading `data/Helvetica.afm` from its own package. The bundler does not
+    // trace those metrics files, so that read raised ENOENT in production and
+    // every export failed -- on a font this renderer never uses. Every write
+    // here selects the embedded Noto Sans by name, which is registered below,
+    // so there is no default font to load.
+    ...NO_BUILT_IN_DEFAULT_FONT,
     bufferPages: true,
     compress: true,
     displayTitle: true,

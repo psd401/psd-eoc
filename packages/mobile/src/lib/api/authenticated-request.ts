@@ -280,11 +280,55 @@ async function readJson(
  * Fetch adapter with a fixed transport policy. Only the auth controller calls
  * this class because it is the sole owner of an unlocked bearer.
  */
+/** The reporting surface this client needs, kept narrow so tests can stand in. */
+export interface ClientFailureReporter {
+  report(
+    input: Readonly<{
+      kind: AuthenticatedRequestFailureKind | 'status';
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+      path: string;
+      status: number | null;
+      requestId: string | null;
+    }>,
+  ): void;
+}
+
 export class AuthenticatedApiClient implements AuthenticatedRequestTransport {
   public constructor(
     private readonly baseUrl: () => string,
     private readonly fetchImplementation: AuthenticatedFetch = fetch,
+    /**
+     * Reports failures the server cannot see. A request refused by the server
+     * is already in its logs; one that never arrived is witnessed only here.
+     */
+    private readonly diagnostics: ClientFailureReporter | null = null,
   ) {}
+
+  #reportFailure(
+    request: AuthenticatedRequestOptions<unknown>,
+    error: unknown,
+  ): void {
+    if (this.diagnostics === null) return;
+    if (error instanceof AuthenticatedRequestFailure) {
+      this.diagnostics.report({
+        kind: error.kind,
+        method: request.method,
+        path: request.path,
+        status: error.status,
+        requestId: null,
+      });
+      return;
+    }
+    if (error instanceof AuthenticatedApiError) {
+      this.diagnostics.report({
+        kind: 'status',
+        method: request.method,
+        path: request.path,
+        status: error.status,
+        requestId: error.apiError.requestId,
+      });
+    }
+  }
 
   public async request<Output>(
     bearer: string,
@@ -388,11 +432,18 @@ export class AuthenticatedApiClient implements AuthenticatedRequestTransport {
       return await Promise.race([fetchAndParse(), deadline.interruption]);
     } catch (error) {
       if (deadline.interruptedBy() === 'caller') {
+        // The caller abandoned this request; that is not a failure to report.
         throw error;
       }
       if (deadline.interruptedBy() === 'timeout') {
-        throw new AuthenticatedRequestFailure('network', NETWORK_MESSAGE);
+        const timedOut = new AuthenticatedRequestFailure(
+          'network',
+          NETWORK_MESSAGE,
+        );
+        this.#reportFailure(request, timedOut);
+        throw timedOut;
       }
+      this.#reportFailure(request, error);
       throw error;
     } finally {
       deadline.dispose();

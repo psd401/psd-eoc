@@ -9,6 +9,7 @@ import {
   EVENT_SUMMARY_PDF_MAX_SNAPSHOT_BYTES,
   renderEventSummaryPdf as renderEventSummaryPdfWithOrganization,
   findEmittedFontFilePath,
+  NO_BUILT_IN_DEFAULT_FONT,
   resolveBundledFontFilePath,
   type EventSummaryDeliveryChannelSnapshot,
   type EventSummaryEventSnapshot,
@@ -346,6 +347,20 @@ describe('event summary PDF renderer', () => {
     ).toBe(
       '/workspace/packages/server/.next/server/chunks/static/media/NotoSans-Regular.60ef0f25.ttf',
     );
+  });
+
+  test('never asks PDFKit for a built-in default font', () => {
+    // PDFKit reads `data/Helvetica.afm` from its own package when it selects a
+    // default font at construction. The bundler does not trace those metrics
+    // files, so in the deployed build that read raised ENOENT and every export
+    // failed -- on a font this renderer never uses.
+    //
+    // A unit test cannot reproduce the deployed condition, because here both
+    // the font asset and `node_modules` resolve. It was verified by hand, by
+    // making PDFKit's `data` directory unavailable: without the option below
+    // the render fails with the exact production ENOENT, and with it the render
+    // succeeds. This pins the decision so it cannot be dropped again.
+    expect(NO_BUILT_IN_DEFAULT_FONT as unknown).toEqual({ font: null });
   });
 
   test('creates deterministic PDF 1.7 bytes with an embedded Noto Sans font', async () => {
