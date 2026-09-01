@@ -2723,4 +2723,85 @@ describeWithDatabase('device push-token persistence', () => {
       }),
     ).resolves.toEqual([]);
   });
+
+  test('does not fan a dual-provider device out to a provider the snapshot never used', async () => {
+    const database = databaseConnection().db;
+    const store = deviceCapabilityStore(database);
+    const expoToken = `ExponentPushToken[synthetic-${fixtureSuffix}-dualexpo]`;
+    const apnsToken = `synthetic-apns-${fixtureSuffix}-dual`;
+
+    // One device registers under two providers at once: an APNs registration
+    // and its Expo fallback. Both are live.
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios' as const,
+        provider: 'apns' as const,
+        serviceEnvironment: 'production' as const,
+        build: pushBuild,
+        token: apnsToken,
+        expoFallbackToken: expoToken,
+      },
+      humanInvocation('dual-provider-single-device'),
+      store,
+    );
+    const [expoRegistration] = await database
+      .select({ id: devicePushTokenRegistrations.id })
+      .from(devicePushTokenRegistrations)
+      .where(
+        and(
+          eq(devicePushTokenRegistrations.deviceEnrollmentId, fixture.deviceId),
+          eq(devicePushTokenRegistrations.provider, 'expo'),
+          eq(devicePushTokenRegistrations.token, expoToken),
+        ),
+      );
+    if (expoRegistration === undefined) {
+      throw new Error('The Expo fallback registration was not retained.');
+    }
+
+    // The snapshot was published under the Expo cutover, so it carries the
+    // device's Expo endpoint and not its APNs one.
+    const snapshotIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 4,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      { id: expoRegistration.id, token: expoToken },
+      snapshotIdentity,
+    );
+
+    const snapshot = await loadRosterSnapshot(
+      database as unknown as Parameters<typeof loadRosterSnapshot>[0],
+      'staff',
+      facilityId,
+      snapshotIdentity.rosterSnapshotId,
+    );
+    if (snapshot === null) {
+      throw new Error('The published roster snapshot was not readable.');
+    }
+    const live = await rosterSnapshotWithLivePushTokens(
+      database as unknown as Parameters<
+        typeof rosterSnapshotWithLivePushTokens
+      >[0],
+      snapshot,
+    );
+
+    // The APNs registration is live and unclaimed, but the snapshot uses Expo,
+    // so it must not become a second endpoint. Fanning it out would send this
+    // one device the same notification twice, on a provider not in use. The
+    // device's own Expo endpoint is present; its APNs registration is not, and
+    // no endpoint carries the APNs provider at all.
+    const pushEndpoints = live.recipients
+      .flatMap((recipient) => recipient.endpoints)
+      .filter((endpoint) => endpoint.channel === 'push');
+    const pushTokens = pushEndpoints.map((endpoint) => endpoint.token);
+    expect(pushTokens).toContain(expoToken);
+    expect(pushTokens).not.toContain(apnsToken);
+    expect(pushEndpoints.some((endpoint) => endpoint.provider === 'apns')).toBe(
+      false,
+    );
+  });
 });
