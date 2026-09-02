@@ -1,0 +1,2 @@
+ALTER TABLE "access_membership_snapshots" ADD COLUMN "scope" text DEFAULT 'access' NOT NULL;--> statement-breakpoint
+ALTER TABLE "access_membership_snapshots" ADD CONSTRAINT "access_membership_snapshots_scope_valid" CHECK ("access_membership_snapshots"."scope" in ('access', 'roster'));

@@ -309,6 +309,13 @@
       "when": 1787939022446,
       "tag": "0043_manual_others_source",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1788318520403,
+      "tag": "0044_access_snapshot_scope",
+      "breakpoints": true
     }
   ]
 }
