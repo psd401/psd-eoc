@@ -14,6 +14,7 @@ import {
   createScheduledAccessMembershipSyncAuthorizer,
   createSyncAccessMembershipHandler,
   type AccessMembershipSyncCapabilityContext,
+  type AccessMembershipSyncScope,
 } from '../../lib/auth/access-membership-sync';
 import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
 import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/auth/google-roster-config';
@@ -62,6 +63,8 @@ export function scheduledIdempotencyKey(now: Date): string {
 export const AccessMembershipSyncSummarySchema = z
   .object({
     event: z.literal('access-membership-sync-complete'),
+    /** Which groups the run covered: sign-in groups, or roster groups. */
+    scope: z.enum(['access', 'roster']),
     sourceSha: SourceShaSchema,
     snapshotId: UuidSchema,
     snapshotVersion: z.number().int().positive(),
@@ -115,10 +118,12 @@ export function readAccessMembershipSyncEnvironment(
 export function accessMembershipSyncSummary(
   sourceSha: string,
   resultValue: SyncAccessMembershipResult,
+  scope: AccessMembershipSyncScope = 'access',
 ): AccessMembershipSyncSummary {
   const result = SyncAccessMembershipResultSchema.parse(resultValue);
   return AccessMembershipSyncSummarySchema.parse({
     event: 'access-membership-sync-complete',
+    scope,
     sourceSha: SourceShaSchema.parse(sourceSha),
     snapshotId: result.snapshotId,
     snapshotVersion: result.snapshotVersion,
@@ -148,27 +153,67 @@ async function runFromCommandLine(): Promise<void> {
     requestId: run.requestId,
     idempotencyKey: run.idempotencyKey,
   });
+  const dependencies = {
+    evaluator: createGoogleAccessMembershipEvaluator(
+      readGoogleCloudIdentityRosterConfiguration(),
+    ),
+    store: createDrizzleAccessMembershipSyncStore(connection.db),
+  };
+  const invocation = {
+    context,
+    humanActionResolutionContext: null,
+    safetyResolver: null,
+    authorizer: createScheduledAccessMembershipSyncAuthorizer(),
+  };
   try {
+    // Sign-in groups first, on their own. This run is what keeps everyone's
+    // membership fresh, and it fails the job as it always has.
     const result = await withReducedDriverErrors('access-membership sync', () =>
       invokeAuthorizedCapabilityHandler(
-        createSyncAccessMembershipHandler({
-          evaluator: createGoogleAccessMembershipEvaluator(
-            readGoogleCloudIdentityRosterConfiguration(),
-          ),
-          store: createDrizzleAccessMembershipSyncStore(connection.db),
-        }),
+        createSyncAccessMembershipHandler(dependencies, 'access'),
         {},
-        {
-          context,
-          humanActionResolutionContext: null,
-          safetyResolver: null,
-          authorizer: createScheduledAccessMembershipSyncAuthorizer(),
-        },
+        invocation,
       ),
     );
     console.info(
       JSON.stringify(accessMembershipSyncSummary(run.sourceSha, result)),
     );
+
+    // Roster groups second, and separately. A building or district list with
+    // one non-staff member, one nested group, or too many people must not
+    // take down the run that refreshes sign-in, so everything the roster leg
+    // does, including asking whether any roster group exists, is reported
+    // and the job still exits clean. Skipped when none is configured, which
+    // is the ordinary state until a district list exists.
+    try {
+      const rosterGroups =
+        await dependencies.store.readConfiguredAccessGroups('roster');
+      if (rosterGroups.length > 0) {
+        const rosterResult = await withReducedDriverErrors(
+          'roster-membership sync',
+          () =>
+            invokeAuthorizedCapabilityHandler(
+              createSyncAccessMembershipHandler(dependencies, 'roster'),
+              {},
+              invocation,
+            ),
+        );
+        console.info(
+          JSON.stringify(
+            accessMembershipSyncSummary(run.sourceSha, rosterResult, 'roster'),
+          ),
+        );
+      }
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'roster-membership-sync-failed',
+          scope: 'roster',
+          sourceSha: run.sourceSha,
+          failure: describeFailure('roster-membership sync', error),
+        }),
+      );
+    }
   } finally {
     await connection.close();
   }

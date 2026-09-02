@@ -84,6 +84,9 @@ interface StoreHarness {
     completedAt: string;
   }>;
   readonly publications: EvaluatedAccessMembershipSet[];
+  /** The scope each read and each publication was asked for. */
+  readonly readScopes: Array<string | undefined>;
+  readonly publishScopes: Array<string | undefined>;
   readonly reservations: Parameters<AccessMembershipSyncStore['reserve']>[0][];
   readonly store: AccessMembershipSyncStore;
 }
@@ -93,11 +96,15 @@ function storeHarness(
 ): StoreHarness {
   const failed: StoreHarness['failed'] = [];
   const publications: EvaluatedAccessMembershipSet[] = [];
+  const readScopes: Array<string | undefined> = [];
+  const publishScopes: Array<string | undefined> = [];
   const reservations: Parameters<AccessMembershipSyncStore['reserve']>[0][] =
     [];
   return {
     failed,
     publications,
+    readScopes,
+    publishScopes,
     reservations,
     store: {
       async reserve(request) {
@@ -109,11 +116,13 @@ function storeHarness(
             }
           : { kind: 'replay' as const, result: replay };
       },
-      async readConfiguredAccessGroups() {
+      async readConfiguredAccessGroups(scope) {
+        readScopes.push(scope);
         return CONFIGURED_GROUPS;
       },
-      async publish(_reservationId, evaluation) {
+      async publish(_reservationId, evaluation, scope) {
         publications.push(evaluation);
+        publishScopes.push(scope);
         return RESULT;
       },
       async failReservation(reservationId, errorCode, completedAt) {
@@ -237,6 +246,67 @@ describe('access-membership sync capability core', () => {
     expect(unconfigured.failed[0]?.errorCode).toBe(
       'NO_CONFIGURED_ACCESS_GROUPS',
     );
+  });
+
+  test('runs the sign-in groups and the roster groups as separate scoped runs', async () => {
+    // One atomic run over every Google group meant a district roster list
+    // with one non-staff member could abort the run that refreshes sign-in
+    // membership, and a day later refuse everyone. The two scopes reserve,
+    // read, evaluate, and publish independently under distinct keys.
+    const harness = storeHarness();
+    const dependencies = {
+      store: harness.store,
+      evaluator: { evaluate: async () => EVALUATION },
+    };
+
+    await syncAccessMembership({}, context(), dependencies, 'access');
+    await syncAccessMembership({}, context(), dependencies, 'roster');
+
+    expect(
+      harness.reservations.map(({ idempotencyKey }) => idempotencyKey),
+    ).toEqual([
+      'access-sync:synthetic-run-0001',
+      'access-sync:synthetic-run-0001:roster',
+    ]);
+    expect(harness.reservations.map(({ scope }) => scope)).toEqual([
+      'access',
+      'roster',
+    ]);
+    expect(harness.readScopes).toEqual(['access', 'roster']);
+    expect(harness.publishScopes).toEqual(['access', 'roster']);
+  });
+
+  test('a roster run that fails leaves the access run untouched', async () => {
+    const harness = storeHarness();
+    // The provider is fine for the sign-in groups and then refuses the
+    // roster groups: a district list with one member outside the staff
+    // domain is exactly the shape that used to take the whole run down.
+    let evaluations = 0;
+    const dependencies = {
+      store: harness.store,
+      evaluator: {
+        evaluate: async () => {
+          evaluations += 1;
+          if (evaluations > 1) {
+            throw new Error('NON_STAFF_MEMBERSHIP: a district list member');
+          }
+          return EVALUATION;
+        },
+      },
+    };
+
+    await expect(
+      syncAccessMembership({}, context(), dependencies, 'access'),
+    ).resolves.toMatchObject({ publication: 'created' });
+    await expect(
+      syncAccessMembership({}, context(), dependencies, 'roster'),
+    ).rejects.toBeInstanceOf(Error);
+
+    // The access publication stands; the roster failure was recorded against
+    // its own reservation, not the access run's.
+    expect(harness.publishScopes).toEqual(['access']);
+    expect(harness.failed).toHaveLength(1);
+    expect(harness.reservations[1]?.scope).toBe('roster');
   });
 
   test('rejects human, agent, wrong-service, and untrusted transports before reservation', async () => {
