@@ -255,6 +255,27 @@ describeWithDatabase('live membership at sign-in', () => {
     expect(await rowsFor('holder@example.invalid')).toHaveLength(1);
   });
 
+  test('refuses to remove the last reachable administrator', async () => {
+    // Only one administrator remains reachable. Google says they are gone,
+    // which is either a real removal that would strand the deployment or a
+    // wrong answer; either way the stored membership stands, and the
+    // scheduled sync, which resolves the group afresh, gets the last word.
+    const outcome = await createLiveMembershipReconciler(
+      googleAnswering({}, []),
+    ).reconcile(database(), {
+      email: 'holder@example.invalid',
+      checkedAt: NOW,
+    });
+    expect(outcome).toBe('unavailable');
+    expect(await rowsFor('holder@example.invalid')).toHaveLength(1);
+    expect(
+      await decideAccess(database(), {
+        email: 'holder@example.invalid',
+        checkedAt: NOW,
+      }),
+    ).toMatchObject({ granted: true, roles: ['admin'] });
+  });
+
   test('with no Google sign-in group active, nothing is asked', async () => {
     await database()
       .update(groupSources)
