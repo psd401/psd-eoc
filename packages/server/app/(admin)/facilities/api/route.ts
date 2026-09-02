@@ -16,7 +16,8 @@ import {
 } from '../admin-request';
 import {
   currentStaffRosterConfiguration,
-  publishRosterSnapshot,
+  publishAfterManualMembersSave,
+  publishRosterSnapshotOrExplain,
 } from '../roster-publish';
 import { parseFacilitiesAdminMutation } from './request';
 
@@ -74,7 +75,7 @@ export async function POST(request: Request): Promise<Response> {
             'Add a building source before publishing a roster snapshot.',
           );
         }
-        await publishRosterSnapshot({
+        await publishRosterSnapshotOrExplain({
           authenticated,
           sourceConfiguration,
           idempotencyKey,
@@ -87,7 +88,15 @@ export async function POST(request: Request): Promise<Response> {
           command: mutation.command,
           metadata,
         });
-        break;
+        // Saving is the publish. The save has committed by now; a refused
+        // publication reports that the people were saved and why the roster
+        // did not publish, rather than redirecting as a success.
+        await publishAfterManualMembersSave({ authenticated, idempotencyKey });
+        return adminSuccessRedirect(
+          request,
+          '/facilities',
+          'manual-members-published',
+        );
       case 'create-neighborhood-version':
         await executeCreateNeighborhoodVersionCapability({
           authenticated,

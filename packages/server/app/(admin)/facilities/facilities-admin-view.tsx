@@ -388,8 +388,9 @@ function ManualMembersForm({
       <fieldset>
         <legend>People notified by {group.displayName}</legend>
         <p id={helpId}>
-          One staff address per line. Saving replaces the whole list, and
-          rebuilding the roster afterwards is what puts it into effect. This
+          One staff address per line. Saving replaces the whole list and
+          publishes a new roster snapshot in the same step; if the publication
+          is refused, the page says why and the saved people stay saved. This
           does not notify anyone.
         </p>
         <label>
@@ -418,10 +419,11 @@ function RosterPublishForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
       <fieldset>
         <legend>Publish the roster</legend>
         <p id={helpId}>
-          Reads every configured building source and publishes a new immutable
-          snapshot, including the devices currently registered for push. Do this
-          after changing who a manual source reaches. This does not start an
-          event or notify anyone.
+          Reads every configured source and publishes a new immutable snapshot,
+          including the devices currently registered for push. Saving a manual
+          source&apos;s people already does this; use it after a Google Group
+          changes or if an automatic publish reported a failure. This does not
+          start an event or notify anyone.
         </p>
         <button aria-describedby={helpId} type="submit">
           Publish roster snapshot
@@ -478,7 +480,8 @@ function ManualOthersGroupForm({
           A manual others source notifies the people an administrator adds to it
           at every event, at every facility, without a Google Group. Use it for
           the district-wide responder list. Creating the source does not add
-          anyone; add people to it afterwards, then publish the roster.
+          anyone; add people to it afterwards, and saving them publishes the
+          roster or says why it could not.
         </p>
         <label>
           Display name
