@@ -6,6 +6,7 @@ import {
   AccessMembershipEvaluationError,
   createGoogleAccessMembershipEvaluator,
   createGoogleGroupResolver,
+  createGoogleMembershipChecker,
 } from './google-access-membership';
 
 // The group these tests configure. Nothing about it is special any more: the
@@ -648,5 +649,103 @@ describe('exact Google Group resolver for the administration forms', () => {
       resolver(harness).resolve(DESIGNATED_ACCESS_GROUP_EMAIL),
       'GOOGLE_REQUEST_REJECTED',
     );
+  });
+});
+
+describe('direct Google membership checker for sign-in', () => {
+  const GROUPS = Object.freeze([
+    { groupSourceId: 'source-a', googleGroupId: '01a' },
+    { groupSourceId: 'source-b', googleGroupId: '01b' },
+  ]);
+
+  /** Answers `memberships:lookup` per group: a status, or a foreign name. */
+  function lookupHarness(
+    answers: Readonly<Record<string, number | 'foreign'>>,
+  ): ProviderHarness {
+    const calls: Array<Readonly<{ init?: RequestInit; url: string }>> = [];
+    const fetchImplementation = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      calls.push(
+        Object.freeze({ ...(init === undefined ? {} : { init }), url }),
+      );
+      if (url === TOKEN_ENDPOINT) return tokenResponse();
+      const match = /\/groups\/([^/]+)\/memberships:lookup\?/u.exec(url);
+      const group = match?.[1];
+      if (group === undefined) {
+        throw new Error('The checker contacted an unexpected provider URL.');
+      }
+      const answer = answers[group] ?? 404;
+      if (answer === 'foreign') {
+        return Response.json({ name: 'groups/elsewhere/memberships/0001' });
+      }
+      if (answer === 200) {
+        return Response.json({ name: `groups/${group}/memberships/0001` });
+      }
+      return new Response(PROVIDER_SECRET, { status: answer });
+    }) as typeof fetch;
+    return { calls, fetch: fetchImplementation };
+  }
+
+  function checker(harness: ProviderHarness) {
+    return createGoogleMembershipChecker(configuration(), {
+      fetch: harness.fetch,
+      now: () => new Date(TEST_TIME),
+    });
+  }
+
+  test('answers membership per group from one token and one lookup each', async () => {
+    const harness = lookupHarness({ '01a': 200, '01b': 404 });
+    const answers = await checker(harness).check(
+      ' Person@Example.invalid ',
+      GROUPS,
+    );
+    expect([...answers]).toEqual([
+      ['source-a', true],
+      ['source-b', false],
+    ]);
+    expect(harness.calls).toHaveLength(3);
+    expect(harness.calls[0]?.url).toBe(TOKEN_ENDPOINT);
+    expect(harness.calls[1]?.url).toContain(
+      '/groups/01a/memberships:lookup?memberKey.id=person%40example.invalid',
+    );
+    expect(harness.calls[2]?.url).toContain('/groups/01b/memberships:lookup?');
+  });
+
+  test('asks nothing when no sign-in group is configured', async () => {
+    const harness = lookupHarness({});
+    expect([
+      ...(await checker(harness).check('person@example.invalid', [])),
+    ]).toEqual([]);
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  test('treats any answer other than a membership or a 404 as a failure', async () => {
+    for (const status of [403, 500]) {
+      const harness = lookupHarness({ '01a': status });
+      await expectEvaluationError(
+        checker(harness).check('person@example.invalid', GROUPS),
+        'GOOGLE_REQUEST_REJECTED',
+      );
+    }
+  });
+
+  test('refuses a membership Google names under another group', async () => {
+    const harness = lookupHarness({ '01a': 'foreign' });
+    await expectEvaluationError(
+      checker(harness).check('person@example.invalid', GROUPS),
+      'GOOGLE_RESPONSE_INVALID',
+    );
+  });
+
+  test('refuses an address that is not an email before contacting Google', async () => {
+    const harness = lookupHarness({ '01a': 200 });
+    await expectEvaluationError(
+      checker(harness).check('not an address', GROUPS),
+      'GOOGLE_REQUEST_REJECTED',
+    );
+    expect(harness.calls).toHaveLength(0);
   });
 });
