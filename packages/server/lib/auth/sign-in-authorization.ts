@@ -6,6 +6,10 @@ import { UserSchema, type User } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
 import { users } from '../../db/schema';
+import {
+  defaultLiveMembershipReconciler,
+  type LiveMembershipReconciler,
+} from './live-membership';
 import { decideAccess, type AccessRefusal } from './trusted-group-access';
 
 export type SignInAuthorization =
@@ -35,6 +39,11 @@ export type SignInAuthorization =
  * A first-time signer is created here. Their roles are whatever their groups
  * grant — there is no bootstrap admin, no approved subject, and no synthetic
  * fixture to seed one.
+ *
+ * Before the decision, this person's membership in every active sign-in
+ * group is read from Google and written down, so being added to a group
+ * means signing in now, not after the next scheduled sync. When Google
+ * cannot be asked the stored membership decides, bounded by its freshness.
  */
 export async function authorizeSignIn(
   database: Database,
@@ -44,8 +53,12 @@ export async function authorizeSignIn(
     displayName: string;
     checkedAt: Date;
   }>,
+  dependencies: Readonly<{ liveMembership?: LiveMembershipReconciler }> = {},
 ): Promise<SignInAuthorization> {
   const email = input.email.toLowerCase();
+  await (
+    dependencies.liveMembership ?? defaultLiveMembershipReconciler()
+  ).reconcile(database, { email, checkedAt: input.checkedAt });
   const decision = await decideAccess(database, {
     email,
     checkedAt: input.checkedAt,
