@@ -4811,4 +4811,131 @@ describeWithDatabase('facilities administrator database flow', () => {
       resetStaffRosterEmailForTests();
     }
   });
+  test('one Google group may be a sign-in group and one roster source at once', async () => {
+    // The district staff group gates sign-in and is the every-event audience.
+    // Within a purpose a group is still one source, and it cannot be both a
+    // building source and an others source: the roster sync reads those two
+    // purposes together and refuses a group it would read twice.
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const suffix = randomUUID();
+    const requestIds: string[] = [];
+    await persistAdministratorIdentity(database, authenticated, suffix);
+    const googleGroupId = `district-staff-${suffix}`;
+    const email = `district-staff-${suffix}@example.invalid`;
+
+    const signIn = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        grantedRole: 'staff',
+        displayName: `District staff sign-in ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId,
+        email,
+      },
+      metadata: metadata('dual-purpose-access', requestIds),
+    });
+    const audience = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'others',
+        facilityId: null,
+        displayName: `District staff audience ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId,
+        email,
+      },
+      metadata: metadata('dual-purpose-others', requestIds),
+    });
+    expect(signIn.id).not.toBe(audience.id);
+    expect([signIn.purpose, audience.purpose]).toEqual(['access', 'others']);
+
+    await expect(
+      executeCreateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          kind: 'google-group',
+          purpose: 'others',
+          facilityId: null,
+          displayName: `District staff audience again ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId,
+          email,
+        },
+        metadata: metadata('dual-purpose-others-again', requestIds),
+      }),
+    ).rejects.toThrow('That group source is already configured.');
+
+    const facility = await executeCreateFacilityCapability({
+      authenticated,
+      store,
+      command: {
+        code: `DUAL-${suffix.slice(0, 6).toUpperCase()}`,
+        name: `Dual purpose facility ${suffix.slice(0, 8)}`,
+      },
+      metadata: metadata('dual-purpose-facility', requestIds),
+    });
+    await expect(
+      executeCreateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: facility.id,
+          displayName: `District staff as a building ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId,
+          email,
+        },
+        metadata: metadata('dual-purpose-building', requestIds),
+      }),
+    ).rejects.toThrow(
+      'already backs an active roster source of the other kind',
+    );
+
+    // The rule is symmetric: a group that backs a building source cannot be
+    // registered as an others source either.
+    const buildingFirst = `district-building-first-${suffix}`;
+    await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: `Building first ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: buildingFirst,
+        email: `district-building-first-${suffix}@example.invalid`,
+      },
+      metadata: metadata('dual-purpose-building-first', requestIds),
+    });
+    await expect(
+      executeCreateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          kind: 'google-group',
+          purpose: 'others',
+          facilityId: null,
+          displayName: `Building first as others ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId: buildingFirst,
+          email: `district-building-first-${suffix}@example.invalid`,
+        },
+        metadata: metadata('dual-purpose-building-first-others', requestIds),
+      }),
+    ).rejects.toThrow(
+      'already backs an active roster source of the other kind',
+    );
+  });
 });
