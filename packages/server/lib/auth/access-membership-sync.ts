@@ -149,6 +149,8 @@ export interface AccessMembershipSyncReservationRequest {
   readonly idempotencyKey: string;
   readonly requestDigest: string;
   readonly startedAt: string;
+  /** Which groups this run covers; a replay reconstructs the same scope. */
+  readonly scope?: AccessMembershipSyncScope;
 }
 
 export type AccessMembershipSyncReservation =
@@ -158,15 +160,49 @@ export type AccessMembershipSyncReservation =
       result: AccessMembershipPublicationResult;
     }>;
 
+/**
+ * Which groups one sync run reads and publishes.
+ *
+ * `access` is the groups that gate sign-in. `roster` is the building and
+ * others groups whose membership feeds notification audiences. They are run
+ * separately because a failure must stay where it belongs: a district-wide
+ * roster group with one non-staff member, one nested group, or too many
+ * people would otherwise abort the run that refreshes access membership, and
+ * after a day of that everyone is refused at sign-in for a group that has
+ * nothing to do with who may sign in.
+ */
+export type AccessMembershipSyncScope = 'access' | 'roster';
+
+/** The group purposes a scope covers. */
+export function scopePurposes(
+  scope: AccessMembershipSyncScope,
+): readonly ('access' | 'building' | 'others')[] {
+  return scope === 'access' ? ['access'] : ['building', 'others'];
+}
+
+/**
+ * One idempotency key per scope, derived from the run's, so the two runs of
+ * one scheduled tick reserve and replay independently.
+ */
+export function scopedIdempotencyKey(
+  idempotencyKey: string,
+  scope: AccessMembershipSyncScope,
+): string {
+  return scope === 'access' ? idempotencyKey : `${idempotencyKey}:roster`;
+}
+
 export interface AccessMembershipSyncStore {
   reserve(
     request: AccessMembershipSyncReservationRequest,
   ): Promise<AccessMembershipSyncReservation>;
-  /** The active access sources a deployment has configured. */
-  readConfiguredAccessGroups(): Promise<readonly DesignatedAccessGroup[]>;
+  /** The active Google sources a deployment has configured for one scope. */
+  readConfiguredAccessGroups(
+    scope?: AccessMembershipSyncScope,
+  ): Promise<readonly DesignatedAccessGroup[]>;
   publish(
     reservationId: string,
     evaluation: EvaluatedAccessMembershipSet,
+    scope?: AccessMembershipSyncScope,
   ): Promise<AccessMembershipPublicationResult>;
   failReservation(
     reservationId: string,
@@ -307,6 +343,7 @@ export async function syncAccessMembership(
   inputValue: SyncAccessMembershipInput,
   context: AccessMembershipSyncCapabilityContext,
   dependencies: AccessMembershipSyncDependencies,
+  scope: AccessMembershipSyncScope = 'access',
 ): Promise<AccessMembershipPublicationResult> {
   const input = SyncAccessMembershipInputSchema.parse(inputValue);
   const invocation = validateContext(context);
@@ -314,9 +351,10 @@ export async function syncAccessMembership(
   const startedAt = timestamp(now);
   const reservation = await dependencies.store.reserve({
     actor: invocation.actor,
-    idempotencyKey: invocation.idempotencyKey,
-    requestDigest: digest(input),
+    idempotencyKey: scopedIdempotencyKey(invocation.idempotencyKey, scope),
+    requestDigest: digest({ ...input, scope }),
     startedAt,
+    scope,
   });
   if (reservation.kind === 'replay') {
     return SyncAccessMembershipResultSchema.parse({
@@ -334,13 +372,17 @@ export async function syncAccessMembership(
     }
     // The groups to evaluate come from the database, never from the command.
     // A caller cannot ask for a group the deployment has not activated.
-    const configured = await dependencies.store.readConfiguredAccessGroups();
+    const configured =
+      await dependencies.store.readConfiguredAccessGroups(scope);
     if (configured.length === 0) {
       throw new AccessMembershipSyncError(
         'NO_CONFIGURED_ACCESS_GROUPS',
-        'No active access or building group is configured, so there is nothing to read.',
+        'No active Google group is configured for this scope, so there is nothing to read.',
       );
     }
+    // A roster scope whose groups are all empty fails here too, on its own
+    // run: that is a site still being set up, and the failure is reported
+    // without touching the run that refreshes sign-in.
     const evaluation = validateEvaluation(
       await dependencies.evaluator.evaluate(configured),
     );
@@ -363,7 +405,7 @@ export async function syncAccessMembership(
       );
     }
     return SyncAccessMembershipResultSchema.parse(
-      await dependencies.store.publish(reservation.id, evaluation),
+      await dependencies.store.publish(reservation.id, evaluation, scope),
     );
   } catch (error) {
     await dependencies.store
@@ -381,6 +423,7 @@ export async function syncAccessMembership(
 /** Registers the exact access-membership publisher in the canonical catalog. */
 export function createSyncAccessMembershipHandler(
   dependencies: AccessMembershipSyncDependencies,
+  scope: AccessMembershipSyncScope = 'access',
 ): Readonly<
   RegisteredCapabilityHandler<
     'sync-access-membership',
@@ -388,7 +431,7 @@ export function createSyncAccessMembershipHandler(
   >
 > {
   return registerCapabilityHandler('sync-access-membership', (input, context) =>
-    syncAccessMembership(input, context, dependencies),
+    syncAccessMembership(input, context, dependencies, scope),
   );
 }
 
@@ -534,6 +577,7 @@ export function createDrizzleAccessMembershipSyncStore(
       snapshotId: string;
       auditEntryHash: string | null;
     }>,
+    scope: AccessMembershipSyncScope,
   ): Promise<AccessMembershipPublicationResult> {
     const [latestRun] = await database
       .select({ id: accessMembershipSnapshots.id })
@@ -573,7 +617,9 @@ export function createDrizzleAccessMembershipSyncStore(
       .where(
         and(
           eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
+          // The same scope the run read, so a replay describes the set the
+          // first call actually published rather than only the access groups.
+          inArray(groupSources.purpose, scopePurposes(scope)),
           eq(groupSources.active, true),
         ),
       )
@@ -763,13 +809,16 @@ export function createDrizzleAccessMembershipSyncStore(
       }
       return Object.freeze({
         kind: 'replay' as const,
-        result: await loadReplay(proofFromReference(existing.resultReference)),
+        result: await loadReplay(
+          proofFromReference(existing.resultReference),
+          request.scope ?? 'access',
+        ),
       });
     },
 
-    async readConfiguredAccessGroups(): Promise<
-      readonly DesignatedAccessGroup[]
-    > {
+    async readConfiguredAccessGroups(
+      scope: AccessMembershipSyncScope = 'access',
+    ): Promise<readonly DesignatedAccessGroup[]> {
       const rows = await database
         .select({
           groupSourceId: groupSources.id,
@@ -780,7 +829,7 @@ export function createDrizzleAccessMembershipSyncStore(
         .from(groupSources)
         .where(
           and(
-            inArray(groupSources.purpose, ['access', 'building', 'others']),
+            inArray(groupSources.purpose, scopePurposes(scope)),
             eq(groupSources.active, true),
             eq(groupSources.kind, 'google-group'),
           ),
@@ -822,6 +871,7 @@ export function createDrizzleAccessMembershipSyncStore(
     async publish(
       reservationIdValue: string,
       evaluationValue: EvaluatedAccessMembershipSet,
+      scope: AccessMembershipSyncScope = 'access',
     ): Promise<AccessMembershipPublicationResult> {
       const reservationId = UuidSchema.parse(reservationIdValue);
       const evaluation = validateEvaluation(evaluationValue);
@@ -861,7 +911,7 @@ export function createDrizzleAccessMembershipSyncStore(
           .from(groupSources)
           .where(
             and(
-              inArray(groupSources.purpose, ['access', 'building', 'others']),
+              inArray(groupSources.purpose, scopePurposes(scope)),
               eq(groupSources.active, true),
               eq(groupSources.kind, 'google-group'),
             ),
@@ -951,26 +1001,31 @@ export function createDrizzleAccessMembershipSyncStore(
         // The guard that makes reconfiguration safe. At least one person who
         // holds the administrator role must still be reachable through a group
         // that grants it, or the whole transaction is refused and the previous
-        // membership stands.
-        const administratorEmails = await transaction
-          .select({ email: groupMembers.email })
-          .from(groupMembers)
-          .innerJoin(
-            groupSources,
-            eq(groupSources.id, groupMembers.groupSourceId),
-          )
-          .where(
-            and(
-              eq(groupSources.purpose, 'access'),
-              eq(groupSources.active, true),
-              eq(groupSources.grantedRole, 'admin'),
-            ),
-          );
-        if (administratorEmails.length === 0) {
-          throw new AccessMembershipSyncError(
-            'ACCESS_PUBLICATION_LEAVES_NO_ADMINISTRATOR',
-            'Publishing this membership would leave no reachable administrator.',
-          );
+        // membership stands. A roster run replaces only roster groups'
+        // members and cannot change who holds the administrator role, so it
+        // is not asked; asking would refuse a fresh deployment's first roster
+        // run for a condition it did not create and cannot affect.
+        if (scope === 'access') {
+          const administratorEmails = await transaction
+            .select({ email: groupMembers.email })
+            .from(groupMembers)
+            .innerJoin(
+              groupSources,
+              eq(groupSources.id, groupMembers.groupSourceId),
+            )
+            .where(
+              and(
+                eq(groupSources.purpose, 'access'),
+                eq(groupSources.active, true),
+                eq(groupSources.grantedRole, 'admin'),
+              ),
+            );
+          if (administratorEmails.length === 0) {
+            throw new AccessMembershipSyncError(
+              'ACCESS_PUBLICATION_LEAVES_NO_ADMINISTRATOR',
+              'Publishing this membership would leave no reachable administrator.',
+            );
+          }
         }
 
         await completeReservation(

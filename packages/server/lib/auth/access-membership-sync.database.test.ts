@@ -653,7 +653,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       createdAt: BASELINE_TIME,
     });
 
-    const configured = await store.readConfiguredAccessGroups();
+    const configured = await store.readConfiguredAccessGroups('roster');
     const building = configured.find(
       ({ groupSourceId }) => groupSourceId === buildingSourceId,
     );
@@ -688,6 +688,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
               : [RECOVERY_EMAIL],
         })),
       ),
+      'roster',
     );
 
     // The building group's members landed, and its read was stamped.
@@ -738,12 +739,24 @@ describeWithDatabase('access-membership atomic database publication', () => {
       createdAt: BASELINE_TIME,
     });
 
-    const configured = await store.readConfiguredAccessGroups();
+    const configured = await store.readConfiguredAccessGroups('roster');
     const others = configured.find(
       ({ groupSourceId }) => groupSourceId === othersSourceId,
     );
     expect(others).toBeDefined();
     expect(others?.grantedRole).toBeNull();
+    // The scopes partition the groups: the sign-in run never sees a roster
+    // group, and the roster run never sees a sign-in group, so a failure in
+    // one cannot be raised inside the other.
+    const accessScope = await store.readConfiguredAccessGroups('access');
+    expect(
+      accessScope.some(({ groupSourceId }) => groupSourceId === othersSourceId),
+    ).toBe(false);
+    expect(
+      configured.some(
+        ({ groupSourceId }) => groupSourceId === BASELINE_SOURCE_ID,
+      ),
+    ).toBe(false);
 
     const providerIds = new Map(
       (
@@ -771,6 +784,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
               : [RECOVERY_EMAIL],
         })),
       ),
+      'roster',
     );
 
     const members = await database
