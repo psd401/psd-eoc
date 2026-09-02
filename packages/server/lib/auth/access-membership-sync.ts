@@ -352,7 +352,9 @@ export async function syncAccessMembership(
   const reservation = await dependencies.store.reserve({
     actor: invocation.actor,
     idempotencyKey: scopedIdempotencyKey(invocation.idempotencyKey, scope),
-    requestDigest: digest({ ...input, scope }),
+    // The scope lives in the key, so the digest stays what earlier runs
+    // recorded and a redelivery that straddles a deploy still replays.
+    requestDigest: digest(input),
     startedAt,
     scope,
   });
@@ -568,9 +570,11 @@ export function createDrizzleAccessMembershipSyncStore(
    *
    * A replayed idempotency key must return what the first call returned, so
    * this reads the snapshot back and re-derives the same aggregate. It refuses
-   * if that snapshot is no longer the current access generation, because
+   * if that snapshot is no longer the newest run of its own scope, because
    * reporting a superseded publication as current would tell the caller the
-   * configuration is live when something else replaced it.
+   * configuration is live when something else replaced it. The sign-in run and
+   * the roster run of one scheduled tick share the version sequence, so the
+   * check is per scope: a roster run never supersedes a sign-in run.
    */
   async function loadReplay(
     proof: Readonly<{
@@ -582,13 +586,18 @@ export function createDrizzleAccessMembershipSyncStore(
     const [latestRun] = await database
       .select({ id: accessMembershipSnapshots.id })
       .from(accessMembershipSnapshots)
-      .where(eq(accessMembershipSnapshots.complete, true))
+      .where(
+        and(
+          eq(accessMembershipSnapshots.complete, true),
+          eq(accessMembershipSnapshots.scope, scope),
+        ),
+      )
       .orderBy(desc(accessMembershipSnapshots.version))
       .limit(1);
     if (latestRun === undefined || latestRun.id !== proof.snapshotId) {
       throw new AccessMembershipSyncError(
         'IDEMPOTENCY_RESULT_SUPERSEDED',
-        'A later access-sync run replaced the one this result described.',
+        'A later run of the same scope replaced the one this result described.',
       );
     }
     const [snapshot] = await database
@@ -970,6 +979,7 @@ export function createDrizzleAccessMembershipSyncStore(
           id: snapshotId,
           version: snapshotVersion,
           complete: true,
+          scope,
           syncStartedAt: new Date(evaluation.syncStartedAt),
           capturedAt: new Date(evaluation.capturedAt),
         });
