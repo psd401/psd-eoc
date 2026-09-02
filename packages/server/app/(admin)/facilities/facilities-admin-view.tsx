@@ -389,8 +389,9 @@ function ManualMembersForm({
         <legend>People notified by {group.displayName}</legend>
         <p id={helpId}>
           One staff address per line. Saving replaces the whole list and
-          publishes a new roster snapshot, so the change takes effect at once.
-          This does not notify anyone.
+          publishes a new roster snapshot in the same step; if the publication
+          is refused, the page says why and the saved people stay saved. This
+          does not notify anyone.
         </p>
         <label>
           Staff addresses
@@ -480,7 +481,7 @@ function ManualOthersGroupForm({
           at every event, at every facility, without a Google Group. Use it for
           the district-wide responder list. Creating the source does not add
           anyone; add people to it afterwards, and saving them publishes the
-          roster.
+          roster or says why it could not.
         </p>
         <label>
           Display name
