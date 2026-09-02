@@ -525,6 +525,9 @@ function googleGroupsClient(
 /** One configured Google group, by the source that carries it. */
 export interface GoogleGroupReference {
   readonly groupSourceId: string;
+  /** The group's address, which is how Google is asked which group this is. */
+  readonly email: string;
+  /** The ID recorded when the group was registered; Google must still agree. */
   readonly googleGroupId: string;
 }
 
@@ -555,11 +558,14 @@ export function createGoogleMembershipChecker(
       email: string,
       groups: readonly GoogleGroupReference[],
     ): Promise<ReadonlyMap<string, boolean>> {
-      const address = GroupAddressSchema.safeParse(email);
+      // The same rule the scheduled evaluator applies to every member it
+      // lists: an address outside the staff domain is never confirmed, so
+      // the live path cannot admit someone the sync would refuse.
+      const address = staffRosterEmail().safeParse(email);
       if (!address.success) {
         throw new AccessMembershipEvaluationError(
-          'GOOGLE_REQUEST_REJECTED',
-          'The address to look up is not a valid email address.',
+          'NON_STAFF_MEMBERSHIP',
+          'The address to look up is outside the approved staff domain.',
         );
       }
       const answers = new Map<string, boolean>();
@@ -570,10 +576,25 @@ export function createGoogleMembershipChecker(
         Authorization: `Bearer ${token}`,
       };
       for (const group of groups) {
+        // Ask Google which group the address names now, and require it to
+        // be the group that was registered. A group deleted and recreated,
+        // or re-keyed, answers 404 to a membership lookup on the old ID for
+        // everyone; read as "not a member" that would remove each person
+        // as they arrived. Here it is a failure, and nothing is written.
+        const identity = await client.resolveGroupIdentity(
+          group.email.trim().toLowerCase(),
+          authorization,
+        );
+        if (identity.googleGroupId !== group.googleGroupId) {
+          throw new AccessMembershipEvaluationError(
+            'DESIGNATED_GROUP_IDENTITY_INVALID',
+            'A configured access group no longer resolves to its recorded Google Group ID.',
+          );
+        }
         answers.set(
           group.groupSourceId,
           await client.lookupDirectMembership(
-            `groups/${group.googleGroupId}`,
+            identity.name,
             address.data,
             authorization,
           ),
