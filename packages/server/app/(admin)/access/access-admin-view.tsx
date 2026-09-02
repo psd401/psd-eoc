@@ -83,7 +83,12 @@ function CreateAccessGroupForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
         </label>
         <label>
           Role granted to every member
-          <select defaultValue="staff" name="grantedRole" required>
+          <select
+            aria-describedby="new-access-group-role-help"
+            defaultValue="staff"
+            name="grantedRole"
+            required
+          >
             <option value="staff">Staff</option>
             <option value="admin">Administrator</option>
           </select>
