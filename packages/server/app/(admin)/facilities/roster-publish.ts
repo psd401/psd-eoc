@@ -1,3 +1,4 @@
+import { IdempotencyKeySchema } from '@psd-eoc/contracts';
 import { desc, eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
@@ -14,6 +15,21 @@ import {
 import { AdminFormError } from './admin-request';
 
 type AdminDatabase = ReturnType<typeof getDefaultAdminDatabase>;
+
+/** The ceiling `IdempotencyKeySchema` enforces; the derived key must fit it. */
+const IDEMPOTENCY_KEY_MAX_LENGTH = 200;
+const PUBLISH_KEY_SUFFIX = '.publish';
+
+/**
+ * The publication's idempotency key, derived from the save's so a replayed
+ * form replays the same publication. Parsed through the contract so a drift
+ * between this ceiling and the schema fails loudly rather than truncating.
+ */
+function publishKeyFor(saveKey: string): string {
+  return IdempotencyKeySchema.parse(
+    `${saveKey.slice(0, IDEMPOTENCY_KEY_MAX_LENGTH - PUBLISH_KEY_SUFFIX.length)}${PUBLISH_KEY_SUFFIX}`,
+  );
+}
 
 /**
  * Names the exact roster source configuration a publication reads.
@@ -144,7 +160,7 @@ export async function publishAfterManualMembersSave(
     result = await publishRosterSnapshot({
       authenticated: input.authenticated,
       sourceConfiguration,
-      idempotencyKey: `${input.idempotencyKey.slice(0, 190)}.publish`,
+      idempotencyKey: publishKeyFor(input.idempotencyKey),
       ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
       database,
     });

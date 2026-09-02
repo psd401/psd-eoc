@@ -149,9 +149,11 @@ selects. Others sources come in two kinds. A Google others source draws its
 membership from a Google Group; a manual others source is curated in the
 application, on the Facilities page, with no Google Group, which suits a
 fixed district responder list. Saving the people on a manual source publishes
-the roster at once; a change to a Google Group takes effect when the scheduled
-roster sync next publishes, or when an administrator publishes from the
-Facilities page.
+the roster in the same request, or says why it could not: a refused
+publication leaves the saved people in place and nothing changes who is reached
+until a publish succeeds. A change to a Google Group takes effect when the
+scheduled roster sync next publishes, or when an administrator publishes from
+the Facilities page.
 
 ## 6. Walk the admin surface
 
