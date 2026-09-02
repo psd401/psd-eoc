@@ -2438,7 +2438,7 @@ describe('protected access-membership publication boundary', () => {
 describe('alarm topic delivery', () => {
   it('deploys sanitized channel-worker metrics and alarms only with each worker', () => {
     const filters = resourceEntries('AWS::Logs::MetricFilter');
-    expect(filters).toHaveLength(13);
+    expect(filters).toHaveLength(15);
     expect(
       filters
         .map(([, resource]) => {
@@ -2456,6 +2456,11 @@ describe('alarm topic delivery', () => {
         .sort(),
     ).toEqual(
       [
+        [
+          'AccessMembershipSyncFailureCount',
+          '"Protected access-membership synchronization failed closed"',
+          undefined,
+        ],
         [
           'EmailCallbackFailureCount',
           '{ $.event = "email-callback-message-failed" }',
@@ -2505,6 +2510,11 @@ describe('alarm topic delivery', () => {
           'PushWorkerHeartbeat',
           '{ $.event = "push-worker-heartbeat" }',
           'ShouldRunExpoPushWorker',
+        ],
+        [
+          'RosterMembershipSyncFailureCount',
+          '{ $.event = "roster-membership-sync-failed" }',
+          undefined,
         ],
         [
           'SmsOutboxToProviderLatency',
@@ -2605,6 +2615,68 @@ describe('alarm topic delivery', () => {
         'psd-eoc-email-worker-health',
       ].sort(),
     );
+  });
+
+  it('alarms when the scheduled membership task fails either leg', () => {
+    // The roster leg logs its failure and exits clean, so nothing else would
+    // say a district list stopped refreshing; the sign-in leg failing is the
+    // path to the 24-hour lockout. Both are read from the bootstrap log
+    // group the task writes to, unconditionally.
+    const filters = resourceEntries('AWS::Logs::MetricFilter')
+      .map(([, resource]) => properties(resource))
+      .filter((filter) =>
+        [
+          '"Protected access-membership synchronization failed closed"',
+          '{ $.event = "roster-membership-sync-failed" }',
+        ].includes(String(filter.FilterPattern)),
+      );
+    expect(
+      filters
+        .map((filter) =>
+          asArray(filter.MetricTransformations).map(
+            (t) => asRecord(t).MetricName,
+          ),
+        )
+        .flat()
+        .sort(),
+    ).toEqual([
+      'AccessMembershipSyncFailureCount',
+      'RosterMembershipSyncFailureCount',
+    ]);
+    for (const filter of filters) {
+      expect(JSON.stringify(filter.LogGroupName)).toContain(
+        'BootstrapLogGroup',
+      );
+    }
+
+    const alarms = resourceEntries('AWS::CloudWatch::Alarm').filter(
+      ([, resource]) =>
+        String(properties(resource).AlarmName).endsWith(
+          '-membership-sync-failed',
+        ),
+    );
+    expect(
+      alarms.map(([, resource]) => properties(resource).AlarmName).sort(),
+    ).toEqual([
+      'psd-eoc-access-membership-sync-failed',
+      'psd-eoc-roster-membership-sync-failed',
+    ]);
+    for (const [, resource] of alarms) {
+      expect(resource.Condition).toBeUndefined();
+      const alarm = properties(resource);
+      expect(String(alarm.AlarmDescription)).toContain('Runbook: https://');
+      expect(alarm.Threshold).toBe(1);
+      expect(alarm.TreatMissingData).toBe('notBreaching');
+      expect(asArray(alarm.AlarmActions)).toHaveLength(1);
+      expect(asArray(alarm.OKActions)).toHaveLength(1);
+      const action = JSON.stringify(asArray(alarm.AlarmActions)[0]);
+      // The roster leg pages operations; the sign-in leg pages critical.
+      expect(action).toContain(
+        String(alarm.AlarmName).startsWith('psd-eoc-access-')
+          ? 'CriticalAlarmTopic'
+          : 'OperationsAlarmTopic',
+      );
+    }
   });
 
   it('leaves the alarm topics unencrypted so a confirmation can be sent', () => {
