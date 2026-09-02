@@ -27,13 +27,37 @@ function adminForm(
   return new AdminForm(parameters);
 }
 
+/**
+ * Stands in for Google. The ID it answers with is derived from the address so
+ * a test can tell a resolved ID from anything a form might have carried.
+ */
+function googleThatResolves() {
+  const asked: string[] = [];
+  return {
+    asked,
+    resolve: async (email: string) => {
+      asked.push(email);
+      return `resolved:${email}`;
+    },
+  };
+}
+
+function googleThatIsNeverAsked() {
+  return async (email: string): Promise<string> => {
+    throw new Error(
+      `No Google lookup was expected, but one asked for ${email}.`,
+    );
+  };
+}
+
 describe('facilities administration form parsing', () => {
-  test('parses facility create and update through canonical contracts', () => {
-    const created = parseFacilitiesAdminMutation(
+  test('parses facility create and update through canonical contracts', async () => {
+    const created = await parseFacilitiesAdminMutation(
       adminForm('create-facility', [
         ['code', 'NEW-SITE'],
         ['name', 'New Site'],
       ]),
+      googleThatIsNeverAsked(),
     );
     expect(created).toEqual({
       intent: 'create-facility',
@@ -42,13 +66,14 @@ describe('facilities administration form parsing', () => {
     });
     expect(Object.isFrozen(created.command)).toBe(true);
 
-    const updated = parseFacilitiesAdminMutation(
+    const updated = await parseFacilitiesAdminMutation(
       adminForm('update-facility', [
         ['facilityId', IDS.facilityA],
         ['code', 'SITE-A'],
         ['name', 'Site A'],
         ['active', 'false'],
       ]),
+      googleThatIsNeverAsked(),
     );
     expect(updated).toMatchObject({
       intent: 'update-facility',
@@ -61,14 +86,15 @@ describe('facilities administration form parsing', () => {
     });
   });
 
-  test('server-fixes every building and others source kind and purpose', () => {
-    const googleBuilding = parseFacilitiesAdminMutation(
+  test('server-fixes every building and others source kind and purpose', async () => {
+    const google = googleThatResolves();
+    const googleBuilding = await parseFacilitiesAdminMutation(
       adminForm('create-google-building-group', [
         ['facilityId', IDS.facilityA],
         ['displayName', 'Site A staff'],
-        ['googleGroupId', 'google-site-a-staff'],
         ['email', 'site-a@example.invalid'],
       ]),
+      google.resolve,
     );
     expect(googleBuilding).toMatchObject({
       command: {
@@ -76,16 +102,19 @@ describe('facilities administration form parsing', () => {
         purpose: 'building',
         facilityId: IDS.facilityA,
         active: true,
+        googleGroupId: 'resolved:site-a@example.invalid',
+        email: 'site-a@example.invalid',
       },
       status: 'building-group-created',
     });
 
-    const syntheticBuilding = parseFacilitiesAdminMutation(
+    const syntheticBuilding = await parseFacilitiesAdminMutation(
       adminForm('create-synthetic-building-group', [
         ['facilityId', IDS.facilityA],
         ['displayName', 'Site A test staff'],
         ['fixtureKey', 'site-a-test-staff'],
       ]),
+      google.resolve,
     );
     expect(syntheticBuilding).toMatchObject({
       command: {
@@ -96,28 +125,30 @@ describe('facilities administration form parsing', () => {
       },
     });
 
-    const googleOthers = parseFacilitiesAdminMutation(
+    const googleOthers = await parseFacilitiesAdminMutation(
       adminForm('create-google-others-group', [
         ['displayName', 'District response staff'],
-        ['googleGroupId', 'google-district-response'],
         ['email', 'response@example.invalid'],
       ]),
+      google.resolve,
     );
     expect(googleOthers).toMatchObject({
       command: {
         kind: 'google-group',
         purpose: 'others',
         facilityId: null,
+        googleGroupId: 'resolved:response@example.invalid',
       },
       status: 'others-group-created',
     });
 
     // A manual others source names no facility and no provider: it is the
     // district-level list curated in the application.
-    const manualOthers = parseFacilitiesAdminMutation(
+    const manualOthers = await parseFacilitiesAdminMutation(
       adminForm('create-manual-others-group', [
         ['displayName', 'District responders'],
       ]),
+      google.resolve,
     );
     expect(manualOthers).toMatchObject({
       intent: 'create-manual-others-group',
@@ -131,20 +162,22 @@ describe('facilities administration form parsing', () => {
       },
       status: 'others-group-created',
     });
-    expect(() =>
+    await expect(
       parseFacilitiesAdminMutation(
         adminForm('create-manual-others-group', [
           ['displayName', 'District responders'],
           ['facilityId', '00000000-0000-4000-8000-000000000001'],
         ]),
+        google.resolve,
       ),
-    ).toThrow();
+    ).rejects.toThrow();
 
-    const syntheticOthers = parseFacilitiesAdminMutation(
+    const syntheticOthers = await parseFacilitiesAdminMutation(
       adminForm('create-synthetic-others-group', [
         ['displayName', 'District test response staff'],
         ['fixtureKey', 'district-test-response'],
       ]),
+      google.resolve,
     );
     expect(syntheticOthers).toMatchObject({
       command: {
@@ -153,17 +186,56 @@ describe('facilities administration form parsing', () => {
         facilityId: null,
       },
     });
+    // Only the two Google sources consulted Google; the synthetic and manual
+    // sources have no Google Group to resolve.
+    expect(google.asked).toEqual([
+      'site-a@example.invalid',
+      'response@example.invalid',
+    ]);
   });
 
-  test('parses immutable building and others replacements through the canonical update contract', () => {
-    const building = parseFacilitiesAdminMutation(
+  test('takes the Google Group ID from Google, never from the form', async () => {
+    // A form that carries an ID of its own is refused outright: the field is
+    // not on the allowed list, so nothing a person types can become the
+    // stored ID that the scheduled sync later checks the row against.
+    await expect(
+      parseFacilitiesAdminMutation(
+        adminForm('create-google-others-group', [
+          ['displayName', 'District response staff'],
+          ['googleGroupId', 'typed-by-hand'],
+          ['email', 'response@example.invalid'],
+        ]),
+        googleThatIsNeverAsked(),
+      ),
+    ).rejects.toThrow(AdminFormError);
+
+    // A group Google will not resolve is refused as a form error before any
+    // command exists, with the resolver's own explanation.
+    await expect(
+      parseFacilitiesAdminMutation(
+        adminForm('create-google-others-group', [
+          ['displayName', 'District response staff'],
+          ['email', 'nobody@example.invalid'],
+        ]),
+        async () => {
+          throw new AdminFormError(
+            'Google did not resolve nobody@example.invalid as an exact Google Group.',
+          );
+        },
+      ),
+    ).rejects.toThrow(/did not resolve nobody@example\.invalid/u);
+  });
+
+  test('parses immutable building and others replacements through the canonical update contract', async () => {
+    const google = googleThatResolves();
+    const building = await parseFacilitiesAdminMutation(
       adminForm('replace-google-building-group', [
         ['sourceId', IDS.buildingSource],
         ['facilityId', IDS.facilityA],
         ['displayName', 'Site A staff replacement'],
-        ['googleGroupId', 'google-site-a-staff-v2'],
         ['email', 'site-a-v2@example.invalid'],
       ]),
+      google.resolve,
     );
     expect(building).toEqual({
       intent: 'replace-google-building-group',
@@ -174,18 +246,19 @@ describe('facilities administration form parsing', () => {
         facilityId: IDS.facilityA,
         displayName: 'Site A staff replacement',
         active: true,
-        googleGroupId: 'google-site-a-staff-v2',
+        googleGroupId: 'resolved:site-a-v2@example.invalid',
         email: 'site-a-v2@example.invalid',
       },
       status: 'building-group-replaced',
     });
 
-    const others = parseFacilitiesAdminMutation(
+    const others = await parseFacilitiesAdminMutation(
       adminForm('replace-synthetic-others-group', [
         ['sourceId', IDS.syntheticOthers],
         ['displayName', 'District test response replacement'],
         ['fixtureKey', 'district-test-response-v2'],
       ]),
+      google.resolve,
     );
     expect(others).toEqual({
       intent: 'replace-synthetic-others-group',
@@ -202,15 +275,17 @@ describe('facilities administration form parsing', () => {
     });
     expect(Object.isFrozen(building.command)).toBe(true);
     expect(Object.isFrozen(others.command)).toBe(true);
+    expect(google.asked).toEqual(['site-a-v2@example.invalid']);
   });
 
-  test('parses new and superseding neighborhood versions with repeated facility fields', () => {
-    const created = parseFacilitiesAdminMutation(
+  test('parses new and superseding neighborhood versions with repeated facility fields', async () => {
+    const created = await parseFacilitiesAdminMutation(
       adminForm('create-neighborhood-version', [
         ['name', 'Harbor neighborhood'],
         ['facilityIds', IDS.facilityA],
         ['facilityIds', IDS.facilityB],
       ]),
+      googleThatIsNeverAsked(),
     );
     expect(created).toMatchObject({
       intent: 'create-neighborhood-version',
@@ -221,12 +296,13 @@ describe('facilities administration form parsing', () => {
       },
     });
 
-    const versioned = parseFacilitiesAdminMutation(
+    const versioned = await parseFacilitiesAdminMutation(
       adminForm('create-neighborhood-version', [
         ['neighborhoodId', IDS.neighborhood],
         ['name', 'Harbor neighborhood'],
         ['facilityIds', IDS.facilityA],
       ]),
+      googleThatIsNeverAsked(),
     );
     expect(versioned).toMatchObject({
       command: {
@@ -237,33 +313,34 @@ describe('facilities administration form parsing', () => {
     });
   });
 
-  test('rejects unlisted fields and exposes no in-place building or others update intent', () => {
-    expect(() =>
+  test('rejects unlisted fields and exposes no in-place building or others update intent', async () => {
+    await expect(
       parseFacilitiesAdminMutation(
         adminForm('create-google-building-group', [
           ['facilityId', IDS.facilityA],
           ['displayName', 'Site A staff'],
-          ['googleGroupId', 'google-site-a-staff'],
           ['email', 'site-a@example.invalid'],
           ['fixtureKey', 'smuggled-field'],
         ]),
+        googleThatIsNeverAsked(),
       ),
-    ).toThrow(AdminFormError);
-    expect(() =>
+    ).rejects.toThrow(AdminFormError);
+    await expect(
       parseFacilitiesAdminMutation(
         adminForm('update-building-group', [['facilityId', IDS.facilityA]]),
+        googleThatIsNeverAsked(),
       ),
-    ).toThrow(AdminFormError);
-    expect(() =>
+    ).rejects.toThrow(AdminFormError);
+    await expect(
       parseFacilitiesAdminMutation(
         adminForm('replace-google-others-group', [
           ['sourceId', IDS.googleOthers],
           ['facilityId', IDS.facilityA],
           ['displayName', 'Smuggled facility binding'],
-          ['googleGroupId', 'google-other-v2'],
           ['email', 'other-v2@example.invalid'],
         ]),
+        googleThatIsNeverAsked(),
       ),
-    ).toThrow(AdminFormError);
+    ).rejects.toThrow(AdminFormError);
   });
 });

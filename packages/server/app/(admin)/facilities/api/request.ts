@@ -15,6 +15,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import { AdminFormError, type AdminForm } from '../admin-request';
+import type { GoogleGroupIdResolver } from '../google-group-id';
 
 const COMMON_FIELDS = ['csrfToken', 'idempotencyKey', 'intent'] as const;
 
@@ -71,26 +72,32 @@ function parseActive(value: string): boolean {
   throw new AdminFormError('The facility status is invalid.');
 }
 
-function parseGoogleGroup(
+/**
+ * A Google source is registered by its address alone. The Google Group ID is
+ * not the form's to supply: it is resolved from the address, and a group that
+ * Google cannot resolve is refused before anything is saved.
+ */
+async function parseGoogleGroup(
   form: AdminForm,
   intent: 'create-google-building-group' | 'create-google-others-group',
-): FacilitiesAdminMutation {
+  resolveGoogleGroupId: GoogleGroupIdResolver,
+): Promise<FacilitiesAdminMutation> {
   const building = intent === 'create-google-building-group';
   form.assertFields([
     ...COMMON_FIELDS,
     ...(building ? (['facilityId'] as const) : []),
     'displayName',
-    'googleGroupId',
     'email',
   ]);
+  const email = form.required('email');
   const command = CreateGroupSourceInputSchema.parse({
     kind: 'google-group',
     purpose: building ? 'building' : 'others',
     facilityId: building ? form.required('facilityId') : null,
     displayName: form.required('displayName'),
     active: true,
-    googleGroupId: form.required('googleGroupId'),
-    email: form.required('email'),
+    googleGroupId: await resolveGoogleGroupId(email),
+    email,
   });
   return {
     intent,
@@ -159,19 +166,20 @@ function parseManualGroup(
   };
 }
 
-function parseGoogleGroupReplacement(
+async function parseGoogleGroupReplacement(
   form: AdminForm,
   intent: 'replace-google-building-group' | 'replace-google-others-group',
-): FacilitiesAdminMutation {
+  resolveGoogleGroupId: GoogleGroupIdResolver,
+): Promise<FacilitiesAdminMutation> {
   const building = intent === 'replace-google-building-group';
   form.assertFields([
     ...COMMON_FIELDS,
     'sourceId',
     ...(building ? (['facilityId'] as const) : []),
     'displayName',
-    'googleGroupId',
     'email',
   ]);
+  const email = form.required('email');
   return {
     intent,
     command: UpdateGroupSourceInputSchema.parse({
@@ -181,8 +189,8 @@ function parseGoogleGroupReplacement(
       facilityId: building ? form.required('facilityId') : null,
       displayName: form.required('displayName'),
       active: true,
-      googleGroupId: form.required('googleGroupId'),
-      email: form.required('email'),
+      googleGroupId: await resolveGoogleGroupId(email),
+      email,
     }),
     status: building ? 'building-group-replaced' : 'others-group-replaced',
   };
@@ -215,10 +223,15 @@ function parseSyntheticGroupReplacement(
   };
 }
 
-/** Strictly parses one whitelisted native-form mutation into contract input. */
-export function parseFacilitiesAdminMutation(
+/**
+ * Strictly parses one whitelisted native-form mutation into contract input.
+ * Only a Google source consults the resolver, to turn its address into the
+ * Google Group ID the record carries.
+ */
+export async function parseFacilitiesAdminMutation(
   form: AdminForm,
-): FacilitiesAdminMutation {
+  resolveGoogleGroupId: GoogleGroupIdResolver,
+): Promise<FacilitiesAdminMutation> {
   const intent = form.required('intent');
   switch (intent) {
     case 'create-facility':
@@ -251,7 +264,7 @@ export function parseFacilitiesAdminMutation(
       };
     case 'create-google-building-group':
     case 'create-google-others-group':
-      return parseGoogleGroup(form, intent);
+      return parseGoogleGroup(form, intent, resolveGoogleGroupId);
     case 'create-manual-building-group':
     case 'create-manual-others-group':
       return parseManualGroup(form, intent);
@@ -277,7 +290,7 @@ export function parseFacilitiesAdminMutation(
       return parseSyntheticGroup(form, intent);
     case 'replace-google-building-group':
     case 'replace-google-others-group':
-      return parseGoogleGroupReplacement(form, intent);
+      return parseGoogleGroupReplacement(form, intent, resolveGoogleGroupId);
     case 'replace-synthetic-building-group':
     case 'replace-synthetic-others-group':
       return parseSyntheticGroupReplacement(form, intent);

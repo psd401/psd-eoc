@@ -3162,6 +3162,9 @@ export class PsdEocStack extends Stack {
       bootstrapIdentitySecret.grantRead(runtimeRole),
       googleOauthSecret.grantRead(runtimeRole),
       googleOidcCookieSecret.grantRead(runtimeRole),
+      // The admin forms resolve a Google Group address to its ID through the
+      // same read-only roster-reader credential the scheduled sync uses.
+      googleGroupsSecret.grantRead(runtimeRole),
       apiSaltSecret.grantRead(runtimeRole),
       deliveryStateWorkerSecret.grantRead(runtimeRole),
       attemptExecutionWorkerSecret.grantRead(runtimeRole),
@@ -3276,6 +3279,10 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'GOOGLE_OIDC_COOKIE_SECRET',
                   value: googleOidcCookieSecret.secretArn,
+                },
+                {
+                  name: 'GOOGLE_ROSTER_CONFIG',
+                  value: googleGroupsSecret.secretArn,
                 },
                 {
                   name: 'DATABASE_PASSWORD',
