@@ -40,13 +40,18 @@ export async function POST(request: Request): Promise<Response> {
           'displayName',
           'googleGroupId',
           'email',
+          'grantedRole',
         ]);
+        // The role is the whole point of an access group: every member of it
+        // receives exactly this. The contract requires it, and without this
+        // field the form could never create a second group.
         const command = CreateGroupSourceInputSchema.parse({
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
           displayName: form.required('displayName'),
           active: true,
+          grantedRole: form.required('grantedRole'),
           googleGroupId: form.required('googleGroupId'),
           email: form.required('email'),
         });
@@ -65,6 +70,7 @@ export async function POST(request: Request): Promise<Response> {
           'googleGroupId',
           'email',
           'active',
+          'grantedRole',
         ]);
         const command = UpdateGroupSourceInputSchema.parse({
           id: form.required('id'),
@@ -73,6 +79,7 @@ export async function POST(request: Request): Promise<Response> {
           facilityId: null,
           displayName: form.required('displayName'),
           active: parseActive(form.required('active')),
+          grantedRole: form.required('grantedRole'),
           googleGroupId: form.required('googleGroupId'),
           email: form.required('email'),
         });

@@ -81,6 +81,23 @@ function CreateAccessGroupForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
             type="email"
           />
         </label>
+        <label>
+          Role granted to every member
+          <select
+            aria-describedby="new-access-group-role-help"
+            defaultValue="staff"
+            name="grantedRole"
+            required
+          >
+            <option value="staff">Staff</option>
+            <option value="admin">Administrator</option>
+          </select>
+        </label>
+        <p id="new-access-group-role-help">
+          Staff can sign in and take part in events. Administrator also
+          configures facilities, rosters, and integrations. Every member of the
+          group receives this role.
+        </p>
         <button type="submit">Add access group</button>
       </fieldset>
     </form>
@@ -152,6 +169,17 @@ function AccessGroupEditor({
               spellCheck={false}
               type="email"
             />
+          </label>
+          <label>
+            Role granted to every member
+            <select
+              defaultValue={group.grantedRole}
+              name="grantedRole"
+              required
+            >
+              <option value="staff">Staff</option>
+              <option value="admin">Administrator</option>
+            </select>
           </label>
           <label>
             Status

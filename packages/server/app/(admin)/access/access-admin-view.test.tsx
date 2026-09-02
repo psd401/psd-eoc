@@ -178,6 +178,16 @@ describe('AccessAdminView semantics', () => {
       'An email correction also requires a distinct Google Group ID.',
     );
     expect(html).toContain('<legend>Add a Google access group</legend>');
+    // The role is what an access group grants; without a field for it the
+    // form could never satisfy the contract, so no second group could ever be
+    // added. Both the create form and the editor carry it, staff first.
+    expect(html.match(/name="grantedRole"/gu)).toHaveLength(2);
+    expect(html).toMatch(/<option value="staff"[^>]*>Staff<\/option>/u);
+    expect(html).toMatch(/<option value="admin"[^>]*>Administrator<\/option>/u);
+    // A new group defaults to staff; only an explicit choice grants admin.
+    expect(html).toMatch(
+      /value="create-access-group"[\s\S]*?<option value="staff" selected=""/u,
+    );
     expect(html).toContain(
       'Only designated Google Groups can grant PSD EOC access.',
     );
