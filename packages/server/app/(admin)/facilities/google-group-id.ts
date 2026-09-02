@@ -1,3 +1,5 @@
+import type { GroupSourcePage } from '@psd-eoc/contracts';
+
 import {
   AccessMembershipEvaluationError,
   createGoogleGroupResolver,
@@ -7,10 +9,35 @@ import {
   GoogleRosterConfigurationError,
   readGoogleCloudIdentityRosterConfiguration,
 } from '../../../lib/auth/google-roster-config';
+import {
+  SessionAccessError,
+  type AuthenticatedSession,
+} from '../../../lib/auth/sessions';
 import { AdminFormError } from './admin-request';
+import { executeListGroupSourcesCapability } from './capabilities';
 
 /** Resolves a Google Group address to the ID the server stores for it. */
 export type GoogleGroupIdResolver = (email: string) => Promise<string>;
+
+/** The part of a session these helpers decide on. */
+export type AdminSession = Pick<AuthenticatedSession, 'roles'>;
+
+/** The one form of a group address the record carries and compares. */
+export function normalizeGroupAddress(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * Asked before any provider call. A lookup answers whether a group exists in
+ * the Workspace, which is not a question a staff session gets to ask. The
+ * capability engine enforces the same role when the command runs; this is
+ * the same rule, applied before Google is contacted rather than after.
+ */
+function requireAdministrator(authenticated: AdminSession): void {
+  if (!authenticated.roles.includes('admin')) {
+    throw new SessionAccessError('FORBIDDEN', 'Access is denied.');
+  }
+}
 
 function defaultResolver(): GoogleGroupResolver {
   return createGoogleGroupResolver(
@@ -41,9 +68,12 @@ function explain(email: string, code: string): string {
  * a group that Google cannot resolve is refused before anything is saved.
  */
 export async function resolveGoogleGroupIdForForm(
+  authenticated: AdminSession,
   email: string,
   resolver: () => GoogleGroupResolver = defaultResolver,
 ): Promise<string> {
+  requireAdministrator(authenticated);
+  const address = normalizeGroupAddress(email);
   let client: GoogleGroupResolver;
   try {
     client = resolver();
@@ -56,11 +86,95 @@ export async function resolveGoogleGroupIdForForm(
     throw error;
   }
   try {
-    return (await client.resolve(email)).googleGroupId;
+    return (await client.resolve(address)).googleGroupId;
   } catch (error) {
     if (error instanceof AccessMembershipEvaluationError) {
-      throw new AdminFormError(explain(email, error.code));
+      throw new AdminFormError(explain(address, error.code));
     }
     throw error;
   }
+}
+
+/** What an existing access group is known by: its address and the ID Google gave it. */
+export interface StoredAccessGroupLocator {
+  readonly id: string;
+  readonly email: string | null;
+  readonly googleGroupId: string | null;
+}
+
+export type AccessGroupLocatorLookup = (
+  authenticated: AuthenticatedSession,
+  id: string,
+) => Promise<StoredAccessGroupLocator | null>;
+
+const ACCESS_GROUP_PAGE_LIMIT = 100;
+const ACCESS_GROUP_PAGE_CAP = 10;
+
+async function listedAccessGroupLocator(
+  authenticated: AuthenticatedSession,
+  id: string,
+): Promise<StoredAccessGroupLocator | null> {
+  let cursor: string | null = null;
+  for (let page = 0; page < ACCESS_GROUP_PAGE_CAP; page += 1) {
+    const result: GroupSourcePage = await executeListGroupSourcesCapability({
+      authenticated,
+      query: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        active: null,
+        cursor,
+        limit: ACCESS_GROUP_PAGE_LIMIT,
+      },
+    });
+    const found = result.items.find((item) => item.id === id);
+    if (found !== undefined) {
+      // The query asks for Google sources only; anything else has no
+      // address to compare, and the capability will refuse the edit.
+      return found.kind === 'google-group'
+        ? Object.freeze({
+            id: found.id,
+            email: found.email,
+            googleGroupId: found.googleGroupId,
+          })
+        : null;
+    }
+    cursor = result.pageInfo.nextCursor;
+    if (cursor === null) break;
+  }
+  return null;
+}
+
+/**
+ * The ID an access-group edit should carry. An edit that keeps the address
+ * keeps the ID Google already gave it and never contacts Google, so a
+ * display-name change or a deactivation goes through while Google is down
+ * or the credential is being rotated. Only a changed address is resolved.
+ */
+export async function googleGroupIdForAccessGroupUpdate(
+  authenticated: AuthenticatedSession,
+  input: Readonly<{ id: string; email: string }>,
+  dependencies: Readonly<{
+    lookup?: AccessGroupLocatorLookup;
+    resolver?: () => GoogleGroupResolver;
+  }> = {},
+): Promise<string> {
+  requireAdministrator(authenticated);
+  const current = await (dependencies.lookup ?? listedAccessGroupLocator)(
+    authenticated,
+    input.id,
+  );
+  if (
+    current !== null &&
+    current.email !== null &&
+    current.googleGroupId !== null &&
+    normalizeGroupAddress(current.email) === normalizeGroupAddress(input.email)
+  ) {
+    return current.googleGroupId;
+  }
+  return resolveGoogleGroupIdForForm(
+    authenticated,
+    input.email,
+    dependencies.resolver,
+  );
 }

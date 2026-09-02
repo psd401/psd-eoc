@@ -15,7 +15,10 @@ import {
 } from '@psd-eoc/contracts';
 
 import { AdminFormError, type AdminForm } from '../admin-request';
-import type { GoogleGroupIdResolver } from '../google-group-id';
+import {
+  normalizeGroupAddress,
+  type GoogleGroupIdResolver,
+} from '../google-group-id';
 
 const COMMON_FIELDS = ['csrfToken', 'idempotencyKey', 'intent'] as const;
 
@@ -89,7 +92,7 @@ async function parseGoogleGroup(
     'displayName',
     'email',
   ]);
-  const email = form.required('email');
+  const email = normalizeGroupAddress(form.required('email'));
   const command = CreateGroupSourceInputSchema.parse({
     kind: 'google-group',
     purpose: building ? 'building' : 'others',
@@ -179,7 +182,7 @@ async function parseGoogleGroupReplacement(
     'displayName',
     'email',
   ]);
-  const email = form.required('email');
+  const email = normalizeGroupAddress(form.required('email'));
   return {
     intent,
     command: UpdateGroupSourceInputSchema.parse({
