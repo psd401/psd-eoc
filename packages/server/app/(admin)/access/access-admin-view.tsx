@@ -45,7 +45,8 @@ function CreateAccessGroupForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
         <p id="new-access-group-help">
           Access groups permit staff sign-in. They do not add anyone to a
           notification audience. Only designated Google Groups can grant PSD EOC
-          access.
+          access. Enter the group&apos;s address; its Google Group ID is looked
+          up from Google when you save.
         </p>
         <label>
           Display name
@@ -55,17 +56,6 @@ function CreateAccessGroupForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
             maxLength={160}
             name="displayName"
             required
-          />
-        </label>
-        <label>
-          Google Group ID
-          <input
-            autoCapitalize="none"
-            autoComplete="off"
-            maxLength={255}
-            name="googleGroupId"
-            required
-            spellCheck={false}
           />
         </label>
         <label>
@@ -130,7 +120,8 @@ function AccessGroupEditor({
             while the proven source and its replacement remain active until a
             new access snapshot proves the replacement and the old source can be
             retired. A locator replacement must be submitted as Active. An email
-            correction also requires a distinct Google Group ID. Its access-only
+            correction is looked up from Google when you save and takes the
+            Google Group ID Google holds for the new address. Its access-only
             purpose never changes.
           </p>
           <label>
@@ -144,18 +135,10 @@ function AccessGroupEditor({
               required
             />
           </label>
-          <label>
-            Google Group ID
-            <input
-              autoCapitalize="none"
-              autoComplete="off"
-              defaultValue={group.googleGroupId}
-              maxLength={255}
-              name="googleGroupId"
-              required
-              spellCheck={false}
-            />
-          </label>
+          <p>
+            Google Group ID <code>{group.googleGroupId}</code>, as Google
+            resolved it from the address.
+          </p>
           <label>
             Google Group email
             <input

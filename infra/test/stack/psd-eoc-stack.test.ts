@@ -1291,6 +1291,7 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_USERNAME',
         'GOOGLE_OAUTH_CONFIG',
         'GOOGLE_OIDC_COOKIE_SECRET',
+        'GOOGLE_ROSTER_CONFIG',
         'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
         'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
         'PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN',
@@ -1302,6 +1303,11 @@ describe('App Runner runtime safety boundary', () => {
     );
     expect(secrets.get('GOOGLE_OAUTH_CONFIG')).toEqual({
       Ref: 'GoogleOauthSecretArn',
+    });
+    // The admin forms look a Google Group up by address with the same
+    // read-only roster-reader credential the scheduled sync holds.
+    expect(secrets.get('GOOGLE_ROSTER_CONFIG')).toEqual({
+      Ref: 'GoogleGroupsSecretArn',
     });
     expect(JSON.stringify(secrets.get('DATABASE_USERNAME'))).toContain(
       ':username::',
@@ -1321,7 +1327,8 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('DATABASE_SECRET_ARN');
     expect(serialized).not.toContain('BootstrapSourceSha');
     expect(serialized).not.toContain('ApprovedGoogleSubject');
-    expect(serialized).not.toContain('GOOGLE_ROSTER_CONFIG');
+    // GOOGLE_ROSTER_CONFIG is deliberately present now: the admin forms
+    // resolve a Google Group address to its ID with that read-only credential.
     expect(serialized).not.toContain('EXPO_ACCESS_TOKEN');
     expect(serialized).not.toContain('SES_ACCESS_KEY');
     expect(serialized).not.toContain('SES_SECRET');
