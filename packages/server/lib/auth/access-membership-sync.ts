@@ -780,7 +780,7 @@ export function createDrizzleAccessMembershipSyncStore(
         .from(groupSources)
         .where(
           and(
-            inArray(groupSources.purpose, ['access', 'building']),
+            inArray(groupSources.purpose, ['access', 'building', 'others']),
             eq(groupSources.active, true),
             eq(groupSources.kind, 'google-group'),
           ),
@@ -861,7 +861,7 @@ export function createDrizzleAccessMembershipSyncStore(
           .from(groupSources)
           .where(
             and(
-              inArray(groupSources.purpose, ['access', 'building']),
+              inArray(groupSources.purpose, ['access', 'building', 'others']),
               eq(groupSources.active, true),
               eq(groupSources.kind, 'google-group'),
             ),

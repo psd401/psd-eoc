@@ -714,6 +714,86 @@ describeWithDatabase('access-membership atomic database publication', () => {
     ).toMatchObject({ granted: false });
   });
 
+  test('reads and publishes a Google others group so a district list has members', async () => {
+    // An others source is the district-level list an event at any school
+    // reaches. Its Google membership was never read: the sync evaluated
+    // access and building groups only, so a Google others source stayed
+    // empty forever and reached nobody. It grants no role, exactly like a
+    // building group, so reading it cannot widen who may sign in.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const othersSourceId = randomUUID();
+    await database.insert(groupSources).values({
+      id: othersSourceId,
+      kind: 'google-group',
+      purpose: 'others',
+      facilityId: null,
+      displayName: 'Sync Test district responders',
+      active: true,
+      grantedRole: null,
+      membersCapturedAt: null,
+      googleGroupId: 'sync_test_district_responders',
+      email: 'synctest-responders@example.invalid',
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+
+    const configured = await store.readConfiguredAccessGroups();
+    const others = configured.find(
+      ({ groupSourceId }) => groupSourceId === othersSourceId,
+    );
+    expect(others).toBeDefined();
+    expect(others?.grantedRole).toBeNull();
+
+    const providerIds = new Map(
+      (
+        await database
+          .select({
+            id: groupSources.id,
+            googleGroupId: groupSources.googleGroupId,
+          })
+          .from(groupSources)
+      ).map(({ id, googleGroupId }) => [id, googleGroupId ?? '']),
+    );
+    const reservation = await reserve(store, 'access-sync:others-0001');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      reservation.id,
+      evaluationFor(
+        configured.map((group) => ({
+          groupSourceId: group.groupSourceId,
+          groupEmail: group.email,
+          googleGroupId: providerIds.get(group.groupSourceId) ?? '',
+          grantedRole: group.grantedRole,
+          memberEmails:
+            group.groupSourceId === othersSourceId
+              ? ['responder@example.invalid']
+              : [RECOVERY_EMAIL],
+        })),
+      ),
+    );
+
+    const members = await database
+      .select({ email: groupMembers.email })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupSourceId, othersSourceId));
+    expect(members.map(({ email }) => email)).toEqual([
+      'responder@example.invalid',
+    ]);
+    const [source] = await database
+      .select({ capturedAt: groupSources.membersCapturedAt })
+      .from(groupSources)
+      .where(eq(groupSources.id, othersSourceId));
+    expect(source?.capturedAt).not.toBeNull();
+
+    expect(
+      await decideAccess(database, {
+        email: 'responder@example.invalid',
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: false });
+  });
+
   test('the database refuses a group whose role does not match its purpose', async () => {
     // A building group granting a role would silently widen who may sign in;
     // an access group granting none would admit people to nothing. Both are
