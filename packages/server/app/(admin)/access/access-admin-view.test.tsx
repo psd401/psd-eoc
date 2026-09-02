@@ -175,9 +175,17 @@ describe('AccessAdminView semantics', () => {
       'A locator replacement must be submitted as Active.',
     );
     expect(html).toContain(
-      'An email correction also requires a distinct Google Group ID.',
+      'An email correction is looked up from Google when you save and takes the Google Group ID Google holds for the new address.',
     );
     expect(html).toContain('<legend>Add a Google access group</legend>');
+    // The Google Group ID is Google's to say. Neither form asks for it; the
+    // editor shows the one Google resolved, and the create form says the
+    // lookup happens on save.
+    expect(html).not.toContain('name="googleGroupId"');
+    expect(html).toContain(
+      'its Google Group ID is looked up from Google when you save.',
+    );
+    expect(html).toContain('<code>01-access-group</code>, as Google');
     // The role is what an access group grants; without a field for it the
     // form could never satisfy the contract, so no second group could ever be
     // added. Both the create form and the editor carry it, staff first.
