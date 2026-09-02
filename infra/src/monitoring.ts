@@ -1909,7 +1909,9 @@ function configureMembershipSyncMonitoring(
       metric: new cloudwatch.Metric({
         metricName: definition.metricName,
         namespace: MONITORING_METRIC_NAMESPACE,
-        period: Duration.hours(1),
+        // One period per scheduled run, so an OK means a run passed without
+        // a failure line rather than an hour having gone by.
+        period: Duration.hours(2),
         statistic: 'Sum',
         unit: cloudwatch.Unit.COUNT,
       }),

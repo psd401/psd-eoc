@@ -15,7 +15,8 @@ The scheduled membership task runs every two hours in two legs. The sign-in
 leg reads the Google groups that gate sign-in; the roster leg reads the Google
 groups behind building and district roster sources. Each leg logs one summary
 line; a failed leg logs one failure line. Both alarms count those failure lines
-over one hour and alarm on the first one, treating a quiet hour as normal.
+over two hours, one scheduled run, and alarm on the first one, treating a quiet
+period as normal.
 
 - **Roster leg** (`roster-membership-sync-failed`): the job still exits clean
   and sign-in is unaffected, so this alarm is the only signal that a building
@@ -58,6 +59,6 @@ closed`): the job failed. Sign-in itself still confirms each person with
 
 ## Verify recovery
 
-Both alarms return to `OK` an hour after the last failure line, and the next
-scheduled run logs `access-membership-sync-complete` for `scope: access` and,
+Both alarms return to `OK` once a full two-hour period passes with no failure
+line, which means a scheduled run completed without one, and that run logs `access-membership-sync-complete` for `scope: access` and,
 when a roster group is configured, for `scope: roster`.

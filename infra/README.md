@@ -66,6 +66,11 @@ Use the [stuck outbox](../docs/runbooks/alarm-outbox-stuck.md) procedure.
 
 Use the [stale roster](../docs/runbooks/alarm-roster-stale.md) procedure.
 
+### Runbook: Membership sync failure
+
+Use the [membership task failure](../docs/runbooks/alarm-membership-sync-failure.md)
+procedure.
+
 ### Runbook: Outbox to provider latency
 
 Use the [Expo](../docs/runbooks/provider-expo.md),
