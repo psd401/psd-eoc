@@ -15,6 +15,11 @@ import {
   parseIdempotencyKey,
   readAdminForm,
 } from '../../facilities/admin-request';
+import {
+  googleGroupIdForAccessGroupUpdate,
+  normalizeGroupAddress,
+  resolveGoogleGroupIdForForm,
+} from '../../facilities/google-group-id';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,13 +43,14 @@ export async function POST(request: Request): Promise<Response> {
         form.assertFields([
           ...COMMON_FIELDS,
           'displayName',
-          'googleGroupId',
           'email',
           'grantedRole',
         ]);
         // The role is the whole point of an access group: every member of it
         // receives exactly this. The contract requires it, and without this
-        // field the form could never create a second group.
+        // field the form could never create a second group. The Google Group
+        // ID is not the form's to supply: Google resolves it from the address.
+        const email = normalizeGroupAddress(form.required('email'));
         const command = CreateGroupSourceInputSchema.parse({
           kind: 'google-group',
           purpose: 'access',
@@ -52,8 +58,11 @@ export async function POST(request: Request): Promise<Response> {
           displayName: form.required('displayName'),
           active: true,
           grantedRole: form.required('grantedRole'),
-          googleGroupId: form.required('googleGroupId'),
-          email: form.required('email'),
+          googleGroupId: await resolveGoogleGroupIdForForm(
+            authenticated,
+            email,
+          ),
+          email,
         });
         await executeCreateGroupSourceCapability({
           authenticated,
@@ -67,21 +76,28 @@ export async function POST(request: Request): Promise<Response> {
           ...COMMON_FIELDS,
           'id',
           'displayName',
-          'googleGroupId',
           'email',
           'active',
           'grantedRole',
         ]);
+        // An edit that keeps the address keeps the ID Google already gave
+        // it and never contacts Google, so a deactivation goes through while
+        // Google is down. Only a changed address is looked up.
+        const id = form.required('id');
+        const email = normalizeGroupAddress(form.required('email'));
         const command = UpdateGroupSourceInputSchema.parse({
-          id: form.required('id'),
+          id,
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
           displayName: form.required('displayName'),
           active: parseActive(form.required('active')),
           grantedRole: form.required('grantedRole'),
-          googleGroupId: form.required('googleGroupId'),
-          email: form.required('email'),
+          googleGroupId: await googleGroupIdForAccessGroupUpdate(
+            authenticated,
+            { id, email },
+          ),
+          email,
         });
         await executeUpdateGroupSourceCapability({
           authenticated,

@@ -19,6 +19,7 @@ import {
   publishAfterManualMembersSave,
   publishRosterSnapshotOrExplain,
 } from '../roster-publish';
+import { resolveGoogleGroupIdForForm } from '../google-group-id';
 import { parseFacilitiesAdminMutation } from './request';
 
 export const dynamic = 'force-dynamic';
@@ -28,7 +29,9 @@ export async function POST(request: Request): Promise<Response> {
     const form = await readAdminForm(request);
     const authenticated = await authenticateAdminMutation(request, form);
     const idempotencyKey = parseIdempotencyKey(form);
-    const mutation = parseFacilitiesAdminMutation(form);
+    const mutation = await parseFacilitiesAdminMutation(form, (email) =>
+      resolveGoogleGroupIdForForm(authenticated, email),
+    );
     const metadata = { idempotencyKey } as const;
 
     switch (mutation.intent) {

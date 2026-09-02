@@ -254,17 +254,6 @@ function GoogleGroupFields({
         />
       </label>
       <label>
-        Google Group ID
-        <input
-          autoCapitalize="none"
-          autoComplete="off"
-          maxLength={255}
-          name="googleGroupId"
-          required
-          spellCheck={false}
-        />
-      </label>
-      <label>
         Google Group email
         <input
           autoCapitalize="none"

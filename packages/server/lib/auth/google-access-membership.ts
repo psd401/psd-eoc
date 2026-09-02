@@ -278,20 +278,30 @@ async function boundedJson(
   }
 }
 
+export interface GoogleGroupsClientOptions {
+  readonly fetch?: typeof fetch;
+  readonly now?: () => Date;
+}
+
+/** One exact Google Group as Cloud Identity resolved it from its address. */
+export interface ResolvedGoogleGroup {
+  /** The Cloud Identity resource name, `groups/<id>`. */
+  readonly name: string;
+  /** The stable Google Group ID: the resource name after `groups/`. */
+  readonly googleGroupId: string;
+}
+
+const GroupAddressSchema = z.string().trim().toLowerCase().email().max(320);
+
 /**
- * Creates the one exact, non-delegated, read-only access-group evaluator.
- *
- * The evaluator deliberately rejects every non-user direct edge. Therefore a
- * successful first publication has no nested topology for which direct versus
- * transitive product semantics could differ.
+ * The provider transport the membership evaluator and the group resolver
+ * share: bounded, non-delegated, read-only requests signed with the
+ * roster-reader credential, and the one exact-identity rule for a group.
  */
-export function createGoogleAccessMembershipEvaluator(
+function googleGroupsClient(
   configuration: GoogleCloudIdentityRosterConfiguration,
-  options: Readonly<{
-    fetch?: typeof fetch;
-    now?: () => Date;
-  }> = {},
-): GoogleAccessMembershipEvaluator {
+  options: GoogleGroupsClientOptions,
+) {
   const fetchImplementation = options.fetch ?? globalThis.fetch;
   const now = options.now ?? (() => new Date());
 
@@ -380,22 +390,25 @@ export function createGoogleAccessMembershipEvaluator(
     );
   }
 
-  /** Reads one configured group's direct user members, failing closed. */
-  async function evaluateOneGroup(
-    group: DesignatedAccessGroup,
+  /**
+   * Resolves a group address to the exact group Google holds for it.
+   *
+   * Two calls, deliberately. `groups:lookup` only resolves a group key to a
+   * resource name; its response carries no groupKey, labels, or
+   * dynamicGroupMetadata. Asking it for those through a `fields` mask is
+   * rejected with 400 INVALID_ARGUMENT ("Error expanding 'fields'
+   * parameter"), which surfaces here as GOOGLE_REQUEST_REJECTED and looks
+   * indistinguishable from an authorization failure. The details are read
+   * from `groups.get` on the resolved name.
+   */
+  async function resolveGroupIdentity(
+    email: string,
     authorization: Readonly<Record<string, string>>,
-  ): Promise<EvaluatedAccessGroup> {
-    // Two calls, deliberately. `groups:lookup` only resolves a group key to
-    // a resource name; its response carries no groupKey, labels, or
-    // dynamicGroupMetadata. Asking it for those through a `fields` mask is
-    // rejected with 400 INVALID_ARGUMENT ("Error expanding 'fields'
-    // parameter"), which surfaces here as GOOGLE_REQUEST_REJECTED and looks
-    // indistinguishable from an authorization failure. The details are read
-    // from `groups.get` on the resolved name.
+  ): Promise<ResolvedGoogleGroup> {
     const lookupUrl = new URL(
       `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
     );
-    lookupUrl.searchParams.set('groupKey.id', group.email);
+    lookupUrl.searchParams.set('groupKey.id', email);
     lookupUrl.searchParams.set('fields', 'name');
     const resolved = await providerRequest(
       lookupUrl,
@@ -427,7 +440,7 @@ export function createGoogleAccessMembershipEvaluator(
     // so a published snapshot would not describe who actually holds access.
     if (
       resource.name !== resolved.name ||
-      resource.groupKey.id.toLowerCase() !== group.email ||
+      resource.groupKey.id.toLowerCase() !== email ||
       resource.groupKey.id !== resource.groupKey.id.trim() ||
       resource.dynamicGroupMetadata !== undefined ||
       !Object.hasOwn(
@@ -440,7 +453,70 @@ export function createGoogleAccessMembershipEvaluator(
         'Google did not resolve the exact configured access group.',
       );
     }
-    const googleGroupId = resource.name.slice('groups/'.length);
+    return Object.freeze({
+      name: resource.name,
+      googleGroupId: resource.name.slice('groups/'.length),
+    });
+  }
+
+  return { accessToken, now, providerRequest, resolveGroupIdentity };
+}
+
+export interface GoogleGroupResolver {
+  /** Resolves a group address to its exact Google Group, failing closed. */
+  resolve(email: string): Promise<ResolvedGoogleGroup>;
+}
+
+/**
+ * Resolves a Google Group address to the ID Google holds for it, under the
+ * same identity rules the membership evaluator applies: the exact address,
+ * not a dynamic group, a real discussion-forum group. An administrator
+ * registering a group types its address; the ID is Google's to say.
+ */
+export function createGoogleGroupResolver(
+  configuration: GoogleCloudIdentityRosterConfiguration,
+  options: GoogleGroupsClientOptions = {},
+): GoogleGroupResolver {
+  const client = googleGroupsClient(configuration, options);
+  return Object.freeze({
+    async resolve(email: string): Promise<ResolvedGoogleGroup> {
+      const address = GroupAddressSchema.safeParse(email);
+      if (!address.success) {
+        throw new AccessMembershipEvaluationError(
+          'DESIGNATED_GROUP_IDENTITY_INVALID',
+          'The Google Group address is not a valid email address.',
+        );
+      }
+      const token = await client.accessToken();
+      return client.resolveGroupIdentity(address.data, {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      });
+    },
+  });
+}
+
+/**
+ * Creates the one exact, non-delegated, read-only access-group evaluator.
+ *
+ * The evaluator deliberately rejects every non-user direct edge. Therefore a
+ * successful first publication has no nested topology for which direct versus
+ * transitive product semantics could differ.
+ */
+export function createGoogleAccessMembershipEvaluator(
+  configuration: GoogleCloudIdentityRosterConfiguration,
+  options: GoogleGroupsClientOptions = {},
+): GoogleAccessMembershipEvaluator {
+  const { accessToken, now, providerRequest, resolveGroupIdentity } =
+    googleGroupsClient(configuration, options);
+
+  /** Reads one configured group's direct user members, failing closed. */
+  async function evaluateOneGroup(
+    group: DesignatedAccessGroup,
+    authorization: Readonly<Record<string, string>>,
+  ): Promise<EvaluatedAccessGroup> {
+    const resource = await resolveGroupIdentity(group.email, authorization);
+    const { googleGroupId } = resource;
     const memberEmails = new Set<string>();
     const seenMembershipNames = new Set<string>();
     const seenPageTokens = new Set<string>();

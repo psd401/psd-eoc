@@ -5,6 +5,7 @@ import type { GoogleCloudIdentityRosterConfiguration } from './google-roster-con
 import {
   AccessMembershipEvaluationError,
   createGoogleAccessMembershipEvaluator,
+  createGoogleGroupResolver,
 } from './google-access-membership';
 
 // The group these tests configure. Nothing about it is special any more: the
@@ -563,6 +564,89 @@ describe('exact Google access-membership evaluator', () => {
     await expectEvaluationError(
       evaluator(hanging, 1).evaluate(CONFIGURED_GROUPS),
       'GOOGLE_UNAVAILABLE',
+    );
+  });
+});
+
+describe('exact Google Group resolver for the administration forms', () => {
+  function resolver(harness: ProviderHarness) {
+    return createGoogleGroupResolver(configuration(), {
+      fetch: harness.fetch,
+      now: () => new Date(TEST_TIME),
+    });
+  }
+
+  function membersMustNotBeListed(): never {
+    throw new Error('The resolver must not list memberships.');
+  }
+
+  test('resolves an address to the ID Google holds without listing members', async () => {
+    const harness = providerHarness(membersMustNotBeListed);
+    const resolved = await resolver(harness).resolve(
+      ` ${DESIGNATED_ACCESS_GROUP_EMAIL.toUpperCase()} `,
+    );
+    expect(resolved).toEqual({
+      name: `groups/${GROUP_ID}`,
+      googleGroupId: GROUP_ID,
+    });
+    // Token, lookup by the normalized address, then the exact group read.
+    const urls = harness.calls.map(({ url }) => url);
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toBe(TOKEN_ENDPOINT);
+    expect(urls[1]).toBe(
+      `${CLOUD_IDENTITY_ENDPOINT}/groups:lookup?groupKey.id=${encodeURIComponent(DESIGNATED_ACCESS_GROUP_EMAIL)}&fields=name`,
+    );
+    expect(
+      urls[2]?.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups/${GROUP_ID}?`),
+    ).toBe(true);
+  });
+
+  test('refuses a mismatched or dynamic group under the evaluator rule', async () => {
+    for (const lookup of [
+      {
+        name: `groups/${GROUP_ID}`,
+        groupKey: { id: 'another-group@example.invalid' },
+        labels: {
+          'cloudidentity.googleapis.com/groups.discussion_forum': '',
+        },
+      },
+      {
+        name: `groups/${GROUP_ID}`,
+        groupKey: { id: DESIGNATED_ACCESS_GROUP_EMAIL },
+        labels: {
+          'cloudidentity.googleapis.com/groups.discussion_forum': '',
+        },
+        dynamicGroupMetadata: { queries: [PROVIDER_SECRET] },
+      },
+    ]) {
+      const harness = providerHarness(membersMustNotBeListed, () =>
+        Response.json(lookup),
+      );
+      await expectEvaluationError(
+        resolver(harness).resolve(DESIGNATED_ACCESS_GROUP_EMAIL),
+        'DESIGNATED_GROUP_IDENTITY_INVALID',
+      );
+      expect(harness.calls).toHaveLength(3);
+    }
+  });
+
+  test('refuses an address that is not an email before contacting Google', async () => {
+    const harness = providerHarness(membersMustNotBeListed);
+    await expectEvaluationError(
+      resolver(harness).resolve('not an address'),
+      'DESIGNATED_GROUP_IDENTITY_INVALID',
+    );
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  test('reports a group Google refuses by code, keeping the provider body out', async () => {
+    const harness = providerHarness(
+      membersMustNotBeListed,
+      () => new Response(PROVIDER_SECRET, { status: 404 }),
+    );
+    await expectEvaluationError(
+      resolver(harness).resolve(DESIGNATED_ACCESS_GROUP_EMAIL),
+      'GOOGLE_REQUEST_REJECTED',
     );
   });
 });
