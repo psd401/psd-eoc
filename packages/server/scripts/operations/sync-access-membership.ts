@@ -181,13 +181,14 @@ async function runFromCommandLine(): Promise<void> {
 
     // Roster groups second, and separately. A building or district list with
     // one non-staff member, one nested group, or too many people must not
-    // take down the run that refreshes sign-in, so its failure is reported
+    // take down the run that refreshes sign-in, so everything the roster leg
+    // does, including asking whether any roster group exists, is reported
     // and the job still exits clean. Skipped when none is configured, which
     // is the ordinary state until a district list exists.
-    const rosterGroups =
-      await dependencies.store.readConfiguredAccessGroups('roster');
-    if (rosterGroups.length > 0) {
-      try {
+    try {
+      const rosterGroups =
+        await dependencies.store.readConfiguredAccessGroups('roster');
+      if (rosterGroups.length > 0) {
         const rosterResult = await withReducedDriverErrors(
           'roster-membership sync',
           () =>
@@ -202,16 +203,16 @@ async function runFromCommandLine(): Promise<void> {
             accessMembershipSyncSummary(run.sourceSha, rosterResult, 'roster'),
           ),
         );
-      } catch (error) {
-        console.error(
-          JSON.stringify({
-            event: 'roster-membership-sync-failed',
-            scope: 'roster',
-            sourceSha: run.sourceSha,
-            failure: describeFailure('roster-membership sync', error),
-          }),
-        );
       }
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'roster-membership-sync-failed',
+          scope: 'roster',
+          sourceSha: run.sourceSha,
+          failure: describeFailure('roster-membership sync', error),
+        }),
+      );
     }
   } finally {
     await connection.close();
