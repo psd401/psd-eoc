@@ -70,10 +70,18 @@ test.describe('mobile-event-collaboration', () => {
         ({ payload }) =>
           (payload as Readonly<{ text?: unknown }>).text === ORIGINAL,
       );
+      if (original === undefined) {
+        throw new Error('The posted update was not retained in the journal.');
+      }
       expect(original).toMatchObject({
         supersedesEntryId: null,
         supersessionKind: null,
       });
+      // Retained means nothing later corrected or redacted it either.
+      const superseding = retained.filter(
+        ({ supersedesEntryId }) => supersedesEntryId === original.id,
+      );
+      expect(superseding).toEqual([]);
     } finally {
       await connection.close();
     }
