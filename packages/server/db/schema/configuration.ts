@@ -153,7 +153,12 @@ export const groupSources = pgTable(
       table.kind,
       table.purpose,
     ),
-    unique('group_sources_google_group_id_uq').on(table.googleGroupId),
+    // One Google group may back one source per purpose: a sign-in group and
+    // a roster source at once, never two sources of the same purpose.
+    unique('group_sources_google_group_id_purpose_uq').on(
+      table.googleGroupId,
+      table.purpose,
+    ),
     unique('group_sources_fixture_key_uq').on(table.fixtureKey),
     index('group_sources_facility_idx').on(table.facilityId),
     check(

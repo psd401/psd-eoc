@@ -1,0 +1,2 @@
+ALTER TABLE "group_sources" DROP CONSTRAINT "group_sources_google_group_id_uq";--> statement-breakpoint
+ALTER TABLE "group_sources" ADD CONSTRAINT "group_sources_google_group_id_purpose_uq" UNIQUE("google_group_id","purpose");
