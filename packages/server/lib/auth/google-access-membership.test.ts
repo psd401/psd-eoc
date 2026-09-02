@@ -6,6 +6,7 @@ import {
   AccessMembershipEvaluationError,
   createGoogleAccessMembershipEvaluator,
   createGoogleGroupResolver,
+  createGoogleMembershipChecker,
 } from './google-access-membership';
 
 // The group these tests configure. Nothing about it is special any more: the
@@ -647,6 +648,175 @@ describe('exact Google Group resolver for the administration forms', () => {
     await expectEvaluationError(
       resolver(harness).resolve(DESIGNATED_ACCESS_GROUP_EMAIL),
       'GOOGLE_REQUEST_REJECTED',
+    );
+  });
+});
+
+describe('direct Google membership checker for sign-in', () => {
+  const GROUPS = Object.freeze([
+    {
+      groupSourceId: 'source-a',
+      email: 'group-a@example.invalid',
+      googleGroupId: '01a',
+    },
+    {
+      groupSourceId: 'source-b',
+      email: 'group-b@example.invalid',
+      googleGroupId: '01b',
+    },
+  ]);
+  /** What Google resolves each configured address to. */
+  const RESOLVES_TO: Readonly<Record<string, string>> = {
+    'group-a@example.invalid': '01a',
+    'group-b@example.invalid': '01b',
+  };
+
+  /**
+   * Answers the three reads per group: `groups:lookup` by address,
+   * `groups.get` on the resolved name, and `memberships:lookup` for the
+   * person, the last per `answers` (a status, or a foreign name).
+   */
+  function lookupHarness(
+    answers: Readonly<Record<string, number | 'foreign'>>,
+    resolvesTo: Readonly<Record<string, string>> = RESOLVES_TO,
+  ): ProviderHarness {
+    const calls: Array<Readonly<{ init?: RequestInit; url: string }>> = [];
+    const fetchImplementation = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      calls.push(
+        Object.freeze({ ...(init === undefined ? {} : { init }), url }),
+      );
+      if (url === TOKEN_ENDPOINT) return tokenResponse();
+      if (url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups:lookup?`)) {
+        const address = new URL(url).searchParams.get('groupKey.id') ?? '';
+        const id = resolvesTo[address];
+        return id === undefined
+          ? new Response(PROVIDER_SECRET, { status: 404 })
+          : Response.json({ name: `groups/${id}` });
+      }
+      const membership = /\/groups\/([^/]+)\/memberships:lookup\?/u.exec(url);
+      const group = membership?.[1];
+      if (group !== undefined) {
+        const answer = answers[group] ?? 404;
+        if (answer === 'foreign') {
+          return Response.json({ name: 'groups/elsewhere/memberships/0001' });
+        }
+        if (answer === 200) {
+          return Response.json({ name: `groups/${group}/memberships/0001` });
+        }
+        return new Response(PROVIDER_SECRET, { status: answer });
+      }
+      const read = /\/groups\/([^/?]+)\?/u.exec(url);
+      const readId = read?.[1];
+      if (readId !== undefined) {
+        const address = Object.entries(resolvesTo).find(
+          ([, id]) => id === readId,
+        )?.[0];
+        return Response.json({
+          name: `groups/${readId}`,
+          groupKey: { id: address ?? 'unknown@example.invalid' },
+          labels: {
+            'cloudidentity.googleapis.com/groups.discussion_forum': '',
+          },
+        });
+      }
+      throw new Error('The checker contacted an unexpected provider URL.');
+    }) as typeof fetch;
+    return { calls, fetch: fetchImplementation };
+  }
+
+  function checker(harness: ProviderHarness) {
+    return createGoogleMembershipChecker(configuration(), {
+      fetch: harness.fetch,
+      now: () => new Date(TEST_TIME),
+    });
+  }
+
+  test('answers membership per group after re-resolving each group by address', async () => {
+    const harness = lookupHarness({ '01a': 200, '01b': 404 });
+    const answers = await checker(harness).check(
+      ' Person@Example.invalid ',
+      GROUPS,
+    );
+    expect([...answers]).toEqual([
+      ['source-a', true],
+      ['source-b', false],
+    ]);
+    // One token, then per group: lookup by address, read, membership.
+    const urls = harness.calls.map(({ url }) => url);
+    expect(urls).toHaveLength(7);
+    expect(urls[0]).toBe(TOKEN_ENDPOINT);
+    expect(urls[1]).toContain(
+      'groups:lookup?groupKey.id=group-a%40example.invalid',
+    );
+    expect(urls[2]?.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups/01a?`)).toBe(
+      true,
+    );
+    expect(urls[3]).toContain(
+      '/groups/01a/memberships:lookup?memberKey.id=person%40example.invalid',
+    );
+    expect(urls[6]).toContain('/groups/01b/memberships:lookup?');
+  });
+
+  test('asks nothing when no sign-in group is configured', async () => {
+    const harness = lookupHarness({});
+    expect([
+      ...(await checker(harness).check('person@example.invalid', [])),
+    ]).toEqual([]);
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  test('refuses to answer for a group whose recorded ID Google no longer holds', async () => {
+    // The group was deleted and recreated under the same address, so its
+    // membership lookup on the old ID would answer 404 for everyone. The
+    // mismatch is a failure before any membership is asked, so nothing is
+    // read as a removal.
+    const harness = lookupHarness(
+      { '01a': 200 },
+      { ...RESOLVES_TO, 'group-a@example.invalid': '01a-recreated' },
+    );
+    await expectEvaluationError(
+      checker(harness).check('person@example.invalid', GROUPS),
+      'DESIGNATED_GROUP_IDENTITY_INVALID',
+    );
+    expect(
+      harness.calls.some(({ url }) => url.includes('memberships:lookup')),
+    ).toBe(false);
+  });
+
+  test('refuses an address outside the staff domain before contacting Google', async () => {
+    // The scheduled evaluator refuses a non-staff member; the live path
+    // refuses the same address, so it cannot admit whom the sync would not.
+    const harness = lookupHarness({ '01a': 200 });
+    await expectEvaluationError(
+      checker(harness).check('outsider@example.com', GROUPS),
+      'NON_STAFF_MEMBERSHIP',
+    );
+    await expectEvaluationError(
+      checker(harness).check('not an address', GROUPS),
+      'NON_STAFF_MEMBERSHIP',
+    );
+    expect(harness.calls).toHaveLength(0);
+  });
+
+  test('treats any answer other than a membership or a 404 as a failure', async () => {
+    for (const status of [403, 500]) {
+      const harness = lookupHarness({ '01a': status });
+      await expectEvaluationError(
+        checker(harness).check('person@example.invalid', GROUPS),
+        'GOOGLE_REQUEST_REJECTED',
+      );
+    }
+  });
+
+  test('refuses a membership Google names under another group', async () => {
+    const harness = lookupHarness({ '01a': 'foreign' });
+    await expectEvaluationError(
+      checker(harness).check('person@example.invalid', GROUPS),
+      'GOOGLE_RESPONSE_INVALID',
     );
   });
 });

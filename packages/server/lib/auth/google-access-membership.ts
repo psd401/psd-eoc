@@ -43,6 +43,16 @@ const GroupNameLookupResponseSchema = z
   .strict()
   .readonly();
 
+/** `memberships:lookup` names the membership when the address is a direct member. */
+const MembershipNameLookupResponseSchema = z
+  .object({
+    name: z
+      .string()
+      .regex(/^groups\/[A-Za-z0-9_-]+\/memberships\/[A-Za-z0-9_-]+$/u),
+  })
+  .strict()
+  .readonly();
+
 const GroupLookupResponseSchema = z
   .object({
     name: z.string().regex(/^groups\/[A-Za-z0-9_-]+$/u),
@@ -310,6 +320,7 @@ function googleGroupsClient(
     init: RequestInit,
     operation: string,
     parse: (value: unknown) => Result | null,
+    onNotFound?: () => Result,
   ): Promise<Result> {
     const controller = new AbortController();
     const timeout = setTimeout(
@@ -322,6 +333,12 @@ function googleGroupsClient(
         redirect: 'error',
         signal: controller.signal,
       });
+      // Only a caller that asked for it reads 404 as an answer; for every
+      // other request a missing resource is a rejection like any other.
+      if (response.status === 404 && onNotFound !== undefined) {
+        await response.body?.cancel().catch(() => undefined);
+        return onNotFound();
+      }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
         throw new AccessMembershipEvaluationError(
@@ -459,7 +476,133 @@ function googleGroupsClient(
     });
   }
 
-  return { accessToken, now, providerRequest, resolveGroupIdentity };
+  /**
+   * Whether one address is a direct member of one group right now. Google
+   * answers `memberships:lookup` with the membership's name, or 404 when the
+   * address is not a direct member; the 404 is an answer here, not a failure.
+   * Anything else that is not a membership is a provider failure and throws.
+   */
+  async function lookupDirectMembership(
+    groupName: string,
+    email: string,
+    authorization: Readonly<Record<string, string>>,
+  ): Promise<boolean> {
+    const url = new URL(
+      `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${groupName}/memberships:lookup`,
+    );
+    url.searchParams.set('memberKey.id', email);
+    url.searchParams.set('fields', 'name');
+    const answer = await providerRequest<
+      Readonly<{ member: boolean; name?: string }>
+    >(
+      url,
+      { headers: authorization, method: 'GET' },
+      'Direct Google membership lookup',
+      (value) => {
+        const parsed = MembershipNameLookupResponseSchema.safeParse(value);
+        return parsed.success ? { member: true, name: parsed.data.name } : null;
+      },
+      () => ({ member: false }),
+    );
+    if (answer.member && !answer.name?.startsWith(`${groupName}/`)) {
+      throw new AccessMembershipEvaluationError(
+        'GOOGLE_RESPONSE_INVALID',
+        'Google answered a membership lookup with another group.',
+      );
+    }
+    return answer.member;
+  }
+
+  return {
+    accessToken,
+    lookupDirectMembership,
+    now,
+    providerRequest,
+    resolveGroupIdentity,
+  };
+}
+
+/** One configured Google group, by the source that carries it. */
+export interface GoogleGroupReference {
+  readonly groupSourceId: string;
+  /** The group's address, which is how Google is asked which group this is. */
+  readonly email: string;
+  /** The ID recorded when the group was registered; Google must still agree. */
+  readonly googleGroupId: string;
+}
+
+export interface GoogleMembershipChecker {
+  /**
+   * For each group, whether the address is a direct member of it right now,
+   * keyed by group source ID. One token, one lookup per group.
+   */
+  check(
+    email: string,
+    groups: readonly GoogleGroupReference[],
+  ): Promise<ReadonlyMap<string, boolean>>;
+}
+
+/**
+ * Answers the sign-in question against Google itself: is this person in
+ * this group now. The scheduled sync keeps every member current on its own
+ * cadence; this is the read that lets a change in a group take effect the
+ * moment the person next arrives, without waiting for that cadence.
+ */
+export function createGoogleMembershipChecker(
+  configuration: GoogleCloudIdentityRosterConfiguration,
+  options: GoogleGroupsClientOptions = {},
+): GoogleMembershipChecker {
+  const client = googleGroupsClient(configuration, options);
+  return Object.freeze({
+    async check(
+      email: string,
+      groups: readonly GoogleGroupReference[],
+    ): Promise<ReadonlyMap<string, boolean>> {
+      // The same rule the scheduled evaluator applies to every member it
+      // lists: an address outside the staff domain is never confirmed, so
+      // the live path cannot admit someone the sync would refuse.
+      const address = staffRosterEmail().safeParse(email);
+      if (!address.success) {
+        throw new AccessMembershipEvaluationError(
+          'NON_STAFF_MEMBERSHIP',
+          'The address to look up is outside the approved staff domain.',
+        );
+      }
+      const answers = new Map<string, boolean>();
+      if (groups.length === 0) return answers;
+      const token = await client.accessToken();
+      const authorization = {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      };
+      for (const group of groups) {
+        // Ask Google which group the address names now, and require it to
+        // be the group that was registered. A group deleted and recreated,
+        // or re-keyed, answers 404 to a membership lookup on the old ID for
+        // everyone; read as "not a member" that would remove each person
+        // as they arrived. Here it is a failure, and nothing is written.
+        const identity = await client.resolveGroupIdentity(
+          group.email.trim().toLowerCase(),
+          authorization,
+        );
+        if (identity.googleGroupId !== group.googleGroupId) {
+          throw new AccessMembershipEvaluationError(
+            'DESIGNATED_GROUP_IDENTITY_INVALID',
+            'A configured access group no longer resolves to its recorded Google Group ID.',
+          );
+        }
+        answers.set(
+          group.groupSourceId,
+          await client.lookupDirectMembership(
+            identity.name,
+            address.data,
+            authorization,
+          ),
+        );
+      }
+      return answers;
+    },
+  });
 }
 
 export interface GoogleGroupResolver {
