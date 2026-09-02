@@ -4901,5 +4901,41 @@ describeWithDatabase('facilities administrator database flow', () => {
     ).rejects.toThrow(
       'already backs an active roster source of the other kind',
     );
+
+    // The rule is symmetric: a group that backs a building source cannot be
+    // registered as an others source either.
+    const buildingFirst = `district-building-first-${suffix}`;
+    await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: `Building first ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: buildingFirst,
+        email: `district-building-first-${suffix}@example.invalid`,
+      },
+      metadata: metadata('dual-purpose-building-first', requestIds),
+    });
+    await expect(
+      executeCreateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          kind: 'google-group',
+          purpose: 'others',
+          facilityId: null,
+          displayName: `Building first as others ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId: buildingFirst,
+          email: `district-building-first-${suffix}@example.invalid`,
+        },
+        metadata: metadata('dual-purpose-building-first-others', requestIds),
+      }),
+    ).rejects.toThrow(
+      'already backs an active roster source of the other kind',
+    );
   });
 });
