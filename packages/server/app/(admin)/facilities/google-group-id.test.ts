@@ -107,15 +107,26 @@ describe('Google Group ID resolution for the administration forms', () => {
     }
   });
 
-  test('says when the server holds no Google Groups credential', async () => {
+  test('says when the server cannot use its Google Groups credential', async () => {
+    // Missing and malformed share one configuration code; the message is
+    // true for both and for the Access page, which has no manual fallback.
     await expect(
       resolveGoogleGroupIdForForm(ADMIN, 'x@example.invalid', () => {
         throw new GoogleRosterConfigurationError(
-          'GOOGLE_ROSTER_CONFIGURATION_MISSING',
+          'GOOGLE_ROSTER_CONFIGURATION_INVALID',
           'GOOGLE_ROSTER_CONFIG is missing.',
         );
       }),
-    ).rejects.toThrow(/no Google Groups credential configured/u);
+    ).rejects.toThrow(/credential is missing or invalid/u);
+  });
+
+  test('answers a typo in the address itself without asking Google', async () => {
+    await expect(
+      resolveGoogleGroupIdForForm(ADMIN, 'psd-eoc at psd', neverResolving()),
+    ).rejects.toThrow('psd-eoc at psd is not a valid email address.');
+    await expect(
+      resolveGoogleGroupIdForForm(ADMIN, '   ', neverResolving()),
+    ).rejects.toThrow('The Google Group address is not a valid email address.');
   });
 
   test('lets an unexpected failure through unchanged', async () => {
