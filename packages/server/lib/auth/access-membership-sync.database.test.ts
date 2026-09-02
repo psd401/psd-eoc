@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { asc, desc, eq, sql } from 'drizzle-orm';
+import { asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -33,9 +33,13 @@ import { decideAccess } from './trusted-group-access';
 import {
   createDrizzleAccessMembershipSyncStore,
   type AccessMembershipSyncReservation,
+  type AccessMembershipSyncScope,
 } from './access-membership-sync';
 import {} from './session-cookie';
-import { type EvaluatedAccessMembershipSet } from './google-access-membership';
+import {
+  type DesignatedAccessGroup,
+  type EvaluatedAccessMembershipSet,
+} from './google-access-membership';
 
 const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@example.invalid';
 
@@ -320,12 +324,14 @@ describeWithDatabase('access-membership atomic database publication', () => {
   async function reserve(
     store: ReturnType<typeof createDrizzleAccessMembershipSyncStore>,
     key: string,
+    scope: AccessMembershipSyncScope = 'access',
   ): Promise<AccessMembershipSyncReservation> {
     return store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
       idempotencyKey: key,
       requestDigest: textDigest(key),
       startedAt: SYNC_TIME,
+      scope,
     });
   }
 
@@ -653,7 +659,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       createdAt: BASELINE_TIME,
     });
 
-    const configured = await store.readConfiguredAccessGroups();
+    const configured = await store.readConfiguredAccessGroups('roster');
     const building = configured.find(
       ({ groupSourceId }) => groupSourceId === buildingSourceId,
     );
@@ -688,6 +694,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
               : [RECOVERY_EMAIL],
         })),
       ),
+      'roster',
     );
 
     // The building group's members landed, and its read was stamped.
@@ -738,12 +745,24 @@ describeWithDatabase('access-membership atomic database publication', () => {
       createdAt: BASELINE_TIME,
     });
 
-    const configured = await store.readConfiguredAccessGroups();
+    const configured = await store.readConfiguredAccessGroups('roster');
     const others = configured.find(
       ({ groupSourceId }) => groupSourceId === othersSourceId,
     );
     expect(others).toBeDefined();
     expect(others?.grantedRole).toBeNull();
+    // The scopes partition the groups: the sign-in run never sees a roster
+    // group, and the roster run never sees a sign-in group, so a failure in
+    // one cannot be raised inside the other.
+    const accessScope = await store.readConfiguredAccessGroups('access');
+    expect(
+      accessScope.some(({ groupSourceId }) => groupSourceId === othersSourceId),
+    ).toBe(false);
+    expect(
+      configured.some(
+        ({ groupSourceId }) => groupSourceId === BASELINE_SOURCE_ID,
+      ),
+    ).toBe(false);
 
     const providerIds = new Map(
       (
@@ -771,6 +790,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
               : [RECOVERY_EMAIL],
         })),
       ),
+      'roster',
     );
 
     const members = await database
@@ -792,6 +812,113 @@ describeWithDatabase('access-membership atomic database publication', () => {
         checkedAt: new Date(SYNC_TIME),
       }),
     ).toMatchObject({ granted: false });
+  });
+
+  test('a replayed sign-in run stays current after the roster run of the same tick', async () => {
+    // One scheduled tick runs the sign-in groups and then the roster groups,
+    // and the two runs share the snapshot version sequence. EventBridge
+    // delivers at least once, so the sign-in run's key can be replayed after
+    // the roster run has already published a newer version. That replay must
+    // still describe the sign-in run as current: only a later run of the same
+    // scope supersedes it, or every redelivered tick would fail the job that
+    // keeps administrators signed in.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const othersSourceId = randomUUID();
+    await database.insert(groupSources).values({
+      id: othersSourceId,
+      kind: 'google-group',
+      purpose: 'others',
+      facilityId: null,
+      displayName: 'Sync Test district responders',
+      active: true,
+      grantedRole: null,
+      membersCapturedAt: null,
+      googleGroupId: 'sync_test_district_responders',
+      email: 'synctest-responders@example.invalid',
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+    const providerIds = new Map(
+      (
+        await database
+          .select({
+            id: groupSources.id,
+            googleGroupId: groupSources.googleGroupId,
+          })
+          .from(groupSources)
+      ).map(({ id, googleGroupId }) => [id, googleGroupId ?? '']),
+    );
+    const evaluationOf = (groups: readonly DesignatedAccessGroup[]) =>
+      evaluationFor(
+        groups.map((group) => ({
+          groupSourceId: group.groupSourceId,
+          groupEmail: group.email,
+          googleGroupId: providerIds.get(group.groupSourceId) ?? '',
+          grantedRole: group.grantedRole,
+          memberEmails:
+            group.groupSourceId === othersSourceId
+              ? ['responder@example.invalid']
+              : [RECOVERY_EMAIL],
+        })),
+      );
+
+    const accessRun = await reserve(store, 'access-sync:tick-0001', 'access');
+    if (accessRun.kind !== 'reserved') throw new Error('expected reserved');
+    const accessResult = await store.publish(
+      accessRun.id,
+      evaluationOf(await store.readConfiguredAccessGroups('access')),
+      'access',
+    );
+
+    const rosterRun = await reserve(
+      store,
+      'access-sync:tick-0001:roster',
+      'roster',
+    );
+    if (rosterRun.kind !== 'reserved') throw new Error('expected reserved');
+    const rosterResult = await store.publish(
+      rosterRun.id,
+      evaluationOf(await store.readConfiguredAccessGroups('roster')),
+      'roster',
+    );
+    expect(rosterResult.snapshotVersion).toBeGreaterThan(
+      accessResult.snapshotVersion,
+    );
+
+    // The redelivered sign-in run: the newest snapshot overall is now the
+    // roster run's, and that must not count against it.
+    const replay = await reserve(store, 'access-sync:tick-0001', 'access');
+    if (replay.kind !== 'replay') throw new Error('expected replay');
+    expect(replay.result.snapshotId).toBe(accessResult.snapshotId);
+
+    const rosterReplay = await reserve(
+      store,
+      'access-sync:tick-0001:roster',
+      'roster',
+    );
+    if (rosterReplay.kind !== 'replay') throw new Error('expected replay');
+    expect(rosterReplay.result.snapshotId).toBe(rosterResult.snapshotId);
+
+    // Each run record names the scope it covered.
+    const recorded = await database
+      .select({
+        id: accessMembershipSnapshots.id,
+        scope: accessMembershipSnapshots.scope,
+      })
+      .from(accessMembershipSnapshots)
+      .where(
+        inArray(accessMembershipSnapshots.id, [
+          accessResult.snapshotId,
+          rosterResult.snapshotId,
+        ]),
+      );
+    expect(new Map(recorded.map(({ id, scope }) => [id, scope]))).toEqual(
+      new Map([
+        [accessResult.snapshotId, 'access'],
+        [rosterResult.snapshotId, 'roster'],
+      ]),
+    );
   });
 
   test('the database refuses a group whose role does not match its purpose', async () => {

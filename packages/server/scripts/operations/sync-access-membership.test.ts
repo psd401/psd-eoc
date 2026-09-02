@@ -36,6 +36,41 @@ describe('protected access-membership sync task boundary', () => {
     expect(serialized).not.toContain('token');
   });
 
+  test('names the scope a run covered', () => {
+    // The scheduled tick runs sign-in groups and roster groups separately;
+    // the log line says which one it is describing.
+    const access = accessMembershipSyncSummary(SOURCE_SHA, {
+      snapshotId: '00000000-0000-4000-8000-000000000501',
+      snapshotVersion: 8,
+      capturedAt: '2026-08-17T12:00:00.000Z',
+      activeAccessGroupCount: 2,
+      evaluatedMembershipCount: 3,
+      membershipDigest: 'b'.repeat(64),
+      providerGroupIdDigest: 'c'.repeat(64),
+      publication: 'created',
+    });
+    expect(access.scope).toBe('access');
+
+    const roster = accessMembershipSyncSummary(
+      SOURCE_SHA,
+      {
+        snapshotId: '00000000-0000-4000-8000-000000000502',
+        snapshotVersion: 9,
+        capturedAt: '2026-08-17T12:05:00.000Z',
+        activeAccessGroupCount: 1,
+        evaluatedMembershipCount: 2,
+        membershipDigest: 'd'.repeat(64),
+        providerGroupIdDigest: 'e'.repeat(64),
+        publication: 'created',
+      },
+      'roster',
+    );
+    expect(roster).toMatchObject({
+      scope: 'roster',
+      evaluatedMembershipCount: 2,
+    });
+  });
+
   test('honors an explicitly pinned request and idempotency identity', () => {
     expect(
       readAccessMembershipSyncEnvironment({

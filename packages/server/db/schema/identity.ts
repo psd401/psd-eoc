@@ -138,6 +138,8 @@ export const accessMembershipSnapshots = pgTable(
     complete: boolean('complete').notNull(),
     syncStartedAt: occurredAt('sync_started_at').notNull(),
     capturedAt: occurredAt('captured_at').notNull(),
+    /** Which groups the run covered: the sign-in groups, or the roster groups. */
+    scope: text('scope').notNull().default('access'),
   },
   (table) => [
     unique('access_membership_snapshots_version_uq').on(table.version),
@@ -152,6 +154,10 @@ export const accessMembershipSnapshots = pgTable(
     check(
       'access_membership_snapshots_times',
       sql`${table.capturedAt} >= ${table.syncStartedAt}`,
+    ),
+    check(
+      'access_membership_snapshots_scope_valid',
+      sql`${table.scope} in ('access', 'roster')`,
     ),
   ],
 );
