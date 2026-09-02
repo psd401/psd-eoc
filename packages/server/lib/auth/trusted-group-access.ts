@@ -79,7 +79,10 @@ export async function decideAccess(
   }
 
   const memberships = await database
-    .select({ groupSourceId: groupMembers.groupSourceId })
+    .select({
+      groupSourceId: groupMembers.groupSourceId,
+      capturedAt: groupMembers.capturedAt,
+    })
     .from(groupMembers)
     .where(
       and(
@@ -100,13 +103,30 @@ export async function decideAccess(
   // Only the groups this person is actually in need to be fresh. A neglected
   // group they do not belong to says nothing about their access, and letting
   // it deny them is the same mistake as requiring membership in every group.
-  const held = new Set(memberships.map(({ groupSourceId }) => groupSourceId));
+  //
+  // The evidence for one person is the fresher of two reads: the scheduled
+  // sync's read of the whole group, stamped on the group, and a live read of
+  // this one membership at their last sign-in, stamped on the row. A person
+  // confirmed by Google minutes ago is not stale because the group's bulk
+  // read is a day old.
+  const held = new Map(
+    memberships.map(({ groupSourceId, capturedAt }) => [
+      groupSourceId,
+      capturedAt,
+    ]),
+  );
   const usable = active.flatMap((group) => {
-    const capturedAt = group.membersCapturedAt;
+    const rowCapturedAt = held.get(group.id);
+    if (rowCapturedAt === undefined) return [];
+    const capturedAt = new Date(
+      Math.max(
+        rowCapturedAt.getTime(),
+        group.membersCapturedAt?.getTime() ?? 0,
+      ),
+    );
     if (
-      !held.has(group.id) ||
-      capturedAt === null ||
-      input.checkedAt.getTime() - capturedAt.getTime() > MEMBERSHIP_FRESHNESS_MS
+      input.checkedAt.getTime() - capturedAt.getTime() >
+      MEMBERSHIP_FRESHNESS_MS
     ) {
       return [];
     }

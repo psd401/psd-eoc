@@ -201,4 +201,49 @@ describeWithDatabase('sign-in authorization', () => {
       }),
     ).toMatchObject({ authorized: false, refusal: 'ACCOUNT_DISABLED' });
   });
+  test('a person Google confirms at sign-in is authorized without waiting for the sync', async () => {
+    // Not on record at all: added to the staff group in Google a moment ago.
+    // The live read writes them down, and the decision that follows reads it.
+    const result = await authorizeSignIn(
+      database(),
+      {
+        googleSubject: 'subject-arrival',
+        email: 'arrival@example.invalid',
+        displayName: 'Just Arrived',
+        checkedAt: NOW,
+      },
+      {
+        liveMembership: {
+          reconcile: async (db, input) => {
+            await db.insert(groupMembers).values({
+              groupSourceId: STAFF_GROUP,
+              email: input.email,
+              capturedAt: input.checkedAt,
+            });
+            return 'reconciled';
+          },
+        },
+      },
+    );
+    expect(result).toMatchObject({ authorized: true, created: true });
+    if (!result.authorized) throw new Error('expected authorization');
+    expect(result.user.roles).toEqual(['staff']);
+  });
+
+  test('when Google cannot be asked, someone not on record is still refused', async () => {
+    const result = await authorizeSignIn(
+      database(),
+      {
+        googleSubject: 'subject-stranger',
+        email: 'stranger@example.invalid',
+        displayName: 'Stranger',
+        checkedAt: NOW,
+      },
+      { liveMembership: { reconcile: async () => 'unavailable' } },
+    );
+    expect(result).toMatchObject({
+      authorized: false,
+      refusal: 'NOT_IN_A_TRUSTED_GROUP',
+    });
+  });
 });

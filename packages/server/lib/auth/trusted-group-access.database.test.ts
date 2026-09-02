@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -186,5 +186,43 @@ describeWithDatabase('trusted group access', () => {
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: true, roles: ['staff'] });
+  });
+  test("a membership confirmed live is fresh while the group's bulk read is stale", async () => {
+    // The scheduled sync last read this group a day ago, but this person was
+    // confirmed by Google at their sign-in a minute ago. The fresher of the
+    // two reads is the evidence for them.
+    const staleGroupRead = new Date(
+      NOW.getTime() - MEMBERSHIP_FRESHNESS_MS - 60_000,
+    );
+    const teacherInStaff = and(
+      eq(groupMembers.groupSourceId, STAFF_GROUP),
+      eq(groupMembers.email, 'teacher@example.invalid'),
+    );
+    await database()
+      .update(groupSources)
+      .set({ membersCapturedAt: staleGroupRead })
+      .where(eq(groupSources.id, STAFF_GROUP));
+    await database()
+      .update(groupMembers)
+      .set({ capturedAt: new Date(NOW.getTime() - 60_000) })
+      .where(teacherInStaff);
+    expect(
+      await decideAccess(database(), {
+        email: 'teacher@example.invalid',
+        checkedAt: NOW,
+      }),
+    ).toMatchObject({ granted: true, roles: ['staff'] });
+
+    // A row as old as the group's read is as stale as the group.
+    await database()
+      .update(groupMembers)
+      .set({ capturedAt: staleGroupRead })
+      .where(teacherInStaff);
+    expect(
+      await decideAccess(database(), {
+        email: 'teacher@example.invalid',
+        checkedAt: NOW,
+      }),
+    ).toMatchObject({ granted: false, refusal: 'MEMBERSHIP_STALE' });
   });
 });
