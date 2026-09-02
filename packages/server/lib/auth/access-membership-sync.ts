@@ -403,7 +403,7 @@ export async function syncAccessMembership(
     ) {
       throw new AccessMembershipSyncError(
         'ACCESS_EVALUATION_SET_MISMATCH',
-        'The provider evaluation did not cover the configured access groups.',
+        'The provider evaluation did not cover the groups this run was asked to read.',
       );
     }
     return SyncAccessMembershipResultSchema.parse(
