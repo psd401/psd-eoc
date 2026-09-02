@@ -991,9 +991,17 @@ async function assertGroupIdentityAvailable(
     database,
     `admin-group-source:${source.kind}:${identity}`,
   );
+  // One Google group may back one source per purpose, so the district staff
+  // group can be the sign-in group and the every-event audience at once.
+  // Within a purpose it is still one source, and across the two roster
+  // purposes it is one source as well: the roster sync evaluates building
+  // and others groups together and refuses a group it would read twice.
   const condition =
     source.kind === 'google-group'
-      ? eq(groupSources.googleGroupId, source.googleGroupId)
+      ? and(
+          eq(groupSources.googleGroupId, source.googleGroupId),
+          eq(groupSources.purpose, source.purpose),
+        )
       : eq(groupSources.fixtureKey, source.fixtureKey);
   const [existing] = await database
     .select({ id: groupSources.id })
@@ -1003,6 +1011,26 @@ async function assertGroupIdentityAvailable(
     .for('update');
   if (existing !== undefined && existing.id !== exceptId) {
     throw conflict('That group source is already configured.');
+  }
+  if (source.kind === 'google-group' && source.purpose !== 'access') {
+    const otherRosterPurpose =
+      source.purpose === 'building' ? 'others' : 'building';
+    const [rosterTwin] = await database
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.googleGroupId, source.googleGroupId),
+          eq(groupSources.purpose, otherRosterPurpose),
+          eq(groupSources.active, true),
+        ),
+      )
+      .limit(1);
+    if (rosterTwin !== undefined) {
+      throw conflict(
+        'That Google Group already backs an active roster source of the other kind. A group can be a sign-in group and one roster source, not a building source and an others source at once.',
+      );
+    }
   }
 }
 
