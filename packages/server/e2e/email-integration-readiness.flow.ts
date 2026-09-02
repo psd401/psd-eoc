@@ -403,13 +403,16 @@ test.describe('email-integration-readiness', () => {
         ),
       ).toBeVisible();
 
-      const loadPreview = page.getByRole('button', { name: 'Load preview' });
+      const loadPreview = page.getByRole('button', {
+        name: 'Check',
+        exact: true,
+      });
       await loadPreview.focus();
       await loadPreview.press('Enter');
       await expect(
         page.getByRole('heading', {
           level: 2,
-          name: '3. Review consequences and confirm',
+          name: '3. Review and confirm',
         }),
       ).toBeVisible();
       await expect(

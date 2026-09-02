@@ -6,12 +6,12 @@ import { journalEntries } from '../db/schema';
 import { expectAxeClean, issue341EvidencePath, readFixture } from './support';
 
 const ORIGINAL = 'Synthetic mobile collaboration update.';
-const CORRECTED = 'Synthetic mobile collaboration update — corrected.';
-const CORRECTION_REASON = 'Clarified the synthetic acceptance fixture.';
-const REDACTION_REASON = 'Removed the corrected synthetic fixture from view.';
 
+// Correct and redact left the web event room in #407. Corrections now reach
+// the journal only through the journal capabilities, so this flow stops at the
+// appended update and proves the room retained it verbatim.
 test.describe('mobile-event-collaboration', () => {
-  test('a mobile viewport reconnects and appends correction/redaction provenance without rewriting history', async ({
+  test('a mobile viewport reconnects and appends an update the journal retains verbatim', async ({
     page,
   }) => {
     const fixture = await readFixture();
@@ -47,45 +47,6 @@ test.describe('mobile-event-collaboration', () => {
       hasText: ORIGINAL,
     });
     await expect(originalCard).toBeVisible();
-    await originalCard.getByRole('button', { name: /Correct entry/u }).click();
-
-    const correctionDialog = page.getByRole('dialog', {
-      name: /Correct entry/u,
-    });
-    await correctionDialog.getByLabel('Corrected text').fill(CORRECTED);
-    await correctionDialog
-      .getByLabel('Reason for correction')
-      .fill(CORRECTION_REASON);
-    await correctionDialog
-      .getByRole('button', { name: 'Post correction' })
-      .click();
-
-    const correctionCard = page.locator('article.timeline-entry', {
-      hasText: CORRECTED,
-    });
-    await expect(correctionCard).toBeVisible();
-    await expect(originalCard).toContainText('Edited later — see');
-    await correctionCard.getByRole('button', { name: /Redact entry/u }).click();
-
-    const redactionDialog = page.getByRole('dialog', {
-      name: /Redact entry/u,
-    });
-    await expect(redactionDialog).toContainText(
-      'The original record, its time, and who wrote it are kept and are never deleted.',
-    );
-    await redactionDialog
-      .getByLabel('Reason for redaction')
-      .fill(REDACTION_REASON);
-    await redactionDialog
-      .getByRole('button', { name: 'Hide this entry' })
-      .click();
-
-    await expect(
-      page.getByText(
-        'This content was hidden later. Who wrote it and when are kept on the record.',
-      ),
-    ).toBeVisible();
-    await expect(page.getByText(REDACTION_REASON)).toBeVisible();
     await expectAxeClean(page);
     await page.screenshot({
       path: issue341EvidencePath('mobile-event-collaboration.png'),
@@ -101,7 +62,6 @@ test.describe('mobile-event-collaboration', () => {
           payload: journalEntries.payload,
           supersedesEntryId: journalEntries.supersedesEntryId,
           supersessionKind: journalEntries.supersessionKind,
-          supersessionReason: journalEntries.supersessionReason,
         })
         .from(journalEntries)
         .where(eq(journalEntries.eventId, fixture.eventId))
@@ -110,30 +70,10 @@ test.describe('mobile-event-collaboration', () => {
         ({ payload }) =>
           (payload as Readonly<{ text?: unknown }>).text === ORIGINAL,
       );
-      const correction = retained.find(
-        ({ payload }) =>
-          (payload as Readonly<{ text?: unknown }>).text === CORRECTED,
-      );
-      const redaction = retained.find(
-        ({ supersessionKind }) => supersessionKind === 'redaction',
-      );
-      expect(original).toBeDefined();
-      expect(correction).toMatchObject({
-        supersessionKind: 'correction',
-        supersessionReason: CORRECTION_REASON,
+      expect(original).toMatchObject({
+        supersedesEntryId: null,
+        supersessionKind: null,
       });
-      expect(redaction).toMatchObject({
-        supersessionKind: 'redaction',
-        supersessionReason: REDACTION_REASON,
-      });
-      expect(correction?.supersedesEntryId).toBe(original?.id);
-      expect(redaction?.supersedesEntryId).toBe(correction?.id);
-      expect(
-        (original?.payload as Readonly<{ text?: unknown }> | undefined)?.text,
-      ).toBe(ORIGINAL);
-      expect(
-        (correction?.payload as Readonly<{ text?: unknown }> | undefined)?.text,
-      ).toBe(CORRECTED);
     } finally {
       await connection.close();
     }
