@@ -1,4 +1,5 @@
 import type { GroupSourcePage } from '@psd-eoc/contracts';
+import { z } from 'zod';
 
 import {
   AccessMembershipEvaluationError,
@@ -26,6 +27,8 @@ export type AdminSession = Pick<AuthenticatedSession, 'roles'>;
 export function normalizeGroupAddress(value: string): string {
   return value.trim().toLowerCase();
 }
+
+const GroupAddressShape = z.string().email().max(320);
 
 /**
  * Asked before any provider call. A lookup answers whether a group exists in
@@ -74,13 +77,22 @@ export async function resolveGoogleGroupIdForForm(
 ): Promise<string> {
   requireAdministrator(authenticated);
   const address = normalizeGroupAddress(email);
+  // A typo is answered here, in the form's own words, rather than sent to
+  // Google and reported back as a group Google could not resolve.
+  if (!GroupAddressShape.safeParse(address).success) {
+    throw new AdminFormError(
+      `${address || 'The Google Group address'} is not a valid email address.`,
+    );
+  }
   let client: GoogleGroupResolver;
   try {
     client = resolver();
   } catch (error) {
     if (error instanceof GoogleRosterConfigurationError) {
+      // Missing and malformed arrive under one code; both mean the lookup
+      // cannot happen on this server, and nothing was saved either way.
       throw new AdminFormError(
-        'This server has no Google Groups credential configured, so a Google Group cannot be looked up. A manual source needs no Google Group.',
+        "This server's Google Groups credential is missing or invalid, so a Google Group cannot be looked up. Nothing was saved.",
       );
     }
     throw error;
