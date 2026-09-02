@@ -65,6 +65,8 @@ interface QueueWithDeadLetterQueue {
 
 export interface MonitoringProps {
   readonly appRunnerService: apprunner.CfnService;
+  /** Where the scheduled membership task writes; its failures are alarmed. */
+  readonly bootstrapLogGroup: logs.ILogGroup;
   readonly criticalAlarmTopic: sns.ITopic;
   readonly database: rds.DatabaseCluster;
   readonly displayTimeZone: string;
@@ -1840,6 +1842,88 @@ function publishDashboardOutputs(
  * metric nobody publishes would page the operations team every minute forever,
  * which is worse than no alarm: it trains people to ignore the address.
  */
+/**
+ * The scheduled membership task logs one summary line per scope and one
+ * failure line per failed leg. A failed roster leg is logged and the job
+ * exits clean, so without this nothing tells anyone that a building or
+ * district list has stopped refreshing; a failed sign-in leg fails the job,
+ * and sign-in membership fails closed a day later, so that one pages.
+ */
+function configureMembershipSyncMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  const definitions = [
+    {
+      id: 'RosterMembershipSyncFailureMetric',
+      pattern: '{ $.event = "roster-membership-sync-failed" }',
+      metricName: 'RosterMembershipSyncFailureCount',
+    },
+    {
+      id: 'AccessMembershipSyncFailureMetric',
+      pattern: '"Protected access-membership synchronization failed closed"',
+      metricName: 'AccessMembershipSyncFailureCount',
+    },
+  ] as const;
+  for (const definition of definitions) {
+    new logs.MetricFilter(scope, definition.id, {
+      filterPattern: logs.FilterPattern.literal(definition.pattern),
+      logGroup: props.bootstrapLogGroup,
+      metricName: definition.metricName,
+      metricNamespace: MONITORING_METRIC_NAMESPACE,
+      metricValue: '1',
+      unit: cloudwatch.Unit.COUNT,
+    });
+  }
+
+  const alarmDefinitions = [
+    {
+      id: 'RosterMembershipSyncFailureAlarm',
+      metricName: 'RosterMembershipSyncFailureCount',
+      name: 'psd-eoc-roster-membership-sync-failed',
+      summary:
+        'The scheduled membership task could not read a building or district Google group; those rosters stopped refreshing while sign-in was unaffected.',
+      topic: props.operationsAlarmTopic,
+    },
+    {
+      id: 'AccessMembershipSyncFailureAlarm',
+      metricName: 'AccessMembershipSyncFailureCount',
+      name: 'psd-eoc-access-membership-sync-failed',
+      summary:
+        'The scheduled membership task failed closed on the sign-in groups; stored membership stops authorizing sign-in 24 hours after its last fresh read.',
+      topic: props.criticalAlarmTopic,
+    },
+  ] as const;
+  for (const definition of alarmDefinitions) {
+    const alarm = new cloudwatch.Alarm(scope, definition.id, {
+      alarmDescription: alarmDescription(
+        definition.summary,
+        'runbook-membership-sync-failure',
+        props.monitoringRunbookBaseUrl,
+      ),
+      alarmName: definition.name,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: new cloudwatch.Metric({
+        metricName: definition.metricName,
+        namespace: MONITORING_METRIC_NAMESPACE,
+        // One period per scheduled run, so an OK means a run passed without
+        // a failure line rather than an hour having gone by.
+        period: Duration.hours(2),
+        statistic: 'Sum',
+        unit: cloudwatch.Unit.COUNT,
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const action = new cloudwatchActions.SnsAction(definition.topic);
+    alarm.addAlarmAction(action);
+    alarm.addOkAction(action);
+  }
+}
+
 export function configureInfrastructureMonitoring(
   scope: Construct,
   props: MonitoringProps,
@@ -1869,6 +1953,7 @@ export function configureInfrastructureMonitoring(
   configurePushWorkerMonitoring(scope, props);
   configureEmailWorkerMonitoring(scope, props);
   configureSmsWorkerMonitoring(scope, props);
+  configureMembershipSyncMonitoring(scope, props);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);
 }

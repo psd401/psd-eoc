@@ -3680,6 +3680,7 @@ export class PsdEocStack extends Stack {
     configureInfrastructureMonitoring(this, {
       applicationCondition: shouldProvisionApplication,
       appRunnerService,
+      bootstrapLogGroup,
       channelQueues: {
         email: { deadLetterQueue: emailDeadLetterQueue, queue: emailQueue },
         push: queuePairs.Push,
