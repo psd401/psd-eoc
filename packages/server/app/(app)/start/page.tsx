@@ -1,4 +1,5 @@
 import {
+  EventTypeVersionIdSchema,
   FacilityIdSchema,
   OperatorDetailSchema,
   ThreatIdSchema,
@@ -34,6 +35,8 @@ interface SelectEventTypePageProps {
       mode?: SearchValue;
       threatId?: SearchValue;
       threatDetail?: SearchValue;
+      eventTypeVersionId?: SearchValue;
+      responseDetail?: SearchValue;
     }>
   >;
 }
@@ -365,9 +368,15 @@ interface ResponseStepProps {
   readonly threat: Threat;
   readonly threatDetail: string | null;
   readonly eventTypes: readonly EventTypeListItem[];
+  /** A response whose required description was missing or unusable. */
+  readonly detailProblem: Readonly<{
+    eventTypeVersionId: string;
+    draft: string;
+  }> | null;
 }
 
 function ResponseStep({
+  detailProblem,
   eventTypes,
   facility,
   mode,
@@ -448,6 +457,10 @@ function ResponseStep({
                 );
               }
               const inputId = `response-detail-${item.eventType.id}`;
+              const problem =
+                detailProblem?.eventTypeVersionId === item.latestVersion.id
+                  ? detailProblem
+                  : null;
               return (
                 <form
                   action="/start/confirm"
@@ -487,13 +500,28 @@ function ResponseStep({
                     Describe the response
                   </label>
                   <input
+                    aria-describedby={
+                      problem === null ? undefined : `${inputId}-error`
+                    }
+                    aria-invalid={problem === null ? undefined : true}
                     autoComplete="off"
+                    defaultValue={problem?.draft ?? ''}
                     id={inputId}
                     maxLength={DETAIL_MAX_LENGTH}
                     name="responseDetail"
                     required
                     type="text"
                   />
+                  {problem === null ? null : (
+                    <p
+                      className="field-error"
+                      id={`${inputId}-error`}
+                      role="alert"
+                    >
+                      Type a short description of the response before
+                      continuing. Up to {DETAIL_MAX_LENGTH} plain characters.
+                    </p>
+                  )}
                   <button className="button" type="submit">
                     Continue with {item.latestVersion.name}
                   </button>
@@ -522,11 +550,9 @@ export default async function SelectEventTypePage({
   }
 
   const threatValue = one(parameters.threatId);
-  const returnPath =
-    threatValue === null
-      ? startSelectionReturnPath({ facilityId: facilityResult.data, mode })
-      : startSelectionReturnPath({ facilityId: facilityResult.data, mode });
-  const authenticated = await requirePageSession(returnPath);
+  const authenticated = await requirePageSession(
+    startSelectionReturnPath({ facilityId: facilityResult.data, mode }),
+  );
   const data = await loadOperationalViewData(authenticated);
   const facility = data.facilities.find(
     (candidate) => candidate.id === facilityResult.data,
@@ -568,8 +594,26 @@ export default async function SelectEventTypePage({
     );
   }
 
+  // A response description the contract refused comes back here with the
+  // response it belongs to, so the operator sees the error beside their own
+  // words instead of an empty field.
+  const rejectedResponseValue = one(parameters.eventTypeVersionId);
+  const rejectedResponseResult = EventTypeVersionIdSchema.safeParse(
+    rejectedResponseValue,
+  );
+  const responseDraftValue = one(parameters.responseDetail);
+  const responseDetailProblem =
+    rejectedResponseResult.success &&
+    !OperatorDetailSchema.safeParse(responseDraftValue).success
+      ? {
+          eventTypeVersionId: rejectedResponseResult.data,
+          draft: responseDraftValue ?? '',
+        }
+      : null;
+
   return (
     <ResponseStep
+      detailProblem={responseDetailProblem}
       eventTypes={eventTypesForMode(data.eventTypes, mode)}
       facility={facility}
       mode={mode}

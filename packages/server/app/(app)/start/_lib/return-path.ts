@@ -5,6 +5,18 @@ import {
   TemplateModeSchema,
   ThreatIdSchema,
 } from '@psd-eoc/contracts';
+import { z } from 'zod';
+
+/**
+ * A description the operator typed and the contract refused. It is carried
+ * back to its own step so they can correct it, so it is bounded and stripped
+ * of line breaks here and shown as plain text there; it is never rendered
+ * into a notification, which only ever receives a value the contract accepts.
+ */
+const RejectedDetailDraftSchema = z
+  .string()
+  .max(400)
+  .transform((draft) => draft.replaceAll(/[\r\n]/gu, ' '));
 
 declare const START_FLOW_RETURN_PATH: unique symbol;
 
@@ -50,6 +62,16 @@ export function startResponseReturnPath(
     mode: unknown;
     threatId: unknown;
     threatDetail: unknown;
+    /**
+     * Carries a rejected response description back to its own step so the
+     * operator sees an inline error and their own words, exactly as the
+     * threat step does. The draft is unvalidated by definition, so it is
+     * length-bounded here and rendered as plain text.
+     */
+    rejectedResponse?: Readonly<{
+      eventTypeVersionId: unknown;
+      draft: unknown;
+    }>;
   }>,
 ): StartFlowReturnPath {
   const facilityId = FacilityIdSchema.parse(input.facilityId);
@@ -58,6 +80,17 @@ export function startResponseReturnPath(
   const threatDetail = OperatorDetailSchema.nullable().parse(
     input.threatDetail,
   );
+  const rejected =
+    input.rejectedResponse === undefined
+      ? null
+      : {
+          eventTypeVersionId: EventTypeVersionIdSchema.parse(
+            input.rejectedResponse.eventTypeVersionId,
+          ),
+          draft: RejectedDetailDraftSchema.parse(
+            input.rejectedResponse.draft ?? '',
+          ),
+        };
   return exactReturnPath('/start', [
     ['facilityId', facilityId],
     ['mode', mode],
@@ -65,6 +98,12 @@ export function startResponseReturnPath(
     ...(threatDetail === null
       ? []
       : ([['threatDetail', threatDetail]] as const)),
+    ...(rejected === null
+      ? []
+      : ([
+          ['eventTypeVersionId', rejected.eventTypeVersionId],
+          ['responseDetail', rejected.draft],
+        ] as const)),
   ]);
 }
 

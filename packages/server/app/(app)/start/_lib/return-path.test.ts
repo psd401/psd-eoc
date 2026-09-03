@@ -11,6 +11,38 @@ const EVENT_TYPE_VERSION_ID = '16000000-0000-4000-8000-000000000002';
 const THREAT_ID = '16000000-0000-4000-8000-000000000003';
 
 describe('start-flow return paths', () => {
+  test('carries a refused response description back to its own step', () => {
+    const path = String(
+      startResponseReturnPath({
+        facilityId: FACILITY_ID,
+        mode: 'real',
+        threatId: THREAT_ID,
+        threatDetail: null,
+        rejectedResponse: {
+          eventTypeVersionId: EVENT_TYPE_VERSION_ID,
+          draft: 'Hold in\nclassrooms',
+        },
+      }),
+    );
+    const query = new URLSearchParams(path.slice(path.indexOf('?') + 1));
+    expect(query.get('eventTypeVersionId')).toBe(EVENT_TYPE_VERSION_ID);
+    // A draft is unvalidated by definition, so line breaks are flattened and
+    // the length is bounded before it is ever put in a URL.
+    expect(query.get('responseDetail')).toBe('Hold in classrooms');
+    expect(() =>
+      startResponseReturnPath({
+        facilityId: FACILITY_ID,
+        mode: 'real',
+        threatId: THREAT_ID,
+        threatDetail: null,
+        rejectedResponse: {
+          eventTypeVersionId: EVENT_TYPE_VERSION_ID,
+          draft: 'a'.repeat(401),
+        },
+      }),
+    ).toThrow();
+  });
+
   test('produces only the exact canonical selection pathname and query', () => {
     expect(
       String(

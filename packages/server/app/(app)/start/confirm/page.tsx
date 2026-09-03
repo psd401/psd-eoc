@@ -132,7 +132,20 @@ export default async function ConfirmStartPage({
     threatDetail,
   });
   if (eventType.eventType.requiresDetail && responseDetailValue === null) {
-    redirect(responseHref);
+    // Return the operator to the response step with the words they typed, so
+    // the field shows an inline error rather than an empty box.
+    redirect(
+      startResponseReturnPath({
+        facilityId: facility.id,
+        mode,
+        threatId: threat.id,
+        threatDetail,
+        rejectedResponse: {
+          eventTypeVersionId: eventType.latestVersion.id,
+          draft: one(parameters.responseDetail) ?? '',
+        },
+      }),
+    );
   }
   const responseDetail = eventType.eventType.requiresDetail
     ? responseDetailValue

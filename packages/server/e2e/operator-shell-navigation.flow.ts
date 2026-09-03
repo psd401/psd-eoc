@@ -147,6 +147,25 @@ test.describe('operator-shell-navigation', () => {
       page.getByRole('heading', { level: 1, name: 'Choose response' }),
     ).toBeVisible();
 
+    // A response that needs a description refuses whitespace the browser's own
+    // required-field check accepts, and says so beside the words the operator
+    // typed rather than emptying the field.
+    const otherResponse = page.getByRole('form', { name: 'Other Drill' });
+    await otherResponse.getByLabel('Describe the response').fill('   ');
+    await otherResponse
+      .getByRole('button', { name: 'Continue with Other Drill' })
+      .click();
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Choose response' }),
+    ).toBeVisible();
+    await expect(
+      otherResponse.getByRole('alert').filter({ hasText: /Type a short/u }),
+    ).toBeVisible();
+    await expect(otherResponse.getByLabel('Describe the response')).toHaveValue(
+      '   ',
+    );
+    await expectAxeClean(page);
+
     await page
       .getByRole('link', { name: 'Change threat', exact: true })
       .click();
