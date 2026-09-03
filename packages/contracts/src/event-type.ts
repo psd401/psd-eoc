@@ -76,6 +76,7 @@ export type ClassificationMarker = z.infer<typeof ClassificationMarkerSchema>;
 export const TemplateVariableSchema = z.enum([
   'site',
   'eventType',
+  'threat',
   'startTime',
   'initiator',
 ]);
@@ -90,6 +91,7 @@ export type TemplateVariable = z.infer<typeof TemplateVariableSchema>;
 export const TemplateTokenSchema = z.enum([
   '{{site}}',
   '{{eventType}}',
+  '{{threat}}',
   '{{startTime}}',
   '{{initiator}}',
 ]);

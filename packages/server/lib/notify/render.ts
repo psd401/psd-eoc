@@ -12,7 +12,8 @@ import {
   type TemplateVariable,
 } from '@psd-eoc/contracts';
 
-const TEMPLATE_TOKEN_PATTERN = /\{\{(site|eventType|startTime|initiator)\}\}/gu;
+const TEMPLATE_TOKEN_PATTERN =
+  /\{\{(site|eventType|threat|startTime|initiator)\}\}/gu;
 const FORMAT_CHARACTER_PATTERN = /\p{Format}/u;
 const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 const WHITESPACE_PATTERN = /\s/u;
@@ -23,6 +24,7 @@ const SINGLE_PART_UCS2_MAX_CODE_UNITS = 70;
 const TRUNCATION_MARKER = '...';
 const SAFE_CONTEXT_FALLBACKS = Object.freeze({
   site: 'Recorded site',
+  threat: 'Recorded threat',
   initiator: 'Recorded initiator',
 });
 
@@ -528,7 +530,7 @@ function rendererOwnedEventTypeName(
 }
 
 function safeContextVariable(
-  name: 'initiator' | 'site',
+  name: 'initiator' | 'site' | 'threat',
   value: string,
 ): string {
   try {
@@ -548,6 +550,7 @@ function validatedVariables(
   return Object.freeze({
     site: safeContextVariable('site', variables.site),
     eventType: rendererOwnedEventTypeName(variables.eventType, templateMode),
+    threat: safeContextVariable('threat', variables.threat),
     startTime: formatNotificationStartTime(variables.startTime),
     initiator: safeContextVariable('initiator', variables.initiator),
   });
@@ -614,6 +617,7 @@ function interpolate(
     const recovered = replaceTokens({
       ...variables,
       site: SAFE_CONTEXT_FALLBACKS.site,
+      threat: SAFE_CONTEXT_FALLBACKS.threat,
       eventType:
         templateMode === 'real'
           ? 'Configured response'

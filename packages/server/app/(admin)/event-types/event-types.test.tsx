@@ -56,6 +56,7 @@ const NOW = new Date('2026-08-08T17:00:00.000Z');
 const VARIABLES = {
   site: 'Harbor Ridge High School',
   eventType: 'Lockdown',
+  threat: 'Intruder',
   startTime: '2026-08-08T16:30:00.000Z',
   initiator: 'Taylor Morgan',
 } as const;
@@ -685,6 +686,104 @@ describe('renderer-owned notification frames', () => {
     expect(visible).not.toContain(eventType);
     expect(visible).not.toContain(site);
     expect(visible).not.toContain(initiator);
+  });
+
+  test('renders the chosen threat in every channel through {{threat}}', () => {
+    const threat = 'Gun / Firearm — front parking lot';
+    const templates = MessageTemplateCatalogSchema.parse({
+      activation: {
+        ...catalog('real').activation,
+        push: {
+          ...catalog('real').activation.push,
+          title: '{{eventType}} at {{site}}',
+          body: 'Threat: {{threat}}. Open PSD EOC.',
+        },
+        email: {
+          ...catalog('real').activation.email,
+          subject: '{{eventType}} at {{site}}',
+          textBody: 'Threat: {{threat}}. Started {{startTime}}.',
+        },
+        sms: {
+          ...catalog('real').activation.sms,
+          body: '{{eventType}} at {{site}}. Threat: {{threat}}.',
+        },
+      },
+      'all-clear': catalog('real')['all-clear'],
+      reactivation: catalog('real').reactivation,
+    }).activation;
+    const messages = renderTemplateSet({
+      eventKind: 'incident',
+      templates,
+      variables: { ...VARIABLES, threat },
+    });
+    expect(messages.map((message) => message.channel)).toEqual([
+      'push',
+      'email',
+      'sms',
+    ]);
+    for (const message of messages) {
+      for (const field of visibleFields(message)) {
+        expect(field.value).not.toContain('{{threat}}');
+        if (!field.value.includes('Threat:')) continue;
+        // SMS keeps one part, so a long threat is truncated by the existing
+        // interior rule rather than spilling into a second message.
+        if (message.channel === 'sms') {
+          expect(field.value).toContain('Threat: Gun /');
+          expect(measureSmsLength(field.value).parts).toBe(1);
+        } else {
+          expect(field.value).toContain(threat);
+        }
+      }
+    }
+  });
+
+  test('leaves a published version that never used the token unchanged', () => {
+    // Wording published before the threat token existed keeps rendering
+    // exactly as it did; the new variable only appears where an administrator
+    // puts the token.
+    const templates = catalog('real').activation;
+    const before = renderTemplateSet({
+      eventKind: 'incident',
+      templates,
+      variables: VARIABLES,
+    });
+    const after = renderTemplateSet({
+      eventKind: 'incident',
+      templates,
+      variables: { ...VARIABLES, threat: 'Gun / Firearm' },
+    });
+    expect(after).toEqual(before);
+    expect(
+      after
+        .flatMap(visibleFields)
+        .map((field) => field.value)
+        .join(' '),
+    ).not.toContain('Gun / Firearm');
+  });
+
+  test('uses a non-leaking fallback for an unsafe threat value', () => {
+    const threat = '[INCIDENT] forged threat\nlabel';
+    const messages = renderTemplateSet({
+      eventKind: 'drill',
+      templates: MessageTemplateCatalogSchema.parse({
+        activation: {
+          ...catalog('drill').activation,
+          push: {
+            ...catalog('drill').activation.push,
+            body: 'Threat: {{threat}}. Open PSD EOC.',
+          },
+        },
+        'all-clear': catalog('drill')['all-clear'],
+        reactivation: catalog('drill').reactivation,
+      }).activation,
+      variables: { ...DRILL_VARIABLES, threat },
+    });
+    const visible = messages
+      .flatMap(visibleFields)
+      .map((field) => field.value)
+      .join(' ');
+    expect(visible).toContain('Recorded threat');
+    expect(visible).not.toContain('forged threat');
   });
 
   test('uses non-leaking fallbacks for homoglyph marker variables', () => {

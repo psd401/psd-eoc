@@ -515,7 +515,7 @@ function makeTemplateCatalog(
             classificationMarker,
             channel: 'push',
             title: `${visibleMode} ${action}: ${eventTypeName}`,
-            body: `${visibleMode} ${action} at {{site}}. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.`,
+            body: `${visibleMode} ${action} at {{site}}. Threat: {{threat}}. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.`,
           },
           email: {
             templateMode,
@@ -523,14 +523,14 @@ function makeTemplateCatalog(
             classificationMarker,
             channel: 'email',
             subject: `${visibleMode} ${action}: ${eventTypeName} at {{site}}`,
-            textBody: `${visibleMode} ${action}\n\nEvent type: {{eventType}}\nSite: {{site}}\nStarted: {{startTime}}\nInitiated by: {{initiator}}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
+            textBody: `${visibleMode} ${action}\n\nResponse: {{eventType}}\nThreat: {{threat}}\nSite: {{site}}\nStarted: {{startTime}}\nInitiated by: {{initiator}}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
           },
           sms: {
             templateMode,
             purpose,
             classificationMarker,
             channel: 'sms',
-            body: `${visibleMode} ${action}: {{eventType}} at {{site}}. Open PSD EOC for current instructions.`,
+            body: `${visibleMode} ${action}: {{eventType}} at {{site}}. Threat: {{threat}}. Open PSD EOC for current instructions.`,
           },
         },
       ];
