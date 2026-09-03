@@ -1032,3 +1032,58 @@ dd {
     outline-color: Highlight;
   }
 }
+
+/* Threat-then-response steps: a card that needs the operator's own words. */
+.choice-card--detail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.6rem;
+  cursor: default;
+}
+
+.choice-card--detail .field-label {
+  font-weight: 600;
+}
+
+.choice-card--detail input[type='text'] {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #5a6472;
+  border-radius: 0.5rem;
+  font: inherit;
+}
+
+.choice-card--detail input[aria-invalid='true'] {
+  border-color: #a4262c;
+  outline: 2px solid #a4262c;
+  outline-offset: 1px;
+}
+
+.choice-card--detail .field-error {
+  margin: 0;
+  color: #a4262c;
+  font-weight: 600;
+}
+
+.chosen-threat {
+  margin: 0 0 0.75rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid #1f4e79;
+  background: #eef3f8;
+  border-radius: 0.5rem;
+}
+
+.chosen-threat__label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.8rem;
+  color: #3a4654;
+}
+
+.page-heading__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}

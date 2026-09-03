@@ -49,7 +49,11 @@ export const PLAYWRIGHT_IDS = Object.freeze({
   user: uuid(7),
   session: uuid(8),
   mismatchedFacility: uuid(9),
+  threat: uuid(27),
 });
+
+/** The name the browser fixture shows for its one synthetic threat. */
+export const PLAYWRIGHT_THREAT_NAME = 'Synthetic wildlife';
 
 const StartFlowPlaywrightEventSchema = z
   .object({
@@ -153,6 +157,8 @@ export function activationResultFixture(
       status: 'active',
       rosterSnapshotId: preview.rosterSnapshotId,
       rosterPopulation: 'staff',
+      threat: preview.threat,
+      responseDetail: preview.responseDetail,
       createdBy: actor,
       createdAt: occurredAt,
       activatedAt: occurredAt,
@@ -320,6 +326,12 @@ export function activationPreviewFixture(
     eventTypeVersion: selection.eventTypeVersion,
     rosterSnapshotId: PLAYWRIGHT_IDS.rosterSnapshot,
     rosterPopulation: 'staff',
+    threat: {
+      id: selection.threatId,
+      name: PLAYWRIGHT_THREAT_NAME,
+      detail: selection.threatDetail,
+    },
+    responseDetail: selection.responseDetail,
     recipientCount: 4,
     channels: channelConsequences({
       kind: selection.kind,
@@ -370,6 +382,12 @@ export function activeEventFixture(
     status: 'active',
     rosterSnapshotId: PLAYWRIGHT_IDS.rosterSnapshot,
     rosterPopulation: 'synthetic',
+    threat: {
+      id: PLAYWRIGHT_IDS.threat,
+      name: PLAYWRIGHT_THREAT_NAME,
+      detail: null,
+    },
+    responseDetail: null,
     createdBy: {
       kind: 'human',
       userId: PLAYWRIGHT_IDS.user,

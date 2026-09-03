@@ -55,6 +55,8 @@ const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
 const SYNTHETIC_OTHER_FACILITY_ID = '00000000-0000-4000-8000-000000000002';
 const SYNTHETIC_REAL_VERSION_ID = '00000000-0000-4000-8000-000000000200';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
+/** The seed's first active threat, `Synthetic wildlife`. */
+const SYNTHETIC_THREAT_ID = '00000000-0000-4000-8000-000000000700';
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1_000;
 const INHERITED_RUNTIME_ENVIRONMENT_KEYS = [
   'BUN_INSTALL',
@@ -267,6 +269,9 @@ async function createSyntheticDrill(
         templateMode: 'drill',
       },
       rosterPopulation: 'synthetic',
+      threatId: SYNTHETIC_THREAT_ID,
+      threatDetail: null,
+      responseDetail: null,
     },
     invocation(identity, null),
     createDrizzleStartFlowCapabilityStore(connection.db),

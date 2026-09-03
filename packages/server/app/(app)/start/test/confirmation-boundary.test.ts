@@ -103,6 +103,12 @@ function preview(
     eventTypeVersion: { id: IDS.eventType, templateMode },
     rosterSnapshotId: IDS.roster,
     rosterPopulation,
+    threat: {
+      id: '20000000-0000-4000-8000-000000000099',
+      name: 'Synthetic wildlife',
+      detail: null,
+    },
+    responseDetail: null,
     recipientCount: 2,
     channels: (['push', 'email'] as const).map((channel) => ({
       channel,

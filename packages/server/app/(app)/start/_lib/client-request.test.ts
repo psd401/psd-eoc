@@ -32,6 +32,8 @@ function activeEvent(overrides: Partial<Event> = {}): Event {
     status: 'active',
     rosterSnapshotId: uuid(4),
     rosterPopulation: 'synthetic',
+    threat: null,
+    responseDetail: null,
     createdBy: { kind: 'human', userId: uuid(5), sessionId: uuid(6) },
     createdAt: '2026-08-10T18:00:00.000Z',
     activatedAt: '2026-08-10T18:00:00.000Z',
@@ -103,6 +105,9 @@ const ACTIVATION_SELECTION = Object.freeze({
     templateMode: 'drill' as const,
   },
   rosterPopulation: 'staff' as const,
+  threatId: uuid(22),
+  threatDetail: null,
+  responseDetail: null,
 });
 const ACTIVATION_IDEMPOTENCY_KEY = 'activate:synthetic-response-binding';
 
@@ -155,7 +160,10 @@ describe('activation response binding', () => {
     eventKind: ACTIVATION_SELECTION.kind,
     eventTypeVersionId: ACTIVATION_SELECTION.eventTypeVersion.id,
     facilityId: ACTIVATION_SELECTION.facilityId,
+    responseDetail: ACTIVATION_SELECTION.responseDetail,
     templateMode: ACTIVATION_SELECTION.templateMode,
+    threatDetail: ACTIVATION_SELECTION.threatDetail,
+    threatId: ACTIVATION_SELECTION.threatId,
   };
 
   test('accepts the exact preview the browser confirmed', () => {
