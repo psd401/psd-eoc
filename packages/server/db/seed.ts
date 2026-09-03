@@ -862,6 +862,14 @@ export interface SeedDatabaseOptions {
   readonly insertRosterEndpoints?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
+  /**
+   * Writes the threats in place of the seed. A fixture held at a migration
+   * before `0046_threat_catalog` has no `threats` table, so it supplies a no-op
+   * here rather than letting the seed fail on a relation that does not exist.
+   */
+  readonly insertThreats?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
 }
 
 export async function seedDatabase(
@@ -879,15 +887,19 @@ export async function seedDatabase(
       )
       .onConflictDoNothing();
 
-    await transaction
-      .insert(threats)
-      .values(
-        threatRows.map((threat) => ({
-          ...threat,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
+    if (options.insertThreats !== undefined) {
+      await options.insertThreats(transaction);
+    } else {
+      await transaction
+        .insert(threats)
+        .values(
+          threatRows.map((threat) => ({
+            ...threat,
+            createdAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
 
     await transaction
       .insert(neighborhoodVersions)

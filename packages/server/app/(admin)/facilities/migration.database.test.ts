@@ -451,6 +451,9 @@ async function channelSnapshot(
 
 async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
   await seedDatabase(database, {
+    // Threats arrived in migration 0046; this fixture is held before it, so
+    // the seed must not touch a relation that does not exist yet.
+    insertThreats: () => Promise.resolve(),
     async insertRosterEndpoints(transaction) {
       await transaction.execute(sql`
         insert into roster_endpoints (

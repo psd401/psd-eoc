@@ -369,6 +369,9 @@ async function stageReviewedLiveShape(
 ): Promise<void> {
   await seedDatabase(database, {
     insertRosterEndpoints: insertLegacyRosterEndpoints,
+    // Threats arrived in migration 0046; this schema is held before it, so
+    // the seed must not touch a relation that does not exist yet.
+    insertThreats: () => Promise.resolve(),
     // Written here with the columns this schema actually has: Drizzle emits
     // every column of a table it inserts into, so seeding group sources
     // through the current schema fails against a database held at an earlier
