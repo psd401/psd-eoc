@@ -76,18 +76,30 @@ const ids = {
   eventTypeLockdownDrill: '00000000-0000-4000-8000-000000000101',
   eventTypeModifiedLockdownReal: '00000000-0000-4000-8000-000000000102',
   eventTypeModifiedLockdownDrill: '00000000-0000-4000-8000-000000000103',
-  eventTypeMedicalReal: '00000000-0000-4000-8000-000000000104',
-  eventTypeMedicalDrill: '00000000-0000-4000-8000-000000000105',
-  eventTypeWildlifeReal: '00000000-0000-4000-8000-000000000106',
-  eventTypeWildlifeDrill: '00000000-0000-4000-8000-000000000107',
+  // 0104–0107 and 0204–0207 once seeded Medical and Wildlife as responses.
+  // They are threats now; a live database keeps those rows (an administrator
+  // retires them) and the ids stay unused so no new family collides with
+  // them under the seed's insert-if-absent rule.
+  eventTypeEvacuationReal: '00000000-0000-4000-8000-000000000108',
+  eventTypeEvacuationDrill: '00000000-0000-4000-8000-000000000109',
+  eventTypeNoEvacuationReal: '00000000-0000-4000-8000-00000000010a',
+  eventTypeNoEvacuationDrill: '00000000-0000-4000-8000-00000000010b',
+  eventTypeShelterInPlaceReal: '00000000-0000-4000-8000-00000000010c',
+  eventTypeShelterInPlaceDrill: '00000000-0000-4000-8000-00000000010d',
+  eventTypeOtherReal: '00000000-0000-4000-8000-00000000010e',
+  eventTypeOtherDrill: '00000000-0000-4000-8000-00000000010f',
   eventTypeVersionLockdownReal: '00000000-0000-4000-8000-000000000200',
   eventTypeVersionLockdownDrill: '00000000-0000-4000-8000-000000000201',
   eventTypeVersionModifiedLockdownReal: '00000000-0000-4000-8000-000000000202',
   eventTypeVersionModifiedLockdownDrill: '00000000-0000-4000-8000-000000000203',
-  eventTypeVersionMedicalReal: '00000000-0000-4000-8000-000000000204',
-  eventTypeVersionMedicalDrill: '00000000-0000-4000-8000-000000000205',
-  eventTypeVersionWildlifeReal: '00000000-0000-4000-8000-000000000206',
-  eventTypeVersionWildlifeDrill: '00000000-0000-4000-8000-000000000207',
+  eventTypeVersionEvacuationReal: '00000000-0000-4000-8000-000000000208',
+  eventTypeVersionEvacuationDrill: '00000000-0000-4000-8000-000000000209',
+  eventTypeVersionNoEvacuationReal: '00000000-0000-4000-8000-00000000020a',
+  eventTypeVersionNoEvacuationDrill: '00000000-0000-4000-8000-00000000020b',
+  eventTypeVersionShelterInPlaceReal: '00000000-0000-4000-8000-00000000020c',
+  eventTypeVersionShelterInPlaceDrill: '00000000-0000-4000-8000-00000000020d',
+  eventTypeVersionOtherReal: '00000000-0000-4000-8000-00000000020e',
+  eventTypeVersionOtherDrill: '00000000-0000-4000-8000-00000000020f',
   integrationGoogleGroups: '00000000-0000-4000-8000-000000000300',
   integrationExpoPush: '00000000-0000-4000-8000-000000000301',
   integrationMobilePush: '00000000-0000-4000-8000-000000000305',
@@ -343,6 +355,11 @@ const rosterSnapshot = RosterSnapshotSchema.parse({
   capturedAt: SEED_TIMESTAMP,
 });
 
+/**
+ * The responses an operator chooses after the threat. Each family has a real
+ * and a drill identity; "Other" requires the operator to describe the
+ * response in their own words.
+ */
 const eventTypeDefinitions = [
   {
     id: ids.eventTypeLockdownReal,
@@ -351,6 +368,7 @@ const eventTypeDefinitions = [
     familyKey: 'lockdown',
     name: 'Lockdown',
     mode: 'real',
+    requiresDetail: false,
   },
   {
     id: ids.eventTypeLockdownDrill,
@@ -359,6 +377,7 @@ const eventTypeDefinitions = [
     familyKey: 'lockdown',
     name: 'Lockdown Drill',
     mode: 'drill',
+    requiresDetail: false,
   },
   {
     id: ids.eventTypeModifiedLockdownReal,
@@ -367,6 +386,7 @@ const eventTypeDefinitions = [
     familyKey: 'modified-lockdown',
     name: 'Modified Lockdown',
     mode: 'real',
+    requiresDetail: false,
   },
   {
     id: ids.eventTypeModifiedLockdownDrill,
@@ -375,38 +395,79 @@ const eventTypeDefinitions = [
     familyKey: 'modified-lockdown',
     name: 'Modified Lockdown Drill',
     mode: 'drill',
+    requiresDetail: false,
   },
   {
-    id: ids.eventTypeMedicalReal,
-    versionId: ids.eventTypeVersionMedicalReal,
-    key: 'medical',
-    familyKey: 'medical',
-    name: 'Medical',
+    id: ids.eventTypeEvacuationReal,
+    versionId: ids.eventTypeVersionEvacuationReal,
+    key: 'evacuation',
+    familyKey: 'evacuation',
+    name: 'Evacuation',
     mode: 'real',
+    requiresDetail: false,
   },
   {
-    id: ids.eventTypeMedicalDrill,
-    versionId: ids.eventTypeVersionMedicalDrill,
-    key: 'medical-drill',
-    familyKey: 'medical',
-    name: 'Medical Drill',
+    id: ids.eventTypeEvacuationDrill,
+    versionId: ids.eventTypeVersionEvacuationDrill,
+    key: 'evacuation-drill',
+    familyKey: 'evacuation',
+    name: 'Evacuation Drill',
     mode: 'drill',
+    requiresDetail: false,
   },
   {
-    id: ids.eventTypeWildlifeReal,
-    versionId: ids.eventTypeVersionWildlifeReal,
-    key: 'wildlife',
-    familyKey: 'wildlife',
-    name: 'Wildlife',
+    id: ids.eventTypeNoEvacuationReal,
+    versionId: ids.eventTypeVersionNoEvacuationReal,
+    key: 'no-evacuation',
+    familyKey: 'no-evacuation',
+    name: 'No Evacuation',
     mode: 'real',
+    requiresDetail: false,
   },
   {
-    id: ids.eventTypeWildlifeDrill,
-    versionId: ids.eventTypeVersionWildlifeDrill,
-    key: 'wildlife-drill',
-    familyKey: 'wildlife',
-    name: 'Wildlife Drill',
+    id: ids.eventTypeNoEvacuationDrill,
+    versionId: ids.eventTypeVersionNoEvacuationDrill,
+    key: 'no-evacuation-drill',
+    familyKey: 'no-evacuation',
+    name: 'No Evacuation Drill',
     mode: 'drill',
+    requiresDetail: false,
+  },
+  {
+    id: ids.eventTypeShelterInPlaceReal,
+    versionId: ids.eventTypeVersionShelterInPlaceReal,
+    key: 'shelter-in-place',
+    familyKey: 'shelter-in-place',
+    name: 'Shelter in Place',
+    mode: 'real',
+    requiresDetail: false,
+  },
+  {
+    id: ids.eventTypeShelterInPlaceDrill,
+    versionId: ids.eventTypeVersionShelterInPlaceDrill,
+    key: 'shelter-in-place-drill',
+    familyKey: 'shelter-in-place',
+    name: 'Shelter in Place Drill',
+    mode: 'drill',
+    requiresDetail: false,
+  },
+  {
+    id: ids.eventTypeOtherReal,
+    versionId: ids.eventTypeVersionOtherReal,
+    key: 'other',
+    familyKey: 'other',
+    name: 'Other',
+    mode: 'real',
+    requiresDetail: true,
+  },
+  {
+    id: ids.eventTypeOtherDrill,
+    versionId: ids.eventTypeVersionOtherDrill,
+    key: 'other-drill',
+    familyKey: 'other',
+    name: 'Other Drill',
+    mode: 'drill',
+    requiresDetail: true,
   },
 ] as const;
 
@@ -479,12 +540,13 @@ function makeTemplateCatalog(
   return MessageTemplateCatalogSchema.parse(sets);
 }
 
-const eventTypeRows = eventTypeDefinitions.map((definition) =>
+export const eventTypeRows = eventTypeDefinitions.map((definition) =>
   EventTypeSchema.parse({
     id: definition.id,
     key: definition.key,
     familyKey: definition.familyKey,
     templateMode: definition.mode,
+    requiresDetail: definition.requiresDetail,
     createdAt: SEED_TIMESTAMP,
   }),
 );
@@ -623,9 +685,9 @@ const channelConfigurationRows = [
  * database that may already contain unrelated records.
  */
 export interface ReferenceSeedSummary {
-  readonly eventTypes: 8;
-  readonly eventTypeVersions: 8;
-  readonly eventTypeTemplates: 72;
+  readonly eventTypes: 12;
+  readonly eventTypeVersions: 12;
+  readonly eventTypeTemplates: 108;
   readonly integrationStatuses: 6;
   readonly channelConfigurations: 3;
   readonly events: 0;
@@ -645,9 +707,9 @@ export interface SeedSummary extends ReferenceSeedSummary {
 }
 
 const referenceSeedSummary: ReferenceSeedSummary = {
-  eventTypes: 8,
-  eventTypeVersions: 8,
-  eventTypeTemplates: 72,
+  eventTypes: 12,
+  eventTypeVersions: 12,
+  eventTypeTemplates: 108,
   integrationStatuses: 6,
   channelConfigurations: 3,
   events: 0,
@@ -674,17 +736,22 @@ const seedSummary: SeedSummary = {
  */
 export async function seedReferenceData(
   database: Database,
+  options: ReferenceSeedOptions = {},
 ): Promise<ReferenceSeedSummary> {
   await database.transaction(async (transaction) => {
-    await transaction
-      .insert(eventTypes)
-      .values(
-        eventTypeRows.map((eventType) => ({
-          ...eventType,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
+    if (options.insertEventTypes !== undefined) {
+      await options.insertEventTypes(transaction);
+    } else {
+      await transaction
+        .insert(eventTypes)
+        .values(
+          eventTypeRows.map((eventType) => ({
+            ...eventType,
+            createdAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
     await transaction
       .insert(eventTypeVersions)
       .values(
@@ -870,7 +937,22 @@ export interface SeedDatabaseOptions {
   readonly insertThreats?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
+  /**
+   * Writes the event types in place of the seed. A fixture held at a migration
+   * before `0047_threat_on_activation` has no `requires_detail` column, and
+   * Drizzle emits every column of a table it inserts into, so the fixture
+   * writes the rows with the columns its schema actually has.
+   */
+  readonly insertEventTypes?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
 }
+
+/** The reference seed only ever needs the event type override. */
+export type ReferenceSeedOptions = Pick<
+  SeedDatabaseOptions,
+  'insertEventTypes'
+>;
 
 export async function seedDatabase(
   database: Database,
@@ -1086,7 +1168,7 @@ export async function seedDatabase(
     }
   });
 
-  await seedReferenceData(database);
+  await seedReferenceData(database, options);
 
   return seedSummary;
 }

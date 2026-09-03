@@ -122,7 +122,7 @@ const descriptions = Object.freeze({
   'create-activation-preview': Object.freeze({
     title: 'Create activation consequence preview',
     description:
-      'Create a short-lived consequence preview for a human-operated activation flow. This only prepares information; it never activates an event or sends a notification.',
+      'Create a short-lived consequence preview for a human-operated activation flow from a site, a mode, a threat (see list-threats, with a typed description when the threat requires one), and a response. This only prepares information; it never activates an event or sends a notification.',
   }),
   'prepare-activation': Object.freeze({
     title: 'Prepare activation for human confirmation',

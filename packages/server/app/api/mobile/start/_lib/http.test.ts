@@ -27,6 +27,7 @@ const IDS = {
   preview: '51000000-0000-4000-8000-000000000006',
   eventType: '51000000-0000-4000-8000-000000000007',
   confirmation: '51000000-0000-4000-8000-000000000008',
+  threat: '51000000-0000-4000-8000-000000000009',
 } as const;
 
 const NOW = new Date('2026-08-11T17:00:00.000Z');
@@ -162,6 +163,9 @@ function previewInput(): CapabilityInput<'create-activation-preview'> {
       templateMode: 'drill',
     },
     rosterPopulation: 'staff',
+    threatId: IDS.threat,
+    threatDetail: null,
+    responseDetail: null,
   };
 }
 

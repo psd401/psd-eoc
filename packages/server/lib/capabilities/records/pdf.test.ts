@@ -230,6 +230,8 @@ function snapshot(
       id: '10000000-0000-4000-8000-000000000020',
       name: 'Synthetic lockdown drill',
     },
+    threat: { name: 'Synthetic earthquake', detail: null },
+    responseDetail: null,
     recordedParticipantCount: 17,
     journal: options.journal ?? baseJournal(),
     photos: [

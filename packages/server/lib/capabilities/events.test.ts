@@ -69,6 +69,7 @@ const IDS = Object.freeze({
   existingEvent: uuid(16),
   activationRequest: uuid(17),
   activationConfirmation: uuid(18),
+  threat: uuid(20),
 });
 
 const TIMES = Object.freeze({
@@ -599,6 +600,12 @@ const REAL_TARGET = Object.freeze({
   rosterPopulation: 'staff' as const,
 });
 
+const SEED_THREAT = Object.freeze({
+  id: IDS.threat,
+  name: 'Synthetic wildlife',
+  detail: null,
+});
+
 function integrationStatus(
   channel: 'push' | 'email',
   population: RosterPopulation,
@@ -700,6 +707,8 @@ function activationPreview(
     sendReadiness: 'ready',
     blockingReasonCodes: [],
     activeEventIds: input.activeEventIds ?? [],
+    threat: SEED_THREAT,
+    responseDetail: null,
     consequenceDigest: input.consequenceDigest ?? 'a'.repeat(64),
     createdAt,
     expiresAt: input.expiresAt ?? TIMES.previewExpires,
@@ -750,6 +759,8 @@ function controlledSmsActivationPreview(): ActivationPreview {
       targetSet: { id: uuid(19), version: 1 },
       endpointReferenceDigest: 'c'.repeat(64),
     },
+    threat: null,
+    responseDetail: null,
     consequenceDigest: 'd'.repeat(64),
     createdAt: TIMES.previewCreated,
     expiresAt: TIMES.previewExpires,
@@ -817,6 +828,8 @@ function activeEvent(
     rosterSnapshotId: IDS.rosterSnapshot,
     rosterPopulation: target.rosterPopulation,
     createdBy: requiresHuman ? HUMAN_ACTOR : AGENT_ACTOR,
+    threat: SEED_THREAT,
+    responseDetail: null,
     createdAt: TIMES.eventCreated,
     activatedAt: TIMES.eventActivated,
     allClearAt: status === 'active' ? null : TIMES.seededAllClear,

@@ -280,6 +280,7 @@ describeWithDatabase('event-type database versioning', () => {
         key,
         familyKey: key,
         templateMode: 'real' as const,
+        requiresDetail: false,
       },
       name: 'Secure',
       description: 'Synthetic event type used only by the database test.',
@@ -436,6 +437,7 @@ describeWithDatabase('event-type database versioning', () => {
         key,
         familyKey: key,
         templateMode: 'real' as const,
+        requiresDetail: false,
       },
       name: 'Gas Leak',
       description: 'Original response wording.',
@@ -513,6 +515,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Shelter',
         description: 'Base version for independent draft concurrency.',
@@ -654,6 +657,7 @@ describeWithDatabase('event-type database versioning', () => {
         key,
         familyKey: key,
         templateMode: 'drill' as const,
+        requiresDetail: false,
       },
       name: 'Secure Drill',
       description: 'Original exact content.',
@@ -792,6 +796,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Medical',
         description: null,
@@ -933,6 +938,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Wildlife',
         description: 'A draft whose final author must remain attributable.',
@@ -1020,6 +1026,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real' as const,
+          requiresDetail: false,
         },
         name: 'Modified Lockdown',
         description: 'Original draft awaiting a concurrent edit.',
@@ -1156,6 +1163,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'drill',
+          requiresDetail: false,
         },
         name: 'Shelter Drill',
         description: null,
@@ -1224,6 +1232,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Fire',
         description: null,
@@ -1290,7 +1299,7 @@ describeWithDatabase('event-type database versioning', () => {
     });
   });
 
-  test('renders reviewed lock-screen seed copy for all four real/drill families', async () => {
+  test('renders reviewed lock-screen seed copy for all six real/drill families', async () => {
     const store = new DrizzleEventTypeStore(databaseConnection().db);
     const page = await store.list({
       templateMode: null,
@@ -1303,10 +1312,14 @@ describeWithDatabase('event-type database versioning', () => {
       'Lockdown Drill',
       'Modified Lockdown',
       'Modified Lockdown Drill',
-      'Medical',
-      'Medical Drill',
-      'Wildlife',
-      'Wildlife Drill',
+      'Evacuation',
+      'Evacuation Drill',
+      'No Evacuation',
+      'No Evacuation Drill',
+      'Shelter in Place',
+      'Shelter in Place Drill',
+      'Other',
+      'Other Drill',
     ]);
     const seeded = page.items.filter((item) =>
       expected.has(item.latestVersion.name),
@@ -1373,6 +1386,7 @@ describeWithDatabase('event-type database versioning', () => {
             key,
             familyKey: key,
             templateMode,
+            requiresDetail: false,
           },
           name,
           description: null,
@@ -1411,6 +1425,7 @@ describeWithDatabase('event-type database versioning', () => {
               key,
               familyKey: key,
               templateMode: 'real',
+              requiresDetail: false,
             },
             name,
             description: null,
@@ -1453,6 +1468,7 @@ describeWithDatabase('event-type database versioning', () => {
         key,
         familyKey: key,
         templateMode: 'real' as const,
+        requiresDetail: false,
       },
       name: 'Secure',
       description: 'The browser-local draft identifier will be lost.',
@@ -1578,6 +1594,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real' as const,
+          requiresDetail: false,
         },
         name,
         description: `Concurrent recovery request ${index + 1}.`,
@@ -1675,6 +1692,7 @@ describeWithDatabase('event-type database versioning', () => {
           key: recoveryFirstKey,
           familyKey: recoveryFirstKey,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Secure',
         description: 'Original draft before a forced recovery-first race.',
@@ -1694,6 +1712,7 @@ describeWithDatabase('event-type database versioning', () => {
         key: recoveryFirstKey,
         familyKey: recoveryFirstKey,
         templateMode: 'real' as const,
+        requiresDetail: false,
       },
       name: 'Hold',
       description: 'Recovered while publication was waiting.',
@@ -1794,6 +1813,7 @@ describeWithDatabase('event-type database versioning', () => {
           key: publishFirstKey,
           familyKey: publishFirstKey,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Shelter',
         description: 'Original draft before a forced publish-first race.',
@@ -1831,6 +1851,7 @@ describeWithDatabase('event-type database versioning', () => {
               key: publishFirstKey,
               familyKey: publishFirstKey,
               templateMode: 'real',
+              requiresDetail: false,
             },
             name: 'Evacuate',
             description: 'A recovery request queued behind publication.',
@@ -1892,6 +1913,7 @@ describeWithDatabase('event-type database versioning', () => {
           key,
           familyKey: key,
           templateMode: 'real',
+          requiresDetail: false,
         },
         name: 'Secure',
         description: null,
@@ -1925,6 +1947,7 @@ describeWithDatabase('event-type database versioning', () => {
             key,
             familyKey: `other-${randomUUID()}`,
             templateMode: 'real',
+            requiresDetail: false,
           },
           name: 'Hold',
           description: null,
@@ -1936,7 +1959,7 @@ describeWithDatabase('event-type database versioning', () => {
     ).rejects.toMatchObject({
       code: 'CONFLICT',
       message:
-        'The stable event-type key belongs to a different immutable family or mode.',
+        'The stable event-type key belongs to a different immutable family, mode, or description rule.',
       status: 409,
     });
     await expect(
@@ -1947,6 +1970,7 @@ describeWithDatabase('event-type database versioning', () => {
             key,
             familyKey: key,
             templateMode: 'drill',
+            requiresDetail: false,
           },
           name: 'Secure Drill',
           description: null,
@@ -1958,7 +1982,7 @@ describeWithDatabase('event-type database versioning', () => {
     ).rejects.toMatchObject({
       code: 'CONFLICT',
       message:
-        'The stable event-type key belongs to a different immutable family or mode.',
+        'The stable event-type key belongs to a different immutable family, mode, or description rule.',
       status: 409,
     });
 

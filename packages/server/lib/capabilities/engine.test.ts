@@ -367,6 +367,8 @@ const SYNTHETIC_ACTIVE_EVENT = Object.freeze({
   status: 'active' as const,
   rosterSnapshotId: IDS.rosterSnapshot,
   rosterPopulation: 'synthetic' as const,
+  threat: null,
+  responseDetail: null,
   createdBy: AGENT_ACTOR,
   createdAt: TIMES.created,
   activatedAt: TIMES.activated,
@@ -475,6 +477,8 @@ function createEventRoomSyncRegistration(fail = false): Readonly<{
               name: 'Synthetic Exercise',
               templateMode: 'drill',
             },
+            threat: null,
+            responseDetail: null,
           },
           event: SYNTHETIC_ACTIVE_EVENT,
           entries: [],
@@ -558,6 +562,8 @@ function createCloseRegistration(): Readonly<{
           status: 'closed' as const,
           rosterSnapshotId: IDS.rosterSnapshot,
           rosterPopulation: 'staff' as const,
+          threat: null,
+          responseDetail: null,
           createdBy: HUMAN_ACTOR,
           createdAt: TIMES.created,
           activatedAt: TIMES.activated,
@@ -977,6 +983,8 @@ describe('capability engine', () => {
         name: 'Synthetic Exercise',
         templateMode: 'drill',
       },
+      threat: null,
+      responseDetail: null,
     });
 
     for (const [index, source] of ['agent-rest', 'mcp'].entries()) {

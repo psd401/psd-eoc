@@ -106,6 +106,7 @@ import {
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
+import { activationThreatFromColumns } from './start-preview';
 import {
   authorDisplayNameForRow,
   resolveActorDisplayName,
@@ -255,6 +256,8 @@ function eventFromRow(row: typeof events.$inferSelect): Event {
     status: row.status,
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    threat: activationThreatFromColumns(row),
+    responseDetail: row.responseDetail ?? null,
     createdBy: row.createdBy,
     createdAt: dateIso(row.createdAt),
     activatedAt: row.activatedAt === null ? null : dateIso(row.activatedAt),
@@ -292,6 +295,8 @@ function activationPreviewFromRow(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    threat: activationThreatFromColumns(row),
+    responseDetail: row.responseDetail ?? null,
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -1740,6 +1745,9 @@ function drillRecordFromDatabaseRow(row: DrillRecordDatabaseRow): DrillRecord {
       templateMode: 'drill',
     },
     eventTypeName: row.eventTypeName,
+    threatName: event.threatName ?? null,
+    threatDetail: event.threatDetail ?? null,
+    responseDetail: event.responseDetail ?? null,
     status: event.status,
     startedAt: dateIso(event.activatedAt),
     allClearAt: event.allClearAt === null ? null : dateIso(event.allClearAt),
@@ -1846,6 +1854,9 @@ function eventRecordFromDatabaseRow(row: DrillRecordDatabaseRow): EventRecord {
       templateMode: event.templateMode,
     },
     eventTypeName: row.eventTypeName,
+    threatName: event.threatName ?? null,
+    threatDetail: event.threatDetail ?? null,
+    responseDetail: event.responseDetail ?? null,
     status: event.status,
     startedAt: dateIso(event.activatedAt),
     allClearAt: event.allClearAt === null ? null : dateIso(event.allClearAt),

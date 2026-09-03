@@ -1,14 +1,17 @@
 import {
   ACTIVATION_PREVIEW_MAX_AGE_SECONDS,
   ActivationPreviewSchema,
+  ActivationSelectionSchema,
+  ActivationThreatSchema,
   ChannelConfigurationSchema,
-  CreateActivationPreviewInputSchema,
   EventTypeVersionSchema,
   FacilitySchema,
+  OperatorDetailSchema,
   type ActivationPreview,
+  type ActivationSelection,
+  type ActivationThreat,
   type Actor,
   type ChannelConfiguration,
-  type CreateActivationPreviewInput,
   type DeliveryTestNotificationMetadata,
   type DeliveryTestTargetEndpointRef,
   type EventTypeVersion,
@@ -47,7 +50,8 @@ export type ActivationPreviewBuildErrorCode =
   | 'EVENT_TYPE_UNAVAILABLE'
   | 'FACILITY_UNAVAILABLE'
   | 'INITIATOR_UNAVAILABLE'
-  | 'PREVIEW_TIME_INVALID';
+  | 'PREVIEW_TIME_INVALID'
+  | 'THREAT_UNAVAILABLE';
 
 /** A bounded preview construction failure that never exposes roster content. */
 export class ActivationPreviewBuildError extends Error {
@@ -62,6 +66,7 @@ export class ActivationPreviewBuildError extends Error {
         FACILITY_UNAVAILABLE: 'The selected facility is unavailable.',
         INITIATOR_UNAVAILABLE: 'The initiating identity is unavailable.',
         PREVIEW_TIME_INVALID: 'The activation preview time is invalid.',
+        THREAT_UNAVAILABLE: 'The selected threat is unavailable.',
       }[code],
     );
     this.name = 'ActivationPreviewBuildError';
@@ -71,7 +76,14 @@ export class ActivationPreviewBuildError extends Error {
 /** Complete immutable evidence needed to build one activation preview. */
 export interface ActivationPreviewEvidence {
   readonly id: string;
-  readonly selection: CreateActivationPreviewInput;
+  readonly selection: ActivationSelection;
+  /**
+   * The threat the operator chose, resolved against the catalog by the
+   * caller. Null only for a monthly delivery test, which has no threat.
+   */
+  readonly threat: ActivationThreat | null;
+  /** The operator's words for an "Other" response, when one was required. */
+  readonly responseDetail: string | null;
   readonly facility: Facility;
   readonly eventTypeVersion: EventTypeVersion;
   readonly rosterSnapshot: RosterSnapshot;
@@ -151,8 +163,13 @@ function confirmationBoundActivationTemplates(
 export function buildActivationPreview(
   evidenceValue: ActivationPreviewEvidence,
 ): ActivationPreview {
-  const selection = CreateActivationPreviewInputSchema.parse(
-    evidenceValue.selection,
+  const selection = ActivationSelectionSchema.parse(evidenceValue.selection);
+  const threat =
+    evidenceValue.threat === null
+      ? null
+      : ActivationThreatSchema.parse(evidenceValue.threat);
+  const responseDetail = OperatorDetailSchema.nullable().parse(
+    evidenceValue.responseDetail,
   );
   const facility = FacilitySchema.parse(evidenceValue.facility);
   const eventTypeVersion = EventTypeVersionSchema.parse(
@@ -176,6 +193,9 @@ export function buildActivationPreview(
   }
   if (evidenceValue.rosterSnapshot.population !== selection.rosterPopulation) {
     throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
+  }
+  if (threat === null && evidenceValue.deliveryTest === undefined) {
+    throw new ActivationPreviewBuildError('THREAT_UNAVAILABLE');
   }
   if (
     evidenceValue.initiator.kind === 'system' ||
@@ -354,6 +374,10 @@ export function buildActivationPreview(
     eventTypeVersion: selection.eventTypeVersion,
     rosterSnapshotId: resolvedAudience.rosterSnapshot.id,
     rosterPopulation: resolvedAudience.rosterSnapshot.population,
+    // Both are inside the digest a human signs, so a preview cannot be
+    // consumed for a different threat or a different typed description.
+    threat,
+    responseDetail,
 
     recipientCount,
     channels,
@@ -375,5 +399,29 @@ export function buildActivationPreview(
       capabilityId: 'start-event',
       consequence,
     }),
+  });
+}
+
+/**
+ * Rebuilds the pinned threat from the three columns a preview or event row
+ * carries. The name is the snapshot taken when the operator chose, so a
+ * record reads the same after the catalog changes.
+ */
+export function activationThreatFromColumns(
+  row: Readonly<{
+    threatId: string | null;
+    threatName: string | null;
+    threatDetail: string | null;
+  }>,
+): ActivationThreat | null {
+  // Loose equality on purpose: a partial projection or a transport fake may
+  // omit the columns entirely, and an absent threat is still no threat.
+  if (row.threatId == null || row.threatName == null) {
+    return null;
+  }
+  return ActivationThreatSchema.parse({
+    id: row.threatId,
+    name: row.threatName,
+    detail: row.threatDetail,
   });
 }

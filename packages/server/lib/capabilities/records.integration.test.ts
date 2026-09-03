@@ -775,7 +775,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     }
     const csvText = new TextDecoder().decode(csvArtifact.bytes);
     expect(csvText).toStartWith(
-      'site,date,time,type,duration,participants_count\r\n',
+      'site,date,time,threat,type,duration,participants_count\r\n',
     );
     expect(csvText).toContain('[DRILL] Lockdown Drill');
     expect(csvText).toContain('[TEST] Lockdown Drill');

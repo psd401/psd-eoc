@@ -64,6 +64,8 @@ function activeEvent(
     status: 'active',
     rosterSnapshotId: IDS.roster,
     rosterPopulation: real ? 'staff' : 'synthetic',
+    threat: null,
+    responseDetail: null,
     createdBy: ACTOR,
     createdAt: '2026-08-10T16:00:00.000Z',
     activatedAt: '2026-08-10T16:01:00.000Z',

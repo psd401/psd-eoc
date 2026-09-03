@@ -391,7 +391,20 @@ export function EventRoom({
         <div className="event-heading">
           <div>
             <p className="facility-name">{facilityLabel}</p>
-            <h1>{eventTypeLabel}</h1>
+            <h1>
+              {eventTypeLabel}
+              {currentEvent.responseDetail === null
+                ? null
+                : ` — ${currentEvent.responseDetail}`}
+            </h1>
+            <p className="event-threat">
+              <span className="event-threat__label">Threat</span>{' '}
+              {currentEvent.threat === null
+                ? 'Not recorded'
+                : currentEvent.threat.detail === null
+                  ? currentEvent.threat.name
+                  : `${currentEvent.threat.name} — ${currentEvent.threat.detail}`}
+            </p>
             <dl className="event-facts">
               <dt>Status</dt>
               <dd>

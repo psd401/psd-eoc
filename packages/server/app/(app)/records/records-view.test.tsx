@@ -51,6 +51,9 @@ function record(kind: 'incident' | 'drill' | 'test'): EventRecord {
         : kind === 'drill'
           ? 'Earthquake Drill'
           : 'System Test',
+    threatName: kind === 'test' ? null : 'Earthquake',
+    threatDetail: null,
+    responseDetail: null,
     status: 'closed',
     startedAt: '2026-08-10T16:00:00.000Z',
     allClearAt: '2026-08-10T16:14:00.000Z',
@@ -78,7 +81,10 @@ describe('operational records view', () => {
     expect(html).toContain('REAL INCIDENT');
     expect(html).toContain('<th scope="col">Date</th>');
     expect(html).toContain('<th scope="col">Time</th>');
-    expect(html).toContain('<th scope="col">Type</th>');
+    expect(html).toContain('<th scope="col">Threat</th>');
+    expect(html).toContain('<th scope="col">Response</th>');
+    expect(html).toContain('<span>Earthquake</span>');
+    expect(html).toContain('Not recorded');
     expect(html).toContain('August 10, 2026');
     expect(html).toContain('9:00:00 AM PDT');
     expect(html).toContain('DRILL — TRAINING ONLY');
