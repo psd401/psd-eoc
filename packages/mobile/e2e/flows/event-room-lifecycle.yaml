@@ -6,7 +6,7 @@ tags: [issue-32, synthetic-only, event-room]
     condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
     label: Refuse lifecycle mutations outside the synthetic harness
 - extendedWaitUntil:
-    visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'
+    visible: 'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.'
     timeout: 30000
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertNotVisible: '^REAL INCIDENT$'

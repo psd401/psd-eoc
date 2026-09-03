@@ -81,6 +81,9 @@ function selection(
       templateMode: 'drill',
     },
     rosterPopulation: 'synthetic',
+    threatId: '71000000-0000-4000-8000-000000000028',
+    threatDetail: null,
+    responseDetail: null,
   });
 }
 
@@ -285,11 +288,12 @@ describe('issue-21 synthetic Maestro transport', () => {
     ).rejects.toMatchObject({ name: 'AbortError' });
   });
 
-  test('runs the complete three-tap data path without a provider transport', async () => {
+  test('runs the complete four-tap data path without a provider transport', async () => {
     const request = fixtureRequest();
     const home = await loadStartHomeData(request);
     expect(home.facilities).toHaveLength(1);
     expect(home.eventTypes).toHaveLength(1);
+    expect(home.threats).toHaveLength(1);
     expect(home.activeEvents).toHaveLength(1);
 
     const facility = home.facilities[0];
@@ -419,6 +423,9 @@ describe('issue-21 synthetic Maestro transport', () => {
               templateMode: 'real',
             },
             rosterPopulation: 'staff',
+            threatId: '71000000-0000-4000-8000-000000000028',
+            threatDetail: null,
+            responseDetail: null,
           },
           idempotencyKey: PREVIEW_IDEMPOTENCY_KEY,
           schema: ActivationPreviewSchema,

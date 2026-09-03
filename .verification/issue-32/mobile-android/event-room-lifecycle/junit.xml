@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="18.19" timestamp="2026-08-30T18:13:03">
-    <testcase id="Issue 32 - post text and end the opened drill" name="Issue 32 - post text and end the opened drill" classname="Issue 32 - post text and end the opened drill" file="packages/mobile/e2e/flows/event-room-lifecycle.yaml" time="18.178" timestamp="2026-08-30T18:13:03" status="SUCCESS">
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="17.702" timestamp="2026-09-03T14:44:18">
+    <testcase id="Issue 32 - post text and end the opened drill" name="Issue 32 - post text and end the opened drill" classname="Issue 32 - post text and end the opened drill" file="packages/mobile/e2e/flows/event-room-lifecycle.yaml" time="17.684" timestamp="2026-09-03T14:44:18" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only, event-room"/>
       </properties>

@@ -26,8 +26,8 @@ The synthetic-mode assertion runs before the first tap. Do not remove it, point
 these flows at production, use staff recipient data, or enable a live provider.
 The action taps select the same complete accessibility labels announced by
 VoiceOver and TalkBack, rather than relying on screen coordinates. The
-start-drill flow contains exactly three `tapOn` commands: site + mode, event
-type, and final human confirmation.
+start-drill flow contains exactly four `tapOn` commands: site + mode, threat,
+response, and final human confirmation.
 
 These label-driven scripts verify the native accessibility hierarchy, not the
 quality of synthesized speech or platform gestures. Before release, a human

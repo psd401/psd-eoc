@@ -12,6 +12,7 @@ import {
   JoinEventResultSchema,
   StartEventInputSchema,
   StartEventResultSchema,
+  ThreatPageSchema,
   type ActivationPreview,
   type ApiErrorCode,
   type CreateActivationPreviewInput,
@@ -20,6 +21,7 @@ import {
   type Facility,
   type JoinEventResult,
   type StartEventResult,
+  type Threat,
 } from '@psd-eoc/contracts';
 
 import {
@@ -43,6 +45,8 @@ export interface StartHomeActiveEvent {
 export interface StartHomeData {
   readonly facilities: readonly Facility[];
   readonly eventTypes: readonly EventTypeListItem[];
+  /** Selectable threats in the district's declared order. */
+  readonly threats: readonly Threat[];
   readonly activeEvents: readonly StartHomeActiveEvent[];
 }
 
@@ -295,7 +299,7 @@ async function historicalEventTypeName(
 export async function loadStartHomeData(
   request: StartAuthenticatedRequest,
 ): Promise<StartHomeData> {
-  const [facilities, eventTypes, activeEvents] = await Promise.all([
+  const [facilities, eventTypes, threats, activeEvents] = await Promise.all([
     loadAllPages<Facility>(
       request,
       '/api/mobile/start/facilities',
@@ -305,6 +309,11 @@ export async function loadStartHomeData(
       request,
       '/event-types/api?operation=list&enabled=true',
       EventTypePageSchema,
+    ),
+    loadAllPages<Threat>(
+      request,
+      '/api/mobile/start/threats',
+      ThreatPageSchema,
     ),
     loadAllPages<Event>(request, '/api/events', EventPageSchema),
   ]);
@@ -343,6 +352,7 @@ export async function loadStartHomeData(
     // still-active event, but can never be offered as a new start target.
     facilities: Object.freeze(facilities.filter((facility) => facility.active)),
     eventTypes,
+    threats: Object.freeze(threats.filter((threat) => threat.active)),
     activeEvents: Object.freeze(
       activeEvents.map((event) =>
         Object.freeze({
@@ -389,7 +399,11 @@ export async function createPreview(
     preview.kind !== selection.kind ||
     preview.templateMode !== selection.templateMode ||
     preview.rosterPopulation !== selection.rosterPopulation ||
-    !sameVersion(preview.eventTypeVersion, selection.eventTypeVersion)
+    !sameVersion(preview.eventTypeVersion, selection.eventTypeVersion) ||
+    preview.threat === null ||
+    preview.threat.id !== selection.threatId ||
+    preview.threat.detail !== selection.threatDetail ||
+    preview.responseDetail !== selection.responseDetail
   ) {
     throw requestFailure(
       'preview',

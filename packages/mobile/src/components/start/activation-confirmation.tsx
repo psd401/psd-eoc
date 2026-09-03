@@ -26,6 +26,8 @@ export interface ActivationConfirmationProps {
   readonly rosterPopulation: RosterPopulation;
   readonly sendReadiness: ActivationPreview['sendReadiness'];
   readonly testID?: string;
+  /** The chosen threat, with the operator's words when it required them. */
+  readonly threatLabel: string;
 }
 
 type PreviewChannel = ActivationPreview['channels'][number];
@@ -97,6 +99,7 @@ export function ActivationConfirmation({
   rosterPopulation,
   sendReadiness,
   testID,
+  threatLabel,
 }: ActivationConfirmationProps) {
   const theme = getEventTheme(mode, eventKind);
   const classification = theme.classificationWord;
@@ -124,6 +127,9 @@ export function ActivationConfirmation({
         </Text>
         <Text style={[styles.summaryText, { color: theme.colors.textPrimary }]}>
           {eventTypeName} at {facilityName}
+        </Text>
+        <Text style={[styles.summaryText, { color: theme.colors.textPrimary }]}>
+          Threat: {threatLabel}
         </Text>
         <Text style={[styles.audience, { color: theme.colors.textPrimary }]}>
           {audience}
@@ -165,7 +171,7 @@ export function ActivationConfirmation({
         </Text>
         <Text style={styles.consequencesIntroduction}>
           {/* Reach, not copy. The operator is deciding whether to start an
-              event; the wording is configured per event type and is not
+              event; the wording is configured per response and is not
               theirs to change here, so printing every rendered body buried
               the decision under boilerplate. */}
           Starting this {classification} notifies staff on these channels.

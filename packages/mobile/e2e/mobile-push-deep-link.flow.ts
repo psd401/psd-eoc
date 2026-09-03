@@ -27,7 +27,7 @@ export async function verifyMobilePushDeepLinkFlow(): Promise<void> {
         ? flow.includes('start: 50%, 83%') &&
           flow.includes('point: 15%, 83%') &&
           flow.includes(
-            'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+            'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.',
           )
         : flow.includes("'\\[DRILL\\] Synthetic earthquake drill'");
     assert(

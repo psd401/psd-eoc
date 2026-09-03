@@ -20,6 +20,7 @@ import {
   SessionEstablishmentResultSchema,
   StartEventInputSchema,
   StartEventResultSchema,
+  ThreatPageSchema,
   UnregisterPushTokenInputSchema,
   projectJournalEntryForRead,
   type ActivationPreview,
@@ -73,7 +74,10 @@ const IDS = Object.freeze({
   allClearIntent: uuid(25),
   closeTransition: uuid(26),
   closeJournal: uuid(27),
+  threat: uuid(28),
 });
+
+const SYNTHETIC_THREAT_NAME = 'Synthetic wildlife';
 
 const FIXTURE_CREATED_AT = '2026-08-11T17:00:00.000Z';
 const FIXTURE_DIGEST = 'a'.repeat(64);
@@ -173,6 +177,8 @@ function activeEvent(
     status: 'active',
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
+    threat: { id: IDS.threat, name: SYNTHETIC_THREAT_NAME, detail: null },
+    responseDetail: null,
     createdBy: {
       kind: 'human',
       userId: IDS.user,
@@ -491,6 +497,8 @@ function activationPreview(now: Date): ActivationPreview {
     },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
+    threat: { id: IDS.threat, name: SYNTHETIC_THREAT_NAME, detail: null },
+    responseDetail: null,
     recipientCount: 2,
     channels: mockedChannelConsequences(),
     sendReadiness: 'ready',
@@ -591,7 +599,10 @@ function assertSyntheticPreviewSelection(input: unknown): void {
     selection.templateMode !== 'drill' ||
     selection.eventTypeVersion.id !== IDS.eventTypeVersion ||
     selection.eventTypeVersion.templateMode !== 'drill' ||
-    selection.rosterPopulation !== 'synthetic'
+    selection.rosterPopulation !== 'synthetic' ||
+    selection.threatId !== IDS.threat ||
+    selection.threatDetail !== null ||
+    selection.responseDetail !== null
   ) {
     throw new TypeError(
       'The issue-21 fixture accepts only its exact synthetic drill selection.',
@@ -885,6 +896,27 @@ export function createIssue21SyntheticFixtureTransport(
 
       if (
         input.method === 'GET' &&
+        input.path === '/api/mobile/start/threats'
+      ) {
+        payload = ThreatPageSchema.parse({
+          items: [
+            {
+              id: IDS.threat,
+              key: 'issue-21-synthetic-wildlife',
+              name: SYNTHETIC_THREAT_NAME,
+              sortOrder: 0,
+              requiresDetail: false,
+              active: true,
+              createdAt: FIXTURE_CREATED_AT,
+            },
+          ],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+        return input.schema.parse(payload);
+      }
+
+      if (
+        input.method === 'GET' &&
         input.path === '/event-types/api?operation=list&enabled=true'
       ) {
         payload = EventTypePageSchema.parse({
@@ -895,6 +927,7 @@ export function createIssue21SyntheticFixtureTransport(
                 key: 'issue-21-synthetic-earthquake',
                 familyKey: 'issue-21-synthetic-earthquake',
                 templateMode: 'drill',
+                requiresDetail: false,
                 createdAt: FIXTURE_CREATED_AT,
               },
               latestVersion: version,
@@ -1060,6 +1093,12 @@ export function createIssue21SyntheticFixtureTransport(
                 name: version.name,
                 templateMode: 'drill',
               },
+              threat: {
+                id: IDS.threat,
+                name: SYNTHETIC_THREAT_NAME,
+                detail: null,
+              },
+              responseDetail: null,
             },
             event: currentEvent,
             entries: initial

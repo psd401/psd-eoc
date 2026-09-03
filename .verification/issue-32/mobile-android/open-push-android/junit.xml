@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="9.212" timestamp="2026-08-30T18:12:37">
-    <testcase id="Issue 32 - open the synthetic drill notification on Android" name="Issue 32 - open the synthetic drill notification on Android" classname="Issue 32 - open the synthetic drill notification on Android" file="packages/mobile/e2e/flows/open-push-android.yaml" time="9.199" timestamp="2026-08-30T18:12:38" status="SUCCESS">
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="5.418" timestamp="2026-09-03T14:43:52">
+    <testcase id="Issue 32 - open the synthetic drill notification on Android" name="Issue 32 - open the synthetic drill notification on Android" classname="Issue 32 - open the synthetic drill notification on Android" file="packages/mobile/e2e/flows/open-push-android.yaml" time="5.409" timestamp="2026-09-03T14:43:52" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only, notification, android"/>
       </properties>

@@ -4,6 +4,7 @@ import type {
   EventTypeListItem,
   FacilityId,
   TemplateMode,
+  Threat,
 } from '@psd-eoc/contracts';
 
 export type ActivationPreviewBinding = Readonly<{
@@ -11,7 +12,12 @@ export type ActivationPreviewBinding = Readonly<{
   facilityId: FacilityId | null;
   mode: TemplateMode | null;
   preview: ActivationPreview | null;
+  selectedThreat: Threat | null;
+  /** The operator's words for an "Other" threat; null when not required. */
+  threatDetail: string | null;
   selectedType: EventTypeListItem | null;
+  /** The operator's words for an "Other" response; null when not required. */
+  responseDetail: string | null;
 }>;
 
 function activeEventIdsMatchFacility(
@@ -43,15 +49,27 @@ function activeEventIdsMatchFacility(
  * Route parameters and React state can change before an effect clears an old
  * preview. Every caller must therefore derive confirmation UI and submission
  * from this synchronous result instead of trusting the stored preview alone.
+ * The threat and both typed descriptions are part of the binding: a preview
+ * for a different threat or different words is never shown for confirmation.
  */
 export function getBoundActivationPreview(
   binding: ActivationPreviewBinding,
 ): ActivationPreview | null {
-  const { activeEvents, facilityId, mode, preview, selectedType } = binding;
+  const {
+    activeEvents,
+    facilityId,
+    mode,
+    preview,
+    responseDetail,
+    selectedThreat,
+    selectedType,
+    threatDetail,
+  } = binding;
   if (
     facilityId === null ||
     mode === null ||
     preview === null ||
+    selectedThreat === null ||
     selectedType === null
   ) {
     return null;
@@ -66,6 +84,10 @@ export function getBoundActivationPreview(
     preview.templateMode !== mode ||
     preview.eventTypeVersion.id !== latestVersion.id ||
     preview.eventTypeVersion.templateMode !== mode ||
+    preview.threat === null ||
+    preview.threat.id !== selectedThreat.id ||
+    preview.threat.detail !== threatDetail ||
+    preview.responseDetail !== responseDetail ||
     !activeEventIdsMatchFacility(preview, activeEvents)
   ) {
     return null;

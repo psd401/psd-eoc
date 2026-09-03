@@ -44,6 +44,13 @@ tags: [issue-32, synthetic-only]
 - tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'
 - scroll
 - assertVisible:
+    id: 'issue-21-drill-threat'
+- assertVisible: 'DRILL — TRAINING ONLY. Threat Synthetic wildlife'
+- tapOn:
+    id: 'issue-21-drill-threat'
+- assertVisible: 'Threat: Synthetic wildlife'
+- scroll
+- assertVisible:
     id: 'issue-21-drill-event-type'
 - assertVisible: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'
 - tapOn:
