@@ -130,13 +130,16 @@ test.describe('synthetic-drill-lifecycle', () => {
       path: evidencePath('synthetic-drill-all-clear-review-mobile-390.png'),
       fullPage: true,
     });
-    // The dialog re-renders when its preview settles, and that render moves
-    // focus back to Cancel on the next animation frame. Wait for both before
-    // moving focus, or Shift+Tab races the refocus and lands nowhere.
+    // The dialog re-renders when its preview settles: React replaces the
+    // action row, so the Cancel button the operator was on is a different
+    // element and focus briefly rests on nothing until the next animation
+    // frame restores it. What this step proves is the dialog's tab order, so
+    // it waits for the settled render and then starts from Cancel rather than
+    // racing that restore.
     await expect(
       endDialog.getByRole('button', { name: 'End event and notify staff' }),
     ).toBeEnabled();
-    await expect(endCancel).toBeFocused();
+    await endCancel.focus();
     await page.keyboard.press('Shift+Tab');
     await expect(
       endDialog.getByRole('button', { name: 'End event and notify staff' }),

@@ -1841,11 +1841,13 @@ function EventTypeEditor({
         {draft !== null && item === null
           ? `Continue unpublished ${draft.name}`
           : item === null
-            ? 'Create event type'
+            ? 'Create response'
             : `Edit ${item.latestVersion.name}`}
       </h2>
       <p className={`mode-banner ${mode}`}>
-        {mode === 'real' ? 'REAL INCIDENT TYPE' : 'DRILL — TRAINING ONLY TYPE'}
+        {mode === 'real'
+          ? 'REAL INCIDENT RESPONSE'
+          : 'DRILL — TRAINING ONLY RESPONSE'}
       </p>
       <p className="classification-note">
         Real-versus-drill mode is immutable. The renderer—not this form—starts
@@ -2223,15 +2225,15 @@ export function EventTypeAdmin({
         {recoveryOutsideFilter ? (
           <div className="error-summary" role="alert">
             <p>
-              A retained change belongs to an event type hidden by the current
+              A retained change belongs to a response hidden by the current
               filter. No new change can be sent until it is resolved.
             </p>
             <a href="/event-types/manage">
-              Show all event types and open the retained change
+              Show all responses and open the retained change
             </a>
           </div>
         ) : null}
-        <label htmlFor="event-type-picker">Event type</label>
+        <label htmlFor="event-type-picker">Response</label>
         <select
           id="event-type-picker"
           onChange={(event) => setSelectedId(event.target.value)}
@@ -2244,7 +2246,7 @@ export function EventTypeAdmin({
               {item.latestVersion.version}
             </option>
           ))}
-          <option value="new">Create a new event type</option>
+          <option value="new">Create a new response</option>
         </select>
         <p className="field-help">
           Real and drill variants are separate immutable identities. Publishing

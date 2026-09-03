@@ -183,13 +183,13 @@ export function RecordsView({
             />
           </div>
           <div className="filter-field">
-            <label htmlFor="records-event-type">Event type</label>
+            <label htmlFor="records-event-type">Response</label>
             <select
               defaultValue={filters.eventTypeId ?? ''}
               id="records-event-type"
               name="eventTypeId"
             >
-              <option value="">All event types</option>
+              <option value="">All responses</option>
               {eventTypes.map(({ eventType, latestVersion }) => (
                 <option key={eventType.id} value={eventType.id}>
                   {latestVersion.name}
