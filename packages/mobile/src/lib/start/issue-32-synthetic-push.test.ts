@@ -54,6 +54,8 @@ function event(kind: 'drill' | 'incident' = 'drill') {
     status: 'active',
     rosterSnapshotId: '71000000-0000-4000-8000-000000000004',
     rosterPopulation: kind === 'drill' ? 'synthetic' : 'staff',
+    threat: null,
+    responseDetail: null,
     createdBy: {
       kind: 'human',
       userId: '71000000-0000-4000-8000-000000000006',

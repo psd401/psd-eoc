@@ -4,6 +4,7 @@ import {
   type ActivationPreview,
   type EventTypeListItem,
   type TemplateMode,
+  type Threat,
 } from '@psd-eoc/contracts';
 import * as Crypto from 'expo-crypto';
 import * as Haptics from 'expo-haptics';
@@ -21,6 +22,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -41,6 +43,7 @@ import {
   StartMutationRecoveryBlockedAttention,
   StartMutationRecoveryCheckingAttention,
   SyntheticModeBanner,
+  ThreatChoice,
 } from '../../components/start';
 import {
   OFFLINE_ACTION_MESSAGE,
@@ -112,6 +115,20 @@ export default function StartEventScreen() {
   const [selectedType, setSelectedType] = useState<EventTypeListItem | null>(
     null,
   );
+  // The threat comes first. A threat or response that requires the
+  // operator's own words holds the flow on a short description before the
+  // next step; the trimmed words travel with the preview and the event.
+  const [selectedThreat, setSelectedThreat] = useState<Threat | null>(null);
+  const [pendingDetailThreat, setPendingDetailThreat] = useState<Threat | null>(
+    null,
+  );
+  const [threatDetail, setThreatDetail] = useState<string | null>(null);
+  const [threatDetailDraft, setThreatDetailDraft] = useState('');
+  const [pendingDetailType, setPendingDetailType] =
+    useState<EventTypeListItem | null>(null);
+  const [responseDetail, setResponseDetail] = useState<string | null>(null);
+  const [responseDetailDraft, setResponseDetailDraft] = useState('');
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ActivationPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -181,6 +198,14 @@ export default function StartEventScreen() {
     previewRequestGeneration.current += 1;
     previewInFlight.current = false;
     setSelectedType(null);
+    setSelectedThreat(null);
+    setPendingDetailThreat(null);
+    setThreatDetail(null);
+    setThreatDetailDraft('');
+    setPendingDetailType(null);
+    setResponseDetail(null);
+    setResponseDetailDraft('');
+    setDetailError(null);
     setPreview(null);
     setPreviewLoading(false);
     setPreviewError(null);
@@ -233,19 +258,121 @@ export default function StartEventScreen() {
           (item) =>
             item.eventType.templateMode === mode && item.latestVersion.enabled,
         );
+  const threats = data?.threats ?? [];
   const theme = mode === null ? null : getEventTheme(mode);
   const boundPreview = getBoundActivationPreview({
     activeEvents: data?.activeEvents.map((choice) => choice.event) ?? [],
     facilityId,
     mode,
     preview,
+    responseDetail,
+    selectedThreat,
     selectedType,
+    threatDetail,
   });
+  const threatLabel =
+    selectedThreat === null
+      ? ''
+      : threatDetail === null
+        ? selectedThreat.name
+        : `${selectedThreat.name} — ${threatDetail}`;
+  const responseLabel =
+    selectedType === null
+      ? ''
+      : responseDetail === null
+        ? selectedType.latestVersion.name
+        : `${selectedType.latestVersion.name} — ${responseDetail}`;
 
-  async function chooseEventType(item: EventTypeListItem): Promise<void> {
+  function chooseThreat(threat: Threat): void {
+    setDetailError(null);
+    if (threat.requiresDetail) {
+      setPendingDetailThreat(threat);
+      setThreatDetailDraft('');
+      AccessibilityInfo.announceForAccessibility(
+        `${threat.name}. Describe the threat in a few words, then continue.`,
+      );
+      return;
+    }
+    setThreatDetail(null);
+    setSelectedThreat(threat);
+    AccessibilityInfo.announceForAccessibility(
+      `Threat ${threat.name}. Now choose the response.`,
+    );
+  }
+
+  function continueWithThreatDetail(): void {
+    if (pendingDetailThreat === null) return;
+    const trimmed = threatDetailDraft.trim();
+    if (trimmed.length === 0) {
+      const message =
+        'Type a short description of the threat before continuing.';
+      setDetailError(message);
+      AccessibilityInfo.announceForAccessibility(message);
+      return;
+    }
+    setThreatDetail(trimmed);
+    setSelectedThreat(pendingDetailThreat);
+    setPendingDetailThreat(null);
+    setDetailError(null);
+    AccessibilityInfo.announceForAccessibility(
+      `Threat ${pendingDetailThreat.name}, ${trimmed}. Now choose the response.`,
+    );
+  }
+
+  function changeThreat(): void {
+    previewRequestGeneration.current += 1;
+    previewInFlight.current = false;
+    setSelectedThreat(null);
+    setPendingDetailThreat(null);
+    setThreatDetail(null);
+    setThreatDetailDraft('');
+    setPendingDetailType(null);
+    setResponseDetail(null);
+    setResponseDetailDraft('');
+    setDetailError(null);
+    setSelectedType(null);
+    setPreview(null);
+    setPreviewLoading(false);
+    setPreviewError(null);
+  }
+
+  function chooseResponse(item: EventTypeListItem): void {
+    setDetailError(null);
+    if (item.eventType.requiresDetail) {
+      setPendingDetailType(item);
+      setResponseDetailDraft('');
+      AccessibilityInfo.announceForAccessibility(
+        `${item.latestVersion.name}. Describe the response in a few words, then continue.`,
+      );
+      return;
+    }
+    void chooseEventType(item, null);
+  }
+
+  function continueWithResponseDetail(): void {
+    if (pendingDetailType === null) return;
+    const trimmed = responseDetailDraft.trim();
+    if (trimmed.length === 0) {
+      const message =
+        'Type a short description of the response before continuing.';
+      setDetailError(message);
+      AccessibilityInfo.announceForAccessibility(message);
+      return;
+    }
+    const item = pendingDetailType;
+    setPendingDetailType(null);
+    setDetailError(null);
+    void chooseEventType(item, trimmed);
+  }
+
+  async function chooseEventType(
+    item: EventTypeListItem,
+    itemDetail: string | null,
+  ): Promise<void> {
     if (
       facility === undefined ||
       mode === null ||
+      selectedThreat === null ||
       previewLoading ||
       previewInFlight.current
     ) {
@@ -257,7 +384,10 @@ export default function StartEventScreen() {
     const selectedFacilityId = facility.id;
     const selectedMode = mode;
     const selectedVersionId = item.latestVersion.id;
+    const chosenThreat = selectedThreat;
+    const chosenThreatDetail = threatDetail;
     setSelectedType(item);
+    setResponseDetail(itemDetail);
     setPreview(null);
     setPreviewError(null);
     setPreviewLoading(true);
@@ -273,6 +403,9 @@ export default function StartEventScreen() {
             templateMode: selectedMode,
           },
           rosterPopulation: SYNTHETIC_FIXTURE_ENABLED ? 'synthetic' : 'staff',
+          threatId: chosenThreat.id,
+          threatDetail: chosenThreatDetail,
+          responseDetail: itemDetail,
         }),
         Crypto.randomUUID(),
       );
@@ -286,7 +419,10 @@ export default function StartEventScreen() {
           facilityId: selectedFacilityId,
           mode: selectedMode,
           preview: nextPreview,
+          responseDetail: itemDetail,
+          selectedThreat: chosenThreat,
           selectedType: item,
+          threatDetail: chosenThreatDetail,
         }) !== null;
       if (!previewMatches(currentData)) {
         currentData = await loadStartHomeData(requestAuthenticated);
@@ -326,7 +462,7 @@ export default function StartEventScreen() {
   function confirmActivation(): void {
     if (boundPreview === null || selectedType === null) return;
     const admission = startMutation.submitActivation({
-      eventTypeName: selectedType.latestVersion.name,
+      eventTypeName: responseLabel,
       preview: boundPreview,
     });
     if (admission.accepted) {
@@ -609,7 +745,11 @@ export default function StartEventScreen() {
             <Text style={styles.backButtonText}>‹ Back</Text>
           </Pressable>
           <Text style={styles.stepText}>
-            {boundPreview === null ? 'Step 2 of 3' : 'Step 3 of 3'}
+            {selectedThreat === null
+              ? 'Step 2 of 4'
+              : boundPreview === null
+                ? 'Step 3 of 4'
+                : 'Step 4 of 4'}
           </Text>
         </View>
 
@@ -656,17 +796,139 @@ export default function StartEventScreen() {
           </View>
         )}
 
-        {facility !== undefined && mode !== null && boundPreview === null ? (
+        {facility !== undefined && mode !== null && selectedThreat === null ? (
           <View style={styles.selection}>
             <View style={styles.heading}>
               <Text style={styles.eyebrow}>{facility.code}</Text>
               <Text accessibilityRole="header" style={styles.title}>
-                Choose event type
+                Choose threat
               </Text>
               <Text style={styles.subtitle}>{facility.name}</Text>
               <Text style={styles.helpText}>
-                Choosing a type loads a current consequence preview. It does not
-                start an event or notify anyone.
+                Choosing a threat does not start an event or notify anyone. You
+                choose the response next.
+              </Text>
+            </View>
+
+            {pendingDetailThreat !== null ? (
+              <View style={styles.detailForm}>
+                <Text accessibilityRole="header" style={styles.detailHeading}>
+                  Describe the threat
+                </Text>
+                <Text style={styles.helpText}>
+                  {pendingDetailThreat.name}: a few words. Staff see exactly
+                  what you type.
+                </Text>
+                <TextInput
+                  accessibilityLabel="Threat description"
+                  autoCapitalize="sentences"
+                  autoFocus
+                  maxLength={200}
+                  onChangeText={(text) => {
+                    setThreatDetailDraft(text);
+                    setDetailError(null);
+                  }}
+                  onSubmitEditing={continueWithThreatDetail}
+                  returnKeyType="done"
+                  style={styles.input}
+                  value={threatDetailDraft}
+                />
+                {detailError === null ? null : (
+                  <Text
+                    accessibilityLiveRegion="assertive"
+                    accessibilityRole="alert"
+                    style={styles.errorText}
+                  >
+                    {detailError}
+                  </Text>
+                )}
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={continueWithThreatDetail}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    Continue with {pendingDetailThreat.name}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setPendingDetailThreat(null);
+                    setThreatDetailDraft('');
+                    setDetailError(null);
+                  }}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.secondaryButtonText}>
+                    Back to threats
+                  </Text>
+                </Pressable>
+              </View>
+            ) : threats.length === 0 ? (
+              <View accessibilityRole="alert" style={styles.error}>
+                <Text style={styles.errorHeading}>
+                  No threats are configured
+                </Text>
+                <Text style={styles.errorText}>
+                  No event was started. Contact a PSD EOC administrator.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.choiceList}>
+                {threats.map((threat, index) => (
+                  <ThreatChoice
+                    key={threat.id}
+                    mode={mode}
+                    name={threat.name}
+                    onPress={() => {
+                      chooseThreat(threat);
+                    }}
+                    requiresDetail={threat.requiresDetail}
+                    {...(SYNTHETIC_FIXTURE_ENABLED &&
+                    mode === 'drill' &&
+                    index === 0
+                      ? { testID: ISSUE_21_MAESTRO_IDS.drillThreat }
+                      : {})}
+                  />
+                ))}
+              </View>
+            )}
+          </View>
+        ) : null}
+
+        {facility !== undefined &&
+        mode !== null &&
+        selectedThreat !== null &&
+        boundPreview === null ? (
+          <View style={styles.selection}>
+            <View style={styles.heading}>
+              <Text style={styles.eyebrow}>{facility.code}</Text>
+              <Text accessibilityRole="header" style={styles.title}>
+                Choose response
+              </Text>
+              <Text style={styles.subtitle}>{facility.name}</Text>
+              <Text style={styles.chosenThreat}>Threat: {threatLabel}</Text>
+              <Pressable
+                accessibilityRole="button"
+                disabled={previewLoading}
+                onPress={changeThreat}
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.secondaryButtonText}>Change threat</Text>
+              </Pressable>
+              <Text style={styles.helpText}>
+                Choosing a response loads a current consequence preview. It does
+                not start an event or notify anyone.
               </Text>
             </View>
 
@@ -700,6 +962,7 @@ export default function StartEventScreen() {
                   accessibilityRole="button"
                   onPress={() => {
                     setSelectedType(null);
+                    setResponseDetail(null);
                     setPreviewError(null);
                   }}
                   style={({ pressed }) => [
@@ -708,18 +971,77 @@ export default function StartEventScreen() {
                   ]}
                 >
                   <Text style={styles.secondaryButtonText}>
-                    Return to event types
+                    Return to responses
                   </Text>
                 </Pressable>
               </View>
             )}
 
             {!previewLoading && previewError === null ? (
-              eventTypes.length === 0 ? (
-                <View accessibilityRole="alert" style={styles.error}>
-                  <Text style={styles.errorHeading}>
-                    No enabled event types
+              pendingDetailType !== null ? (
+                <View style={styles.detailForm}>
+                  <Text accessibilityRole="header" style={styles.detailHeading}>
+                    Describe the response
                   </Text>
+                  <Text style={styles.helpText}>
+                    {pendingDetailType.latestVersion.name}: a few words. They
+                    replace the response name in every notification.
+                  </Text>
+                  <TextInput
+                    accessibilityLabel="Response description"
+                    autoCapitalize="sentences"
+                    autoFocus
+                    maxLength={200}
+                    onChangeText={(text) => {
+                      setResponseDetailDraft(text);
+                      setDetailError(null);
+                    }}
+                    onSubmitEditing={continueWithResponseDetail}
+                    returnKeyType="done"
+                    style={styles.input}
+                    value={responseDetailDraft}
+                  />
+                  {detailError === null ? null : (
+                    <Text
+                      accessibilityLiveRegion="assertive"
+                      accessibilityRole="alert"
+                      style={styles.errorText}
+                    >
+                      {detailError}
+                    </Text>
+                  )}
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={continueWithResponseDetail}
+                    style={({ pressed }) => [
+                      styles.primaryButton,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={styles.primaryButtonText}>
+                      Continue with {pendingDetailType.latestVersion.name}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => {
+                      setPendingDetailType(null);
+                      setResponseDetailDraft('');
+                      setDetailError(null);
+                    }}
+                    style={({ pressed }) => [
+                      styles.secondaryButton,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={styles.secondaryButtonText}>
+                      Back to responses
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : eventTypes.length === 0 ? (
+                <View accessibilityRole="alert" style={styles.error}>
+                  <Text style={styles.errorHeading}>No enabled responses</Text>
                   <Text style={styles.errorText}>
                     No event was started. Contact a PSD EOC administrator.
                   </Text>
@@ -734,7 +1056,7 @@ export default function StartEventScreen() {
                       mode={mode}
                       name={item.latestVersion.name}
                       onPress={() => {
-                        void chooseEventType(item);
+                        chooseResponse(item);
                       }}
                       {...(SYNTHETIC_FIXTURE_ENABLED &&
                       mode === 'drill' &&
@@ -766,7 +1088,7 @@ export default function StartEventScreen() {
             channels={boundPreview.channels}
             disabled={mutationPending}
             eventKind={boundPreview.kind}
-            eventTypeName={selectedType.latestVersion.name}
+            eventTypeName={responseLabel}
             facilityName={facility.name}
             mode={mode}
             onConfirm={() => {
@@ -775,6 +1097,7 @@ export default function StartEventScreen() {
             recipientCount={boundPreview.recipientCount}
             rosterPopulation={boundPreview.rosterPopulation}
             sendReadiness={boundPreview.sendReadiness}
+            threatLabel={threatLabel}
             {...(SYNTHETIC_FIXTURE_ENABLED && mode === 'drill'
               ? { testID: ISSUE_21_MAESTRO_IDS.confirmDrill }
               : {})}
@@ -907,6 +1230,53 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.72,
+  },
+  chosenThreat: {
+    color: '#102A43',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  detailForm: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#BCCCDC',
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 12,
+    padding: 16,
+  },
+  detailHeading: {
+    color: '#102A43',
+    fontSize: 20,
+    fontWeight: '900',
+    lineHeight: 26,
+  },
+  input: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#486581',
+    borderRadius: 10,
+    borderWidth: 2,
+    color: '#102A43',
+    fontSize: 17,
+    minHeight: 48,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  primaryButton: {
+    alignItems: 'center',
+    backgroundColor: '#17324D',
+    borderRadius: 12,
+    justifyContent: 'center',
+    minHeight: 52,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 22,
+    textAlign: 'center',
   },
   secondaryButton: {
     alignItems: 'center',

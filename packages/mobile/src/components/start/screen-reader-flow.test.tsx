@@ -41,6 +41,7 @@ const { Call911Action, open911Dialer } = await import('./call-911-affordance');
 const { ClassifiedActionButton } = await import('./classified-action-button');
 const { EventTypeChoice } = await import('./event-type-choice');
 const { StartModeAction } = await import('./start-mode-action');
+const { ThreatChoice } = await import('./threat-choice');
 
 type Element = ReactElement<Record<string, unknown>>;
 
@@ -217,7 +218,7 @@ const REAL_TEST_CHANNELS = [
 ] as const satisfies ActivationPreview['channels'];
 
 describe('VoiceOver and TalkBack start-flow contract', () => {
-  test('exposes the three-tap path as classified buttons with large targets', () => {
+  test('exposes the four-tap path as classified buttons with large targets', () => {
     for (const mode of ['real', 'drill'] as const) {
       const modeChoice = StartModeAction({
         facilityName: 'Synthetic Test School',
@@ -233,6 +234,34 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
         'does not start an event',
       );
       expect(minimumHeight(modeButton)).toBeGreaterThanOrEqual(48);
+
+      const threatChoice = ThreatChoice({
+        mode,
+        name: 'Wildlife',
+        onPress: () => {},
+        requiresDetail: false,
+      }) as Element;
+      const threatButton = renderClassifiedAction(threatChoice);
+      expect(threatButton.props.accessibilityRole).toBe('button');
+      expect(threatButton.props.accessibilityLabel).toBe(
+        `${mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY'}. Threat Wildlife`,
+      );
+      expect(threatButton.props.accessibilityHint).toContain(
+        'No event is started',
+      );
+      expect(minimumHeight(threatButton)).toBeGreaterThanOrEqual(48);
+
+      const otherThreat = renderClassifiedAction(
+        ThreatChoice({
+          mode,
+          name: 'Other',
+          onPress: () => {},
+          requiresDetail: true,
+        }) as Element,
+      );
+      expect(otherThreat.props.accessibilityHint).toContain(
+        'describe the threat',
+      );
 
       const typeChoice = EventTypeChoice({
         mode,
@@ -257,6 +286,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
         recipientCount: 2,
         rosterPopulation: mode === 'real' ? 'staff' : 'synthetic',
         sendReadiness: 'ready',
+        threatLabel: 'Wildlife',
       }) as Element;
       const confirmationNodes = elements(confirmation);
       const banner = confirmationNodes.find(
@@ -284,7 +314,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     }
   });
 
-  test('executes the ordered three-tap semantic path through final confirmation', () => {
+  test('executes the ordered four-tap semantic path through final confirmation', () => {
     const completedSteps: string[] = [];
     const modeButton = renderClassifiedAction(
       StartModeAction({
@@ -299,6 +329,21 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School',
     );
     press(modeButton);
+
+    const threatButton = renderClassifiedAction(
+      ThreatChoice({
+        mode: 'drill',
+        name: 'Synthetic wildlife',
+        onPress: () => {
+          completedSteps.push('threat');
+        },
+        requiresDetail: false,
+      }) as Element,
+    );
+    expect(threatButton.props.accessibilityLabel).toBe(
+      'DRILL — TRAINING ONLY. Threat Synthetic wildlife',
+    );
+    press(threatButton);
 
     const typeButton = renderClassifiedAction(
       EventTypeChoice({
@@ -327,6 +372,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       recipientCount: 2,
       rosterPopulation: 'synthetic',
       sendReadiness: 'ready',
+      threatLabel: 'Synthetic wildlife',
     }) as Element;
     const confirmButton = renderedElements(confirmation).find(
       (node) =>
@@ -343,6 +389,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
 
     expect(completedSteps).toEqual([
       'site-and-mode',
+      'threat',
       'event-type-and-preview',
       'final-human-confirmation',
     ]);
@@ -359,6 +406,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       recipientCount: 2,
       rosterPopulation: 'synthetic',
       sendReadiness: 'ready',
+      threatLabel: 'Synthetic wildlife',
     }) as Element;
     const text = renderedText(confirmation).join(' ').replaceAll(/\s+/gu, ' ');
     const nodes = renderedElements(confirmation);
@@ -579,7 +627,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     ]);
   });
 
-  test('guards the executable Maestro flows and fixes activation at three taps', async () => {
+  test('guards the executable Maestro flows and fixes activation at four taps', async () => {
     const startFlow = await Bun.file(
       new URL('../../../.maestro/issue-21/start-drill.yaml', import.meta.url),
     ).text();
@@ -590,8 +638,22 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       new URL('../../../.maestro/issue-21/README.md', import.meta.url),
     ).text();
 
-    expect(startFlow.match(/^\s*- tapOn:/gmu)).toHaveLength(3);
+    expect(startFlow.match(/^\s*- tapOn:/gmu)).toHaveLength(4);
     expect(joinFlow.match(/^\s*- tapOn:/gmu)).toHaveLength(1);
+    // The threat is named before the response, and nothing is sent by it.
+    expect(startFlow).toContain(
+      "tapOn: 'DRILL — TRAINING ONLY. Threat Synthetic wildlife'",
+    );
+    expect(
+      startFlow.indexOf(
+        "tapOn: 'DRILL — TRAINING ONLY. Threat Synthetic wildlife'",
+      ),
+    ).toBeLessThan(
+      startFlow.indexOf(
+        "tapOn: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'",
+      ),
+    );
+    expect(flowReadme).toContain('exactly four `tapOn` commands');
     expect(startFlow).toContain('stopApp: false');
     expect(joinFlow).toContain('stopApp: false');
     expect(startFlow).not.toContain('stopApp: true');

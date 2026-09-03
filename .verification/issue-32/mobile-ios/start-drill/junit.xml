@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="40.983" timestamp="2026-08-30T18:08:02">
-    <testcase id="Issue 32 - start the provider-free synthetic drill" name="Issue 32 - start the provider-free synthetic drill" classname="Issue 32 - start the provider-free synthetic drill" file="packages/mobile/e2e/flows/start-drill.yaml" time="40.967" timestamp="2026-08-30T18:08:02" status="SUCCESS">
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="44.14" timestamp="2026-09-03T14:37:16">
+    <testcase id="Issue 32 - start the provider-free synthetic drill" name="Issue 32 - start the provider-free synthetic drill" classname="Issue 32 - start the provider-free synthetic drill" file="packages/mobile/e2e/flows/start-drill.yaml" time="44.126" timestamp="2026-09-03T14:37:16" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only"/>
       </properties>
