@@ -1604,6 +1604,7 @@ function EventTypeEditor({
                       key: requiredText(form, 'key'),
                       familyKey: requiredText(form, 'familyKey'),
                       templateMode: selectedMode,
+                      requiresDetail: form.get('requiresDetail') === 'on',
                     }
                   : {
                       kind: 'existing-event-type',
@@ -2025,6 +2026,26 @@ function EventTypeEditor({
                   fieldId="new-event-type-mode"
                   fieldIssues={fieldIssues}
                 />
+              </div>
+              <div className="field field--checkbox">
+                <input
+                  aria-describedby="new-event-type-requires-detail-help"
+                  id="new-event-type-requires-detail"
+                  name="requiresDetail"
+                  type="checkbox"
+                />
+                <label htmlFor="new-event-type-requires-detail">
+                  Requires a typed description
+                </label>
+                <p
+                  className="field-help"
+                  id="new-event-type-requires-detail-help"
+                >
+                  Tick this for a response such as “Other” that an operator must
+                  describe in their own words before starting an event. The
+                  description appears in every notification in place of the
+                  response name.
+                </p>
               </div>
             </fieldset>
           ) : null}

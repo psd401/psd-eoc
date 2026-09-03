@@ -37,6 +37,7 @@ import {
   seedReferenceData,
   type SeedDatabaseOptions,
 } from '../db/seed';
+import { insertEventTypesBeforeDetailRule } from '../lib/testing/held-back-event-types';
 import { migrateDatabase, migrationsFolder } from './migrate';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -372,6 +373,7 @@ async function stageReviewedLiveShape(
     // Threats arrived in migration 0046; this schema is held before it, so
     // the seed must not touch a relation that does not exist yet.
     insertThreats: () => Promise.resolve(),
+    insertEventTypes: insertEventTypesBeforeDetailRule,
     // Written here with the columns this schema actually has: Drizzle emits
     // every column of a table it inserts into, so seeding group sources
     // through the current schema fails against a database held at an earlier

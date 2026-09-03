@@ -118,6 +118,7 @@ function createInput(key: string) {
       key,
       familyKey: key,
       templateMode: 'real' as const,
+      requiresDetail: false,
     },
     name: 'Lockdown',
     description: 'Synthetic configuration used only by an atomicity test.',

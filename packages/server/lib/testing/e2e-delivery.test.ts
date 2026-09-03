@@ -186,6 +186,8 @@ function deliveryTestPreview(): DeliveryTestPreview {
     blockingReasonCodes: [],
     activeEventIds: [],
     deliveryTest: metadata,
+    threat: null,
+    responseDetail: null,
     consequenceDigest: CONSEQUENCE_DIGEST,
     createdAt: TIMES.previewCreated,
     expiresAt: TIMES.previewExpires,

@@ -34,6 +34,7 @@ import {
   notificationIntents,
 } from '../../../db/schema';
 import { CapabilityEngineError } from '../engine';
+import { activationThreatFromColumns } from '../start-preview';
 import type { DrillRecordCsvRow } from './csv';
 import type { EventSummarySnapshot } from './pdf';
 
@@ -91,6 +92,8 @@ function eventFromRow(row: typeof events.$inferSelect): Event {
     status: row.status,
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    threat: activationThreatFromColumns(row),
+    responseDetail: row.responseDetail ?? null,
     createdBy: row.createdBy,
     createdAt: dateIso(row.createdAt),
     activatedAt: row.activatedAt === null ? null : dateIso(row.activatedAt),
@@ -172,6 +175,9 @@ export async function loadDrillRecordsExportSnapshot(
       facilityName: facilities.name,
       facilityCode: facilities.code,
       eventType: eventTypeVersions.name,
+      threatName: events.threatName,
+      threatDetail: events.threatDetail,
+      responseDetail: events.responseDetail,
     })
     .from(events)
     .innerJoin(facilities, eq(facilities.id, events.facilityId))
@@ -245,6 +251,9 @@ export async function loadDrillRecordsExportSnapshot(
         facilityName: row.facilityName,
         facilityCode: row.facilityCode,
         eventType: row.eventType,
+        threatName: row.threatName,
+        threatDetail: row.threatDetail,
+        responseDetail: row.responseDetail ?? null,
         kind: row.kind,
         startedAt: dateIso(row.startedAt),
         durationSeconds,
@@ -680,6 +689,8 @@ export async function loadEventSummarySnapshot(
       id: header.eventTypeId,
       name: header.eventTypeName,
     }),
+    threat: event.threat,
+    responseDetail: event.responseDetail,
     recordedParticipantCount: recordedParticipantIds.size,
     journal,
     photos,

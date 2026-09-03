@@ -90,6 +90,9 @@ export interface EventSummarySnapshot {
   readonly event: EventSummaryEventSnapshot;
   readonly facility: Readonly<{ code: string; name: string }>;
   readonly eventType: Readonly<{ id: string; name: string }>;
+  /** Null for an event activated before the threat catalog existed. */
+  readonly threat: Readonly<{ name: string; detail: string | null }> | null;
+  readonly responseDetail: string | null;
   readonly recordedParticipantCount: number;
   readonly journal: readonly JournalEntryReadProjection[];
   readonly photos: readonly EventSummaryPhotoSnapshot[];
@@ -768,7 +771,22 @@ function writeOverview(
     'Facility',
     `${snapshot.facility.name} (${snapshot.facility.code})`,
   );
-  writeLabelValue(document, 'Event type', snapshot.eventType.name);
+  writeLabelValue(
+    document,
+    'Threat',
+    snapshot.threat === null
+      ? 'Not recorded (event predates the threat catalog)'
+      : snapshot.threat.detail === null
+        ? snapshot.threat.name
+        : `${snapshot.threat.name} — ${snapshot.threat.detail}`,
+  );
+  writeLabelValue(
+    document,
+    'Response',
+    snapshot.responseDetail === null
+      ? snapshot.eventType.name
+      : `${snapshot.eventType.name} — ${snapshot.responseDetail}`,
+  );
   writeLabelValue(document, 'Event type version ID', snapshot.eventType.id);
   writeLabelValue(document, 'Event ID', snapshot.event.id);
   writeLabelValue(document, 'Classification', snapshot.classification);

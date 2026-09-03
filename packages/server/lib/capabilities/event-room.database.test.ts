@@ -206,6 +206,10 @@ function expectedHeader() {
       name: ids.eventTypeVersionName,
       templateMode: ids.eventTypeTemplateMode,
     },
+    // These fixtures insert events directly, before any threat is chosen, so
+    // the heading reports the pre-catalog shape.
+    threat: null,
+    responseDetail: null,
   };
 }
 
@@ -271,6 +275,10 @@ describe('event-room AWS Data API transaction transport', () => {
       { stringValue: 'active' },
       { stringValue: rosterSnapshotId },
       { stringValue: 'synthetic' },
+      { isNull: true },
+      { isNull: true },
+      { isNull: true },
+      { isNull: true },
       { stringValue: JSON.stringify(HUMAN_ACTOR) },
       { stringValue: '2026-08-10 12:00:00+00' },
       { stringValue: '2026-08-10 12:00:01+00' },
@@ -608,6 +616,8 @@ describeWithDatabase('event-room atomic synchronization', () => {
           name: beforeFacilityName,
         },
         eventType: expectedHeader().eventType,
+        threat: null,
+        responseDetail: null,
       });
       expect(before.snapshotSequence).toBe(1);
       expect(
@@ -628,6 +638,8 @@ describeWithDatabase('event-room atomic synchronization', () => {
           name: afterFacilityName,
         },
         eventType: expectedHeader().eventType,
+        threat: null,
+        responseDetail: null,
       });
       expect(after.snapshotSequence).toBe(2);
       expect(

@@ -1457,6 +1457,12 @@ describeWithDatabase('event journal database guarantees', () => {
           },
           rosterSnapshotId: ids.rosterSnapshotId,
           rosterPopulation: 'synthetic',
+          threat: {
+            id: '00000000-0000-4000-8000-000000000700',
+            name: 'Synthetic wildlife',
+            detail: null,
+          },
+          responseDetail: null,
           recipientCount: recipientRows.length,
           channels: [
             {
@@ -1505,6 +1511,10 @@ describeWithDatabase('event journal database guarantees', () => {
           eventTypeVersionId: sourcePreview.eventTypeVersion.id,
           rosterSnapshotId: sourcePreview.rosterSnapshotId,
           rosterPopulation: sourcePreview.rosterPopulation,
+          threatId: sourcePreview.threat?.id ?? null,
+          threatName: sourcePreview.threat?.name ?? null,
+          threatDetail: sourcePreview.threat?.detail ?? null,
+          responseDetail: sourcePreview.responseDetail,
           recipientCount: sourcePreview.recipientCount,
           channels: sourcePreview.channels,
           sendReadiness: sourcePreview.sendReadiness,
@@ -1534,6 +1544,12 @@ describeWithDatabase('event journal database guarantees', () => {
           kind: 'test',
           templateMode: 'drill',
           rosterPopulation: 'synthetic',
+          threat: {
+            id: '00000000-0000-4000-8000-000000000700',
+            name: 'Synthetic wildlife',
+            detail: null,
+          },
+          responseDetail: null,
           activationAuthorization: { kind: 'synthetic-training' },
         });
         expect(started.notificationIntent).toMatchObject({
@@ -2203,6 +2219,12 @@ describeWithDatabase('event journal database guarantees', () => {
         },
         rosterSnapshotId: staffRosterSnapshotId,
         rosterPopulation: 'staff',
+        threat: {
+          id: '00000000-0000-4000-8000-000000000700',
+          name: 'Synthetic wildlife',
+          detail: null,
+        },
+        responseDetail: null,
         recipientCount: 1,
         channels: [
           {
@@ -2252,6 +2274,10 @@ describeWithDatabase('event journal database guarantees', () => {
         eventTypeVersionId: sourcePreview.eventTypeVersion.id,
         rosterSnapshotId: sourcePreview.rosterSnapshotId,
         rosterPopulation: sourcePreview.rosterPopulation,
+        threatId: sourcePreview.threat?.id ?? null,
+        threatName: sourcePreview.threat?.name ?? null,
+        threatDetail: sourcePreview.threat?.detail ?? null,
+        responseDetail: sourcePreview.responseDetail,
         recipientCount: sourcePreview.recipientCount,
         channels: sourcePreview.channels,
         sendReadiness: sourcePreview.sendReadiness,

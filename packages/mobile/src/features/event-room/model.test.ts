@@ -32,6 +32,7 @@ const ids = {
   roster: '00000000-0000-4000-8000-000000000104',
   user: '00000000-0000-4000-8000-000000000105',
   session: '00000000-0000-4000-8000-000000000106',
+  threat: '00000000-0000-4000-8000-000000000110',
 };
 
 const event: Event = {
@@ -43,6 +44,8 @@ const event: Event = {
   status: 'active',
   rosterSnapshotId: ids.roster,
   rosterPopulation: 'staff',
+  threat: { id: ids.threat, name: 'Wildlife', detail: null },
+  responseDetail: null,
   createdBy: {
     kind: 'human',
     userId: ids.user,
@@ -68,6 +71,8 @@ const event: Event = {
 const header: EventRoomHeader = {
   facility: { id: ids.facility, code: 'SYN', name: 'Synthetic School' },
   eventType: { id: ids.type, name: 'Lockdown drill', templateMode: 'drill' },
+  threat: { id: ids.threat, name: 'Wildlife', detail: null },
+  responseDetail: null,
 };
 
 const allClearEvent: Event = {
@@ -167,6 +172,8 @@ describe('event-room model', () => {
           name: 'Renamed Synthetic School',
         },
         eventType: { ...header.eventType, name: 'Updated lockdown label' },
+        threat: header.threat,
+        responseDetail: header.responseDetail,
       },
     });
 

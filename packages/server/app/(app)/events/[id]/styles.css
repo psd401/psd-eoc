@@ -953,3 +953,17 @@ dialog::backdrop {
     forced-color-adjust: auto;
   }
 }
+
+/* The pinned threat sits under the response name in the event heading. */
+.event-threat {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.event-threat__label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.8rem;
+  font-weight: 700;
+  margin-right: 0.35rem;
+}
