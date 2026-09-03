@@ -33,7 +33,7 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
   { href: '/facilities', label: 'Schools', authorization: 'district-admin' },
   {
     href: '/event-types',
-    label: 'Event types',
+    label: 'Responses',
     authorization: 'district-admin',
   },
   { href: '/access', label: 'Access', authorization: 'district-admin' },

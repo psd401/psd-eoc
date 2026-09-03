@@ -9,7 +9,7 @@ const DISTRICT_ADMIN_DESTINATIONS = [
   ['Delivery tests', '/delivery-tests', 'Monthly live delivery test'],
   ['Readiness', '/admin', 'Deployment readiness'],
   ['Schools', '/facilities', /^Facilities, neighborhoods,/u],
-  ['Event types', '/event-types', 'Event types and message templates'],
+  ['Responses', '/event-types', 'Responses and message templates'],
   ['Access', '/access', 'Access groups and the roles they grant'],
   ['Devices', '/devices', 'Device sessions'],
   ['Notifications', '/integrations', 'Integrations administration'],
@@ -52,6 +52,20 @@ test.describe('operator-shell-navigation', () => {
       ).toHaveAttribute('aria-current', 'page');
       await expectAxeClean(page);
     }
+
+    // The responses admin is where the "event type" wording used to live, so
+    // this navigation also proves an operator reads only "response" there.
+    await page.goto('/event-types/manage');
+    await expect(
+      page.getByRole('heading', {
+        level: 1,
+        name: 'Responses and message templates',
+      }),
+    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByLabel('Response', { exact: true })).toBeVisible();
+    expect(
+      (await page.locator('main#main-content').innerText()).toLowerCase(),
+    ).not.toContain('event type');
 
     await page.goto('/');
     await page.screenshot({

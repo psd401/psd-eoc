@@ -274,7 +274,7 @@ export function DeliveryTestPreviewConfirmation({
           </dd>
           <dt>Target version</dt>
           <dd>{preview.targetSet.version}</dd>
-          <dt>Event type version ID</dt>
+          <dt>Response version ID</dt>
           <dd className="code-value">
             <code>{preview.activationPreview.eventTypeVersion.id}</code>
           </dd>
