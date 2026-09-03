@@ -22,6 +22,7 @@ export const AGENT_DEPLOYED_CAPABILITY_IDS = Object.freeze([
   'get-prepared-activation',
   'get-stale-roster-report',
   'list-facilities',
+  'list-threats',
   'list-agent-api-keys',
   'create-event-type-draft',
   'update-event-type-draft',

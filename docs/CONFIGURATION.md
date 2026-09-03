@@ -30,12 +30,23 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:sesIdentityDomain`
 - `psdEoc:sourceRepositoryUrl`
 - `psdEoc:syntheticGroups`
+- `psdEoc:threats`
 <!-- docs-contract:cdk-context:end -->
 
 Identity, target account/region, facility data, sender identity, and runbook
 base URL are configuration. `readDeploymentTarget` and
 `readDeploymentIdentity` validate these values during synthesis. Facilities,
-neighborhoods, and synthetic groups are validated again before bootstrap.
+neighborhoods, synthetic groups, and threats are validated again before
+bootstrap.
+
+`psdEoc:threats` is the ordered list an operator chooses from before the
+response when starting an incident or a drill. Each entry has a lower-case
+`key` the bootstrap matches on, a `name`, and optionally `requiresDetail: true`
+for an entry such as "Other" that cannot be chosen without a typed
+description. The bootstrap creates any threat the database lacks and never
+edits one that exists, so a rebuilt database regains the district's list and a
+later configuration change never reshuffles or renames what operators have
+learned.
 
 `psdEoc:hostedZoneId` names the Route 53 zone that answers for the hosted
 domain. The deployment writes the application's public record there from the

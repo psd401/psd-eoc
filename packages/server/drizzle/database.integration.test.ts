@@ -8675,6 +8675,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
   test('loads a complete, inert, and fully synthetic district', async () => {
     expect(firstSeedSummary).toEqual({
       facilities: 2,
+      threats: 4,
       neighborhoods: 1,
       neighborhoodFacilities: 2,
       groupSources: 3,

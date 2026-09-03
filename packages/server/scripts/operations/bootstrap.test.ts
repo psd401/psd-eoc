@@ -424,6 +424,8 @@ describe('bootstrap coordinator', () => {
           facilitiesCreated: districtRuns++ === 0 ? 2 : 0,
           neighborhoodsConfigured: 1,
           neighborhoodsCreated: districtRuns === 1 ? 1 : 0,
+          threatsConfigured: 3,
+          threatsCreated: districtRuns === 1 ? 3 : 0,
         };
       },
       async verifyApplicationLogin(): Promise<void> {
@@ -511,6 +513,8 @@ describe('bootstrap coordinator', () => {
           facilitiesCreated: 0,
           neighborhoodsConfigured: 0,
           neighborhoodsCreated: 0,
+          threatsConfigured: 0,
+          threatsCreated: 0,
         };
       },
       async verifyApplicationLogin(): Promise<void> {
@@ -584,6 +588,8 @@ describe('bootstrap coordinator', () => {
           facilitiesCreated: 0,
           neighborhoodsConfigured: 0,
           neighborhoodsCreated: 0,
+          threatsConfigured: 0,
+          threatsCreated: 0,
         };
       },
       async verifyApplicationLogin(): Promise<void> {

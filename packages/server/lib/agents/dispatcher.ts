@@ -180,6 +180,7 @@ export function createDefaultAgentCapabilityDispatcher(
         case 'get-facility':
           return dependencies.journal.execute(capabilityId, input, invocation);
 
+        case 'list-threats':
         case 'create-activation-preview':
           return dependencies.activationPreviews.execute(
             capabilityId,

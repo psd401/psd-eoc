@@ -12,6 +12,7 @@ import type { TrustedCapabilityInvocation } from '../../../../../lib/capabilitie
 import {
   authenticateMobileStartRequest,
   handleListMobileStartFacilities,
+  handleListMobileStartThreats,
   handleMobileActivateEvent,
   handleMobileActivationPreview,
   type MobileStartRouteRuntime,
@@ -100,6 +101,17 @@ function testRuntime(
     async executeFacilities(input, invocation) {
       executions.push({
         capabilityId: 'list-facilities',
+        input,
+        invocation,
+      });
+      return {
+        items: [],
+        pageInfo: { hasMore: false, nextCursor: null },
+      };
+    },
+    async executeThreats(input, invocation) {
+      executions.push({
+        capabilityId: 'list-threats',
         input,
         invocation,
       });
@@ -261,6 +273,55 @@ describe('mobile start route handlers', () => {
     ]) {
       const { executions, runtime } = testRuntime();
       const response = await handleListMobileStartFacilities(
+        new Request(`https://eoc.example.test${path}`, {
+          headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+        }),
+        runtime,
+      );
+
+      expect(response.status).toBe(400);
+      expect(executions).toEqual([]);
+    }
+  });
+
+  test('lists selectable threats as a mobile query without facility scope', async () => {
+    const { authentications, executions, runtime } = testRuntime();
+    const request = new Request(
+      'https://eoc.example.test/api/mobile/start/threats?cursor=cursor_1&limit=25',
+      { headers: { authorization: `Bearer ${SESSION_TOKEN}` } },
+    );
+
+    const response = await handleListMobileStartThreats(request, runtime);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(authentications).toEqual([
+      expect.objectContaining({ kind: 'query', request }),
+    ]);
+    expect(executions).toEqual([
+      {
+        capabilityId: 'list-threats',
+        input: {
+          includeInactive: false,
+          cursor: 'cursor_1',
+          limit: 25,
+        },
+        invocation: expect.objectContaining({
+          source: 'mobile',
+          mutation: null,
+        }),
+      },
+    ]);
+  });
+
+  test('rejects unsupported threat query input before capability execution', async () => {
+    for (const path of [
+      '/api/mobile/start/threats?includeInactive=true',
+      '/api/mobile/start/threats?limit=201',
+      '/api/mobile/start/threats?limit=10&limit=20',
+    ]) {
+      const { executions, runtime } = testRuntime();
+      const response = await handleListMobileStartThreats(
         new Request(`https://eoc.example.test${path}`, {
           headers: { authorization: `Bearer ${SESSION_TOKEN}` },
         }),
