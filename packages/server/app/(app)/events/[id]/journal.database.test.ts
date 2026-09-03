@@ -74,6 +74,7 @@ import {
   executeJournalCapability,
   type JournalCapabilityStore,
 } from '../../../../lib/capabilities/journal';
+import { loadActivationPreview } from '../../../../lib/capabilities/start';
 import {
   quarantineStorageKey,
   readyStorageKey,
@@ -3068,6 +3069,43 @@ describeWithDatabase('event journal database guarantees', () => {
           );
       }
     }
+  });
+
+  test('reports a preview prepared before the threat requirement as gone', async () => {
+    // A preview written in the ten minutes before this migration deployed has
+    // no threat and is not a delivery test, so it can never satisfy the
+    // current contract. The loader must report it as gone, which the
+    // confirmation boundary turns into "start again", instead of raising a
+    // schema error nobody can classify.
+    const ids = syntheticFixtureIds();
+    const fixtureDatabase = databaseConnection().db;
+    const preThreatPreviewId = randomUUID();
+    const createdAt = new Date();
+    await fixtureDatabase.insert(activationPreviews).values({
+      id: preThreatPreviewId,
+      facilityId: ids.northFacilityId,
+      kind: 'test',
+      templateMode: 'drill',
+      eventTypeVersionId: ids.eventTypeVersionId,
+      rosterSnapshotId: ids.rosterSnapshotId,
+      rosterPopulation: 'synthetic',
+      threatId: null,
+      threatName: null,
+      threatDetail: null,
+      responseDetail: null,
+      recipientCount: 0,
+      channels: [],
+      sendReadiness: 'blocked',
+      blockingReasonCodes: ['PUSH_NOT_MOCKED'],
+      activeEventIds: [],
+      consequenceDigest: 'f'.repeat(64),
+      createdAt,
+      expiresAt: new Date(createdAt.getTime() + 10 * 60_000),
+    });
+
+    await expect(
+      loadActivationPreview(fixtureDatabase, preThreatPreviewId),
+    ).resolves.toBeNull();
   });
 
   test('denies journal writes outside the authenticated facility scope', async () => {

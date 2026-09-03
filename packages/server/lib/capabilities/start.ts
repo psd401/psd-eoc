@@ -1433,6 +1433,18 @@ export async function loadActivationPreview(
   if (row === undefined) {
     return null;
   }
+  // A preview prepared in the ten minutes before this migration deployed has
+  // no threat and is not a delivery test, so it can never satisfy the current
+  // contract. Report it as gone rather than throwing a schema error the
+  // confirmation boundary cannot classify: the operator is told to start
+  // again, which is exactly what they must do.
+  if (
+    row.threatId === null &&
+    row.threatName === null &&
+    row.deliveryTestTargetSetId === null
+  ) {
+    return null;
+  }
   return ActivationPreviewSchema.parse({
     id: row.id,
     facilityId: row.facilityId,
