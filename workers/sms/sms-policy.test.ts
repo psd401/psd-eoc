@@ -330,6 +330,7 @@ describe('SMS rendering policy', () => {
       variables: {
         site: 'Synthetic School',
         eventType: 'Synthetic drill',
+        threat: 'Synthetic wildlife',
         startTime: '2026-08-11T18:00:00.000Z',
         initiator: 'Synthetic Operator',
       },

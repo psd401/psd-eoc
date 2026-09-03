@@ -130,6 +130,7 @@ type DraftLedgerRow = Readonly<{
 export const EVENT_TYPE_PREVIEW_VARIABLES = Object.freeze({
   site: 'Harbor Ridge High School',
   eventType: 'Lockdown Drill',
+  threat: 'Intruder',
   startTime: '2026-08-08T16:30:00.000Z',
   initiator: 'Taylor Morgan',
 });

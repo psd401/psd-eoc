@@ -820,17 +820,17 @@ function templateSet(
       mode === 'real'
         ? {
             title: 'REAL INCIDENT: {{eventType}} at {{site}}',
-            body: 'Follow district safety procedures. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
+            body: 'Threat: {{threat}}. Follow district safety procedures. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
             email:
-              '{{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nFollow district safety procedures and open PSD EOC for current instructions. PSD EOC does not contact 911; call 911 first if emergency assistance is needed.',
-            sms: 'REAL INCIDENT: {{eventType}} at {{site}}. Follow district safety procedures. Open PSD EOC.',
+              '{{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nThreat: {{threat}}.\n\nFollow district safety procedures and open PSD EOC for current instructions. PSD EOC does not contact 911; call 911 first if emergency assistance is needed.',
+            sms: 'REAL INCIDENT: {{eventType}} at {{site}}. Threat: {{threat}}. Open PSD EOC.',
           }
         : {
             title: 'TRAINING ONLY: {{eventType}} at {{site}}',
-            body: 'Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
+            body: 'Threat: {{threat}}. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
             email:
-              'TRAINING ONLY. {{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nFollow district safety procedures and open PSD EOC for current instructions.',
-            sms: 'TRAINING ONLY: {{eventType}} at {{site}}. Open PSD EOC for current instructions.',
+              'TRAINING ONLY. {{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nThreat: {{threat}}.\n\nFollow district safety procedures and open PSD EOC for current instructions.',
+            sms: 'TRAINING ONLY: {{eventType}} at {{site}}. Threat: {{threat}}. Open PSD EOC.',
           },
     'all-clear':
       mode === 'real'
@@ -1013,11 +1013,13 @@ export function TemplateFields({
           <fieldset className="template-purpose" key={purpose}>
             <legend>{PURPOSE_LABELS[purpose]} messages</legend>
             <p className="field-help" id={helpId}>
-              Allowed variables: {'{{site}}'}, {'{{eventType}}'},{' '}
-              {'{{startTime}}'}, and {'{{initiator}}'}. PSD EOC wraps every
-              rendered field in immutable real-or-drill and lifecycle markers.
-              Write clear district-approved instructions; the seeded wording is
-              a starting point and can be changed without rebuilding PSD EOC.
+              Allowed variables: {'{{site}}'}, {'{{eventType}}'}, {'{{threat}}'}
+              , {'{{startTime}}'}, and {'{{initiator}}'}. The response and
+              threat variables carry the operator's typed description when the
+              catalog entry required one. PSD EOC wraps every rendered field in
+              immutable real-or-drill and lifecycle markers. Write clear
+              district-approved instructions; the seeded wording is a starting
+              point and can be changed without rebuilding PSD EOC.
             </p>
             <section
               className="channel-editor"

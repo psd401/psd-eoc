@@ -1337,6 +1337,7 @@ describeWithDatabase('event-type database versioning', () => {
         variables: {
           site: 'Harbor Ridge High School',
           eventType: item.latestVersion.name,
+          threat: 'Intruder',
           startTime: '2026-08-08T16:30:00.000Z',
           initiator: 'Taylor Morgan',
         },
