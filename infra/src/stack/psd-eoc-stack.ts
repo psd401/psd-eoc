@@ -85,6 +85,7 @@ import {
   readDeploymentIdentity,
   readFacilityContext,
   readSyntheticGroupContext,
+  readThreatContext,
   readNeighborhoodContext,
 } from './config';
 import type { DeploymentTarget } from './config';
@@ -1910,6 +1911,7 @@ export class PsdEocStack extends Stack {
           PSD_EOC_FACILITIES: readFacilityContext(this.node),
           PSD_EOC_NEIGHBORHOODS: readNeighborhoodContext(this.node),
           PSD_EOC_SYNTHETIC_GROUPS: readSyntheticGroupContext(this.node),
+          PSD_EOC_THREATS: readThreatContext(this.node),
           PSD_EOC_INITIAL_ACCESS_GROUP_ID: initialAccessGroupId.valueAsString,
           PSD_EOC_INITIAL_ACCESS_GROUP_NAME:
             initialAccessGroupName.valueAsString,

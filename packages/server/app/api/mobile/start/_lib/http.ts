@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   IdempotencyKeySchema,
   ListFacilitiesInputSchema,
+  ListThreatsInputSchema,
   type CapabilityInput,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
@@ -39,11 +40,16 @@ const RESPONSE_HEADERS = Object.freeze({
   Vary: 'Authorization, Cookie',
 });
 const DEFAULT_FACILITY_PAGE_LIMIT = 200;
+const DEFAULT_THREAT_PAGE_LIMIT = 200;
 
 export interface MobileStartRouteRuntime extends StartFlowRouteRuntime {
   authenticateQuery(request: Request, now: Date): Promise<AuthenticatedSession>;
   executeFacilities(
     input: CapabilityInput<'list-facilities'>,
+    invocation: TrustedCapabilityInvocation,
+  ): Promise<unknown>;
+  executeThreats(
+    input: CapabilityInput<'list-threats'>,
     invocation: TrustedCapabilityInvocation,
   ): Promise<unknown>;
 }
@@ -99,6 +105,10 @@ export function getDefaultMobileStartRouteRuntime(): MobileStartRouteRuntime {
       input: CapabilityInput<'list-facilities'>,
       invocation: TrustedCapabilityInvocation,
     ) => startCapabilities.execute('list-facilities', input, invocation),
+    executeThreats: (
+      input: CapabilityInput<'list-threats'>,
+      invocation: TrustedCapabilityInvocation,
+    ) => startCapabilities.execute('list-threats', input, invocation),
     executePreview: (
       input: CapabilityInput<'create-activation-preview'>,
       invocation: TrustedCapabilityInvocation,
@@ -142,6 +152,27 @@ function parseFacilitiesInput(
   });
 }
 
+function parseThreatsInput(request: Request): CapabilityInput<'list-threats'> {
+  if (request.method !== 'GET') {
+    throw new SyntaxError('The mobile threat route requires GET.');
+  }
+  const parameters = new URL(request.url).searchParams;
+  const allowed = new Set(['cursor', 'limit']);
+  for (const key of parameters.keys()) {
+    if (!allowed.has(key) || parameters.getAll(key).length !== 1) {
+      throw new SyntaxError('The threat query parameters are invalid.');
+    }
+  }
+  const limit = parameters.get('limit');
+  // The start flow only ever offers a selectable threat; retired ones stay
+  // readable through the event they were pinned on, never through this list.
+  return ListThreatsInputSchema.parse({
+    includeInactive: false,
+    cursor: parameters.get('cursor'),
+    limit: limit === null ? DEFAULT_THREAT_PAGE_LIMIT : Number(limit),
+  });
+}
+
 function queryInvocation(
   authenticated: AuthenticatedSession,
   requestId: string,
@@ -168,6 +199,29 @@ export async function handleListMobileStartFacilities(
     assertFacilitiesQueryHeaders(request);
     const input = parseFacilitiesInput(request);
     const result = await runtime.executeFacilities(
+      input,
+      queryInvocation(authenticated, requestId, serverTime),
+    );
+    return NextResponse.json(result, { headers: RESPONSE_HEADERS });
+  } catch (error) {
+    return startFlowApiErrorResponse(error, requestId);
+  }
+}
+
+/** Lists the selectable threats in the district's declared order. */
+export async function handleListMobileStartThreats(
+  request: Request,
+  runtimeValue?: MobileStartRouteRuntime,
+): Promise<NextResponse> {
+  let requestId: string = randomUUID();
+  try {
+    const runtime = runtimeValue ?? getDefaultMobileStartRouteRuntime();
+    requestId = runtime.createRequestId();
+    const serverTime = runtime.now();
+    const authenticated = await runtime.authenticateQuery(request, serverTime);
+    assertFacilitiesQueryHeaders(request);
+    const input = parseThreatsInput(request);
+    const result = await runtime.executeThreats(
       input,
       queryInvocation(authenticated, requestId, serverTime),
     );

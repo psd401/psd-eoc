@@ -65,6 +65,10 @@ const exampleConfiguration = Object.freeze({
   sesFromAddress: `eoc-alerts@${exampleHostedDomain}`,
   sesIdentityDomain: exampleHostedDomain,
   sourceRepositoryUrl: `https://code.${exampleHostedDomain}/example/eoc`,
+  threats: [
+    { key: 'example-threat', name: 'Example threat' },
+    { key: 'other', name: 'Other', requiresDetail: true },
+  ],
   syntheticGroups: [
     {
       displayName: 'Example synthetic staff',
@@ -95,6 +99,7 @@ const app = new App({
     'psdEoc:sesIdentityDomain': exampleConfiguration.sesIdentityDomain,
     'psdEoc:sourceRepositoryUrl': exampleConfiguration.sourceRepositoryUrl,
     'psdEoc:syntheticGroups': exampleConfiguration.syntheticGroups,
+    'psdEoc:threats': exampleConfiguration.threats,
   },
 });
 const exampleDeploymentTarget = readDeploymentTarget(app.node);
@@ -167,6 +172,10 @@ template.hasResourceProperties('AWS::ECS::TaskDefinition', {
         {
           Name: 'PSD_EOC_SYNTHETIC_GROUPS',
           Value: JSON.stringify(exampleConfiguration.syntheticGroups),
+        },
+        {
+          Name: 'PSD_EOC_THREATS',
+          Value: JSON.stringify(exampleConfiguration.threats),
         },
       ]),
       Name: 'native-bootstrap',

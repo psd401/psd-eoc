@@ -24,6 +24,10 @@ import {
   describeSyntheticGroupOutcome,
 } from '../../db/bootstrap-synthetic-groups';
 import {
+  bootstrapThreats,
+  describeThreatOutcome,
+} from '../../db/bootstrap-threats';
+import {
   configureAndVerifyApplicationRole,
   verifyApplicationLogin,
   verifyDatabaseTls,
@@ -129,6 +133,8 @@ export interface DistrictBootstrapOutcome {
   readonly facilitiesCreated: number;
   readonly neighborhoodsConfigured: number;
   readonly neighborhoodsCreated: number;
+  readonly threatsConfigured: number;
+  readonly threatsCreated: number;
 }
 
 interface BootstrapRunSummary {
@@ -275,7 +281,8 @@ export async function runBootstrap(
     }
     if (
       second.district.facilitiesCreated !== 0 ||
-      second.district.neighborhoodsCreated !== 0
+      second.district.neighborhoodsCreated !== 0 ||
+      second.district.threatsCreated !== 0
     ) {
       throw new Error(
         'The native bootstrap created district configuration twice; it is not idempotent.',
@@ -464,6 +471,10 @@ export function createBootstrapDependencies(
         () => bootstrapSyntheticGroups(administratorConnection.db),
       );
       console.info(describeSyntheticGroupOutcome(syntheticGroups));
+      // Threats are district vocabulary with no dependency on sites, so they
+      // follow the same create-what-is-missing rule and nothing else.
+      const threats = await bootstrapThreats(administratorConnection.db);
+      console.info(describeThreatOutcome(threats));
       return Object.freeze({
         syntheticGroupsConfigured: syntheticGroups.configured,
         syntheticGroupsCreated: syntheticGroups.created.length,
@@ -471,6 +482,8 @@ export function createBootstrapDependencies(
         facilitiesCreated: facilities.created.length,
         neighborhoodsConfigured: neighborhoods.configured,
         neighborhoodsCreated: neighborhoods.created.length,
+        threatsConfigured: threats.configured,
+        threatsCreated: threats.created.length,
       });
     },
     async verifyApplicationLogin(): Promise<void> {

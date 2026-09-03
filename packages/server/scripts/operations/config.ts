@@ -94,6 +94,8 @@ const BootstrapEnvironmentSchema = z
     PSD_EOC_FACILITIES: z.string().max(200_000).optional(),
     /** JSON list of facility groupings notified together. */
     PSD_EOC_NEIGHBORHOODS: z.string().max(200_000).optional(),
+    /** JSON list of the district's threats; see db/bootstrap-threats.ts. */
+    PSD_EOC_THREATS: z.string().max(200_000).optional(),
   })
   .strict();
 

@@ -149,9 +149,9 @@ names, file formats, or one blanket DAN for the database. The inventory is:
   session and credential lifecycle, push-token lifecycle, and agent/API-key
   lifecycle.
 - `configuration-and-governance`
-  Facilities and neighborhoods, group sources, event-type versions/templates
-  and drafts, integration observations, channel configuration, and governance
-  decisions.
+  Facilities and neighborhoods, the threat catalog, group sources, event-type
+  versions/templates and drafts, integration observations, channel
+  configuration, and governance decisions.
 - `generated-reports-and-exports`
   Derived event/drill projections, delivery-test reports, and immutable,
   content-addressed CSV/PDF objects. Expiration of a signed download URL does

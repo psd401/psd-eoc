@@ -17,6 +17,7 @@ export const MCP_TOOL_CAPABILITY_IDS = Object.freeze([
   'get-stale-roster-report',
   'list-facilities',
   'get-facility',
+  'list-threats',
   'list-event-types',
   'get-event-type-version',
   'get-event-type-draft',
@@ -97,6 +98,11 @@ const descriptions = Object.freeze({
     title: 'Get facility',
     description:
       'Read one authorized site identity and name. Records outside the configured agent key facility scope remain unavailable.',
+  }),
+  'list-threats': Object.freeze({
+    title: 'List threats',
+    description:
+      'List the district-declared threats an operator chooses from before the response, in declared order, so a threat ID can be supplied to an activation preview. This is read-only.',
   }),
   'list-event-types': Object.freeze({
     title: 'List event types',
