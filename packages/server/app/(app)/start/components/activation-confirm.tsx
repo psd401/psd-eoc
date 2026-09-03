@@ -31,7 +31,13 @@ export interface ConfirmedSelection {
   readonly eventTypeVersionId: string;
   readonly facilityId: string;
   readonly facilityName: string;
+  /** The operator's words for an "Other" response, when one was required. */
+  readonly responseDetail: string | null;
   readonly templateMode: TemplateMode;
+  /** The operator's words for an "Other" threat, when one was required. */
+  readonly threatDetail: string | null;
+  readonly threatId: string;
+  readonly threatName: string;
 }
 
 export interface ActiveEventChoice {
@@ -153,12 +159,18 @@ function SelectedEventSummary({
   eventKind,
   eventTypeName,
   facilityName,
+  responseDetail,
   templateMode,
+  threatDetail,
+  threatName,
 }: Readonly<{
   eventKind: EventKind;
   eventTypeName: string;
   facilityName: string;
+  responseDetail: string | null;
   templateMode: TemplateMode;
+  threatDetail: string | null;
+  threatName: string;
 }>) {
   return (
     <section className="panel" aria-labelledby="selection-heading">
@@ -166,8 +178,16 @@ function SelectedEventSummary({
       <dl className="facts">
         <dt>Facility</dt>
         <dd>{facilityName}</dd>
-        <dt>Event type</dt>
-        <dd>{eventTypeName}</dd>
+        <dt>Threat</dt>
+        <dd>
+          {threatName}
+          {threatDetail === null ? null : ` — ${threatDetail}`}
+        </dd>
+        <dt>Response</dt>
+        <dd>
+          {eventTypeName}
+          {responseDetail === null ? null : ` — ${responseDetail}`}
+        </dd>
         <dt>Classification</dt>
         <dd>
           <span
@@ -234,7 +254,11 @@ function requireMatchingPreview(
     preview.templateMode !== selection.templateMode ||
     preview.eventTypeVersion.id !== selection.eventTypeVersionId ||
     preview.eventTypeVersion.templateMode !== selection.templateMode ||
-    preview.rosterPopulation !== 'staff'
+    preview.rosterPopulation !== 'staff' ||
+    preview.threat === null ||
+    preview.threat.id !== selection.threatId ||
+    preview.threat.detail !== selection.threatDetail ||
+    preview.responseDetail !== selection.responseDetail
   ) {
     throw new StartFlowRequestError(
       'PSD EOC checked a different event than the one you selected. No event was started and nothing was sent.',
@@ -319,6 +343,9 @@ export function ActivationConfirm({
             templateMode: selection.templateMode,
           },
           rosterPopulation: 'staff',
+          threatId: selection.threatId,
+          threatDetail: selection.threatDetail,
+          responseDetail: selection.responseDetail,
         },
         csrfCookieName,
         ActivationPreviewSchema,
@@ -375,7 +402,10 @@ export function ActivationConfirm({
     selection.eventKind,
     selection.eventTypeVersionId,
     selection.facilityId,
+    selection.responseDetail,
     selection.templateMode,
+    selection.threatDetail,
+    selection.threatId,
   ]);
 
   useEffect(() => {
@@ -563,7 +593,10 @@ export function ActivationConfirm({
         eventKind={selection.eventKind}
         eventTypeName={selection.eventTypeName}
         facilityName={selection.facilityName}
+        responseDetail={selection.responseDetail}
         templateMode={selection.templateMode}
+        threatDetail={selection.threatDetail}
+        threatName={selection.threatName}
       />
 
       <div aria-busy={previewLoading} className="consequence-preview">

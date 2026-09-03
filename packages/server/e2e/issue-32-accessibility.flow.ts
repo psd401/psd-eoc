@@ -28,6 +28,7 @@ const ISSUE_32_PHOTO_BYTES = Buffer.from(
   'base64',
 );
 const ISSUE_32_MOCK_INCIDENT_ID = '32000000-0000-4000-8000-000000000032';
+const REAL_THREAT_DETAIL = 'Unknown chemical smell in the gym';
 
 function remapActivationToEvent(
   result: StartEventResult,
@@ -279,6 +280,12 @@ async function openDrillConfirmation(
     }),
   );
   await expect(page).toHaveURL(/\/start\?.*mode=drill/u);
+  if (options.scanAxe !== false) await expectAxeClean(page);
+  await activateByKeyboard(
+    page,
+    page.getByRole('link', { name: 'Synthetic wildlife', exact: true }),
+  );
+  await expect(page).toHaveURL(/\/start\?.*threatId=/u);
   if (options.scanAxe !== false) await expectAxeClean(page);
   await activateByKeyboard(
     page,
@@ -566,6 +573,18 @@ test.describe('issue-32-accessibility-evidence', () => {
     );
     await expect(page).toHaveURL(/\/start\?.*mode=real/u);
     await expectAxeClean(page);
+    await page.screenshot({
+      path: issue32EvidencePath('real-incident-threat-step.png'),
+      fullPage: true,
+    });
+    // "Synthetic other" requires a typed description. It travels with the
+    // selection through the response step and is shown on the confirmation.
+    const otherThreat = page.getByRole('form', { name: 'Synthetic other' });
+    await focusByKeyboard(page, otherThreat.getByLabel('Describe the threat'));
+    await page.keyboard.type(REAL_THREAT_DETAIL);
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/start\?.*threatDetail=/u);
+    await expectAxeClean(page);
     const lockdown = page.locator('a.choice-card').filter({
       has: page.getByText('Lockdown', { exact: true }),
     });
@@ -579,6 +598,7 @@ test.describe('issue-32-accessibility-evidence', () => {
         name: /Start (?:a separate )?REAL incident and notify/u,
       }),
     ).toBeVisible();
+    await expect(page.getByText(REAL_THREAT_DETAIL).first()).toBeVisible();
     await expectAxeClean(page);
     await page.screenshot({
       path: issue32EvidencePath('real-incident-safe-confirmation.png'),

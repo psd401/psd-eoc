@@ -154,6 +154,9 @@ function previewInput(): CapabilityInput<'create-activation-preview'> {
     templateMode: 'real',
     eventTypeVersion: { id: IDS.eventType, templateMode: 'real' },
     rosterPopulation: 'staff',
+    threatId: '30000000-0000-4000-8000-000000000009',
+    threatDetail: null,
+    responseDetail: null,
   };
 }
 

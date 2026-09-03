@@ -123,6 +123,7 @@ const IDS = Object.freeze({
   rosterSnapshot: uuid(10),
   audience: uuid(11),
   preview: uuid(12),
+  threat: uuid(13),
 });
 
 const NOW = new Date('2026-08-10T17:00:00.000Z');
@@ -200,6 +201,8 @@ const PREVIEW = ActivationPreviewSchema.parse({
   ],
   sendReadiness: 'ready',
   blockingReasonCodes: [],
+  threat: { id: IDS.threat, name: 'Wildlife', detail: null },
+  responseDetail: null,
   activeEventIds: [],
   consequenceDigest: 'a'.repeat(64),
   createdAt: NOW.toISOString(),
@@ -408,6 +411,9 @@ describe('start-flow canonical capability execution', () => {
           templateMode: 'drill',
         },
         rosterPopulation: 'synthetic',
+        threatId: IDS.threat,
+        threatDetail: null,
+        responseDetail: null,
       },
       invocation(IDS.requestPreview),
       store,
@@ -439,6 +445,9 @@ describe('start-flow canonical capability execution', () => {
             templateMode: 'drill',
           },
           rosterPopulation: 'synthetic',
+          threatId: IDS.threat,
+          threatDetail: null,
+          responseDetail: null,
         },
         invocation(IDS.requestDenied, {
           facilityScope: {
