@@ -1,6 +1,8 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
+
+import { responseListHref, type ResponseListFilters } from './filters';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import {
@@ -2173,10 +2175,12 @@ function EventTypeEditor({
 }
 
 export function EventTypeAdmin({
+  filters,
   items,
   csrfCookieName,
   sessionId,
 }: Readonly<{
+  filters: ResponseListFilters;
   items: readonly EventTypeListItem[];
   csrfCookieName: string;
   sessionId: string;
@@ -2228,7 +2232,7 @@ export function EventTypeAdmin({
               A retained change belongs to a response hidden by the current
               filter. No new change can be sent until it is resolved.
             </p>
-            <a href="/event-types/manage">
+            <a href={responseListHref({ showRetired: true })}>
               Show all responses and open the retained change
             </a>
           </div>
@@ -2251,6 +2255,25 @@ export function EventTypeAdmin({
         <p className="field-help">
           Real and drill variants are separate immutable identities. Publishing
           never overwrites a version used by a historical event.
+        </p>
+        {/* A retired response is never deleted, because events stay pinned to
+            the exact version they used. Hiding it here keeps the list to what
+            an operator can actually choose, without losing the way back. */}
+        <a
+          className="retired-toggle"
+          href={responseListHref({
+            templateMode: filters.templateMode,
+            showRetired: !filters.showRetired,
+          })}
+        >
+          {filters.showRetired
+            ? 'Hide retired responses'
+            : 'Show retired responses'}
+        </a>
+        <p className="field-help">
+          {filters.showRetired
+            ? 'Showing every response, including those no longer available for new activations.'
+            : 'Showing responses available for new activations. Retired ones keep their history and can be re-enabled.'}
         </p>
       </aside>
       <EventTypeEditor

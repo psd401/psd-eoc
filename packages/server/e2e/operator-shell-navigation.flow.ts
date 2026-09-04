@@ -67,6 +67,31 @@ test.describe('operator-shell-navigation', () => {
       (await page.locator('main#main-content').innerText()).toLowerCase(),
     ).not.toContain('event type');
 
+    // A retired response is never deleted, so the picker defaults to what an
+    // operator can actually choose and keeps a way back to the rest.
+    const picker = page.getByLabel('Response', { exact: true });
+    const availableCount = await picker.locator('option').count();
+    await expect(page).not.toHaveURL(/show=all/u);
+    await expect(
+      page.getByText(/Showing responses available for new activations/u),
+    ).toBeVisible();
+    await page
+      .getByRole('link', { name: 'Show retired responses', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/event-types\/manage\?show=all$/u);
+    await expect(
+      page.getByText(/Showing every response, including those no longer/u),
+    ).toBeVisible();
+    // Every available response is still listed once retired ones join them.
+    expect(await picker.locator('option').count()).toBeGreaterThanOrEqual(
+      availableCount,
+    );
+    await expectAxeClean(page);
+    await page
+      .getByRole('link', { name: 'Hide retired responses', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/event-types\/manage$/u);
+
     await page.goto('/');
     await page.screenshot({
       path: evidencePath('operator-shell-desktop.png'),
