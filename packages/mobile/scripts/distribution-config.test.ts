@@ -76,8 +76,8 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('ships app/runtime 1.0.11 as embedded-only with no OTA routing', () => {
-    expect(appConfig.expo.version).toBe('1.0.11');
+  test('ships app/runtime 1.0.12 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.12');
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
       enabled: false,
@@ -103,19 +103,19 @@ describe('mobile distribution configuration', () => {
 
   test('pins the complete current Expo SDK 57 compatibility patch set', () => {
     expect(packageManifest.dependencies).toMatchObject({
-      expo: '~57.0.16',
-      'expo-auth-session': '~57.0.9',
-      'expo-constants': '~57.0.14',
+      expo: '~57.0.19',
+      'expo-auth-session': '~57.0.11',
+      'expo-constants': '~57.0.17',
       'expo-crypto': '~57.0.2',
-      'expo-dev-client': '~57.0.15',
-      'expo-file-system': '~57.0.5',
-      'expo-image-picker': '~57.0.13',
-      'expo-linking': '~57.0.7',
-      'expo-location': '~57.0.13',
-      'expo-notifications': '~57.0.14',
-      'expo-router': '~57.0.16',
+      'expo-dev-client': '~57.0.18',
+      'expo-file-system': '~57.0.6',
+      'expo-image-picker': '~57.0.15',
+      'expo-linking': '~57.0.9',
+      'expo-location': '~57.0.15',
+      'expo-notifications': '~57.0.16',
+      'expo-router': '~57.0.18',
       'expo-splash-screen': '~57.0.8',
-      'expo-updates': '~57.0.17',
+      'expo-updates': '~57.0.21',
     });
     expect(packageManifest.dependencies['expo-application']).toBe('~57.0.2');
     expect(packageManifest.scripts['expo:check']).toBe('expo install --check');
@@ -171,7 +171,7 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'iOS and Android ship the same app from the same source at the same version.',
     );
-    expect(release).toContain('The current app/runtime is 1.0.11');
+    expect(release).toContain('The current app/runtime is 1.0.12');
     // The store record names the exact last submitted build, which is now the
     // current app/runtime because 1.0.7 has been built and submitted.
     expect(release).toContain('1.0.10/build 21 on iOS');
@@ -470,7 +470,7 @@ describe('mobile distribution configuration', () => {
     }
     expect(readme).not.toContain('`ota-preview`:');
     expect(readme).toContain(
-      'Remote updates are disabled for app/runtime 1.0.11',
+      'Remote updates are disabled for app/runtime 1.0.12',
     );
     expect(compactReadme).toContain(
       'Ordinary `preview` must never be used for production-environment OTA verification',
