@@ -400,6 +400,7 @@ describeWithDatabase('durable channel attempt execution leases', () => {
       'sms_retry_schedules',
       'channel_attempts',
       'delivery_evidence',
+      'staff_sms_consents',
     ];
     const gaps = await database.execute<{
       table_name: string;

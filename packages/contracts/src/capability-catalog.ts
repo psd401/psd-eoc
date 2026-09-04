@@ -120,6 +120,12 @@ import {
   SyncAccessMembershipInputSchema,
   SyncAccessMembershipResultSchema,
   UnregisterPushTokenInputSchema,
+  RecordSmsConsentInputSchema,
+  SmsConsentReceiptSchema,
+  WithdrawSmsConsentInputSchema,
+  SmsConsentWithdrawalReceiptSchema,
+  SmsConsentStateSchema,
+  ReadMySmsConsentInputSchema,
   UserPageSchema,
 } from './identity';
 import {
@@ -1280,6 +1286,30 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: UnregisterPushTokenInputSchema,
     outputSchema: PushTokenUnregistrationReceiptSchema,
+  }),
+  'record-sms-consent': canonicalCapability({
+    id: 'record-sms-consent',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
+    inputSchema: RecordSmsConsentInputSchema,
+    outputSchema: SmsConsentReceiptSchema,
+  }),
+  'withdraw-sms-consent': canonicalCapability({
+    id: 'withdraw-sms-consent',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
+    inputSchema: WithdrawSmsConsentInputSchema,
+    outputSchema: SmsConsentWithdrawalReceiptSchema,
+  }),
+  'read-my-sms-consent': canonicalCapability({
+    id: 'read-my-sms-consent',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
+    inputSchema: ReadMySmsConsentInputSchema,
+    outputSchema: SmsConsentStateSchema,
   }),
   'create-facility': canonicalCapability({
     id: 'create-facility',

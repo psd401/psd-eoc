@@ -49,6 +49,7 @@ import type { Database } from '../../db/client';
 import {
   deviceEnrollments,
   devicePushTokenRegistrations,
+  staffSmsConsents,
   devicePushTokenUnregistrations,
   groupMembers,
   groupSources,
@@ -114,12 +115,24 @@ export interface RosterLocalPushEndpoint {
   readonly token: string;
 }
 
+/**
+ * A staff member's live SMS consent, which is what makes a number sendable.
+ *
+ * A number without a recorded consent is never copied into a snapshot. The
+ * consent is the permission, not the presence of a phone number somewhere.
+ */
+export interface RosterLocalSmsEndpoint {
+  readonly id: string;
+  readonly phoneNumber: string;
+}
+
 /** Local user facts matched only by the canonical staff email from Groups. */
 export interface RosterLocalContact {
   readonly googleSubject: string;
   readonly staffEmail: string;
   readonly displayName: string;
   readonly pushEndpoints: readonly RosterLocalPushEndpoint[];
+  readonly smsEndpoints: readonly RosterLocalSmsEndpoint[];
 }
 
 /** Exact source configuration and revision evidence read before provider I/O. */
@@ -674,6 +687,19 @@ function buildRecipients(
           }),
         ),
       ),
+      // Validated here as untrusted contact input, exactly like a push token.
+      smsEndpoints: Object.freeze(
+        rawContact.smsEndpoints.map((endpoint) =>
+          Object.freeze({
+            id: UuidSchema.parse(endpoint.id),
+            phoneNumber: z
+              .string()
+              .trim()
+              .regex(/^\+[1-9]\d{7,14}$/u)
+              .parse(endpoint.phoneNumber),
+          }),
+        ),
+      ),
     });
     if (
       contacts.has(contact.staffEmail) ||
@@ -725,6 +751,15 @@ function buildRecipients(
             provider: endpoint.provider,
             serviceEnvironment: endpoint.serviceEnvironment,
             token: endpoint.token,
+          }),
+        ),
+        ...(local?.smsEndpoints ?? []).map((endpoint) =>
+          EndpointSchema.parse({
+            id: endpoint.id,
+            channel: 'sms',
+            status: 'active',
+            capturedAt,
+            phoneNumber: endpoint.phoneNumber,
           }),
         ),
       ];
@@ -1887,6 +1922,7 @@ export function createDrizzleRosterSyncStore(
             staffEmail: string;
             displayName: string;
             pushEndpoints: RosterLocalPushEndpoint[];
+            smsEndpoints: RosterLocalSmsEndpoint[];
           }
         >();
         for (
@@ -1936,6 +1972,7 @@ export function createDrizzleRosterSyncStore(
               staffEmail,
               displayName: row.displayName,
               pushEndpoints: [],
+              smsEndpoints: [],
             });
           }
           const pushRows = await transaction
@@ -2043,6 +2080,35 @@ export function createDrizzleRosterSyncStore(
             }
           }
         }
+        // A live SMS consent is what makes a number sendable. Withdrawn
+        // consents stay in the table as evidence and are excluded here, so a
+        // withdrawal removes the endpoint from the next snapshot without
+        // destroying the record that the number was once permitted.
+        const consentRows = await transaction
+          .select({
+            id: staffSmsConsents.id,
+            googleSubject: users.googleSubject,
+            phoneNumber: staffSmsConsents.phoneNumber,
+          })
+          .from(staffSmsConsents)
+          .innerJoin(users, eq(users.id, staffSmsConsents.userId))
+          .where(
+            and(isNull(staffSmsConsents.withdrawnAt), isNull(users.disabledAt)),
+          );
+        for (const row of consentRows) {
+          const contact = contactMap.get(row.googleSubject);
+          if (contact === undefined) continue;
+          if (contact.smsEndpoints.length > 0) {
+            throw new RosterSyncError(
+              'LOCAL_CONTACT_CAPTURE_INVALID',
+              'A staff member had more than one live SMS consent.',
+            );
+          }
+          contact.smsEndpoints.push({
+            id: row.id,
+            phoneNumber: row.phoneNumber,
+          });
+        }
         return Object.freeze(
           [...contactMap.values()]
             .sort((left, right) =>
@@ -2056,6 +2122,7 @@ export function createDrizzleRosterSyncStore(
                     left.id.localeCompare(right.id),
                   ),
                 ),
+                smsEndpoints: Object.freeze(contact.smsEndpoints),
               }),
             ),
         );
