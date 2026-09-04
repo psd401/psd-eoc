@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="1.89" timestamp="2026-08-30T18:12:53">
-    <testcase id="Issue 32 - verify the notification opened its exact drill" name="Issue 32 - verify the notification opened its exact drill" classname="Issue 32 - verify the notification opened its exact drill" file="packages/mobile/e2e/flows/push-opened-event-room.yaml" time="1.883" timestamp="2026-08-30T18:12:53" status="SUCCESS">
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="3.966" timestamp="2026-09-03T14:44:03">
+    <testcase id="Issue 32 - verify the notification opened its exact drill" name="Issue 32 - verify the notification opened its exact drill" classname="Issue 32 - verify the notification opened its exact drill" file="packages/mobile/e2e/flows/push-opened-event-room.yaml" time="3.952" timestamp="2026-09-03T14:44:03" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only, notification"/>
       </properties>

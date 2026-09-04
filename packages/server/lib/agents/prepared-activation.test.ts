@@ -64,6 +64,7 @@ const IDS = Object.freeze({
   agentAllowedRead: '00000000-0000-4000-8000-000000000123',
   humanDeniedRead: '00000000-0000-4000-8000-000000000124',
   agentDeniedRead: '00000000-0000-4000-8000-000000000125',
+  threat: '00000000-0000-4000-8000-000000000126',
 });
 
 interface MemoryIdempotency {
@@ -127,6 +128,8 @@ function realActivationPreview(
     sendReadiness: 'ready',
     blockingReasonCodes: [],
     activeEventIds: [],
+    threat: { id: IDS.threat, name: 'Synthetic wildlife', detail: null },
+    responseDetail: null,
     consequenceDigest: 'a'.repeat(64),
     createdAt,
     expiresAt: input.expiresAt ?? '2026-08-10T18:10:00.000Z',
@@ -538,6 +541,8 @@ function activeEventFixture(): Event {
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
     createdBy: { kind: 'human', userId: IDS.human, sessionId: IDS.session },
+    threat: { id: IDS.threat, name: 'Synthetic wildlife', detail: null },
+    responseDetail: null,
     createdAt: '2026-08-10T18:02:00.000Z',
     activatedAt: '2026-08-10T18:02:00.000Z',
     allClearAt: null,

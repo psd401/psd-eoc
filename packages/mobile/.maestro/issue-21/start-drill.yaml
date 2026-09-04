@@ -1,5 +1,5 @@
 appId: ${APP_ID}
-name: Issue 21 - start a synthetic drill in exactly three taps
+name: Issue 21 - start a synthetic drill in exactly four taps
 tags:
   - issue-21
   - synthetic-only
@@ -28,10 +28,18 @@ tags:
 - tapOn: 'DRILL — TRAINING ONLY. Run practice drill at Synthetic Test School'
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertVisible:
+    id: 'issue-21-drill-threat'
+- assertVisible: 'DRILL — TRAINING ONLY. Threat Synthetic wildlife'
+
+# Tap 2: name the threat. Nothing is sent by this choice.
+- tapOn: 'DRILL — TRAINING ONLY. Threat Synthetic wildlife'
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertVisible: 'Threat: Synthetic wildlife'
+- assertVisible:
     id: 'issue-21-drill-event-type'
 - assertVisible: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'
 
-# Tap 2: choose the seeded synthetic drill event type.
+# Tap 3: choose the seeded synthetic drill response.
 - tapOn: 'DRILL — TRAINING ONLY. Choose Synthetic earthquake drill'
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertVisible: '.*synthetic recipient.*'
@@ -43,7 +51,7 @@ tags:
     id: 'issue-21-confirm-drill'
 - assertVisible: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
 
-# Tap 3: the final authenticated-human confirmation performs the activation.
+# Tap 4: the final authenticated-human confirmation performs the activation.
 - tapOn: 'Start a separate DRILL — TRAINING ONLY and record notification intents for 2 synthetic recipients'
 - extendedWaitUntil:
     visible:

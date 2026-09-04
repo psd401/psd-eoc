@@ -339,6 +339,8 @@ function activeEvent(
     status: 'active',
     rosterSnapshotId: ids.roster,
     rosterPopulation,
+    threat: null,
+    responseDetail: null,
     createdBy: requiresHuman ? humanActor : agentActor,
     createdAt: times.created,
     activatedAt: times.activated,
@@ -359,6 +361,12 @@ function activationPreview(target = targeting('incident', 'real', 'staff')) {
     eventTypeVersion:
       target.templateMode === 'real' ? realTypeRef : drillTypeRef,
     rosterSnapshotId: ids.roster,
+    threat: {
+      id: '00000000-0000-4000-8000-0000000000aa',
+      name: 'Synthetic Wildlife',
+      detail: null,
+    },
+    responseDetail: null,
     recipientCount: 42,
     channels: channelPlan(target),
     sendReadiness: 'ready',
@@ -1011,6 +1019,7 @@ describe('event type, targeting, and activation contracts', () => {
           key: 'lockdown-drill',
           familyKey: 'lockdown',
           templateMode: 'drill',
+          requiresDetail: false,
           baseVersionId: ids.eventTypeVersion,
         },
       }).success,
@@ -1349,8 +1358,21 @@ describe('event type, targeting, and activation contracts', () => {
         templateMode: 'drill',
         eventTypeVersion: drillTypeRef,
         rosterPopulation: 'synthetic',
+        threatId: '00000000-0000-4000-8000-0000000000aa',
+        threatDetail: null,
+        responseDetail: null,
       }).success,
     ).toBe(true);
+    // The threat is chosen before the response and is never optional.
+    expect(
+      CreateActivationPreviewInputSchema.safeParse({
+        facilityId: ids.facility,
+        kind: 'test',
+        templateMode: 'drill',
+        eventTypeVersion: drillTypeRef,
+        rosterPopulation: 'synthetic',
+      }).success,
+    ).toBe(false);
 
     const start = {
       source: 'activation-preview',
@@ -1712,6 +1734,8 @@ describe('human-only capability boundary', () => {
         name: 'Synthetic Lockdown',
         templateMode: 'real',
       },
+      threat: null,
+      responseDetail: null,
     } as const;
     const result = {
       eventId: ids.event,
@@ -5386,6 +5410,9 @@ describe('records and report projections', () => {
       kind: 'drill',
       eventTypeVersion: drillTypeRef,
       eventTypeName: 'Lockdown Drill',
+      threatName: null,
+      threatDetail: null,
+      responseDetail: null,
       status: 'active',
       startedAt: times.created,
       allClearAt: null,
@@ -5401,6 +5428,9 @@ describe('records and report projections', () => {
         templateMode: 'real',
       },
       eventTypeName: 'Synthetic Incident',
+      threatName: null,
+      threatDetail: null,
+      responseDetail: null,
     } as const;
     expect(EventRecordSchema.safeParse(incidentRecord).success).toBe(true);
     expect(DrillRecordSchema.safeParse(incidentRecord).success).toBe(false);

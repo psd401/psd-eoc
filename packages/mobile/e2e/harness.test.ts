@@ -110,7 +110,7 @@ describe('issue-32 mobile E2E harness', () => {
     expect(activationResult).toContain('waitUntilVisible: true');
     expect(activationResult).toContain('optional: true');
     expect(activationResult).toContain(
-      'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+      'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.',
     );
     expect(activationResult).not.toContain("id: 'issue-21-activation-result'");
     const iosNotification = await Bun.file(
@@ -124,13 +124,13 @@ describe('issue-32 mobile E2E harness', () => {
     expect(iosNotification).not.toContain('launchApp');
     expect(iosNotification).not.toContain("visible: 'Open event'");
     expect(iosNotification).toContain(
-      'Synthetic earthquake drill. Synthetic Test School, SYNTH.',
+      'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.',
     );
     const openedEventRoom = await Bun.file(
       resolve(flowRoot, 'push-opened-event-room.yaml'),
     ).text();
     expect(openedEventRoom).toContain(
-      "visible: 'Synthetic earthquake drill. Synthetic Test School, SYNTH.'",
+      "visible: 'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.'",
     );
     expect(openedEventRoom).toContain("assertNotVisible: '^REAL INCIDENT$'");
     const iosReveal = await Bun.file(

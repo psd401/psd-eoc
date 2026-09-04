@@ -50,6 +50,7 @@ const IDS = Object.freeze({
   audience: uuid(12),
   user: uuid(13),
   session: uuid(14),
+  threat: uuid(99),
   request: uuid(15),
   transition: uuid(16),
   journal: uuid(17),
@@ -108,6 +109,9 @@ function selectionFixture(
     templateMode: mode,
     eventTypeVersion: { id: versionId, templateMode: mode },
     rosterPopulation: mode === 'real' ? 'staff' : 'synthetic',
+    threatId: IDS.threat,
+    threatDetail: null,
+    responseDetail: null,
   });
 }
 
@@ -212,6 +216,8 @@ function previewFixture(
     eventTypeVersion: selection.eventTypeVersion,
     rosterSnapshotId: IDS.roster,
     rosterPopulation: selection.rosterPopulation,
+    threat: { id: IDS.threat, name: 'Synthetic wildlife', detail: null },
+    responseDetail: null,
     recipientCount: 2,
     channels: [
       {
@@ -265,6 +271,12 @@ function activeEventFixture(
     status: 'active',
     rosterSnapshotId: IDS.roster,
     rosterPopulation: selection.rosterPopulation,
+    threat: {
+      id: selection.threatId,
+      name: 'Synthetic wildlife',
+      detail: selection.threatDetail,
+    },
+    responseDetail: selection.responseDetail,
     createdBy: {
       kind: 'human',
       userId: IDS.user,
@@ -354,6 +366,8 @@ function activationResultFixture(
       status: 'active',
       rosterSnapshotId: preview.rosterSnapshotId,
       rosterPopulation: preview.rosterPopulation,
+      threat: null,
+      responseDetail: null,
       createdBy: actor,
       createdAt: NOW,
       activatedAt: NOW,
@@ -465,6 +479,21 @@ describe('mobile start API client', () => {
             ],
             pageInfo: { hasMore: false, nextCursor: null },
           });
+        case '/api/mobile/start/threats':
+          return parseResponse(input, {
+            items: [
+              {
+                id: IDS.threat,
+                key: 'synthetic-wildlife',
+                name: 'Synthetic wildlife',
+                sortOrder: 0,
+                requiresDetail: false,
+                active: true,
+                createdAt: NOW,
+              },
+            ],
+            pageInfo: { hasMore: false, nextCursor: null },
+          });
         case '/event-types/api?operation=list&enabled=true':
           return parseResponse(input, {
             items: [
@@ -474,6 +503,7 @@ describe('mobile start API client', () => {
                   key: 'synthetic-practice',
                   familyKey: 'synthetic-practice',
                   templateMode: 'drill',
+                  requiresDetail: false,
                   createdAt: NOW,
                 },
                 latestVersion,
@@ -515,6 +545,7 @@ describe('mobile start API client', () => {
       expect.arrayContaining([
         '/api/mobile/start/facilities',
         '/api/mobile/start/facilities?cursor=facility_cursor',
+        '/api/mobile/start/threats',
         '/event-types/api?operation=list&enabled=true',
         '/api/events',
         '/api/events?cursor=event_cursor',
@@ -536,6 +567,12 @@ describe('mobile start API client', () => {
       input: AuthenticatedRequestOptions<Output>,
     ): Promise<Output> => {
       if (input.path === '/api/mobile/start/facilities') {
+        return parseResponse(input, {
+          items: [],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+      if (input.path === '/api/mobile/start/threats') {
         return parseResponse(input, {
           items: [],
           pageInfo: { hasMore: false, nextCursor: null },
@@ -584,6 +621,12 @@ describe('mobile start API client', () => {
       input: AuthenticatedRequestOptions<Output>,
     ): Promise<Output> => {
       if (input.path === '/api/mobile/start/facilities') {
+        return parseResponse(input, {
+          items: [],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+      if (input.path === '/api/mobile/start/threats') {
         return parseResponse(input, {
           items: [],
           pageInfo: { hasMore: false, nextCursor: null },

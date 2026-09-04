@@ -385,6 +385,11 @@ function createCanaryHarness(
       expect(transaction).toBe(transactionToken);
       state.transactionalRuntimeCreations += 1;
       return Object.freeze({
+        selectActivationChoice: async () => ({
+          threatId: '00000000-0000-4000-8000-000000000777',
+          threatDetail: null,
+          responseDetail: null,
+        }),
         gateway: Object.freeze({
           async authorize() {
             throw new Error(
@@ -671,6 +676,9 @@ describe('authenticated rollback canary POST', () => {
           templateMode: 'drill',
         },
         rosterPopulation: 'synthetic',
+        threatId: '00000000-0000-4000-8000-000000000777',
+        threatDetail: null,
+        responseDetail: null,
       },
       idempotencyKey: null,
     });

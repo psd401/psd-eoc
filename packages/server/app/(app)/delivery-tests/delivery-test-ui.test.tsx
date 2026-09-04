@@ -36,6 +36,7 @@ const uuid = (suffix: number): string =>
 const IDS = Object.freeze({
   facility: uuid(1),
   eventType: uuid(2),
+  threat: uuid(6),
   targetSet: uuid(3),
   report: uuid(4),
   run: uuid(5),
@@ -53,6 +54,9 @@ const SELECTION = CreateActivationPreviewInputSchema.parse({
   templateMode: 'drill',
   eventTypeVersion: EVENT_TYPE,
   rosterPopulation: 'staff',
+  threatId: IDS.threat,
+  threatDetail: null,
+  responseDetail: null,
 });
 
 function deliveryTestPreview(
@@ -86,6 +90,10 @@ function deliveryTestPreview(
   const activationPreview = ActivationPreviewSchema.parse({
     ...base,
     deliveryTest,
+    // A delivery test names no threat: production builds its preview with a
+    // null threat and no response detail.
+    threat: null,
+    responseDetail: null,
     channels,
     sendReadiness: live ? 'ready' : 'blocked',
     blockingReasonCodes: live ? [] : ['INTEGRATION_NOT_LIVE_VERIFIED'],

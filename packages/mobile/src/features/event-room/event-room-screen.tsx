@@ -2147,6 +2147,19 @@ function AuthenticatedEventRoomScreen({
     facilityName: header.facility.name,
     facilityCode: header.facility.code,
   };
+  // The response name carries the operator's own words for an "Other"
+  // response; the threat line reads "Not recorded" only for an event that
+  // predates the threat catalog.
+  const responseLabel =
+    header.responseDetail === null
+      ? header.eventType.name
+      : `${header.eventType.name} — ${header.responseDetail}`;
+  const threatLabel =
+    header.threat === null
+      ? 'Not recorded'
+      : header.threat.detail === null
+        ? header.threat.name
+        : `${header.threat.name} — ${header.threat.detail}`;
 
   return (
     <SafeAreaView
@@ -2155,7 +2168,7 @@ function AuthenticatedEventRoomScreen({
     >
       <View style={styles.roomHeader}>
         <View
-          accessibilityLabel={`${header.eventType.name}. ${header.facility.name}, ${header.facility.code}.`}
+          accessibilityLabel={`${responseLabel}. Threat: ${threatLabel}. ${header.facility.name}, ${header.facility.code}.`}
           accessibilityRole="header"
           accessible
           style={styles.trustedHeader}
@@ -2163,7 +2176,12 @@ function AuthenticatedEventRoomScreen({
           <Text
             style={[styles.eventTypeName, { color: theme.colors.textPrimary }]}
           >
-            {header.eventType.name}
+            {responseLabel}
+          </Text>
+          <Text
+            style={[styles.facilityName, { color: theme.colors.textPrimary }]}
+          >
+            Threat: {threatLabel}
           </Text>
           <Text
             style={[styles.facilityName, { color: theme.colors.textMuted }]}

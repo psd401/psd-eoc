@@ -10,6 +10,7 @@ import {
   EventTypeIdSchema,
   EventTypeVersionRefSchema,
   NotificationChannelSchema,
+  OperatorDetailSchema,
 } from './event-type';
 import { FacilityIdSchema } from './facility';
 import {
@@ -157,6 +158,10 @@ export const EventRecordSchema = z
     kind: z.enum(['incident', 'drill', 'test']),
     eventTypeVersion: EventTypeVersionRefSchema,
     eventTypeName: z.string().trim().min(1).max(160),
+    /** Pinned threat name, or null for an event that predates the catalog. */
+    threatName: z.string().trim().min(1).max(160).nullable(),
+    threatDetail: OperatorDetailSchema.nullable(),
+    responseDetail: OperatorDetailSchema.nullable(),
     status: EventStatusSchema,
     startedAt: TimestampSchema,
     allClearAt: TimestampSchema.nullable(),

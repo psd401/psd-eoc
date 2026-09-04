@@ -2,8 +2,17 @@ import { z } from 'zod';
 
 import { PaginationCursorSchema } from './api';
 import { ActorSchema, InvocationSourceSchema } from './capability';
-import { EventIdSchema, EventSchema, type Event } from './event';
-import { EventTypeVersionIdSchema, TemplateModeSchema } from './event-type';
+import {
+  ActivationThreatSchema,
+  EventIdSchema,
+  EventSchema,
+  type Event,
+} from './event';
+import {
+  EventTypeVersionIdSchema,
+  OperatorDetailSchema,
+  TemplateModeSchema,
+} from './event-type';
 import { FacilityIdSchema } from './facility';
 import {
   JournalEntryKindSchema,
@@ -269,6 +278,10 @@ export const EventRoomHeaderSchema = z
       })
       .strict()
       .readonly(),
+    /** The pinned threat, or null for an event that predates the catalog. */
+    threat: ActivationThreatSchema.nullable(),
+    /** The operator's words for an "Other" response, when one was required. */
+    responseDetail: OperatorDetailSchema.nullable(),
   })
   .strict()
   .readonly();

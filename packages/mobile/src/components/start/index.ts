@@ -8,3 +8,4 @@ export * from './start-mode-action';
 export * from './start-mutation-attention';
 export * from './synthetic-mode-banner';
 export * from './test-ids';
+export * from './threat-choice';

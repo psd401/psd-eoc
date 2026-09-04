@@ -27,7 +27,7 @@ export function StartModeAction({
 
   return (
     <ClassifiedActionButton
-      accessibilityHint="Opens event type choices. This choice does not start an event or notify anyone."
+      accessibilityHint="Opens threat choices. This choice does not start an event or notify anyone."
       accessibilityLabel={`${classification}. ${title} at ${facilityName}`}
       busy={busy}
       detail={facilityName}

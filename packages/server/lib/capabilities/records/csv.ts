@@ -2,6 +2,7 @@ const CSV_HEADER = [
   'site',
   'date',
   'time',
+  'threat',
   'type',
   'duration',
   'participants_count',
@@ -31,6 +32,10 @@ export interface DrillRecordCsvRow {
   readonly facilityName: string;
   readonly facilityCode: string;
   readonly eventType: string;
+  /** Null for a drill that predates the threat catalog. */
+  readonly threatName: string | null;
+  readonly threatDetail: string | null;
+  readonly responseDetail: string | null;
   readonly kind: 'drill' | 'test';
   readonly startedAt: string;
   /** Null while the event is active or when a completed duration is unknown. */
@@ -118,11 +123,26 @@ function serializeRow(row: DrillRecordCsvRow): string {
   }
 
   const site = `${neutralizeFormula(row.facilityName)} [${neutralizeFormula(row.facilityCode)}]`;
-  const eventType = `[${row.kind.toUpperCase()}] ${neutralizeFormula(row.eventType)}`;
+  const eventType = `[${row.kind.toUpperCase()}] ${neutralizeFormula(row.eventType)}${
+    row.responseDetail === null
+      ? ''
+      : ` — ${neutralizeFormula(row.responseDetail)}`
+  }`;
+  // A drill from before the threat catalog has no threat to report; the cell
+  // stays empty rather than inventing one.
+  const threat =
+    row.threatName === null
+      ? ''
+      : `${neutralizeFormula(row.threatName)}${
+          row.threatDetail === null
+            ? ''
+            : ` — ${neutralizeFormula(row.threatDetail)}`
+        }`;
   return [
     site,
     formatLosAngelesDate(startedAt),
     formatLosAngelesTime(startedAt),
+    threat,
     eventType,
     durationCell(row.durationSeconds),
     row.participantCount.toString(),

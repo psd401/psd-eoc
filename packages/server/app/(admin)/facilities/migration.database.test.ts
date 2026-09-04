@@ -28,6 +28,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../db/client';
 import { seedDatabase } from '../../../db/seed';
+import { insertEventTypesBeforeDetailRule } from '../../../lib/testing/held-back-event-types';
 import { migrateDatabase, migrationsFolder } from '../../../drizzle/migrate';
 import migrationJournal from '../../../drizzle/migrations/meta/_journal.json';
 import { createDrizzleSecurityAuditRepository } from '../../../lib/audit/drizzle-repository';
@@ -454,6 +455,7 @@ async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
     // Threats arrived in migration 0046; this fixture is held before it, so
     // the seed must not touch a relation that does not exist yet.
     insertThreats: () => Promise.resolve(),
+    insertEventTypes: insertEventTypesBeforeDetailRule,
     async insertRosterEndpoints(transaction) {
       await transaction.execute(sql`
         insert into roster_endpoints (

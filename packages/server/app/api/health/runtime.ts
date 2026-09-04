@@ -9,7 +9,7 @@ import {
   type LifecycleConsequencePreview,
 } from '@psd-eoc/contracts';
 import { S3Client } from '@aws-sdk/client-s3';
-import { sql, type SQL } from 'drizzle-orm';
+import { asc, eq, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 
 import {
@@ -20,6 +20,7 @@ import {
   type PostgresDatabaseConfig,
   type PostgresDatabaseConnection,
 } from '../../../db/client';
+import { eventTypes, eventTypeVersions, threats } from '../../../db/schema';
 import {
   AgentGatewayError,
   type AuthorizedAgentGatewayCall,
@@ -90,8 +91,25 @@ export interface CanaryAgentGateway {
 }
 
 /** Runtime used only while the outer database transaction is open. */
+/** The threat and descriptions the synthetic canary activation pins. */
+export interface CanaryActivationChoice {
+  readonly threatId: string;
+  readonly threatDetail: string | null;
+  readonly responseDetail: string | null;
+}
+
+export const CANARY_DETAIL_TEXT = 'Synthetic health canary';
+
 export interface TransactionalCanaryRuntime {
   readonly gateway: CanaryAgentGateway;
+  /**
+   * Picks the first active threat in declared order for the synthetic
+   * lifecycle and supplies a description wherever the catalog requires one,
+   * so the canary needs no threat of its own in configuration.
+   */
+  selectActivationChoice(
+    eventTypeVersionId: string,
+  ): Promise<CanaryActivationChoice>;
   close(): Promise<void>;
 }
 
@@ -1120,6 +1138,9 @@ async function executeCanaryLifecycle(
   // The production gateway parses every output against the canonical contract
   // before returning. The assertion only adapts its intentionally unknown seam.
   beforeStage('activation-preview');
+  const choice = await runtime.selectActivationChoice(
+    configuration.eventTypeVersionId,
+  );
   const activationPreview = (await runtime.gateway.executeAuthorized(
     authorized.calls['create-activation-preview'],
     async () => ({
@@ -1132,6 +1153,9 @@ async function executeCanaryLifecycle(
           templateMode: 'drill',
         },
         rosterPopulation: 'synthetic',
+        threatId: choice.threatId,
+        threatDetail: choice.threatDetail,
+        responseDetail: choice.responseDetail,
       },
       idempotencyKey: null,
     }),
@@ -1408,8 +1432,45 @@ export function createRuntimeCanaryRouteDependencies(
     gateway: baseRuntime.gateway,
     configureTransaction: configureCanaryTransaction,
     createRequestId: randomUUID,
-    createTransactionalRuntime(transaction: unknown): AgentRestRuntime {
-      return createAgentRestRuntime(transactionConnection(transaction));
+    createTransactionalRuntime(
+      transaction: unknown,
+    ): TransactionalCanaryRuntime {
+      const connection = transactionConnection(transaction);
+      const runtime: AgentRestRuntime = createAgentRestRuntime(connection);
+      return Object.freeze({
+        gateway: runtime.gateway,
+        close: () => runtime.close(),
+        async selectActivationChoice(
+          eventTypeVersionId: string,
+        ): Promise<CanaryActivationChoice> {
+          const [threat] = await connection.db
+            .select({ id: threats.id, requiresDetail: threats.requiresDetail })
+            .from(threats)
+            .where(eq(threats.active, true))
+            .orderBy(asc(threats.sortOrder), asc(threats.name), asc(threats.id))
+            .limit(1);
+          if (threat === undefined) {
+            throw new Error('The health canary found no active threat.');
+          }
+          const [response] = await connection.db
+            .select({ requiresDetail: eventTypes.requiresDetail })
+            .from(eventTypeVersions)
+            .innerJoin(
+              eventTypes,
+              eq(eventTypes.id, eventTypeVersions.eventTypeId),
+            )
+            .where(eq(eventTypeVersions.id, eventTypeVersionId))
+            .limit(1);
+          if (response === undefined) {
+            throw new Error('The health canary event type is unavailable.');
+          }
+          return Object.freeze({
+            threatId: threat.id,
+            threatDetail: threat.requiresDetail ? CANARY_DETAIL_TEXT : null,
+            responseDetail: response.requiresDetail ? CANARY_DETAIL_TEXT : null,
+          });
+        },
+      });
     },
     now: () => new Date(),
     reportFailure(stage: CanaryFailureStage): void {

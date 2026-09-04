@@ -8,6 +8,9 @@ const BASE_ROW: DrillRecordCsvRow = Object.freeze({
   facilityName: 'Harbor Heights Elementary',
   facilityCode: 'HHE',
   eventType: 'Lockdown',
+  threatName: 'Wildlife',
+  threatDetail: null,
+  responseDetail: null,
   kind: 'drill',
   startedAt: '2024-03-10T09:30:00.000Z',
   durationSeconds: 10 * 60,
@@ -33,9 +36,28 @@ describe('drill-record CSV serialization', () => {
     ]);
 
     expect(csv).toBe(
-      'site,date,time,type,duration,participants_count\r\n' +
-        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,[DRILL] Lockdown,00:10:00,35\r\n' +
-        'Harbor Heights Elementary [HHE],2024-03-10,03:30:00 PDT,[TEST] Evacuation,,0\r\n',
+      'site,date,time,threat,type,duration,participants_count\r\n' +
+        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,Wildlife,[DRILL] Lockdown,00:10:00,35\r\n' +
+        'Harbor Heights Elementary [HHE],2024-03-10,03:30:00 PDT,Wildlife,[TEST] Evacuation,,0\r\n',
+    );
+  });
+
+  test('carries typed descriptions and leaves the threat empty for a drill that predates the catalog', () => {
+    const csv = decode([
+      {
+        ...BASE_ROW,
+        threatName: 'Other',
+        threatDetail: 'Gas smell in the gym',
+        eventType: 'Other',
+        responseDetail: 'Move everyone to the field',
+      },
+      { ...BASE_ROW, threatName: null, threatDetail: null },
+    ]);
+
+    expect(csv).toBe(
+      'site,date,time,threat,type,duration,participants_count\r\n' +
+        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,Other — Gas smell in the gym,[DRILL] Other — Move everyone to the field,00:10:00,35\r\n' +
+        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,,[DRILL] Lockdown,00:10:00,35\r\n',
     );
   });
 
@@ -69,7 +91,7 @@ describe('drill-record CSV serialization', () => {
     const expectedType = '"[DRILL] \'@SUM(1,2)\r\n""Lockdown"""';
 
     expect(csv).toBe(
-      `site,date,time,type,duration,participants_count\r\n${expectedSite},2024-03-10,01:30:00 PST,${expectedType},00:10:00,35\r\n`,
+      `site,date,time,threat,type,duration,participants_count\r\n${expectedSite},2024-03-10,01:30:00 PST,Wildlife,${expectedType},00:10:00,35\r\n`,
     );
     const withoutCrLf = csv.replaceAll('\r\n', '');
     expect(withoutCrLf).not.toContain('\r');

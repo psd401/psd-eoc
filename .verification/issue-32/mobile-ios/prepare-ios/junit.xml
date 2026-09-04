@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="6.222" timestamp="2026-08-30T18:07:39">
-    <testcase id="Issue 32 - normalize the iOS simulator home state" name="Issue 32 - normalize the iOS simulator home state" classname="Issue 32 - normalize the iOS simulator home state" file="packages/mobile/e2e/flows/prepare-ios.yaml" time="6.215" timestamp="2026-08-30T18:07:39" status="SUCCESS">
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="6.157" timestamp="2026-09-03T14:36:54">
+    <testcase id="Issue 32 - normalize the iOS simulator home state" name="Issue 32 - normalize the iOS simulator home state" classname="Issue 32 - normalize the iOS simulator home state" file="packages/mobile/e2e/flows/prepare-ios.yaml" time="6.148" timestamp="2026-09-03T14:36:54" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only, ios"/>
       </properties>

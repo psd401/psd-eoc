@@ -15,10 +15,12 @@ import {
   EventKindSchema,
   EventTypeVersionRefSchema,
   LifecycleNotificationPurposeSchema,
+  OperatorDetailSchema,
   TemplateModeSchema,
   type EventKind,
   type TemplateMode,
 } from './event-type';
+import { ThreatIdSchema } from './threat';
 import {
   RosterPopulationSchema,
   RosterSnapshotIdSchema,
@@ -436,6 +438,24 @@ function addClassificationIssues(
 }
 
 /**
+ * Owns the threat an operator chose for one activation: the catalog identity,
+ * the name shown at the time, and the operator's own words when the entry
+ * required them ("Other"). Events activated before the catalog existed and
+ * monthly delivery tests carry none.
+ */
+export const ActivationThreatSchema = z
+  .object({
+    id: ThreatIdSchema,
+    name: z.string().trim().min(1).max(160),
+    detail: OperatorDetailSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+
+/** Pinned activation threat inferred from its schema. */
+export type ActivationThreat = z.infer<typeof ActivationThreatSchema>;
+
+/**
  * Owns the immutable identity and current append-only-derived lifecycle view
  * of an event. Activated events pin roster and event-type versions; real/drill
  * classification is repeated and validated at every boundary.
@@ -450,6 +470,8 @@ export const EventSchema = z
     status: EventStatusSchema,
     rosterSnapshotId: RosterSnapshotIdSchema.nullable(),
     rosterPopulation: RosterPopulationSchema.nullable(),
+    threat: ActivationThreatSchema.nullable(),
+    responseDetail: OperatorDetailSchema.nullable(),
     createdBy: ActorSchema,
     createdAt: TimestampSchema,
     activatedAt: TimestampSchema.nullable(),
@@ -701,30 +723,63 @@ export const JoinOrStartDecisionSchema = z
 /** Explicit join-or-start-new choice inferred from its schema. */
 export type JoinOrStartDecision = z.infer<typeof JoinOrStartDecisionSchema>;
 
+const activationSelectionShape = {
+  facilityId: FacilityIdSchema,
+  kind: EventKindSchema,
+  templateMode: TemplateModeSchema,
+  eventTypeVersion: EventTypeVersionRefSchema,
+  rosterPopulation: RosterPopulationSchema,
+};
+
+function addActivationSelectionIssues(
+  input: Readonly<{
+    kind: EventKind;
+    templateMode: TemplateMode;
+    rosterPopulation: RosterPopulation;
+    eventTypeVersion: Readonly<{ templateMode: TemplateMode }>;
+  }>,
+  context: z.RefinementCtx,
+): void {
+  addClassificationIssues(input, context);
+  if (input.eventTypeVersion.templateMode !== input.templateMode) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Pinned event-type version mode must match activation mode.',
+      path: ['eventTypeVersion', 'templateMode'],
+    });
+  }
+}
+
+/**
+ * Owns the classification and audience half of an activation selection,
+ * without the threat. The monthly delivery test builds its preview from this
+ * directly because a delivery test has no threat scenario.
+ */
+export const ActivationSelectionSchema = z
+  .object(activationSelectionShape)
+  .strict()
+  .superRefine(addActivationSelectionIssues)
+  .readonly();
+
+/** Threat-free activation selection inferred from its schema. */
+export type ActivationSelection = z.infer<typeof ActivationSelectionSchema>;
+
 /**
  * Owns the non-mutating selection used to create a server-bound activation
- * preview. The server resolves the latest roster version; the
- * client cannot choose those persistence IDs directly.
+ * preview. The server resolves the latest roster version; the client cannot
+ * choose those persistence IDs directly. The threat is chosen before the
+ * response and is required; each detail is present exactly when the chosen
+ * catalog entry requires one, which the server checks against the catalog.
  */
 export const CreateActivationPreviewInputSchema = z
   .object({
-    facilityId: FacilityIdSchema,
-    kind: EventKindSchema,
-    templateMode: TemplateModeSchema,
-    eventTypeVersion: EventTypeVersionRefSchema,
-    rosterPopulation: RosterPopulationSchema,
+    ...activationSelectionShape,
+    threatId: ThreatIdSchema,
+    threatDetail: OperatorDetailSchema.nullable(),
+    responseDetail: OperatorDetailSchema.nullable(),
   })
   .strict()
-  .superRefine((input, context) => {
-    addClassificationIssues(input, context);
-    if (input.eventTypeVersion.templateMode !== input.templateMode) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Pinned event-type version mode must match activation mode.',
-        path: ['eventTypeVersion', 'templateMode'],
-      });
-    }
-  })
+  .superRefine(addActivationSelectionIssues)
   .readonly();
 
 /** Non-mutating activation-preview selection inferred from its schema. */
@@ -794,6 +849,8 @@ export const ActivationPreviewSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
+    threat: ActivationThreatSchema.nullable(),
+    responseDetail: OperatorDetailSchema.nullable(),
     recipientCount: z.number().int().nonnegative().max(1_200),
     channels: z.union([
       MultiChannelActivationPreviewPlanSchema,
@@ -833,6 +890,14 @@ export const ActivationPreviewSchema = z
         code: 'custom',
         message: 'Preview event-type version mode must match activation mode.',
         path: ['eventTypeVersion', 'templateMode'],
+      });
+    }
+    if (preview.threat === null && preview.deliveryTest == null) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'An activation preview pins the threat the operator chose; only a monthly delivery test has none.',
+        path: ['threat'],
       });
     }
     if (

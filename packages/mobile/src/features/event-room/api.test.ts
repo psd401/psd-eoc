@@ -112,6 +112,8 @@ function activeSyntheticEvent() {
     status: 'active',
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'synthetic',
+    threat: null,
+    responseDetail: null,
     createdBy: AGENT_ACTOR,
     createdAt: TIMES.created,
     activatedAt: TIMES.activated,
@@ -141,6 +143,8 @@ function trustedHeader() {
       name: 'Synthetic Drill',
       templateMode: 'drill',
     },
+    threat: null,
+    responseDetail: null,
   } as const;
 }
 

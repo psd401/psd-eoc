@@ -35,6 +35,9 @@ export const eventTypes = pgTable(
     key: varchar('key', { length: 100 }).notNull(),
     familyKey: varchar('family_key', { length: 100 }).notNull(),
     templateMode: templateModeEnum('template_mode').notNull(),
+    // A response such as "Other" that an operator must describe in their own
+    // words before it can be chosen.
+    requiresDetail: boolean('requires_detail').default(false).notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [

@@ -177,6 +177,17 @@ function renderedVisibleTextSchema(maxLength: number) {
 }
 
 /**
+ * Owns the short description an operator types when a threat or response
+ * catalog entry requires one ("Other"). It is a rendered value, never a
+ * template: it obeys the same visible-text rules as message copy and any
+ * token-looking text inside it is shown literally.
+ */
+export const OperatorDetailSchema = renderedVisibleTextSchema(200);
+
+/** Operator-typed choice description inferred from its schema. */
+export type OperatorDetail = z.infer<typeof OperatorDetailSchema>;
+
+/**
  * Owns the stable identity for one selectable real or drill event type.
  * Vocabulary changes create new versions without changing this identity's
  * mode.
@@ -215,6 +226,12 @@ export const EventTypeSchema = z
       .max(100)
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
     templateMode: TemplateModeSchema,
+    /**
+     * True for a response such as "Other" that an operator cannot choose
+     * without typing what the response is. Part of the immutable identity so
+     * a real and a drill variant of one family agree.
+     */
+    requiresDetail: z.boolean(),
     createdAt: TimestampSchema,
   })
   .strict()
@@ -902,6 +919,7 @@ export const EventTypeDraftTargetSchema = z
           .max(100)
           .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
         templateMode: TemplateModeSchema,
+        requiresDetail: z.boolean(),
       })
       .strict(),
     z

@@ -6,6 +6,7 @@ import type {
   Facility,
   PageInfo,
   TemplateMode,
+  Threat,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
@@ -28,6 +29,8 @@ export interface OperationalViewData {
   readonly activeEvents: readonly NamedActiveEvent[];
   readonly eventTypes: readonly EventTypeListItem[];
   readonly facilities: readonly Facility[];
+  /** Selectable threats in the district's declared order. */
+  readonly threats: readonly Threat[];
 }
 
 interface OperationalPage<Item> {
@@ -107,7 +110,7 @@ export async function loadOperationalViewData(
   const eventTypeStore = getDefaultEventTypeStore();
   const startFlowRuntime = getDefaultStartFlowCapabilityRuntime();
   const eventRuntime = getDefaultEventCapabilityRuntime();
-  const [facilities, activeEvents, eventTypes] = await Promise.all([
+  const [facilities, activeEvents, eventTypes, threats] = await Promise.all([
     collectAllOperationalPages((cursor) =>
       startFlowRuntime.execute(
         'list-facilities',
@@ -133,6 +136,13 @@ export async function loadOperationalViewData(
           limit: 200,
         },
       }),
+    ),
+    collectAllOperationalPages((cursor) =>
+      startFlowRuntime.execute(
+        'list-threats',
+        { includeInactive: false, cursor, limit: 200 },
+        queryInvocation(authenticated),
+      ),
     ),
   ]);
 
@@ -163,6 +173,7 @@ export async function loadOperationalViewData(
   return Object.freeze({
     facilities: facilityView.startFacilities,
     eventTypes,
+    threats,
     activeEvents: Object.freeze(
       activeEvents.map((event) => ({
         event,

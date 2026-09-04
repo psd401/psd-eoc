@@ -118,7 +118,11 @@ interface ExpectedActivationSelection {
   readonly eventKind: Extract<EventKind, 'incident' | 'drill'>;
   readonly eventTypeVersionId: string;
   readonly facilityId: string;
+  readonly responseDetail: string | null;
   readonly templateMode: TemplateMode;
+  readonly threatDetail: string | null;
+  /** Null only for a monthly delivery test, which pins no threat. */
+  readonly threatId: string | null;
 }
 
 function exactChannelConsequencesMatch(
@@ -162,6 +166,9 @@ export function requireMatchingActivationResult(
     event.eventTypeVersion.templateMode !== selection.templateMode ||
     event.rosterSnapshotId !== preview.rosterSnapshotId ||
     event.rosterPopulation !== preview.rosterPopulation ||
+    (event.threat?.id ?? null) !== selection.threatId ||
+    (event.threat?.detail ?? null) !== selection.threatDetail ||
+    event.responseDetail !== selection.responseDetail ||
     event.status !== 'active' ||
     authorization?.kind !== 'human-confirmed' ||
     authorization.activationPreviewId !== preview.id ||

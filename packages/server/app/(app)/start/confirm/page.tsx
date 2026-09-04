@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
-import { EventTypeVersionIdSchema, FacilityIdSchema } from '@psd-eoc/contracts';
+import {
+  EventTypeVersionIdSchema,
+  FacilityIdSchema,
+  OperatorDetailSchema,
+  ThreatIdSchema,
+} from '@psd-eoc/contracts';
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
@@ -9,6 +14,7 @@ import { WEB_CSRF_COOKIE_NAME } from '../../../../lib/auth/sessions';
 import { eventTypesForMode, loadOperationalViewData } from '../_lib/data';
 import {
   startConfirmationReturnPath,
+  startResponseReturnPath,
   startSelectionReturnPath,
 } from '../_lib/return-path';
 import { requirePageSession } from '../_lib/session';
@@ -29,6 +35,9 @@ interface ConfirmStartPageProps {
       eventTypeVersionId?: SearchValue;
       facilityId?: SearchValue;
       mode?: SearchValue;
+      responseDetail?: SearchValue;
+      threatDetail?: SearchValue;
+      threatId?: SearchValue;
     }>
   >;
 }
@@ -59,19 +68,41 @@ export default async function ConfirmStartPage({
   const eventTypeVersionResult = EventTypeVersionIdSchema.safeParse(
     one(parameters.eventTypeVersionId),
   );
+  const threatResult = ThreatIdSchema.safeParse(one(parameters.threatId));
   const mode = one(parameters.mode);
   if (
     !facilityResult.success ||
     !eventTypeVersionResult.success ||
+    !threatResult.success ||
     (mode !== 'real' && mode !== 'drill')
   ) {
     redirect('/');
   }
 
+  // Descriptions are validated by the same contract the server applies; a
+  // value that fails it is treated as absent so the operator is sent back to
+  // type it rather than shown a confirmation for something the server will
+  // refuse.
+  const threatDetailResult = OperatorDetailSchema.safeParse(
+    one(parameters.threatDetail),
+  );
+  const responseDetailResult = OperatorDetailSchema.safeParse(
+    one(parameters.responseDetail),
+  );
+  const threatDetailValue = threatDetailResult.success
+    ? threatDetailResult.data
+    : null;
+  const responseDetailValue = responseDetailResult.success
+    ? responseDetailResult.data
+    : null;
+
   const returnPath = startConfirmationReturnPath({
     eventTypeVersionId: eventTypeVersionResult.data,
     facilityId: facilityResult.data,
     mode,
+    threatId: threatResult.data,
+    threatDetail: threatDetailValue,
+    responseDetail: responseDetailValue,
   });
   const authenticated = await requirePageSession(returnPath);
   const data = await loadOperationalViewData(authenticated);
@@ -81,9 +112,44 @@ export default async function ConfirmStartPage({
   const eventType = eventTypesForMode(data.eventTypes, mode).find(
     (item) => item.latestVersion.id === eventTypeVersionResult.data,
   );
+  const threat = data.threats.find(
+    (candidate) => candidate.id === threatResult.data,
+  );
   if (facility === undefined || eventType === undefined) {
     redirect('/');
   }
+  if (threat === undefined) {
+    redirect(startSelectionReturnPath({ facilityId: facility.id, mode }));
+  }
+  if (threat.requiresDetail && threatDetailValue === null) {
+    redirect(startSelectionReturnPath({ facilityId: facility.id, mode }));
+  }
+  const threatDetail = threat.requiresDetail ? threatDetailValue : null;
+  const responseHref = startResponseReturnPath({
+    facilityId: facility.id,
+    mode,
+    threatId: threat.id,
+    threatDetail,
+  });
+  if (eventType.eventType.requiresDetail && responseDetailValue === null) {
+    // Return the operator to the response step with the words they typed, so
+    // the field shows an inline error rather than an empty box.
+    redirect(
+      startResponseReturnPath({
+        facilityId: facility.id,
+        mode,
+        threatId: threat.id,
+        threatDetail,
+        rejectedResponse: {
+          eventTypeVersionId: eventType.latestVersion.id,
+          draft: one(parameters.responseDetail) ?? '',
+        },
+      }),
+    );
+  }
+  const responseDetail = eventType.eventType.requiresDetail
+    ? responseDetailValue
+    : null;
 
   const activeEvents: readonly ActiveEventChoice[] = data.activeEvents
     .filter(({ event }) => event.facilityId === facility.id)
@@ -91,18 +157,15 @@ export default async function ConfirmStartPage({
       event,
       label: eventTypeName,
     }));
-  const selectionHref = startSelectionReturnPath({
-    facilityId: facility.id,
-    mode,
-  });
 
   return (
     <main className="page-shell start-flow" id="main-content" tabIndex={-1}>
       <nav aria-label="Start-event progress">
         <ol className="step-list">
           <li className="step-list__complete">1. Site and mode chosen</li>
-          <li className="step-list__complete">2. Event type chosen</li>
-          <li aria-current="step">3. Review and confirm</li>
+          <li className="step-list__complete">2. Threat chosen</li>
+          <li className="step-list__complete">3. Response chosen</li>
+          <li aria-current="step">4. Review and confirm</li>
         </ol>
       </nav>
 
@@ -112,9 +175,17 @@ export default async function ConfirmStartPage({
           <h1>Review and confirm</h1>
           <p className="lede">Check who gets notified, then start the event.</p>
         </div>
-        <Link className="button button--secondary" href={selectionHref}>
-          Change event type
-        </Link>
+        <div className="page-heading__actions">
+          <Link
+            className="button button--secondary"
+            href={startSelectionReturnPath({ facilityId: facility.id, mode })}
+          >
+            Change threat
+          </Link>
+          <Link className="button button--secondary" href={responseHref}>
+            Change response
+          </Link>
+        </div>
       </header>
 
       <Call911Affordance />
@@ -129,7 +200,11 @@ export default async function ConfirmStartPage({
           eventTypeVersionId: eventType.latestVersion.id,
           facilityId: facility.id,
           facilityName: facility.name,
+          responseDetail,
           templateMode: mode,
+          threatDetail,
+          threatId: threat.id,
+          threatName: threat.name,
         }}
       />
     </main>
