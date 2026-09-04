@@ -301,7 +301,8 @@ export function buildActivationPreview(
     ),
     variables: {
       site: facility.name,
-      eventType: eventTypeVersion.name,
+      eventType: renderedResponseLabel(eventTypeVersion.name, responseDetail),
+      threat: renderedThreatLabel(threat),
       startTime: createdAt.toISOString(),
       initiator: evidenceValue.initiatorDisplayName,
     },
@@ -400,6 +401,30 @@ export function buildActivationPreview(
       consequence,
     }),
   });
+}
+
+/**
+ * Composes what staff read for the threat: the catalog name, plus the
+ * operator's own words when the threat required a description. A record that
+ * predates the catalog names no threat, so the copy says so rather than
+ * leaving the sentence dangling.
+ */
+export function renderedThreatLabel(threat: ActivationThreat | null): string {
+  if (threat === null) return 'Not recorded';
+  return threat.detail === null
+    ? threat.name
+    : `${threat.name} — ${threat.detail}`;
+}
+
+/**
+ * Composes what staff read for the response: the versioned response name,
+ * plus the operator's own words when the response required a description.
+ */
+export function renderedResponseLabel(
+  name: string,
+  responseDetail: string | null,
+): string {
+  return responseDetail === null ? name : `${name} — ${responseDetail}`;
 }
 
 /**

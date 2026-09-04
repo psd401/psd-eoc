@@ -106,7 +106,11 @@ import {
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
-import { activationThreatFromColumns } from './start-preview';
+import {
+  activationThreatFromColumns,
+  renderedResponseLabel,
+  renderedThreatLabel,
+} from './start-preview';
 import {
   authorDisplayNameForRow,
   resolveActorDisplayName,
@@ -2094,7 +2098,8 @@ async function createLifecycleConsequencePreviewFromDatabase(
     templates,
     variables: {
       site: facilityRow.name,
-      eventType: versionRow.name,
+      eventType: renderedResponseLabel(versionRow.name, event.responseDetail),
+      threat: renderedThreatLabel(event.threat),
       startTime: event.activatedAt,
       initiator: 'Recorded initiator',
     },

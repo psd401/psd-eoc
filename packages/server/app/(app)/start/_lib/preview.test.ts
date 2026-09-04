@@ -17,6 +17,8 @@ import {
 import {
   ActivationPreviewBuildError,
   buildActivationPreview,
+  renderedResponseLabel,
+  renderedThreatLabel,
   type ActivationPreviewEvidence,
 } from '../../../../lib/capabilities/start-preview';
 import { digestCapabilityValue } from '../../../../lib/capabilities/engine';
@@ -148,7 +150,7 @@ function templates(templateMode: TemplateMode): MessageTemplateCatalog {
         classificationMarker,
         channel: 'push' as const,
         title: '{{eventType}} at {{site}} — {{startTime}}',
-        body: 'Started {{startTime}} by {{initiator}}.',
+        body: 'Threat: {{threat}}. Started {{startTime}} by {{initiator}}.',
       }),
       email: Object.freeze({
         templateMode,
@@ -156,7 +158,7 @@ function templates(templateMode: TemplateMode): MessageTemplateCatalog {
         classificationMarker,
         channel: 'email' as const,
         subject: '{{eventType}} at {{site}} — {{startTime}}',
-        textBody: 'Started {{startTime}} by {{initiator}}.',
+        textBody: 'Threat: {{threat}}. Started {{startTime}} by {{initiator}}.',
       }),
       sms: Object.freeze({
         templateMode,
@@ -320,6 +322,50 @@ describe('activation consequence preview threat pinning', () => {
       threat: { ...THREAT, detail: '{{initiator}} at {{site}}' },
     });
     expect(preview.threat?.detail).toBe('{{initiator}} at {{site}}');
+    // The renderer substitutes once, so an operator's words are shown, never
+    // interpreted: a description cannot reach for another variable's value.
+    const push = preview.channels.find(({ channel }) => channel === 'push');
+    const pushBody =
+      push?.renderedMessage.channel === 'push' ? push.renderedMessage.body : '';
+    expect(pushBody).toContain(
+      'Synthetic wildlife — {{initiator}} at {{site}}',
+    );
+    expect(pushBody).not.toContain('Harbor Ridge High School');
+  });
+
+  test('renders the threat and both descriptions into the staff wording', () => {
+    const preview = buildActivationPreview({
+      ...evidence('real', 'staff'),
+      threat: { ...THREAT, detail: 'Gas smell near the gym' },
+      responseDetail: 'Hold in classrooms',
+    });
+    const push = preview.channels.find(({ channel }) => channel === 'push');
+    const email = preview.channels.find(({ channel }) => channel === 'email');
+    const pushBody =
+      push?.renderedMessage.channel === 'push' ? push.renderedMessage.body : '';
+    const emailSubject =
+      email?.renderedMessage.channel === 'email'
+        ? email.renderedMessage.subject
+        : '';
+    expect(pushBody).toContain('Synthetic wildlife — Gas smell near the gym');
+    expect(pushBody).not.toContain('{{threat}}');
+    // The response name carries the operator's words wherever the wording
+    // already names the response.
+    expect(emailSubject).toContain('Hold in classrooms');
+  });
+
+  test('composes the labels staff read for a threat and a response', () => {
+    // A delivery test and a pre-catalog event carry no threat, so the copy
+    // says so rather than leaving the sentence dangling.
+    expect(renderedThreatLabel(null)).toBe('Not recorded');
+    expect(renderedThreatLabel(THREAT)).toBe('Synthetic wildlife');
+    expect(renderedThreatLabel({ ...THREAT, detail: 'Gas smell' })).toBe(
+      'Synthetic wildlife — Gas smell',
+    );
+    expect(renderedResponseLabel('Lockdown', null)).toBe('Lockdown');
+    expect(renderedResponseLabel('Other', 'Hold in classrooms')).toBe(
+      'Other — Hold in classrooms',
+    );
   });
 });
 

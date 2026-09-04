@@ -69,6 +69,8 @@ import {
   MobileOidcStartRequestSchema,
   MobileOidcStartResponseSchema,
   MessageTemplateCatalogSchema,
+  TemplateTokenSchema,
+  TemplateVariableSchema,
   MonthlyDeliveryTestReportPageSchema,
   MonthlyDeliveryTestReportSchema,
   MobilePushReceivePayloadSchema,
@@ -1147,6 +1149,32 @@ describe('event type, targeting, and activation contracts', () => {
     expect(parseCapabilityInput('publish-event-type-version', publish)).toEqual(
       publish,
     );
+  });
+
+  test('accepts the threat token and still refuses anything outside the grammar', () => {
+    const drillTemplates = templateCatalog('drill');
+    const withThreat = (body: string) => ({
+      ...drillTemplates,
+      activation: {
+        ...drillTemplates.activation,
+        push: { ...drillTemplates.activation.push, body },
+      },
+    });
+    expect(TemplateVariableSchema.options).toContain('threat');
+    expect(TemplateTokenSchema.options).toContain('{{threat}}');
+    expect(
+      MessageTemplateCatalogSchema.safeParse(
+        withThreat('Threat: {{threat}} at {{site}}. Open PSD EOC.'),
+      ).success,
+    ).toBe(true);
+    expect(
+      MessageTemplateCatalogSchema.safeParse(withThreat('Threat: {{threats}}'))
+        .success,
+    ).toBe(false);
+    expect(
+      MessageTemplateCatalogSchema.safeParse(withThreat('Threat: {{threat}'))
+        .success,
+    ).toBe(false);
   });
 
   test('rejects Unicode controls that can visually spoof real versus drill', () => {
