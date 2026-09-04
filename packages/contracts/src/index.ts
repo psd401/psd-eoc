@@ -24,3 +24,4 @@ export * from './report';
 export * from './roster';
 export * from './shared';
 export * from './sms-runtime';
+export * from './threat';

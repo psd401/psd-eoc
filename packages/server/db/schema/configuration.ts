@@ -42,6 +42,31 @@ export const facilities = pgTable(
   ],
 );
 
+/**
+ * District-declared threats, chosen before the response when an event starts.
+ * Rows are created from configuration and never edited by it; `sort_order` is
+ * the declared position at creation and `requires_detail` marks an entry the
+ * operator must describe in their own words.
+ */
+export const threats = pgTable(
+  'threats',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    key: varchar('key', { length: 100 }).notNull(),
+    name: varchar('name', { length: 160 }).notNull(),
+    sortOrder: integer('sort_order').notNull(),
+    requiresDetail: boolean('requires_detail').default(false).notNull(),
+    active: boolean('active').default(true).notNull(),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('threats_key_uq').on(table.key),
+    check('threats_key_format', sql`${table.key} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`),
+    check('threats_name_nonempty', sql`length(btrim(${table.name})) > 0`),
+    check('threats_sort_order_nonnegative', sql`${table.sortOrder} >= 0`),
+  ],
+);
+
 /** Immutable versions of administrator-defined neighborhoods. */
 export const neighborhoodVersions = pgTable(
   'neighborhood_versions',

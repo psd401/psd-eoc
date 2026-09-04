@@ -222,6 +222,28 @@
         "displayName": "Synthetic test recipients",
         "members": ["eoc-canary@example.invalid"]
       }
+    ],
+    "psdEoc:threats": [
+      { "key": "medical", "name": "Medical" },
+      { "key": "drugs", "name": "Drugs" },
+      { "key": "fight-altercation", "name": "Fight/Altercation" },
+      { "key": "fire", "name": "Fire" },
+      { "key": "bus-incident", "name": "Bus Incident" },
+      { "key": "intruder", "name": "Intruder" },
+      { "key": "student-incident", "name": "Student Incident" },
+      { "key": "missing-student", "name": "Missing Student" },
+      { "key": "utility-interruption", "name": "Utility Interruption" },
+      { "key": "gun-firearm", "name": "Gun/Firearm" },
+      { "key": "wildlife", "name": "Wildlife" },
+      { "key": "earthquake", "name": "Earthquake" },
+      {
+        "key": "neighborhood-police-activity",
+        "name": "Neighborhood Police Activity"
+      },
+      { "key": "alarm-activation", "name": "Alarm Activation" },
+      { "key": "weapon", "name": "Weapon" },
+      { "key": "shooting", "name": "Shooting" },
+      { "key": "other", "name": "Other", "requiresDetail": true }
     ]
   }
 }

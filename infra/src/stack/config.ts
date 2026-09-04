@@ -222,6 +222,40 @@ export function readFacilityContext(node: {
   return JSON.stringify(value);
 }
 
+/**
+ * The district's threats, read from CDK context. The bootstrap validates the
+ * same shape again; this check only refuses a synthesis that could never
+ * bootstrap.
+ */
+export function readThreatContext(node: {
+  tryGetContext(key: string): unknown;
+}): string {
+  const value = node.tryGetContext('psdEoc:threats');
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('CDK context psdEoc:threats must be an array.');
+  }
+  for (const entry of value) {
+    const threat = entry as Record<string, unknown>;
+    if (
+      typeof threat?.key !== 'string' ||
+      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(threat.key) ||
+      threat.key.length > 100 ||
+      typeof threat.name !== 'string' ||
+      threat.name.trim().length === 0 ||
+      (threat.requiresDetail !== undefined &&
+        typeof threat.requiresDetail !== 'boolean')
+    ) {
+      throw new Error(
+        'Each psdEoc:threats entry needs a lower-case key and a name.',
+      );
+    }
+  }
+  return JSON.stringify(value);
+}
+
 /** The district's facility groupings, read from CDK context. */
 export function readNeighborhoodContext(node: {
   tryGetContext(key: string): unknown;

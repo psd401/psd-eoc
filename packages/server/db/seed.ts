@@ -9,6 +9,7 @@ import {
   NeighborhoodSchema,
   RosterSnapshotSchema,
   RosterSourceConfigurationSchema,
+  ThreatSchema,
   type MessageTemplateCatalog,
   type NotificationChannel,
   type NotificationPurpose,
@@ -40,6 +41,7 @@ import {
   rosterSourceConfigurationFacilities,
   rosterSourceConfigurationGroups,
   rosterSourceConfigurations,
+  threats,
 } from './schema.js';
 
 const SEED_TIME = new Date('2026-08-06T12:00:00.000Z');
@@ -107,6 +109,49 @@ const facilityRows = [
     code: 'SYN-SOUTH',
     name: 'Synthetic South Campus',
     active: true,
+    createdAt: SEED_TIMESTAMP,
+  }),
+];
+
+/**
+ * A synthetic threat vocabulary in declared order: two plain choices, one that
+ * needs a typed description, and one retired entry the start flow must hide.
+ */
+const threatRows = [
+  ThreatSchema.parse({
+    id: '00000000-0000-4000-8000-000000000700',
+    key: 'synthetic-wildlife',
+    name: 'Synthetic wildlife',
+    sortOrder: 0,
+    requiresDetail: false,
+    active: true,
+    createdAt: SEED_TIMESTAMP,
+  }),
+  ThreatSchema.parse({
+    id: '00000000-0000-4000-8000-000000000701',
+    key: 'synthetic-earthquake',
+    name: 'Synthetic earthquake',
+    sortOrder: 1,
+    requiresDetail: false,
+    active: true,
+    createdAt: SEED_TIMESTAMP,
+  }),
+  ThreatSchema.parse({
+    id: '00000000-0000-4000-8000-000000000702',
+    key: 'synthetic-other',
+    name: 'Synthetic other',
+    sortOrder: 2,
+    requiresDetail: true,
+    active: true,
+    createdAt: SEED_TIMESTAMP,
+  }),
+  ThreatSchema.parse({
+    id: '00000000-0000-4000-8000-000000000703',
+    key: 'synthetic-retired',
+    name: 'Synthetic retired threat',
+    sortOrder: 3,
+    requiresDetail: false,
+    active: false,
     createdAt: SEED_TIMESTAMP,
   }),
 ];
@@ -589,6 +634,7 @@ export interface ReferenceSeedSummary {
 
 export interface SeedSummary extends ReferenceSeedSummary {
   readonly facilities: 2;
+  readonly threats: 4;
   readonly neighborhoods: 1;
   readonly neighborhoodFacilities: 2;
   readonly groupSources: 3;
@@ -610,6 +656,7 @@ const referenceSeedSummary: ReferenceSeedSummary = {
 
 const seedSummary: SeedSummary = {
   facilities: 2,
+  threats: 4,
   neighborhoods: 1,
   neighborhoodFacilities: 2,
   groupSources: 3,
@@ -815,6 +862,14 @@ export interface SeedDatabaseOptions {
   readonly insertRosterEndpoints?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
+  /**
+   * Writes the threats in place of the seed. A fixture held at a migration
+   * before `0046_threat_catalog` has no `threats` table, so it supplies a no-op
+   * here rather than letting the seed fail on a relation that does not exist.
+   */
+  readonly insertThreats?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
 }
 
 export async function seedDatabase(
@@ -831,6 +886,20 @@ export async function seedDatabase(
         })),
       )
       .onConflictDoNothing();
+
+    if (options.insertThreats !== undefined) {
+      await options.insertThreats(transaction);
+    } else {
+      await transaction
+        .insert(threats)
+        .values(
+          threatRows.map((threat) => ({
+            ...threat,
+            createdAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
 
     await transaction
       .insert(neighborhoodVersions)
