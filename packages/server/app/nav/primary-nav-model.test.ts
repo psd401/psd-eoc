@@ -33,7 +33,7 @@ describe('shared operator navigation model', () => {
       'Delivery tests',
       'Readiness',
       'Schools',
-      'Event types',
+      'Responses',
       'Access',
       'Devices',
       'Notifications',

@@ -16,3 +16,4 @@ cdk.out/
 # evidence. Only the JUnit results and screenshots are evidence.
 .verification/**/debug/
 .verification/**/artifacts/
+.verification/**/playwright-artifacts/

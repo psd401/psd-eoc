@@ -286,6 +286,11 @@ async function openDrillConfirmation(
     page.getByRole('link', { name: 'Synthetic wildlife', exact: true }),
   );
   await expect(page).toHaveURL(/\/start\?.*threatId=/u);
+  // The client navigation swaps the document; scanning before the next step
+  // has rendered can inject axe into a page that has no head yet.
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Choose response' }),
+  ).toBeVisible({ timeout: 30_000 });
   if (options.scanAxe !== false) await expectAxeClean(page);
   await activateByKeyboard(
     page,
@@ -584,6 +589,9 @@ test.describe('issue-32-accessibility-evidence', () => {
     await page.keyboard.type(REAL_THREAT_DETAIL);
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/start\?.*threatDetail=/u);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Choose response' }),
+    ).toBeVisible({ timeout: 30_000 });
     await expectAxeClean(page);
     const lockdown = page.locator('a.choice-card').filter({
       has: page.getByText('Lockdown', { exact: true }),

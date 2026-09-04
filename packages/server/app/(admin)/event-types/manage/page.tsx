@@ -67,7 +67,7 @@ export default async function EventTypesAdminPage({
     <main id="main-content" tabIndex={-1}>
       <header className="page-heading">
         <div>
-          <h1>Event types and message templates</h1>
+          <h1>Responses and message templates</h1>
           <p className="lede">
             Draft and preview push, SMS, and email wording. Publishing creates a
             new immutable version; events that used an older version keep

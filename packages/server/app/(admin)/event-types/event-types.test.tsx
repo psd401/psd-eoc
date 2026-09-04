@@ -40,6 +40,7 @@ import {
 } from '../../../lib/notify/render';
 import { eventTypeLandingResponse } from './landing';
 import { PreviewCards, TemplateFields } from './manage/event-type-admin';
+import { NAV_DESTINATIONS } from '../../nav/primary-nav-model';
 
 const IDS = {
   user: '10000000-0000-4000-8000-000000000001',
@@ -1289,6 +1290,24 @@ describe('admin UI semantics', () => {
     expect(markup).toContain('SMS');
     expect(markup).toContain('Email');
     expect(markup.match(/\[DRILL\]/g)?.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test('calls the configured objects responses everywhere an operator reads', async () => {
+    // Routes, API paths, and identifiers keep the event-type names; only the
+    // words an operator reads change. The live admin page is asserted by the
+    // operator-shell-navigation browser flow.
+    expect(
+      NAV_DESTINATIONS.find(({ href }) => href === '/event-types')?.label,
+    ).toBe('Responses');
+    const forbidden = await eventTypeLandingResponse(
+      'https://eoc.example.test/event-types',
+      authenticatedSession(['staff']),
+      new CountingStore(),
+    );
+    expect(forbidden.status).toBe(403);
+    const markup = await forbidden.text();
+    expect(markup).toContain('manage responses and message templates');
+    expect(markup.toLowerCase()).not.toContain('event type');
   });
 
   test('ships visible keyboard focus and minimum target sizing in owned CSS', () => {

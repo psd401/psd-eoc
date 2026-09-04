@@ -5,8 +5,8 @@ import './styles.css';
 import { OperatorShell } from '../../nav/operator-shell';
 
 export const metadata: Metadata = {
-  title: 'Event types | Emergency operations',
-  description: 'Administer versioned event types and notification wording.',
+  title: 'Responses | Emergency operations',
+  description: 'Administer versioned responses and notification wording.',
 };
 
 export default function EventTypesLayout({
