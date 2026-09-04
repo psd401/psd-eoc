@@ -39,7 +39,7 @@
       <circle cx="65" cy="127" r="34" fill="#17324d"/>
       <text x="44" y="137" font-size="26" font-weight="700" fill="#fff">EOC</text>
       <text x="112" y="120" font-size="18" font-weight="700" fill="#17324d">PSD EOC</text>
-      <text x="112" y="145" font-size="13" fill="#4c6275">Version 1.0.11</text>
+      <text x="112" y="145" font-size="13" fill="#4c6275">Version 1.0.12</text>
       <rect x="20" y="184" width="210" height="42" rx="21" fill="#175a8e"/>
       <text x="96" y="211" font-size="14" font-weight="700" fill="#fff">Install</text>
       <text x="20" y="262" font-size="13" fill="#334e62">Stop after Install unless</text>

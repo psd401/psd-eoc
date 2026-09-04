@@ -76,8 +76,8 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('ships app/runtime 1.0.11 as embedded-only with no OTA routing', () => {
-    expect(appConfig.expo.version).toBe('1.0.11');
+  test('ships app/runtime 1.0.12 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.12');
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
       enabled: false,
@@ -171,7 +171,7 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'iOS and Android ship the same app from the same source at the same version.',
     );
-    expect(release).toContain('The current app/runtime is 1.0.11');
+    expect(release).toContain('The current app/runtime is 1.0.12');
     // The store record names the exact last submitted build, which is now the
     // current app/runtime because 1.0.7 has been built and submitted.
     expect(release).toContain('1.0.10/build 21 on iOS');
@@ -470,7 +470,7 @@ describe('mobile distribution configuration', () => {
     }
     expect(readme).not.toContain('`ota-preview`:');
     expect(readme).toContain(
-      'Remote updates are disabled for app/runtime 1.0.11',
+      'Remote updates are disabled for app/runtime 1.0.12',
     );
     expect(compactReadme).toContain(
       'Ordinary `preview` must never be used for production-environment OTA verification',
