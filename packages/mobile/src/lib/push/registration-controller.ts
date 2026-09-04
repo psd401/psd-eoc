@@ -83,6 +83,13 @@ export interface PushSubscription {
 export interface PushNativePort {
   prepare(): Promise<void>;
   getPermissionStatus(): Promise<PushPermissionStatus>;
+  /**
+   * Whether the alert channel exists but will present quietly -- demoted below
+   * high importance, or with its sound removed. Android only; always false
+   * elsewhere. This is reported, never enforced: the notification is still
+   * delivered, because a quiet alert beats no alert.
+   */
+  isAlertChannelMuted(): Promise<boolean>;
   requestPermission(): Promise<PushPermissionStatus>;
   getDevicePushToken(): Promise<NativePushToken>;
   getServiceEnvironment(
@@ -128,6 +135,8 @@ export interface PushRegistrationSnapshot {
   readonly message: string | null;
   readonly phase: PushRegistrationPhase;
   readonly platform: NativePushPlatform | null;
+  /** Registered and delivering, but this device will present it quietly. */
+  readonly alertsMuted: boolean;
 }
 
 export interface PushRegistrationConfiguration {
@@ -145,6 +154,7 @@ const IDLE_SNAPSHOT: PushRegistrationSnapshot = Object.freeze({
   phase: 'idle',
   platform: null,
   message: null,
+  alertsMuted: false,
 });
 const DENIED_CLEANUP_UNCONFIRMED_MESSAGE =
   'Notifications are disabled, and PSD EOC could not confirm push cleanup. Reconnect and retry before relying on the stale-endpoint report.';
@@ -527,10 +537,15 @@ export class PushRegistrationController {
         );
         return;
       }
+      // Asked after the endpoint is registered, never before: how loudly this
+      // device will present an alert must not decide whether it receives one.
       this.update({
         phase: 'registered',
         platform: session.platform,
         message: null,
+        alertsMuted: await this.dependencies.native
+          .isAlertChannelMuted()
+          .catch(() => false),
       });
     } catch (error) {
       this.failCurrent(
@@ -655,8 +670,13 @@ export class PushRegistrationController {
     return result;
   }
 
-  private update(next: PushRegistrationSnapshot): void {
-    this.snapshot = Object.freeze(next);
+  private update(
+    next: Omit<PushRegistrationSnapshot, 'alertsMuted'> &
+      Partial<Pick<PushRegistrationSnapshot, 'alertsMuted'>>,
+  ): void {
+    // Only the registered path has anything to say about presentation, so
+    // every other transition clears the warning rather than restating it.
+    this.snapshot = Object.freeze({ alertsMuted: false, ...next });
     for (const listener of this.listeners) listener();
   }
 }
