@@ -151,6 +151,15 @@ dd {
   top: 1rem;
 }
 
+/* The retired-response toggle sits under the picker as a plain link, sized to
+   the same minimum target as every other control in this admin. */
+.retired-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  font-weight: 700;
+}
+
 .type-list label,
 .field label {
   display: block;

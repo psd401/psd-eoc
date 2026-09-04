@@ -12,6 +12,7 @@ import {
   getDefaultEventTypeStore,
 } from '../../../../lib/capabilities/event-types';
 import { EventTypeAdmin } from './event-type-admin';
+import { parseResponseListFilters } from './filters';
 import { authenticateWebSession } from '../../../../lib/auth/request-session';
 
 export const dynamic = 'force-dynamic';
@@ -19,7 +20,7 @@ export const dynamic = 'force-dynamic';
 export default async function EventTypesAdminPage({
   searchParams,
 }: Readonly<{
-  searchParams: Promise<Readonly<{ mode?: string }>>;
+  searchParams: Promise<Readonly<{ mode?: string; show?: string }>>;
 }>) {
   const cookieStore = await cookies();
   const token = cookieStore.get(WEB_SESSION_COOKIE_NAME)?.value;
@@ -37,18 +38,15 @@ export default async function EventTypesAdminPage({
   }
 
   const parameters = await searchParams;
-  const templateMode =
-    parameters.mode === 'real' || parameters.mode === 'drill'
-      ? parameters.mode
-      : null;
+  const filters = parseResponseListFilters(parameters);
   let eventTypePage;
   try {
     eventTypePage = await executeListEventTypesCapability({
       store: getDefaultEventTypeStore(),
       authenticated,
       query: {
-        templateMode,
-        enabled: null,
+        templateMode: filters.templateMode,
+        enabled: filters.enabled,
         cursor: null,
         limit: 200,
       },
@@ -77,6 +75,7 @@ export default async function EventTypesAdminPage({
       </header>
       <EventTypeAdmin
         csrfCookieName={WEB_CSRF_COOKIE_NAME}
+        filters={filters}
         items={eventTypePage.items}
         sessionId={authenticated.result.session.id}
       />
