@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="35.453" timestamp="2026-09-03T14:43:01">
-    <testcase id="Issue 32 - start the provider-free synthetic drill" name="Issue 32 - start the provider-free synthetic drill" classname="Issue 32 - start the provider-free synthetic drill" file="packages/mobile/e2e/flows/start-drill.yaml" time="35.375" timestamp="2026-09-03T14:43:01" status="SUCCESS">
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="31.22" timestamp="2026-09-03T19:17:25">
+    <testcase id="Issue 32 - start the provider-free synthetic drill" name="Issue 32 - start the provider-free synthetic drill" classname="Issue 32 - start the provider-free synthetic drill" file="packages/mobile/e2e/flows/start-drill.yaml" time="31.21" timestamp="2026-09-03T19:17:25" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only"/>
       </properties>
