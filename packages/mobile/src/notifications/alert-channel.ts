@@ -22,6 +22,10 @@ export async function configureAlertChannel(): Promise<void> {
     name: 'PSD EOC incident and drill alerts',
     description: 'Incident and drill notifications from PSD EOC.',
     importance: AndroidImportance.MAX,
+    // A request Android is free to ignore, and does: it stores
+    // VISIBILITY_NO_OVERRIDE for an ordinary app's channel, which reads back
+    // as UNKNOWN. Asking costs nothing on the phone makers that do honour it.
+    // Nothing may assert on reading it back -- see `push/alert-channel-state`.
     enableVibrate: true,
     vibrationPattern: [0, 500, 250, 500],
     lockscreenVisibility: AndroidNotificationVisibility.PUBLIC,

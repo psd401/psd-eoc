@@ -131,9 +131,29 @@ assert(
   ),
   'Expo automatic server registration must be disabled before listener setup.',
 );
+const alertChannelStateSource = await Bun.file(
+  new URL('../src/lib/push/alert-channel-state.ts', import.meta.url),
+).text();
+/** Comments explain the rule that was wrong; only executable code is checked. */
+const withoutComments = (source: string): string =>
+  source.replaceAll(/\/\*[\s\S]*?\*\//gu, '').replaceAll(/\/\/[^\n]*/gu, '');
+// The regression guard. Requiring a lock-screen visibility Android does not
+// honour denied every Android device this app ever ran on, so no Android
+// device requested a token or registered for push at all. No permission rule
+// may read that field again.
 assert(
-  nativePortSource.includes('channel.sound !== null'),
-  'Android permission checks must reject a muted alert channel.',
+  ![alertChannelStateSource, nativePortSource]
+    .map(withoutComments)
+    .some((source) => source.includes('lockscreenVisibility')),
+  'Android push permission must not be decided by lockscreenVisibility; Android does not honour it.',
+);
+assert(
+  alertChannelStateSource.includes('channel.sound !== null'),
+  'A muted alert channel must still be reported to the person.',
+);
+assert(
+  nativePortSource.includes('androidPushPermission('),
+  'Android permission must be decided by the reviewed alert-channel rule.',
 );
 assert(
   DISABLED_EXPO_AUTO_REGISTRATION_INFO === '{"isEnabled":false}',
