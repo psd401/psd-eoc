@@ -8,7 +8,7 @@ import {
 const FORBIDDEN_DOCUMENT = `<!doctype html>
 <html lang="en">
   <head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Administrator access required | PSD EOC</title></head>
-  <body><main><h1>Administrator access required</h1><p role="alert">Your PSD EOC session is active, but only administrators can manage event types and message templates.</p><p>No event was started and no notification was sent.</p></main></body>
+  <body><main><h1>Administrator access required</h1><p role="alert">Your PSD EOC session is active, but only administrators can manage responses and message templates.</p><p>No event was started and no notification was sent.</p></main></body>
 </html>`;
 
 /** Capability-backed landing response, separated from the Next route exports. */
