@@ -1498,3 +1498,22 @@ export function normalizeNorthAmericanMobileNumber(
   }
   return null;
 }
+
+/**
+ * Owns what a staff member's own consent screen needs, in one read.
+ *
+ * The disclosure travels with the state so mobile renders the same text the
+ * server would show on the web rather than carrying its own copy of district
+ * configuration. A carrier reviewing one screenshot is looking at wording that
+ * only exists in one place.
+ */
+export const MySmsConsentViewSchema = z
+  .object({
+    consent: SmsConsentStateSchema,
+    disclosure: SmsConsentDisclosureSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Own-consent view inferred from its schema. */
+export type MySmsConsentView = z.infer<typeof MySmsConsentViewSchema>;

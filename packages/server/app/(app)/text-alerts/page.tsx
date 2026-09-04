@@ -1,17 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
-import {
-  smsConsentDisclosure,
-  SmsConsentStateSchema,
-} from '@psd-eoc/contracts';
+import { MySmsConsentViewSchema } from '@psd-eoc/contracts';
 import type { Metadata } from 'next';
 
-import {
-  organizationName,
-  privacyContactUrl,
-  smsSupportEmail,
-  smsSupportPhone,
-} from '../../../lib/config/deployment';
 import {
   readMySmsConsentForPage,
   recordSmsConsentAction,
@@ -29,13 +20,11 @@ export const metadata: Metadata = {
 };
 
 export default async function TextAlertsPage() {
-  const consent = SmsConsentStateSchema.parse(await readMySmsConsentForPage());
-  const disclosure = smsConsentDisclosure({
-    organizationName: organizationName(),
-    privacyPolicyUrl: privacyContactUrl(),
-    supportEmail: smsSupportEmail(),
-    supportPhone: smsSupportPhone(),
-  });
+  // One source for the disclosure: the same capability output the mobile app
+  // renders, so the two screens cannot show different terms.
+  const { consent, disclosure } = MySmsConsentViewSchema.parse(
+    await readMySmsConsentForPage(),
+  );
   return (
     <TextAlertsView
       consent={consent}

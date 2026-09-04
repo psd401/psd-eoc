@@ -23,7 +23,8 @@ import {
 } from './action-handlers';
 import type { TextAlertsState } from './text-alerts-view';
 
-export const TEXT_ALERTS_PATH = '/text-alerts';
+// Not exported: a 'use server' module may only export async functions.
+const TEXT_ALERTS_PATH = '/text-alerts';
 
 async function authenticateTextAlertsSession() {
   const cookieStore = await cookies();

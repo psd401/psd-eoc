@@ -44,6 +44,7 @@ import {
   useStartMutationHardwareBackGuard,
   useStartMutationNavigationGuard,
 } from '../lib/start';
+import { SMS_CONSENT_TEST_IDS } from '../features/sms-consent/sms-consent-screen';
 
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'medium',
@@ -578,6 +579,39 @@ export default function HomeScreen() {
             </View>
           </>
         )}
+
+        <View style={styles.releaseTools}>
+          <Text style={styles.releaseToolsText}>
+            Emergency texts are one more way to reach you when the app and email
+            cannot. You choose whether to give a number.
+          </Text>
+          <Pressable
+            accessibilityHint="Opens your emergency text message settings"
+            accessibilityLabel="Emergency text messages"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: mutationPending }}
+            disabled={mutationPending}
+            onPress={() => {
+              requestStartRouteNavigation(
+                startMutation.isPendingNow(),
+                () => {
+                  router.push('/text-alerts' as Href);
+                },
+                announcePendingMutation,
+              );
+            }}
+            style={({ pressed }) => [
+              styles.releaseToolsButton,
+              pressed && !mutationPending && styles.pressed,
+              mutationPending && styles.releaseToolsButtonDisabled,
+            ]}
+            testID={SMS_CONSENT_TEST_IDS.homeEntry}
+          >
+            <Text style={styles.releaseToolsButtonText}>
+              Emergency text messages
+            </Text>
+          </Pressable>
+        </View>
 
         <View style={styles.releaseTools}>
           <Text style={styles.releaseToolsText}>

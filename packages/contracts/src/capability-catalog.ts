@@ -124,7 +124,7 @@ import {
   SmsConsentReceiptSchema,
   WithdrawSmsConsentInputSchema,
   SmsConsentWithdrawalReceiptSchema,
-  SmsConsentStateSchema,
+  MySmsConsentViewSchema,
   ReadMySmsConsentInputSchema,
   UserPageSchema,
 } from './identity';
@@ -1309,7 +1309,7 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     safetyEffect: 'none',
     invocationPolicy: humanInteractiveInvocationPolicy,
     inputSchema: ReadMySmsConsentInputSchema,
-    outputSchema: SmsConsentStateSchema,
+    outputSchema: MySmsConsentViewSchema,
   }),
   'create-facility': canonicalCapability({
     id: 'create-facility',
