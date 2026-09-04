@@ -12,6 +12,8 @@ import {
   RecipientSchema,
   RosterGroupSourceRefSchema,
   RosterSnapshotSchema,
+  ThreatPageSchema,
+  ThreatSchema,
   type ActivationPreview,
   type Actor,
   type CapabilityInput,
@@ -28,6 +30,7 @@ import {
   type RosterGroupSourceRef,
   type RosterPopulation,
   type RosterSnapshot,
+  type ThreatPage,
 } from '@psd-eoc/contracts';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
@@ -57,6 +60,7 @@ import {
   rosterSnapshotSources,
   rosterSnapshots,
   securityAuditEntries,
+  threats,
   users,
 } from '../../db/schema';
 import {
@@ -99,6 +103,7 @@ type StartFlowCapabilityId = Extract<
   | 'create-activation-preview'
   | 'create-delivery-test-preview'
   | 'list-facilities'
+  | 'list-threats'
 >;
 
 type StartFlowQueryDatabase = DatabaseQuery;
@@ -187,6 +192,7 @@ export interface StartFlowCapabilityTransaction
     input: CapabilityInput<'list-facilities'>,
     scope: CapabilityScope,
   ): Promise<FacilityPage>;
+  listThreats(input: CapabilityInput<'list-threats'>): Promise<ThreatPage>;
   createActivationPreview(
     input: CapabilityInput<'create-activation-preview'>,
     actor: Actor,
@@ -369,6 +375,45 @@ async function listFacilitiesFromDatabase(
   const selected = hasMore ? rows.slice(0, input.limit) : rows;
   return FacilityPageSchema.parse({
     items: selected.map(facilityFromRow),
+    pageInfo: {
+      hasMore,
+      nextCursor: hasMore ? encodeOffsetCursor(offset + selected.length) : null,
+    },
+  });
+}
+
+function threatFromRow(row: typeof threats.$inferSelect) {
+  return ThreatSchema.parse({
+    id: row.id,
+    key: row.key,
+    name: row.name,
+    sortOrder: row.sortOrder,
+    requiresDetail: row.requiresDetail,
+    active: row.active,
+    createdAt: dateIso(row.createdAt),
+  });
+}
+
+/**
+ * Threats are district vocabulary rather than facility data, so every
+ * authenticated staff member sees the same list in the declared order.
+ */
+async function listThreatsFromDatabase(
+  database: StartFlowQueryDatabase,
+  input: CapabilityInput<'list-threats'>,
+): Promise<ThreatPage> {
+  const offset = decodeOffsetCursor(input.cursor);
+  const rows = await database
+    .select()
+    .from(threats)
+    .where(input.includeInactive ? undefined : eq(threats.active, true))
+    .orderBy(asc(threats.sortOrder), asc(threats.name), asc(threats.id))
+    .offset(offset)
+    .limit(input.limit + 1);
+  const hasMore = rows.length > input.limit;
+  const selected = hasMore ? rows.slice(0, input.limit) : rows;
+  return ThreatPageSchema.parse({
+    items: selected.map(threatFromRow),
     pageInfo: {
       hasMore,
       nextCursor: hasMore ? encodeOffsetCursor(offset + selected.length) : null,
@@ -1342,6 +1387,7 @@ function createDrizzleStartFlowTransaction(
       appendCapabilityAuditEntry(database, event),
     listFacilities: (input, scope) =>
       listFacilitiesFromDatabase(database, input, scope),
+    listThreats: (input) => listThreatsFromDatabase(database, input),
     createActivationPreview: (input, actor, now) =>
       createActivationPreviewFromDatabase(
         database,
@@ -1424,6 +1470,17 @@ export const listFacilitiesRegistration: ServerCapabilityRegistration<
   },
 };
 
+export const listThreatsRegistration: ServerCapabilityRegistration<
+  'list-threats',
+  StartFlowCapabilityTransaction
+> = {
+  id: 'list-threats',
+  resolveFacilityId: () => null,
+  async handler(input, context): Promise<ThreatPage> {
+    return ThreatPageSchema.parse(await context.transaction.listThreats(input));
+  },
+};
+
 export const createActivationPreviewRegistration: ServerCapabilityRegistration<
   'create-activation-preview',
   StartFlowCapabilityTransaction
@@ -1470,6 +1527,7 @@ export const createDeliveryTestPreviewRegistration: ServerCapabilityRegistration
 
 const registrations = Object.freeze({
   'list-facilities': listFacilitiesRegistration,
+  'list-threats': listThreatsRegistration,
   'create-activation-preview': createActivationPreviewRegistration,
   'create-delivery-test-preview': createDeliveryTestPreviewRegistration,
 });

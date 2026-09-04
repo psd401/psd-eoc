@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import {
   ActivationPreviewSchema,
   FacilityPageSchema,
+  ThreatPageSchema,
   type ActivationPreview,
   type CapabilityInput,
   type CapabilityScope,
   type FacilityPage,
+  type ThreatPage,
 } from '@psd-eoc/contracts';
 
 import {
@@ -227,6 +229,30 @@ function invocation(
   };
 }
 
+const THREAT_PAGE: ThreatPage = ThreatPageSchema.parse({
+  items: [
+    {
+      id: '00000000-0000-4000-8000-00000000a001',
+      key: 'wildlife',
+      name: 'Wildlife',
+      sortOrder: 0,
+      requiresDetail: false,
+      active: true,
+      createdAt: '2026-08-10T15:00:00.000Z',
+    },
+    {
+      id: '00000000-0000-4000-8000-00000000a002',
+      key: 'other',
+      name: 'Other',
+      sortOrder: 1,
+      requiresDetail: true,
+      active: true,
+      createdAt: '2026-08-10T15:00:00.000Z',
+    },
+  ],
+  pageInfo: { hasMore: false, nextCursor: null },
+});
+
 class MemoryStartFlowStore implements StartFlowCapabilityStore {
   public readonly transactionAudits: CapabilityAuditEvent[] = [];
   public readonly failureAudits: CapabilityAuditEvent[] = [];
@@ -236,6 +262,7 @@ class MemoryStartFlowStore implements StartFlowCapabilityStore {
       scope: CapabilityScope;
     }>
   > = [];
+  public readonly threatCalls: CapabilityInput<'list-threats'>[] = [];
   public readonly previewCalls: Array<
     Readonly<{
       input: CapabilityInput<'create-activation-preview'>;
@@ -263,6 +290,10 @@ class MemoryStartFlowStore implements StartFlowCapabilityStore {
     listFacilities: async (input, scope): Promise<FacilityPage> => {
       this.facilityCalls.push({ input, scope });
       return FACILITY_PAGE;
+    },
+    listThreats: async (input): Promise<ThreatPage> => {
+      this.threatCalls.push(input);
+      return THREAT_PAGE;
     },
     createActivationPreview: async (
       input,
@@ -321,6 +352,46 @@ describe('start-flow canonical capability execution', () => {
       requestId: IDS.requestList,
     });
     expect(store.failureAudits).toEqual([]);
+  });
+
+  test('lists threats without a facility scope and with a success audit', async () => {
+    const store = new MemoryStartFlowStore();
+
+    const output = await executeStartFlowCapability(
+      'list-threats',
+      { includeInactive: false, cursor: null, limit: 25 },
+      invocation(IDS.requestList),
+      store,
+    );
+
+    expect(output).toEqual(THREAT_PAGE);
+    expect(store.threatCalls).toEqual([
+      { includeInactive: false, cursor: null, limit: 25 },
+    ]);
+    expect(store.transactionAudits).toHaveLength(1);
+    expect(store.transactionAudits[0]).toMatchObject({
+      action: 'list-threats',
+      outcome: 'success',
+      facilityId: null,
+      requestId: IDS.requestList,
+    });
+    expect(store.failureAudits).toEqual([]);
+  });
+
+  test('refuses a threat query the contract does not allow', async () => {
+    const store = new MemoryStartFlowStore();
+
+    const error = await captureEngineError(() =>
+      executeStartFlowCapability(
+        'list-threats',
+        { includeInactive: false, cursor: null, limit: 201 } as never,
+        invocation(IDS.requestList),
+        store,
+      ),
+    );
+
+    expect(error.status).toBe(400);
+    expect(store.threatCalls).toEqual([]);
   });
 
   test('creates the preview through authoritative time and success audit', async () => {

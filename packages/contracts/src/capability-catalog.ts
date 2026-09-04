@@ -91,6 +91,7 @@ import {
   NeighborhoodSchema,
   UpdateFacilityInputSchema,
 } from './facility';
+import { ListThreatsInputSchema, ThreatPageSchema } from './threat';
 import {
   CreateGroupSourceInputSchema,
   GroupSourcePageSchema,
@@ -1566,6 +1567,14 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListFacilitiesInputSchema,
     outputSchema: FacilityPageSchema,
+  }),
+  'list-threats': canonicalCapability({
+    id: 'list-threats',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    inputSchema: ListThreatsInputSchema,
+    outputSchema: ThreatPageSchema,
   }),
   'get-facility': canonicalCapability({
     id: 'get-facility',
