@@ -57,6 +57,8 @@ const exampleConfiguration = Object.freeze({
     'Sample School District',
   ),
   privacyContactUrl: `https://www.${exampleHostedDomain}/contact`,
+  smsSupportEmail: `servicecentral@${exampleHostedDomain}`,
+  smsSupportPhone: '+12535550123',
   region: alternative(
     productionDeploymentTarget.region,
     'us-east-1',
@@ -95,6 +97,8 @@ const app = new App({
     'psdEoc:neighborhoods': exampleConfiguration.neighborhoods,
     'psdEoc:organizationName': exampleConfiguration.organizationName,
     'psdEoc:privacyContactUrl': exampleConfiguration.privacyContactUrl,
+    'psdEoc:smsSupportEmail': exampleConfiguration.smsSupportEmail,
+    'psdEoc:smsSupportPhone': exampleConfiguration.smsSupportPhone,
     'psdEoc:sesFromAddress': exampleConfiguration.sesFromAddress,
     'psdEoc:sesIdentityDomain': exampleConfiguration.sesIdentityDomain,
     'psdEoc:sourceRepositoryUrl': exampleConfiguration.sourceRepositoryUrl,

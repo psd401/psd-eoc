@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   SmsConsentReceiptSchema,
   SmsConsentStateSchema,
@@ -22,10 +24,13 @@ import {
 } from '../../db/client';
 import { staffSmsConsents } from '../../db/schema';
 
+import type { AuthenticatedSession } from '../auth/sessions';
+
 import {
   CapabilityEngineError,
   executeAuditedCapabilityTransaction,
   readCapabilityTime,
+  resolveHumanCapabilityInvocation,
   type CapabilityEngineStore,
   type CapabilityEngineTransaction,
   type CapabilityHandlerContext,
@@ -526,4 +531,45 @@ export async function closeDefaultSmsConsentCapabilityRuntime(): Promise<void> {
   const runtime = defaultSmsConsentCapabilityRuntime;
   defaultSmsConsentCapabilityRuntime = undefined;
   await runtime?.close();
+}
+
+/** One authenticated web session's SMS consent execution. */
+export interface SmsConsentSessionExecution<Id extends SmsConsentCapabilityId> {
+  readonly authenticated: AuthenticatedSession;
+  readonly capabilityId: Id;
+  readonly command: unknown;
+  readonly metadata?: Readonly<{
+    requestId?: string;
+    now?: Date;
+    idempotencyKey?: string;
+  }>;
+  readonly runtime?: SmsConsentCapabilityRuntime;
+}
+
+/**
+ * Executes a consent capability for a server component or server action.
+ *
+ * Web pages hold a session rather than a bearer token, so they resolve the
+ * invocation here instead of going back out through the REST route the mobile
+ * app uses. Both paths land on the same capability and the same audit.
+ */
+export function executeSmsConsentForSession<Id extends SmsConsentCapabilityId>(
+  input: SmsConsentSessionExecution<Id>,
+): Promise<CapabilityOutput<Id>> {
+  const mutation =
+    input.metadata?.idempotencyKey === undefined
+      ? null
+      : {
+          idempotencyKey: input.metadata.idempotencyKey,
+          humanConfirmationId: null,
+        };
+  const invocation = resolveHumanCapabilityInvocation(input.authenticated, {
+    requestId: input.metadata?.requestId ?? randomUUID(),
+    mutation,
+    ...(input.metadata?.now === undefined
+      ? {}
+      : { serverTime: input.metadata.now }),
+  });
+  const runtime = input.runtime ?? getDefaultSmsConsentCapabilityRuntime();
+  return runtime.execute(input.capabilityId, input.command, invocation);
 }
