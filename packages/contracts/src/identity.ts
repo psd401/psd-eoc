@@ -1264,3 +1264,256 @@ export const UserPageSchema = paginatedSchema(UserSchema);
 
 /** Minimized staff-user page inferred from its schema. */
 export type UserPage = z.infer<typeof UserPageSchema>;
+
+/**
+ * The exact wording a staff member agreed to when they gave a phone number.
+ *
+ * Carriers do not accept "they opted in" as an assertion. A toll-free or 10DLC
+ * review asks what the person was shown at the moment of consent, and a
+ * district has to be able to produce it for any number it later sends to.
+ * Recording the version means a later change to the wording cannot rewrite
+ * what an earlier consent actually said.
+ */
+export const SmsConsentDisclosureVersionSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/u);
+
+/** SMS consent disclosure version inferred from its schema. */
+export type SmsConsentDisclosureVersion = z.infer<
+  typeof SmsConsentDisclosureVersionSchema
+>;
+
+/**
+ * Owns a staff member's affirmative agreement to receive emergency SMS.
+ *
+ * The number is untrusted contact input and is never a log field. Consent is
+ * per person and per number: giving a new number supersedes the previous one
+ * rather than adding a second, because a district notifying two numbers for
+ * one employee is a carrier complaint waiting to happen.
+ */
+export const RecordSmsConsentInputSchema = z
+  .object({
+    phoneNumber: z
+      .string()
+      .trim()
+      .regex(/^\+[1-9]\d{7,14}$/u),
+    disclosureVersion: SmsConsentDisclosureVersionSchema,
+    /**
+     * Affirmative and explicit. A default-checked box is not consent, so this
+     * has to be the literal true the person actually produced.
+     */
+    agreed: z.literal(true),
+  })
+  .strict()
+  .readonly();
+
+/** SMS consent input inferred from its schema. */
+export type RecordSmsConsentInput = z.infer<typeof RecordSmsConsentInputSchema>;
+
+/**
+ * Owns a non-secret receipt for recorded SMS consent.
+ *
+ * The number is deliberately absent: a receipt is rendered and logged, and the
+ * caller already knows the number they just sent.
+ */
+export const SmsConsentReceiptSchema = z
+  .object({
+    /**
+     * Identifies the consent row itself, which is what a carrier dispute is
+     * ultimately resolved against. It is a non-secret opaque id, unlike the
+     * number.
+     */
+    consentId: UuidSchema,
+    disclosureVersion: SmsConsentDisclosureVersionSchema,
+    status: z.literal('consented'),
+    recordedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** SMS consent receipt inferred from its schema. */
+export type SmsConsentReceipt = z.infer<typeof SmsConsentReceiptSchema>;
+
+/** Owns a number-free request to read the caller's own SMS consent state. */
+export const ReadMySmsConsentInputSchema = z.object({}).strict().readonly();
+
+/** Own-consent read input inferred from its schema. */
+export type ReadMySmsConsentInput = z.infer<typeof ReadMySmsConsentInputSchema>;
+
+/** Owns a number-free request to withdraw a staff member's SMS consent. */
+export const WithdrawSmsConsentInputSchema = z.object({}).strict().readonly();
+
+/** SMS consent withdrawal input inferred from its schema. */
+export type WithdrawSmsConsentInput = z.infer<
+  typeof WithdrawSmsConsentInputSchema
+>;
+
+/** Owns a non-secret receipt for a withdrawn SMS consent. */
+export const SmsConsentWithdrawalReceiptSchema = z
+  .object({
+    /** The consent that was withdrawn; the row survives as evidence. */
+    consentId: UuidSchema,
+    status: z.literal('withdrawn'),
+    recordedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** SMS consent withdrawal receipt inferred from its schema. */
+export type SmsConsentWithdrawalReceipt = z.infer<
+  typeof SmsConsentWithdrawalReceiptSchema
+>;
+
+/**
+ * Owns what the current staff member's SMS consent is, for their own view.
+ *
+ * Only the last four digits are exposed. A staff member needs to recognise
+ * which number is on file; nobody needs the whole number read back to them,
+ * and this response passes through rendering and error paths.
+ */
+export const SmsConsentStateSchema = z
+  .discriminatedUnion('status', [
+    z.object({ status: z.literal('none') }).strict(),
+    z
+      .object({
+        status: z.literal('consented'),
+        lastFourDigits: z.string().regex(/^[0-9]{4}$/u),
+        disclosureVersion: SmsConsentDisclosureVersionSchema,
+        consentedAt: TimestampSchema,
+      })
+      .strict(),
+  ])
+  .readonly();
+
+/** Current SMS consent state inferred from its schema. */
+export type SmsConsentState = z.infer<typeof SmsConsentStateSchema>;
+
+/**
+ * The disclosure version currently shown to staff.
+ *
+ * Bumping this is how the wording changes. Consents recorded under an earlier
+ * version keep that version, so a carrier asking what a given number agreed to
+ * years later gets the text that person actually saw rather than the current
+ * one.
+ */
+export const SMS_CONSENT_DISCLOSURE_VERSION: SmsConsentDisclosureVersion =
+  '2026-09-04';
+
+/** Tenant facts the disclosure names, so no district identity is a literal. */
+export const SmsConsentDisclosureContextSchema = z
+  .object({
+    organizationName: z.string().trim().min(1).max(160),
+    privacyPolicyUrl: z.string().url(),
+    supportEmail: z.string().trim().email(),
+    supportPhone: z
+      .string()
+      .trim()
+      .regex(/^\+[1-9]\d{7,14}$/u),
+  })
+  .strict()
+  .readonly();
+
+/** Disclosure context inferred from its schema. */
+export type SmsConsentDisclosureContext = z.infer<
+  typeof SmsConsentDisclosureContextSchema
+>;
+
+/** Owns the exact disclosure a staff member is shown before agreeing. */
+export const SmsConsentDisclosureSchema = z
+  .object({
+    version: SmsConsentDisclosureVersionSchema,
+    summary: z.string().min(1),
+    terms: z.array(z.string().min(1)).min(1).readonly(),
+    agreementLabel: z.string().min(1),
+    privacyPolicyUrl: z.string().url(),
+  })
+  .strict()
+  .readonly();
+
+/** Disclosure inferred from its schema. */
+export type SmsConsentDisclosure = z.infer<typeof SmsConsentDisclosureSchema>;
+
+/**
+ * Builds the disclosure shown at the moment of consent.
+ *
+ * Carrier review asks to see this exact text, so web and mobile must render
+ * one source rather than two hand-kept copies that drift. Every carrier-
+ * required element is here deliberately: who is sending, why, how often, that
+ * rates apply, how to stop, how to get help, and where the privacy policy is.
+ *
+ * US toll-free STOP handling is carrier-owned and cannot be customized, which
+ * is why resuming is described as texting START or UNSTOP to the same number
+ * rather than as something this application can do on the person's behalf.
+ */
+export function smsConsentDisclosure(
+  context: SmsConsentDisclosureContext,
+): SmsConsentDisclosure {
+  const parsed = SmsConsentDisclosureContextSchema.parse(context);
+  return SmsConsentDisclosureSchema.parse({
+    version: SMS_CONSENT_DISCLOSURE_VERSION,
+    summary: `${parsed.organizationName} will text emergency notifications from PSD EOC to the mobile number you enter below.`,
+    terms: Object.freeze([
+      'PSD EOC texts you only about emergency activations, drills, and the delivery tests that prove the system still reaches you. It is never used for marketing.',
+      'Message frequency varies with real events and scheduled drills.',
+      'Message and data rates may apply.',
+      'Reply STOP to any PSD EOC text to stop receiving them. To start again, text START or UNSTOP to that same number.',
+      `Reply HELP for help, or contact ${parsed.supportEmail} or ${parsed.supportPhone}.`,
+      'Your mobile number and this consent record are used only to notify you and to show a carrier that the message was permitted. They are not sold or shared for marketing.',
+    ]),
+    agreementLabel:
+      'I agree to receive emergency text messages from PSD EOC at this number.',
+    privacyPolicyUrl: parsed.privacyPolicyUrl,
+  });
+}
+
+/**
+ * Normalizes a typed North American mobile number to E.164, or null.
+ *
+ * Staff type numbers the way they say them -- "(253) 555-0123", "253.555.0123",
+ * "1 253 555 0123" -- and the stored value has to be one exact form, because a
+ * consent is matched to a delivery by that string. Shared so web and mobile
+ * cannot disagree about which of two spellings is the number on file.
+ *
+ * Deliberately narrow: it accepts NANP input and already-E.164 input and
+ * refuses everything else rather than guessing a country for a bare number.
+ */
+export function normalizeNorthAmericanMobileNumber(
+  input: string,
+): string | null {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return null;
+  if (/^\+[1-9]\d{7,14}$/u.test(trimmed)) return trimmed;
+  // Reject any other leading + rather than stripping it: a mistyped foreign
+  // number must not be silently rewritten into a US one.
+  if (trimmed.startsWith('+')) return null;
+  const digits = trimmed.replace(/[\s().-]/gu, '');
+  if (!/^\d+$/u.test(digits)) return null;
+  if (digits.length === 10) {
+    return /^[2-9]\d{2}[2-9]\d{6}$/u.test(digits) ? `+1${digits}` : null;
+  }
+  if (digits.length === 11 && digits.startsWith('1')) {
+    const national = digits.slice(1);
+    return /^[2-9]\d{2}[2-9]\d{6}$/u.test(national) ? `+1${national}` : null;
+  }
+  return null;
+}
+
+/**
+ * Owns what a staff member's own consent screen needs, in one read.
+ *
+ * The disclosure travels with the state so mobile renders the same text the
+ * server would show on the web rather than carrying its own copy of district
+ * configuration. A carrier reviewing one screenshot is looking at wording that
+ * only exists in one place.
+ */
+export const MySmsConsentViewSchema = z
+  .object({
+    consent: SmsConsentStateSchema,
+    disclosure: SmsConsentDisclosureSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Own-consent view inferred from its schema. */
+export type MySmsConsentView = z.infer<typeof MySmsConsentViewSchema>;

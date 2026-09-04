@@ -690,6 +690,8 @@ async function main(): Promise<void> {
           PSD_EOC_PRIVACY_CONTACT_URL:
             'https://www.example.invalid/privacy-contact',
           PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
+          PSD_EOC_SMS_SUPPORT_EMAIL: 'servicecentral@example.invalid',
+          PSD_EOC_SMS_SUPPORT_PHONE: '+12535550123',
           PSD_EOC_EMAIL_WORKER_ENABLED: 'true',
           PSD_EOC_PRODUCT_OWNER_USER_ID: districtAdministrator.userId,
           PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE:

@@ -858,6 +858,105 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     ]);
   });
 
+  test('carries a live SMS consent into the snapshot and drops a withdrawn one', async () => {
+    const database = databaseConnection().db;
+    const fixture = Object.freeze({
+      userId: randomUUID(),
+      consentId: randomUUID(),
+      googleSubject: `synthetic-sms-consent-${randomUUID()}`,
+      phoneNumber: '+12025550137',
+    });
+    const staffEmail = `synthetic-sms-consent-${fixture.userId}@example.invalid`;
+    await ensureStaffConfiguration(database);
+    await database.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into users (
+          id, google_subject, email, display_name, facility_scope_kind, created_at
+        ) values (
+          ${fixture.userId}::uuid,
+          ${fixture.googleSubject},
+          ${staffEmail},
+          'Synthetic SMS Consent Staff',
+          'district'::facility_scope_kind,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into staff_sms_consents (
+          id, user_id, phone_number, disclosure_version, source, consented_at
+        ) values (
+          ${fixture.consentId}::uuid,
+          ${fixture.userId}::uuid,
+          ${fixture.phoneNumber},
+          '2026-08-29',
+          'web'::invocation_source,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+    });
+
+    const store = createDrizzleRosterSyncStore(database, TEST_PUSH_CUTOVER);
+    const consentingStore: RosterSyncStore = Object.freeze({
+      ...store,
+      loadGroupMembers: async (): Promise<readonly string[]> =>
+        Object.freeze([staffEmail]),
+    });
+
+    // A consent is the permission. Without one the number is never copied into
+    // a snapshot, so this is what makes an SMS endpoint sendable at all.
+    const first = await syncRoster(
+      { sourceConfiguration: STAFF_CONFIGURATION },
+      syncContext('sms-consent-live'),
+      {
+        ...dependencies(database, alertCollector().sink),
+        store: consentingStore,
+      },
+    );
+    const liveSnapshot = requirePublishedSnapshotId(first);
+    const liveRows = await database.execute<{ phone_number: string }>(sql`
+      select phone_number from roster_endpoints
+      where roster_snapshot_id = ${liveSnapshot}::uuid and channel = 'sms'
+    `);
+    expect([...liveRows].map((row) => row.phone_number)).toEqual([
+      fixture.phoneNumber,
+    ]);
+
+    // Withdrawing keeps the consent row as evidence a carrier may ask for, and
+    // removes the endpoint from the next snapshot rather than rewriting the
+    // one already published.
+    await database.execute(sql`
+      update staff_sms_consents
+         set withdrawn_at = ${SYNC_TIME}::timestamptz
+       where id = ${fixture.consentId}::uuid
+    `);
+    const second = await syncRoster(
+      { sourceConfiguration: STAFF_CONFIGURATION },
+      syncContext('sms-consent-withdrawn'),
+      {
+        ...dependencies(database, alertCollector().sink),
+        store: consentingStore,
+      },
+    );
+    const withdrawnSnapshot = requirePublishedSnapshotId(second);
+    const withdrawnRows = await database.execute<{ count: number }>(sql`
+      select count(*)::integer as count from roster_endpoints
+      where roster_snapshot_id = ${withdrawnSnapshot}::uuid and channel = 'sms'
+    `);
+    expect([...withdrawnRows][0]?.count).toBe(0);
+
+    const retained = await database.execute<{ count: number }>(sql`
+      select count(*)::integer as count from staff_sms_consents
+      where id = ${fixture.consentId}::uuid
+    `);
+    expect([...retained][0]?.count).toBe(1);
+
+    const earlier = await database.execute<{ count: number }>(sql`
+      select count(*)::integer as count from roster_endpoints
+      where roster_snapshot_id = ${liveSnapshot}::uuid and channel = 'sms'
+    `);
+    expect([...earlier][0]?.count).toBe(1);
+  });
+
   test('aborts publication when a captured push registration is unregistered before commit', async () => {
     const database = databaseConnection().db;
     const fixture = Object.freeze({
