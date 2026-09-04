@@ -28,6 +28,8 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:privacyContactUrl`
 - `psdEoc:sesFromAddress`
 - `psdEoc:sesIdentityDomain`
+- `psdEoc:smsSupportEmail`
+- `psdEoc:smsSupportPhone`
 - `psdEoc:sourceRepositoryUrl`
 - `psdEoc:syntheticGroups`
 - `psdEoc:threats`
@@ -70,6 +72,8 @@ names are:
 - `PSD_EOC_IOS_BUNDLE_ID`
 - `PSD_EOC_ORGANIZATION_NAME`
 - `PSD_EOC_PRIVACY_CONTACT_URL`
+- `PSD_EOC_SMS_SUPPORT_EMAIL`
+- `PSD_EOC_SMS_SUPPORT_PHONE`
 - `TEST_DATABASE_URL`
 
 ## Direct CDK deployment boundary

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  MySmsConsentViewSchema,
+  smsConsentDisclosure,
   SmsConsentReceiptSchema,
   SmsConsentStateSchema,
   SmsConsentWithdrawalReceiptSchema,
@@ -9,6 +11,7 @@ import {
   type CapabilityOutput,
   type InvocationSource,
   type RegisteredCapabilityId,
+  type MySmsConsentView,
   type SmsConsentReceipt,
   type SmsConsentState,
   type SmsConsentWithdrawalReceipt,
@@ -25,6 +28,12 @@ import {
 import { staffSmsConsents } from '../../db/schema';
 
 import type { AuthenticatedSession } from '../auth/sessions';
+import {
+  organizationName,
+  privacyContactUrl,
+  smsSupportEmail,
+  smsSupportPhone,
+} from '../config/deployment';
 
 import {
   CapabilityEngineError,
@@ -60,6 +69,7 @@ export interface SmsConsentCapabilityTransaction
   readMySmsConsent(
     actor: Extract<Actor, { kind: 'human' }>,
   ): Promise<SmsConsentState>;
+
   loadSmsConsentReplay(
     resultReference: string,
     actor: Extract<Actor, { kind: 'human' }>,
@@ -199,9 +209,19 @@ const readMySmsConsentRegistration: ServerCapabilityRegistration<
   id: 'read-my-sms-consent',
   resolveFacilityId: () => null,
   async handler(_input, context) {
-    return SmsConsentStateSchema.parse(
-      await context.transaction.readMySmsConsent(requireHuman(context)),
-    );
+    // Read the tenant's own configuration rather than trusting a client to
+    // say which district's disclosure it is showing.
+    return MySmsConsentViewSchema.parse({
+      consent: SmsConsentStateSchema.parse(
+        await context.transaction.readMySmsConsent(requireHuman(context)),
+      ),
+      disclosure: smsConsentDisclosure({
+        organizationName: organizationName(),
+        privacyPolicyUrl: privacyContactUrl(),
+        supportEmail: smsSupportEmail(),
+        supportPhone: smsSupportPhone(),
+      }),
+    }) satisfies MySmsConsentView;
   },
 };
 
