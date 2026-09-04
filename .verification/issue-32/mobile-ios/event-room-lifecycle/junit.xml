@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="17.579" timestamp="2026-09-03T14:39:27">
-    <testcase id="Issue 32 - post text and end the opened drill" name="Issue 32 - post text and end the opened drill" classname="Issue 32 - post text and end the opened drill" file="packages/mobile/e2e/flows/event-room-lifecycle.yaml" time="17.571" timestamp="2026-09-03T14:39:27" status="SUCCESS">
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="16.639" timestamp="2026-09-03T19:13:07">
+    <testcase id="Issue 32 - post text and end the opened drill" name="Issue 32 - post text and end the opened drill" classname="Issue 32 - post text and end the opened drill" file="packages/mobile/e2e/flows/event-room-lifecycle.yaml" time="16.628" timestamp="2026-09-03T19:13:07" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-32, synthetic-only, event-room"/>
       </properties>
