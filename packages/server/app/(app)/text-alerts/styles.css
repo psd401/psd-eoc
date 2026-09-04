@@ -1,0 +1,47 @@
+.text-alerts-page section {
+  margin-block-start: 1.5rem;
+}
+
+.text-alerts-terms ul {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+.text-alerts-meta {
+  color: var(--color-text-muted, #4a5568);
+  font-size: 0.9375rem;
+}
+
+.text-alerts-form {
+  display: grid;
+  gap: 1rem;
+  max-width: 28rem;
+}
+
+.text-alerts-form .field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+/*
+  The agreement control reads as one line so the label is unambiguously the
+  thing being agreed to, which is what a carrier reviewer looks for.
+*/
+.text-alerts-form .field--check {
+  align-items: start;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: auto 1fr;
+}
+
+.text-alerts-form .field--check label {
+  font-weight: 400;
+}
+
+.text-alerts-form .field-hint {
+  color: var(--color-text-muted, #4a5568);
+  font-size: 0.875rem;
+  margin: 0;
+}

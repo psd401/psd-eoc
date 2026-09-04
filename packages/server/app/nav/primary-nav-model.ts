@@ -25,6 +25,11 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
   { href: '/start', label: 'Start event', authorization: 'authenticated' },
   { href: '/records', label: 'Records', authorization: 'authenticated' },
   {
+    href: '/text-alerts',
+    label: 'Text alerts',
+    authorization: 'authenticated',
+  },
+  {
     href: '/delivery-tests',
     label: 'Delivery tests',
     authorization: 'authenticated',

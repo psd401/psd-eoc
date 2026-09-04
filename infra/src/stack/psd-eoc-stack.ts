@@ -3359,6 +3359,14 @@ export class PsdEocStack extends Stack {
                   value: deploymentIdentity.privacyContactUrl,
                 },
                 {
+                  name: 'PSD_EOC_SMS_SUPPORT_EMAIL',
+                  value: deploymentIdentity.smsSupportEmail,
+                },
+                {
+                  name: 'PSD_EOC_SMS_SUPPORT_PHONE',
+                  value: deploymentIdentity.smsSupportPhone,
+                },
+                {
                   name: 'PSD_EOC_DISPLAY_TIME_ZONE',
                   value: deploymentIdentity.displayTimeZone,
                 },

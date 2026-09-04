@@ -1466,3 +1466,35 @@ export function smsConsentDisclosure(
     privacyPolicyUrl: parsed.privacyPolicyUrl,
   });
 }
+
+/**
+ * Normalizes a typed North American mobile number to E.164, or null.
+ *
+ * Staff type numbers the way they say them -- "(253) 555-0123", "253.555.0123",
+ * "1 253 555 0123" -- and the stored value has to be one exact form, because a
+ * consent is matched to a delivery by that string. Shared so web and mobile
+ * cannot disagree about which of two spellings is the number on file.
+ *
+ * Deliberately narrow: it accepts NANP input and already-E.164 input and
+ * refuses everything else rather than guessing a country for a bare number.
+ */
+export function normalizeNorthAmericanMobileNumber(
+  input: string,
+): string | null {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return null;
+  if (/^\+[1-9]\d{7,14}$/u.test(trimmed)) return trimmed;
+  // Reject any other leading + rather than stripping it: a mistyped foreign
+  // number must not be silently rewritten into a US one.
+  if (trimmed.startsWith('+')) return null;
+  const digits = trimmed.replace(/[\s().-]/gu, '');
+  if (!/^\d+$/u.test(digits)) return null;
+  if (digits.length === 10) {
+    return /^[2-9]\d{2}[2-9]\d{6}$/u.test(digits) ? `+1${digits}` : null;
+  }
+  if (digits.length === 11 && digits.startsWith('1')) {
+    const national = digits.slice(1);
+    return /^[2-9]\d{2}[2-9]\d{6}$/u.test(national) ? `+1${national}` : null;
+  }
+  return null;
+}
