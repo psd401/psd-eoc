@@ -6,6 +6,7 @@ import type {
   EventTypeListItem,
   FacilityId,
   TemplateMode,
+  Threat,
 } from '@psd-eoc/contracts';
 
 import {
@@ -22,6 +23,7 @@ const EVENT_TYPE_ID = uuid(3);
 const VERSION_ID = uuid(4);
 const ACTIVE_EVENT_ID = uuid(5);
 const OTHER_EVENT_ID = uuid(6);
+const THREAT_ID = uuid(8);
 
 function eventTypeListItem(
   input: Readonly<{
@@ -47,6 +49,10 @@ function eventTypeListItem(
   } as EventTypeListItem;
 }
 
+function threat(id: string = THREAT_ID): Threat {
+  return { id, name: 'Synthetic wildlife', requiresDetail: false } as Threat;
+}
+
 function activationPreview(
   input: Readonly<{
     facilityId?: FacilityId;
@@ -54,9 +60,13 @@ function activationPreview(
     activeEventIds?: readonly string[];
     versionId?: string;
     versionMode?: TemplateMode;
+    threatId?: string | null;
+    threatDetail?: string | null;
+    responseDetail?: string | null;
   }> = {},
 ): ActivationPreview {
   const mode = input.mode ?? 'drill';
+  const threatId = input.threatId === undefined ? THREAT_ID : input.threatId;
   return {
     activeEventIds: input.activeEventIds ?? [],
     facilityId: input.facilityId ?? FACILITY_ID,
@@ -65,6 +75,15 @@ function activationPreview(
       id: input.versionId ?? VERSION_ID,
       templateMode: input.versionMode ?? mode,
     },
+    threat:
+      threatId === null
+        ? null
+        : {
+            id: threatId,
+            name: 'Synthetic wildlife',
+            detail: input.threatDetail ?? null,
+          },
+    responseDetail: input.responseDetail ?? null,
   } as ActivationPreview;
 }
 
@@ -82,17 +101,38 @@ function event(
   } as Event;
 }
 
+const completeBinding: ActivationPreviewBinding = {
+  activeEvents: [],
+  facilityId: FACILITY_ID,
+  mode: 'drill',
+  preview: activationPreview(),
+  responseDetail: null,
+  selectedThreat: threat(),
+  selectedType: eventTypeListItem(),
+  threatDetail: null,
+};
+
 describe('getBoundActivationPreview', () => {
   test('returns the exact preview when every current selection dimension matches', () => {
     const preview = activationPreview();
 
+    expect(getBoundActivationPreview({ ...completeBinding, preview })).toBe(
+      preview,
+    );
+  });
+
+  test('binds typed descriptions exactly as the operator entered them', () => {
+    const preview = activationPreview({
+      threatDetail: 'Gas smell',
+      responseDetail: 'Move to the field',
+    });
+
     expect(
       getBoundActivationPreview({
-        activeEvents: [],
-        facilityId: FACILITY_ID,
-        mode: 'drill',
+        ...completeBinding,
         preview,
-        selectedType: eventTypeListItem(),
+        threatDetail: 'Gas smell',
+        responseDetail: 'Move to the field',
       }),
     ).toBe(preview);
   });
@@ -105,15 +145,19 @@ describe('getBoundActivationPreview', () => {
       'preview version mode',
       activationPreview({ mode: 'drill', versionMode: 'real' }),
     ],
+    ['threat identity', activationPreview({ threatId: uuid(9) })],
+    ['missing threat', activationPreview({ threatId: null })],
+    ['threat description', activationPreview({ threatDetail: 'Different' })],
+    [
+      'response description',
+      activationPreview({ responseDetail: 'Different' }),
+    ],
   ] as const) {
     test(`rejects a preview with stale ${label}`, () => {
       expect(
         getBoundActivationPreview({
-          activeEvents: [],
-          facilityId: FACILITY_ID,
-          mode: 'drill',
+          ...completeBinding,
           preview: stalePreview,
-          selectedType: eventTypeListItem(),
         }),
       ).toBeNull();
     });
@@ -134,27 +178,27 @@ describe('getBoundActivationPreview', () => {
     test(`rejects a stale selected ${label}`, () => {
       expect(
         getBoundActivationPreview({
-          activeEvents: [],
-          facilityId: FACILITY_ID,
-          mode: 'drill',
-          preview: activationPreview(),
+          ...completeBinding,
           selectedType: staleSelectedType,
         }),
       ).toBeNull();
     });
   }
 
-  const completeBinding: ActivationPreviewBinding = {
-    activeEvents: [],
-    facilityId: FACILITY_ID,
-    mode: 'drill',
-    preview: activationPreview(),
-    selectedType: eventTypeListItem(),
-  };
+  test('rejects a preview for a threat other than the one selected now', () => {
+    expect(
+      getBoundActivationPreview({
+        ...completeBinding,
+        selectedThreat: threat(uuid(9)),
+      }),
+    ).toBeNull();
+  });
+
   for (const [label, incompleteBinding] of [
     ['facility', { ...completeBinding, facilityId: null }],
     ['mode', { ...completeBinding, mode: null }],
     ['preview', { ...completeBinding, preview: null }],
+    ['selected threat', { ...completeBinding, selectedThreat: null }],
     ['selected type', { ...completeBinding, selectedType: null }],
   ] as const) {
     test(`rejects a missing current ${label}`, () => {
@@ -167,14 +211,12 @@ describe('getBoundActivationPreview', () => {
 
     expect(
       getBoundActivationPreview({
+        ...completeBinding,
         activeEvents: [
           event({ id: OTHER_EVENT_ID, facilityId: OTHER_FACILITY_ID }),
           event(),
         ],
-        facilityId: FACILITY_ID,
-        mode: 'drill',
         preview,
-        selectedType: eventTypeListItem(),
       }),
     ).toBe(preview);
   });
@@ -182,11 +224,9 @@ describe('getBoundActivationPreview', () => {
   test('rejects a preview that omits another active event at the selected facility', () => {
     expect(
       getBoundActivationPreview({
+        ...completeBinding,
         activeEvents: [event(), event({ id: OTHER_EVENT_ID })],
-        facilityId: FACILITY_ID,
-        mode: 'drill',
         preview: activationPreview({ activeEventIds: [ACTIVE_EVENT_ID] }),
-        selectedType: eventTypeListItem(),
       }),
     ).toBeNull();
   });
@@ -194,11 +234,9 @@ describe('getBoundActivationPreview', () => {
   test('rejects an empty preview when the selected facility has an active event', () => {
     expect(
       getBoundActivationPreview({
+        ...completeBinding,
         activeEvents: [event()],
-        facilityId: FACILITY_ID,
-        mode: 'drill',
         preview: activationPreview(),
-        selectedType: eventTypeListItem(),
       }),
     ).toBeNull();
   });
@@ -206,11 +244,9 @@ describe('getBoundActivationPreview', () => {
   test('rejects a referenced event from another authorized facility', () => {
     expect(
       getBoundActivationPreview({
+        ...completeBinding,
         activeEvents: [event({ facilityId: OTHER_FACILITY_ID })],
-        facilityId: FACILITY_ID,
-        mode: 'drill',
         preview: activationPreview({ activeEventIds: [ACTIVE_EVENT_ID] }),
-        selectedType: eventTypeListItem(),
       }),
     ).toBeNull();
   });
@@ -219,11 +255,9 @@ describe('getBoundActivationPreview', () => {
     test(`rejects a referenced ${status} event`, () => {
       expect(
         getBoundActivationPreview({
+          ...completeBinding,
           activeEvents: [event({ status })],
-          facilityId: FACILITY_ID,
-          mode: 'drill',
           preview: activationPreview({ activeEventIds: [ACTIVE_EVENT_ID] }),
-          selectedType: eventTypeListItem(),
         }),
       ).toBeNull();
     });
@@ -231,12 +265,7 @@ describe('getBoundActivationPreview', () => {
 
   test('rejects a missing or duplicated referenced event record', () => {
     const preview = activationPreview({ activeEventIds: [ACTIVE_EVENT_ID] });
-    const binding = {
-      facilityId: FACILITY_ID,
-      mode: 'drill' as const,
-      preview,
-      selectedType: eventTypeListItem(),
-    };
+    const binding = { ...completeBinding, preview };
 
     expect(
       getBoundActivationPreview({ ...binding, activeEvents: [] }),

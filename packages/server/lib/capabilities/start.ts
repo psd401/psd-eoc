@@ -15,6 +15,8 @@ import {
   ThreatPageSchema,
   ThreatSchema,
   type ActivationPreview,
+  type ActivationSelection,
+  type ActivationThreat,
   type Actor,
   type CapabilityInput,
   type CapabilityOutput,
@@ -50,6 +52,8 @@ import {
   deliveryTestTargetEndpoints,
   deliveryTestTargetSetVersions,
   events,
+  eventTypes,
+  eventTypeVersions,
   facilities,
   groupSources,
   integrationStatuses,
@@ -95,6 +99,7 @@ import {
 } from './start-bounded-query';
 import {
   ActivationPreviewBuildError,
+  activationThreatFromColumns,
   buildActivationPreview,
 } from './start-preview';
 
@@ -231,6 +236,16 @@ function unavailable(message: string): CapabilityEngineError {
     message,
     503,
     true,
+  );
+}
+
+/** A selection the catalog refuses: the client must change what it asked for. */
+function invalidSelection(message: string): CapabilityEngineError {
+  return new CapabilityEngineError(
+    'VALIDATION_ERROR',
+    'CAPABILITY_INPUT_INVALID',
+    message,
+    400,
   );
 }
 
@@ -1090,14 +1105,86 @@ function allAudienceEndpointReferences(
   );
 }
 
+/** What the operator chose beyond classification and audience. */
+interface ActivationChoice {
+  readonly threat: ActivationThreat | null;
+  readonly responseDetail: string | null;
+}
+
+/**
+ * Resolves the operator's threat and detail choices against the catalog
+ * before any consequence is computed: an unknown or retired threat is
+ * refused, and a description is accepted exactly when the chosen catalog
+ * entry requires one. Nothing here is trusted from the client beyond ids and
+ * the operator's own words.
+ */
 async function createActivationPreviewFromDatabase(
   database: StartFlowQueryDatabase,
   input: CapabilityInput<'create-activation-preview'>,
   actor: Actor,
   now: Date,
+  hydrationCache?: RosterSnapshotHydrationCache,
+): Promise<ActivationPreview> {
+  try {
+    const [threatRow] = await database
+      .select()
+      .from(threats)
+      .where(eq(threats.id, input.threatId))
+      .limit(1);
+    if (threatRow === undefined || !threatRow.active) {
+      throw unavailable('The selected threat is unavailable.');
+    }
+    if (threatRow.requiresDetail !== (input.threatDetail !== null)) {
+      throw invalidSelection(
+        threatRow.requiresDetail
+          ? 'The selected threat requires a short description.'
+          : 'The selected threat does not take a description.',
+      );
+    }
+    const [responseIdentity] = await database
+      .select({ requiresDetail: eventTypes.requiresDetail })
+      .from(eventTypeVersions)
+      .innerJoin(eventTypes, eq(eventTypes.id, eventTypeVersions.eventTypeId))
+      .where(eq(eventTypeVersions.id, input.eventTypeVersion.id))
+      .limit(1);
+    if (responseIdentity === undefined) {
+      throw unavailable('The selected event type is unavailable.');
+    }
+    if (responseIdentity.requiresDetail !== (input.responseDetail !== null)) {
+      throw invalidSelection(
+        responseIdentity.requiresDetail
+          ? 'The selected response requires a short description.'
+          : 'The selected response does not take a description.',
+      );
+    }
+    const { threatId, threatDetail, responseDetail, ...selection } = input;
+    return await createActivationPreviewRecord(
+      database,
+      selection,
+      {
+        threat: { id: threatId, name: threatRow.name, detail: threatDetail },
+        responseDetail,
+      },
+      actor,
+      now,
+      undefined,
+      hydrationCache,
+    );
+  } catch (error) {
+    mapPreviewConstructionError(error);
+  }
+}
+
+async function createActivationPreviewRecord(
+  database: StartFlowQueryDatabase,
+  selection: ActivationSelection,
+  choice: ActivationChoice,
+  actor: Actor,
+  now: Date,
   deliveryTestContext?: DeliveryTestPreviewContext,
   hydrationCache?: RosterSnapshotHydrationCache,
 ): Promise<ActivationPreview> {
+  const input = selection;
   try {
     // The Data API permits only one in-flight statement for a transaction ID.
     // Keep every independent consequence read explicitly sequential.
@@ -1175,6 +1262,8 @@ async function createActivationPreviewFromDatabase(
     const preview = buildActivationPreview({
       id: randomUUID(),
       selection: input,
+      threat: choice.threat,
+      responseDetail: choice.responseDetail,
       facility: facilityFromRow(facilityRow),
       eventTypeVersion,
       rosterSnapshot,
@@ -1205,6 +1294,10 @@ async function createActivationPreviewFromDatabase(
       eventTypeVersionId: preview.eventTypeVersion.id,
       rosterSnapshotId: preview.rosterSnapshotId,
       rosterPopulation: preview.rosterPopulation,
+      threatId: preview.threat?.id ?? null,
+      threatName: preview.threat?.name ?? null,
+      threatDetail: preview.threat?.detail ?? null,
+      responseDetail: preview.responseDetail,
       recipientCount: preview.recipientCount,
       channels: preview.channels,
       sendReadiness: preview.sendReadiness,
@@ -1269,7 +1362,9 @@ async function createDeliveryTestPreviewFromDatabase(
     targetSet: input.targetSet,
     endpointReferenceDigest: targetSet.endpointReferenceDigest,
   });
-  const activationPreview = await createActivationPreviewFromDatabase(
+  // A monthly delivery test exercises the channels, not a threat scenario, so
+  // it is the one preview that pins no threat and no typed description.
+  const activationPreview = await createActivationPreviewRecord(
     database,
     {
       facilityId: targetSet.facilityId,
@@ -1278,6 +1373,7 @@ async function createDeliveryTestPreviewFromDatabase(
       eventTypeVersion: input.eventTypeVersion,
       rosterPopulation: 'staff',
     },
+    { threat: null, responseDetail: null },
     actor,
     now,
     { targetSet, metadata, credentialVerificationReferences },
@@ -1337,6 +1433,18 @@ export async function loadActivationPreview(
   if (row === undefined) {
     return null;
   }
+  // A preview prepared in the ten minutes before this migration deployed has
+  // no threat and is not a delivery test, so it can never satisfy the current
+  // contract. Report it as gone rather than throwing a schema error the
+  // confirmation boundary cannot classify: the operator is told to start
+  // again, which is exactly what they must do.
+  if (
+    row.threatId === null &&
+    row.threatName === null &&
+    row.deliveryTestTargetSetId === null
+  ) {
+    return null;
+  }
   return ActivationPreviewSchema.parse({
     id: row.id,
     facilityId: row.facilityId,
@@ -1348,6 +1456,8 @@ export async function loadActivationPreview(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    threat: activationThreatFromColumns(row),
+    responseDetail: row.responseDetail ?? null,
     recipientCount: row.recipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
@@ -1394,7 +1504,6 @@ function createDrizzleStartFlowTransaction(
         input,
         actor,
         now,
-        undefined,
         hydrationCache,
       ),
     async resolveDeliveryTestFacilityId(input) {

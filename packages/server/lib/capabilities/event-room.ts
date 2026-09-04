@@ -43,6 +43,7 @@ import {
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
 } from './engine';
+import { activationThreatFromColumns } from './start-preview';
 
 const EVENT_ROOM_CURSOR_VERSION = 1;
 const EVENT_CACHE_KEY = 'event-room:event';
@@ -159,6 +160,8 @@ function eventFromRow(row: typeof events.$inferSelect): Event {
     status: row.status,
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    threat: activationThreatFromColumns(row),
+    responseDetail: row.responseDetail ?? null,
     createdBy: row.createdBy,
     createdAt: dateIso(row.createdAt),
     activatedAt: row.activatedAt === null ? null : dateIso(row.activatedAt),
@@ -254,7 +257,14 @@ async function readEventRoomHeader(
       'The event-room heading does not match its pinned event configuration.',
     );
   }
-  return EventRoomHeaderSchema.parse({ facility, eventType });
+  // The threat and any typed descriptions were pinned on the event at
+  // activation; they need no second lookup and never change afterwards.
+  return EventRoomHeaderSchema.parse({
+    facility,
+    eventType,
+    threat: event.threat,
+    responseDetail: event.responseDetail,
+  });
 }
 
 interface EventRoomDescriptor {

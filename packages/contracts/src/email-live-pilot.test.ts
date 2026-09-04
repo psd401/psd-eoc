@@ -105,6 +105,8 @@ const controlledActivationPreview = Object.freeze({
   blockingReasonCodes: Object.freeze([]),
   activeEventIds: Object.freeze([]),
   deliveryTest,
+  threat: null,
+  responseDetail: null,
   consequenceDigest: DIGEST,
   createdAt: CREATED_AT,
   expiresAt: EXPIRES_AT,

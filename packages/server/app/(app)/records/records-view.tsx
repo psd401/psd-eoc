@@ -256,7 +256,8 @@ export function RecordsView({
                     <th scope="col">Site</th>
                     <th scope="col">Date</th>
                     <th scope="col">Time</th>
-                    <th scope="col">Type</th>
+                    <th scope="col">Threat</th>
+                    <th scope="col">Response</th>
                     <th scope="col">Duration</th>
                     <th scope="col">Status</th>
                     <th scope="col">Event</th>
@@ -283,6 +284,18 @@ export function RecordsView({
                           </time>
                         </td>
                         <td>
+                          {record.threatName === null ? (
+                            <span className="record-muted">Not recorded</span>
+                          ) : (
+                            <span>
+                              {record.threatName}
+                              {record.threatDetail === null
+                                ? null
+                                : ` — ${record.threatDetail}`}
+                            </span>
+                          )}
+                        </td>
+                        <td>
                           <span
                             className="record-kind"
                             style={{
@@ -291,7 +304,12 @@ export function RecordsView({
                           >
                             {classification.label}
                           </span>
-                          <span>{record.eventTypeName}</span>
+                          <span>
+                            {record.eventTypeName}
+                            {record.responseDetail === null
+                              ? null
+                              : ` — ${record.responseDetail}`}
+                          </span>
                         </td>
                         <td>{recordDuration(record)}</td>
                         <td>{recordStatus(record)}</td>

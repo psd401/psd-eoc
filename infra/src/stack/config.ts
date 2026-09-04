@@ -245,11 +245,13 @@ export function readThreatContext(node: {
       threat.key.length > 100 ||
       typeof threat.name !== 'string' ||
       threat.name.trim().length === 0 ||
+      threat.name.trim().length > 160 ||
       (threat.requiresDetail !== undefined &&
-        typeof threat.requiresDetail !== 'boolean')
+        typeof threat.requiresDetail !== 'boolean') ||
+      (threat.active !== undefined && typeof threat.active !== 'boolean')
     ) {
       throw new Error(
-        'Each psdEoc:threats entry needs a lower-case key and a name.',
+        'Each psdEoc:threats entry needs a lower-case key of at most 100 characters, a name of at most 160, and boolean requiresDetail and active when present.',
       );
     }
   }

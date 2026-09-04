@@ -7,6 +7,7 @@ export const ISSUE_21_MAESTRO_IDS = Object.freeze({
   activationResult: 'issue-21-activation-result',
   confirmDrill: 'issue-21-confirm-drill',
   drillEventType: 'issue-21-drill-event-type',
+  drillThreat: 'issue-21-drill-threat',
   joinedResult: 'issue-21-joined-result',
   joinExisting: 'issue-21-join-existing',
   startDrill: 'issue-21-start-drill',

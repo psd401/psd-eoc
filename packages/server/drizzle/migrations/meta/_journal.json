@@ -330,6 +330,13 @@
       "when": 1788464770480,
       "tag": "0046_threat_catalog",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1788465971468,
+      "tag": "0047_threat_on_activation",
+      "breakpoints": true
     }
   ]
 }

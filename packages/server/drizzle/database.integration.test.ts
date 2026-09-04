@@ -29,6 +29,7 @@ import {
   type SeedDatabaseOptions,
   type SeedSummary,
 } from '../db/seed';
+import { insertEventTypesBeforeDetailRule } from '../lib/testing/held-back-event-types';
 import { notificationIntentChannels } from '../db/schema';
 import { migrateDatabase } from './migrate';
 import {
@@ -2228,6 +2229,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // Threats arrived in migration 0046; this schema is held before it, so
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
+        insertEventTypes: insertEventTypesBeforeDetailRule,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -3078,6 +3080,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // Threats arrived in migration 0046; this schema is held before it, so
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
+        insertEventTypes: insertEventTypesBeforeDetailRule,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -3585,6 +3588,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // Threats arrived in migration 0046; this schema is held before it, so
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
+        insertEventTypes: insertEventTypesBeforeDetailRule,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -6282,7 +6286,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             join event_types as mismatched_type
               on mismatched_type.id = mismatched_version.event_type_id
             where event.id = '00000000-0000-4000-8000-000000009980'::uuid
-              and mismatched_type.key = 'medical-drill'
+              and mismatched_type.key = 'shelter-in-place-drill'
           `);
         }),
       'notification_intents_event_truth_fk',
@@ -6331,7 +6335,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             join event_types as mismatched_type
               on mismatched_type.id = mismatched_version.event_type_id
             where event.id = '00000000-0000-4000-8000-000000009980'::uuid
-              and mismatched_type.key = 'medical-drill'
+              and mismatched_type.key = 'shelter-in-place-drill'
           `);
         }),
       'lifecycle_consequence_previews_event_truth_fk',
@@ -8692,9 +8696,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       rosterSnapshots: 1,
       rosterRecipients: 4,
       rosterEndpoints: 12,
-      eventTypes: 8,
-      eventTypeVersions: 8,
-      eventTypeTemplates: 72,
+      eventTypes: 12,
+      eventTypeVersions: 12,
+      eventTypeTemplates: 108,
       integrationStatuses: 6,
       channelConfigurations: 3,
       events: 0,
@@ -8732,8 +8736,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       neighborhood_facilities: 2,
       roster_recipients: 4,
       roster_endpoints: 12,
-      event_types: 8,
-      event_type_templates: 72,
+      event_types: 12,
+      event_type_templates: 108,
       events: 0,
       notification_intents: 0,
       outbox_messages: 0,
@@ -8772,7 +8776,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       order by template_mode, purpose, channel
     `);
     expect(templateCoverage).toHaveLength(18);
-    expect(templateCoverage.every((row) => row.count === 4)).toBe(true);
+    expect(templateCoverage.every((row) => row.count === 6)).toBe(true);
 
     const northFacility = await db.query.facilities.findFirst({
       where: (facility, { eq }) => eq(facility.code, 'SYN-NORTH'),

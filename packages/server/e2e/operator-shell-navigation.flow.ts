@@ -113,4 +113,74 @@ test.describe('operator-shell-navigation', () => {
       fullPage: true,
     });
   });
+
+  test('start-flow back links return a step without previewing or starting', async ({
+    page,
+  }) => {
+    let previewRequests = 0;
+    let activationRequests = 0;
+    await page.route('**/start/api/preview', async (route) => {
+      previewRequests += 1;
+      await route.abort();
+    });
+    await page.route('**/start/api/activate', async (route) => {
+      activationRequests += 1;
+      await route.abort();
+    });
+
+    await page.goto('/');
+    await page
+      .getByRole('link', {
+        name: 'Run DRILL at Synthetic North Campus',
+        exact: true,
+      })
+      .click();
+    await expect(page).toHaveURL(/\/start\?.*mode=drill/u);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Choose threat' }),
+    ).toBeVisible();
+    await page
+      .getByRole('link', { name: 'Synthetic wildlife', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/start\?.*threatId=/u);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Choose response' }),
+    ).toBeVisible();
+
+    // A response that needs a description refuses whitespace the browser's own
+    // required-field check accepts, and says so beside the words the operator
+    // typed rather than emptying the field.
+    const otherResponse = page.getByRole('form', { name: 'Other Drill' });
+    await otherResponse.getByLabel('Describe the response').fill('   ');
+    await otherResponse
+      .getByRole('button', { name: 'Continue with Other Drill' })
+      .click();
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Choose response' }),
+    ).toBeVisible();
+    await expect(
+      otherResponse.getByRole('alert').filter({ hasText: /Type a short/u }),
+    ).toBeVisible();
+    await expect(otherResponse.getByLabel('Describe the response')).toHaveValue(
+      '   ',
+    );
+    await expectAxeClean(page);
+
+    await page
+      .getByRole('link', { name: 'Change threat', exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/start\?(?!.*threatId=).*mode=drill/u);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Choose threat' }),
+    ).toBeVisible();
+    await expectAxeClean(page);
+
+    await page.getByRole('link', { name: 'Change site', exact: true }).click();
+    await expect(page).toHaveURL(/\/$/u);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Active events' }),
+    ).toBeVisible();
+    expect(previewRequests).toBe(0);
+    expect(activationRequests).toBe(0);
+  });
 });

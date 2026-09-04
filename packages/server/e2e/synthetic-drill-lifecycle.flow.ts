@@ -130,11 +130,13 @@ test.describe('synthetic-drill-lifecycle', () => {
       path: evidencePath('synthetic-drill-all-clear-review-mobile-390.png'),
       fullPage: true,
     });
-    // The dialog re-renders when its preview settles; wait for the final
-    // render before asserting where Shift+Tab lands.
+    // The dialog re-renders when its preview settles, and that render moves
+    // focus back to Cancel on the next animation frame. Wait for both before
+    // moving focus, or Shift+Tab races the refocus and lands nowhere.
     await expect(
       endDialog.getByRole('button', { name: 'End event and notify staff' }),
     ).toBeEnabled();
+    await expect(endCancel).toBeFocused();
     await page.keyboard.press('Shift+Tab');
     await expect(
       endDialog.getByRole('button', { name: 'End event and notify staff' }),

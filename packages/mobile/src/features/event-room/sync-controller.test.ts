@@ -38,6 +38,8 @@ const EVENT = Object.freeze({
   status: 'active' as const,
   rosterSnapshotId: IDS.roster,
   rosterPopulation: 'staff' as const,
+  threat: null,
+  responseDetail: null,
   createdBy: {
     kind: 'human' as const,
     userId: IDS.user,
@@ -67,6 +69,8 @@ const HEADER = Object.freeze({
     name: 'Synthetic safety drill',
     templateMode: 'drill' as const,
   },
+  threat: null,
+  responseDetail: null,
 });
 
 function entry(sequence: number) {

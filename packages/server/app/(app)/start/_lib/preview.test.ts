@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  type ActivationSelection,
+  type ActivationThreat,
   type Actor,
   type ChannelConfiguration,
-  type CreateActivationPreviewInput,
   type EventTypeVersion,
   type Facility,
   type MessageTemplateCatalog,
@@ -44,7 +45,14 @@ const IDS = Object.freeze({
   activeEventB: '00000000-0000-4000-8000-000000000017',
   targetSet: '00000000-0000-4000-8000-000000000018',
   ordinaryEndpoint: '00000000-0000-4000-8000-000000000019',
+  threat: '00000000-0000-4000-8000-000000000020',
 });
+
+const THREAT = Object.freeze({
+  id: IDS.threat,
+  name: 'Synthetic wildlife',
+  detail: null,
+}) satisfies ActivationThreat;
 
 const ACTOR = Object.freeze({
   kind: 'human',
@@ -228,7 +236,7 @@ function evidence(
 ): ActivationPreviewEvidence {
   const kind =
     templateMode === 'real' ? ('incident' as const) : ('drill' as const);
-  const selection: CreateActivationPreviewInput = {
+  const selection: ActivationSelection = {
     facilityId: IDS.facility,
     kind,
     templateMode,
@@ -238,6 +246,8 @@ function evidence(
   return {
     id: IDS.preview,
     selection,
+    threat: THREAT,
+    responseDetail: null,
     facility: FACILITY,
     eventTypeVersion: eventTypeVersion(templateMode),
     rosterSnapshot: roster(population),
@@ -248,6 +258,70 @@ function evidence(
     createdAt: CREATED_AT,
   };
 }
+
+describe('activation consequence preview threat pinning', () => {
+  test('pins the threat and both descriptions inside the signed consequence', () => {
+    const base = buildActivationPreview(evidence('real', 'staff'));
+    const described = buildActivationPreview({
+      ...evidence('real', 'staff'),
+      threat: { ...THREAT, detail: 'Gas smell near the gym' },
+      responseDetail: 'Move everyone to the field',
+    });
+
+    expect(base.threat).toEqual(THREAT);
+    expect(base.responseDetail).toBeNull();
+    expect(described.threat?.detail).toBe('Gas smell near the gym');
+    expect(described.responseDetail).toBe('Move everyone to the field');
+    // A preview for different words is a different consequence: the digest a
+    // human signs cannot be reused for another threat or description.
+    expect(described.consequenceDigest).not.toBe(base.consequenceDigest);
+    expect(
+      buildActivationPreview({
+        ...evidence('real', 'staff'),
+        threat: { ...THREAT, id: IDS.activeEventA },
+      }).consequenceDigest,
+    ).not.toBe(base.consequenceDigest);
+  });
+
+  test('refuses an operator activation without a threat', () => {
+    expect(() =>
+      buildActivationPreview({
+        ...evidence('drill', 'synthetic'),
+        threat: null,
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        name: 'ActivationPreviewBuildError',
+        code: 'THREAT_UNAVAILABLE',
+      }),
+    );
+  });
+
+  test('refuses a description the message contract would refuse', () => {
+    for (const detail of ['', '   ', 'a'.repeat(201), 'bad​word']) {
+      expect(() =>
+        buildActivationPreview({
+          ...evidence('real', 'staff'),
+          threat: { ...THREAT, detail },
+        }),
+      ).toThrow();
+      expect(() =>
+        buildActivationPreview({
+          ...evidence('real', 'staff'),
+          responseDetail: detail,
+        }),
+      ).toThrow();
+    }
+  });
+
+  test('keeps a description that looks like a token as plain words', () => {
+    const preview = buildActivationPreview({
+      ...evidence('real', 'staff'),
+      threat: { ...THREAT, detail: '{{initiator}} at {{site}}' },
+    });
+    expect(preview.threat?.detail).toBe('{{initiator}} at {{site}}');
+  });
+});
 
 describe('activation consequence preview', () => {
   test('pins a synthetic drill to the resolved roster counts and drill wording', () => {

@@ -122,12 +122,16 @@ export function getDefaultMobileStartRouteRuntime(): MobileStartRouteRuntime {
   });
 }
 
-function assertFacilitiesQueryHeaders(request: Request): void {
+/**
+ * A read route must never look like a mutation. The message names the route
+ * that refused so a client and its logs can tell which request was wrong.
+ */
+export function assertQueryHeaders(request: Request, subject: string): void {
   if (
     request.headers.has(START_FLOW_IDEMPOTENCY_HEADER) ||
     request.headers.has(START_FLOW_CONFIRMATION_HEADER)
   ) {
-    throw new SyntaxError('Facility queries cannot carry mutation metadata.');
+    throw new SyntaxError(`${subject} cannot carry mutation metadata.`);
   }
 }
 
@@ -196,7 +200,7 @@ export async function handleListMobileStartFacilities(
     requestId = runtime.createRequestId();
     const serverTime = runtime.now();
     const authenticated = await runtime.authenticateQuery(request, serverTime);
-    assertFacilitiesQueryHeaders(request);
+    assertQueryHeaders(request, 'Facility queries');
     const input = parseFacilitiesInput(request);
     const result = await runtime.executeFacilities(
       input,
@@ -219,7 +223,7 @@ export async function handleListMobileStartThreats(
     requestId = runtime.createRequestId();
     const serverTime = runtime.now();
     const authenticated = await runtime.authenticateQuery(request, serverTime);
-    assertFacilitiesQueryHeaders(request);
+    assertQueryHeaders(request, 'Threat queries');
     const input = parseThreatsInput(request);
     const result = await runtime.executeThreats(
       input,

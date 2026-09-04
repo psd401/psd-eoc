@@ -10,6 +10,7 @@ import {
 } from '../../../../../lib/auth/sessions';
 import type { TrustedCapabilityInvocation } from '../../../../../lib/capabilities/engine';
 import {
+  assertQueryHeaders,
   authenticateMobileStartRequest,
   handleListMobileStartFacilities,
   handleListMobileStartThreats,
@@ -27,6 +28,7 @@ const IDS = {
   preview: '51000000-0000-4000-8000-000000000006',
   eventType: '51000000-0000-4000-8000-000000000007',
   confirmation: '51000000-0000-4000-8000-000000000008',
+  threat: '51000000-0000-4000-8000-000000000009',
 } as const;
 
 const NOW = new Date('2026-08-11T17:00:00.000Z');
@@ -162,6 +164,9 @@ function previewInput(): CapabilityInput<'create-activation-preview'> {
       templateMode: 'drill',
     },
     rosterPopulation: 'staff',
+    threatId: IDS.threat,
+    threatDetail: null,
+    responseDetail: null,
   };
 }
 
@@ -331,6 +336,27 @@ describe('mobile start route handlers', () => {
       expect(response.status).toBe(400);
       expect(executions).toEqual([]);
     }
+  });
+
+  test('names the route that refused a read carrying mutation metadata', () => {
+    // The client only ever sees the generic invalid-request body, so this
+    // message exists for the server log. One shared helper naming the
+    // facilities route sent a threats problem looking at the wrong endpoint.
+    const carrying = new Request('https://eoc.example.test/api/mobile/start', {
+      headers: { 'idempotency-key': IDEMPOTENCY_KEY },
+    });
+    expect(() => {
+      assertQueryHeaders(carrying, 'Threat queries');
+    }).toThrow('Threat queries cannot carry mutation metadata.');
+    expect(() => {
+      assertQueryHeaders(carrying, 'Facility queries');
+    }).toThrow('Facility queries cannot carry mutation metadata.');
+    expect(() => {
+      assertQueryHeaders(
+        new Request('https://eoc.example.test/api/mobile/start'),
+        'Threat queries',
+      );
+    }).not.toThrow();
   });
 
   test('creates a drill preview as a non-mutating mobile capability query', async () => {

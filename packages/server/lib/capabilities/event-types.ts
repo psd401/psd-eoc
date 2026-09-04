@@ -1055,16 +1055,18 @@ export class DrizzleEventTypeStore implements EventTypeStore {
               key: input.target.key,
               familyKey: input.target.familyKey,
               templateMode,
+              requiresDetail: input.target.requiresDetail,
               createdAt: metadata.now,
             });
           } else {
             if (
               existingIdentity.familyKey !== input.target.familyKey ||
-              existingIdentity.templateMode !== input.target.templateMode
+              existingIdentity.templateMode !== input.target.templateMode ||
+              existingIdentity.requiresDetail !== input.target.requiresDetail
             ) {
               throw new EventTypeCapabilityError(
                 'CONFLICT',
-                'The stable event-type key belongs to a different immutable family or mode.',
+                'The stable event-type key belongs to a different immutable family, mode, or description rule.',
               );
             }
             const [publishedVersion] = await transaction

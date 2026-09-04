@@ -362,6 +362,8 @@ describe('default agent dispatcher routing', () => {
       status: 'all-clear',
       rosterSnapshotId: IDS.agent,
       rosterPopulation: 'staff',
+      threat: null,
+      responseDetail: null,
       createdBy: {
         kind: 'human',
         userId: IDS.issuer,

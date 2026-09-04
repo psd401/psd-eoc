@@ -31,7 +31,7 @@ import {
 
 import { digest, occurredAt } from './shared';
 
-import { facilities } from './configuration';
+import { facilities, threats } from './configuration';
 
 import { humanConfirmationRecords } from './identity';
 
@@ -51,6 +51,15 @@ export const activationPreviews = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    // The threat is pinned by id and by the name shown when it was chosen.
+    // Null only for a monthly delivery test, which has no threat scenario,
+    // and for rows that predate the catalog.
+    threatId: uuid('threat_id').references(() => threats.id, {
+      onDelete: 'restrict',
+    }),
+    threatName: varchar('threat_name', { length: 160 }),
+    threatDetail: varchar('threat_detail', { length: 200 }),
+    responseDetail: varchar('response_detail', { length: 200 }),
     recipientCount: integer('recipient_count').notNull(),
     channels: jsonb('channels').notNull(),
     sendReadiness: varchar('send_readiness', { length: 16 }).notNull(),
@@ -155,6 +164,16 @@ export const activationPreviews = pgTable(
       sql`${table.deliveryTestEndpointReferenceDigest} is null
         or ${table.deliveryTestEndpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
     ),
+    check(
+      'activation_previews_threat_pair',
+      sql`(${table.threatId} is null) = (${table.threatName} is null)
+        and (${table.threatDetail} is null or ${table.threatId} is not null)`,
+    ),
+    check(
+      'activation_previews_detail_nonempty',
+      sql`(${table.threatDetail} is null or length(btrim(${table.threatDetail})) > 0)
+        and (${table.responseDetail} is null or length(btrim(${table.responseDetail})) > 0)`,
+    ),
   ],
 );
 
@@ -234,6 +253,14 @@ export const events = pgTable(
     status: eventStatusEnum('status').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id'),
     rosterPopulation: rosterPopulationEnum('roster_population'),
+    // Copied from the consumed preview at activation. Null for events that
+    // predate the threat catalog; the history is never backfilled.
+    threatId: uuid('threat_id').references(() => threats.id, {
+      onDelete: 'restrict',
+    }),
+    threatName: varchar('threat_name', { length: 160 }),
+    threatDetail: varchar('threat_detail', { length: 200 }),
+    responseDetail: varchar('response_detail', { length: 200 }),
     createdBy: jsonb('created_by').notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
     activatedAt: occurredAt('activated_at'),
@@ -363,6 +390,16 @@ export const events = pgTable(
       'events_correction_pair',
       sql`(${table.correctionOfEventId} is null) = (${table.correctionReason} is null)
         and (${table.correctionOfEventId} is null or ${table.correctionOfEventId} <> ${table.id})`,
+    ),
+    check(
+      'events_threat_pair',
+      sql`(${table.threatId} is null) = (${table.threatName} is null)
+        and (${table.threatDetail} is null or ${table.threatId} is not null)`,
+    ),
+    check(
+      'events_detail_nonempty',
+      sql`(${table.threatDetail} is null or length(btrim(${table.threatDetail})) > 0)
+        and (${table.responseDetail} is null or length(btrim(${table.responseDetail})) > 0)`,
     ),
   ],
 );

@@ -310,7 +310,11 @@ export function requireMatchingDeliveryTestActivationResult(
       eventKind: 'drill',
       eventTypeVersionId: preview.activationPreview.eventTypeVersion.id,
       facilityId: preview.activationPreview.facilityId,
+      // A delivery test exercises the channels, not a threat scenario.
+      responseDetail: null,
       templateMode: 'drill',
+      threatDetail: null,
+      threatId: null,
     });
   } catch (error) {
     if (error instanceof StartFlowRequestError) throw resultMismatch();
