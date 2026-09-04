@@ -27,6 +27,7 @@ import {
   humanOnlyActionEnum,
   idempotencyStatusEnum,
   humanConfirmationStatusEnum,
+  invocationSourceEnum,
 } from './enums';
 
 import { auditCode, digest, occurredAt } from './shared';
@@ -727,6 +728,60 @@ export const agentApiKeyRevocations = pgTable(
     check(
       'agent_api_key_revocations_reason_format',
       sql`${table.reasonCode} ~ '^[A-Z0-9_]+$'`,
+    ),
+  ],
+);
+
+/**
+ * A staff member's affirmative agreement to receive emergency SMS.
+ *
+ * Append-only. A carrier reviewing a toll-free or 10DLC registration asks what
+ * the person was shown when they agreed, and a district has to be able to
+ * produce that for any number it sends to. Rewriting or deleting a consent
+ * would destroy the only evidence that the send was permitted.
+ *
+ * One live consent per staff member, enforced by the partial unique index
+ * below: a new number supersedes the previous one rather than adding a second,
+ * because notifying two numbers for one employee is a carrier complaint.
+ */
+export const staffSmsConsents = pgTable(
+  'staff_sms_consents',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    phoneNumber: varchar('phone_number', { length: 16 }).notNull(),
+    disclosureVersion: varchar('disclosure_version', { length: 10 }).notNull(),
+    source: invocationSourceEnum('source').notNull(),
+    supersedesConsentId: uuid('supersedes_consent_id'),
+    withdrawnAt: occurredAt('withdrawn_at'),
+    consentedAt: occurredAt('consented_at').defaultNow().notNull(),
+  },
+  (table) => [
+    unique('staff_sms_consents_supersedes_uq').on(table.supersedesConsentId),
+    foreignKey({
+      columns: [table.supersedesConsentId],
+      foreignColumns: [table.id],
+      name: 'staff_sms_consents_supersedes_fk',
+    }).onDelete('restrict'),
+    // One live consent per person. A withdrawn record stays for evidence and
+    // is excluded here so the same person can consent again later.
+    uniqueIndex('staff_sms_consents_one_live_per_user_uq')
+      .on(table.userId)
+      .where(sql`${table.withdrawnAt} is null`),
+    index('staff_sms_consents_user_idx').on(table.userId, table.consentedAt),
+    check(
+      'staff_sms_consents_e164',
+      sql`${table.phoneNumber} ~ '^\\+[1-9][0-9]{7,14}$'`,
+    ),
+    check(
+      'staff_sms_consents_disclosure_version',
+      sql`${table.disclosureVersion} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'`,
+    ),
+    check(
+      'staff_sms_consents_withdrawal_not_before_consent',
+      sql`${table.withdrawnAt} is null or ${table.withdrawnAt} >= ${table.consentedAt}`,
     ),
   ],
 );

@@ -106,6 +106,38 @@ export function privacyContactUrl(
   return parsed.href;
 }
 
+/**
+ * Customer-care email named in the SMS consent disclosure.
+ *
+ * A carrier reviewing a messaging program requires a reachable contact, and it
+ * appears in the text a staff member agrees to, so it is deployment
+ * configuration rather than an application literal.
+ */
+export function smsSupportEmail(
+  environment: DeploymentEnvironment = process.env,
+): string {
+  const value = required(environment, 'PSD_EOC_SMS_SUPPORT_EMAIL');
+  if (!/^[^\s@]+@[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u.test(value)) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_SMS_SUPPORT_EMAIL must be a support mailbox address.',
+    );
+  }
+  return value;
+}
+
+/** Customer-care phone in E.164, named in the SMS consent disclosure. */
+export function smsSupportPhone(
+  environment: DeploymentEnvironment = process.env,
+): string {
+  const value = required(environment, 'PSD_EOC_SMS_SUPPORT_PHONE');
+  if (!/^\+[1-9]\d{7,14}$/u.test(value)) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_SMS_SUPPORT_PHONE must be an E.164 telephone number.',
+    );
+  }
+  return value;
+}
+
 /** IANA time zone used for stable server- and client-rendered timestamps. */
 export function displayTimeZone(
   environment: DeploymentEnvironment = process.env,

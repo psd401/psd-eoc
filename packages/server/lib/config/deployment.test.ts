@@ -7,6 +7,8 @@ import {
   iosBundleId,
   organizationName,
   privacyContactUrl,
+  smsSupportEmail,
+  smsSupportPhone,
   staffHostedDomain,
 } from './deployment';
 
@@ -19,6 +21,8 @@ describe('deployment configuration', () => {
       PSD_EOC_ORGANIZATION_NAME: 'Example Unified School District',
       PSD_EOC_PRIVACY_CONTACT_URL: 'https://www.example.invalid/contact',
       PSD_EOC_DISPLAY_TIME_ZONE: 'America/New_York',
+      PSD_EOC_SMS_SUPPORT_EMAIL: 'servicecentral@example.invalid',
+      PSD_EOC_SMS_SUPPORT_PHONE: '+12535550123',
     };
 
     expect(applicationOrigin(environment)).toBe(
@@ -82,5 +86,39 @@ describe('deployment configuration', () => {
         privacyContactUrl({ PSD_EOC_PRIVACY_CONTACT_URL: value }),
       ).toThrow(DeploymentConfigurationError);
     }
+  });
+});
+
+describe('SMS support contact configuration', () => {
+  test('reads a configured support mailbox and E.164 phone', () => {
+    const environment = {
+      PSD_EOC_SMS_SUPPORT_EMAIL: 'servicecentral@example.invalid',
+      PSD_EOC_SMS_SUPPORT_PHONE: '+12535550123',
+    };
+
+    expect(smsSupportEmail(environment)).toBe('servicecentral@example.invalid');
+    expect(smsSupportPhone(environment)).toBe('+12535550123');
+  });
+
+  test.each([
+    ['', 'absent'],
+    ['servicecentral', 'no domain'],
+    ['servicecentral@localhost', 'no public domain'],
+    ['service central@example.invalid', 'whitespace'],
+  ])('refuses the support email %p (%s)', (value) => {
+    expect(() => smsSupportEmail({ PSD_EOC_SMS_SUPPORT_EMAIL: value })).toThrow(
+      DeploymentConfigurationError,
+    );
+  });
+
+  test.each([
+    ['', 'absent'],
+    ['2535550123', 'not E.164'],
+    ['+02535550123', 'leading zero'],
+    ['253-555-0123', 'formatted'],
+  ])('refuses the support phone %p (%s)', (value) => {
+    expect(() => smsSupportPhone({ PSD_EOC_SMS_SUPPORT_PHONE: value })).toThrow(
+      DeploymentConfigurationError,
+    );
   });
 });

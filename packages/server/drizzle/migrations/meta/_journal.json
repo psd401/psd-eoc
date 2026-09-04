@@ -337,6 +337,13 @@
       "when": 1788465971468,
       "tag": "0047_threat_on_activation",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1788541161441,
+      "tag": "0048_staff_sms_consent",
+      "breakpoints": true
     }
   ]
 }

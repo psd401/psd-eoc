@@ -147,6 +147,14 @@ export interface DeploymentIdentity {
   readonly iosBundleId: string;
   readonly organizationName: string;
   readonly privacyContactUrl: string;
+  /**
+   * Customer-care contact named in the SMS consent disclosure and in HELP
+   * replies. Carriers require a reachable human contact for a messaging
+   * program, and the district's is configuration like the rest of its
+   * identity.
+   */
+  readonly smsSupportEmail: string;
+  readonly smsSupportPhone: string;
 }
 
 /**
@@ -362,6 +370,11 @@ export function readDeploymentIdentity(node: {
     ),
     organizationName: organizationName.data,
     privacyContactUrl,
+    smsSupportEmail: read(
+      'psdEoc:smsSupportEmail',
+      /^[^\s@]+@[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
+    ),
+    smsSupportPhone: read('psdEoc:smsSupportPhone', /^\+[1-9]\d{7,14}$/u),
   });
 }
 

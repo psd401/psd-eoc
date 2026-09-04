@@ -29,4 +29,27 @@ test.describe('public privacy policy', () => {
       }),
     ).toBeFocused();
   });
+
+  test('states the messaging disclosures a carrier registration requires', async ({
+    page,
+  }) => {
+    await page.context().clearCookies();
+    await page.goto('/privacy');
+
+    // A toll-free review reads this public page and rejects a program whose
+    // policy omits any of these. They are asserted separately so a deletion
+    // names the sentence it removed rather than failing one opaque snapshot.
+    await expect(
+      page.getByRole('heading', { name: 'Mobile numbers and text messages' }),
+    ).toBeVisible();
+    for (const statement of [
+      /Giving a number is voluntary/u,
+      /the exact wording the person agreed to/u,
+      /never used for marketing/u,
+      /not sold, rented, or shared with third parties or affiliates/u,
+      /replying STOP to any message/u,
+    ]) {
+      await expect(page.getByText(statement)).toHaveCount(1);
+    }
+  });
 });

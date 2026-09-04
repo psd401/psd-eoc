@@ -65,6 +65,31 @@ function PrivacyPolicyPage({
           These values support secure return access, session revocation,
           notification registration, and delivery troubleshooting.
         </p>
+        <h3>Mobile numbers and text messages</h3>
+        <p>
+          A staff member may choose to give a mobile number so {organization}
+          can reach them by text message during an emergency. Giving a number is
+          voluntary and is never required to use PSD EOC; staff who give none
+          still receive email and in-app notifications. The application records
+          the number, the exact wording the person agreed to, and when they
+          agreed, because a mobile carrier can require proof that a message to
+          that number was permitted.
+        </p>
+        <p>
+          Mobile numbers and these consent records are used only to send
+          emergency notifications, drills, and the delivery tests that prove the
+          system still reaches staff. They are never used for marketing, and are
+          not sold, rented, or shared with third parties or affiliates for
+          marketing or any other independent purpose. They are disclosed only to
+          the messaging provider {organization} configures, and only to the
+          extent needed to deliver a message.
+        </p>
+        <p>
+          Staff can stop text messages at any time, either in PSD EOC or by
+          replying STOP to any message. Withdrawing marks the consent withdrawn
+          and stops further messages; the record of the consent itself is
+          retained as the evidence a carrier may request.
+        </p>
         <h3>Event content, media, and foreground location</h3>
         <p>
           Authorized staff may submit event messages, journal entries, photos,
@@ -161,7 +186,9 @@ function PrivacyPolicyPage({
         <h2>No advertising or sale of data</h2>
         <p>
           PSD EOC is an operational staff tool. It contains no advertising SDK,
-          behavioral advertising, or sale of staff information.
+          behavioral advertising, or sale of staff information. No mobile
+          number, and no record of consent to be texted, is shared with any
+          third party or affiliate for marketing.
         </p>
       </aside>
     </main>
