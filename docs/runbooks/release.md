@@ -67,9 +67,10 @@ iOS and Android ship the same app from the same source at the same version.
 Release them together: a platform left behind is running different code from
 the one that was verified, and the version alone will not say so.
 
-The current app/runtime is 1.0.11. The last build submitted to both stores is
-1.0.10/build 21 on iOS and 1.0.10/code 12 on Android, on 2026-09-01, so 1.0.11
-is not installable anywhere until it is built and submitted. Remote updates are
+The current app/runtime is 1.0.12. The last build submitted to both stores is
+1.0.10/build 21 on iOS and 1.0.10/code 12 on Android, on 2026-09-01; 1.0.11 was
+never built, so neither it nor 1.0.12
+is installable anywhere until 1.0.12 is built and submitted. Remote updates are
 disabled,
 so every code or asset change requires another app-version bump and fresh store
 builds. The
