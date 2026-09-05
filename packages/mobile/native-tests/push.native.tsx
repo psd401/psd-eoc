@@ -15,6 +15,7 @@ describe('push permission accessibility', () => {
           phase: 'explanation-required',
           platform: 'ios',
           message: null,
+          alertsMuted: false,
         }}
       />,
     );
@@ -31,6 +32,50 @@ describe('push permission accessibility', () => {
     expect(requestPermission).toHaveBeenCalledTimes(1);
   });
 
+  test('says nothing once registration is confirmed and audible', () => {
+    render(
+      <PushNotificationNotice
+        onOpenSettings={jest.fn()}
+        onRequestPermission={jest.fn()}
+        onRetry={jest.fn()}
+        snapshot={{
+          phase: 'registered',
+          platform: 'android',
+          message: null,
+          alertsMuted: false,
+        }}
+      />,
+    );
+
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  test('warns that a silenced channel still delivers, without blocking it', () => {
+    // Android locks a channel against the app once someone edits it, so the
+    // app cannot restore the sound. Refusing to register would have been a
+    // permanent loss of push; saying so is the most it can honestly do.
+    const openSettings = jest.fn();
+    render(
+      <PushNotificationNotice
+        onOpenSettings={openSettings}
+        onRequestPermission={jest.fn()}
+        onRetry={jest.fn()}
+        snapshot={{
+          phase: 'registered',
+          platform: 'android',
+          message: null,
+          alertsMuted: true,
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/still receives PSD EOC alerts/iu)).toBeTruthy();
+    fireEvent.press(
+      screen.getByRole('button', { name: 'Open device notification settings' }),
+    );
+    expect(openSettings).toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     ['ios' as const, /iPhone Settings.*Sounds.*Lock Screen/iu],
     ['android' as const, /Android Settings.*alerts channel/iu],
@@ -44,7 +89,12 @@ describe('push permission accessibility', () => {
           onOpenSettings={openSettings}
           onRequestPermission={jest.fn()}
           onRetry={retry}
-          snapshot={{ phase: 'denied', platform, message: null }}
+          snapshot={{
+            phase: 'denied',
+            platform,
+            message: null,
+            alertsMuted: false,
+          }}
         />,
       );
 
@@ -75,7 +125,12 @@ describe('push permission accessibility', () => {
         onOpenSettings={jest.fn()}
         onRequestPermission={jest.fn()}
         onRetry={jest.fn()}
-        snapshot={{ phase: 'denied', platform: 'ios', message }}
+        snapshot={{
+          phase: 'denied',
+          platform: 'ios',
+          message,
+          alertsMuted: false,
+        }}
       />,
     );
 

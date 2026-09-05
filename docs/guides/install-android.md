@@ -61,11 +61,20 @@ wording varies. To check the settings manually:
 4. Select **Alerting** and enable sound, vibration, lock-screen display, and
    **Pop on screen** or **Show as pop-up** when those controls are offered.
 5. Do not lower this channel to Silent. Android keeps a user's channel choice
-   across app updates.
+   across app updates, and the app cannot raise it back.
 
 The app requests Android's maximum channel importance, but Android and the
 device owner remain in control. This setting cannot guarantee sound while the
 phone is muted or restricted by device or organization policy.
+
+Lowering the channel no longer stops alerts reaching this device: they still
+arrive, and the app says so on its own screen so the setting can be restored.
+Only turning **Allow notifications** off stops delivery.
+
+**Lock-screen display is a request, not a setting the app controls.** Android
+does not accept a lock-screen visibility chosen by an ordinary app, so this
+channel reports its visibility as **Default**. That is expected, and it does
+not mean anything is misconfigured.
 
 ## Check Do Not Disturb
 
