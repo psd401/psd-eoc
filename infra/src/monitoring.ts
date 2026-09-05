@@ -1864,6 +1864,24 @@ function configureMembershipSyncMonitoring(
       pattern: '"Protected access-membership synchronization failed closed"',
       metricName: 'AccessMembershipSyncFailureCount',
     },
+    // The same task publishes the roster after refreshing membership. Both
+    // ways that can fail to publish feed one metric, because the consequence
+    // is identical: activations keep resolving against the previous snapshot.
+    // A publication that threw.
+    {
+      id: 'ScheduledRosterPublishFailureMetric',
+      pattern: '{ $.event = "scheduled-roster-publish-failed" }',
+      metricName: 'ScheduledRosterPublishFailureCount',
+    },
+    // A publication a completeness guard refused. `skipped` is deliberately
+    // not counted: a tenant with no building source configured yet has no
+    // roster to publish, and that is not a fault.
+    {
+      id: 'ScheduledRosterPublishRefusedMetric',
+      pattern:
+        '{ $.event = "scheduled-roster-publish-complete" && $.kind = "refused" }',
+      metricName: 'ScheduledRosterPublishFailureCount',
+    },
   ] as const;
   for (const definition of definitions) {
     new logs.MetricFilter(scope, definition.id, {
@@ -1892,6 +1910,14 @@ function configureMembershipSyncMonitoring(
       summary:
         'The scheduled membership task failed closed on the sign-in groups; stored membership stops authorizing sign-in 24 hours after its last fresh read.',
       topic: props.criticalAlarmTopic,
+    },
+    {
+      id: 'ScheduledRosterPublishFailureAlarm',
+      metricName: 'ScheduledRosterPublishFailureCount',
+      name: 'psd-eoc-scheduled-roster-publish-failed',
+      summary:
+        'The scheduled task refreshed membership but published no roster snapshot; an activation keeps reaching whoever the previous snapshot named, and someone added or removed since is wrong in it.',
+      topic: props.operationsAlarmTopic,
     },
   ] as const;
   for (const definition of alarmDefinitions) {

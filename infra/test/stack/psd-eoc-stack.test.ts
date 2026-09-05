@@ -2462,7 +2462,9 @@ describe('protected access-membership publication boundary', () => {
 describe('alarm topic delivery', () => {
   it('deploys sanitized channel-worker metrics and alarms only with each worker', () => {
     const filters = resourceEntries('AWS::Logs::MetricFilter');
-    expect(filters).toHaveLength(15);
+    // 15 channel-worker and membership filters, plus the two that count a
+    // scheduled roster publication that threw or was refused.
+    expect(filters).toHaveLength(17);
     expect(
       filters
         .map(([, resource]) => {
@@ -2538,6 +2540,19 @@ describe('alarm topic delivery', () => {
         [
           'RosterMembershipSyncFailureCount',
           '{ $.event = "roster-membership-sync-failed" }',
+          undefined,
+        ],
+        // The scheduled task's publish leg, unconditional like the membership
+        // filters beside it: it writes to the bootstrap log group whether or
+        // not the application tier is provisioned.
+        [
+          'ScheduledRosterPublishFailureCount',
+          '{ $.event = "scheduled-roster-publish-complete" && $.kind = "refused" }',
+          undefined,
+        ],
+        [
+          'ScheduledRosterPublishFailureCount',
+          '{ $.event = "scheduled-roster-publish-failed" }',
           undefined,
         ],
         [
@@ -2639,6 +2654,67 @@ describe('alarm topic delivery', () => {
         'psd-eoc-email-worker-health',
       ].sort(),
     );
+  });
+
+  it('alarms when the scheduled task refreshes membership but publishes no roster', () => {
+    // The publication is deliberately non-fatal: it must never take down the
+    // leg that keeps sign-in working, so it logs and the task exits clean.
+    // Nothing else would say the roster stopped advancing, and a roster that
+    // silently stops advancing is what left staff out of an activation.
+    const filters = resourceEntries('AWS::Logs::MetricFilter')
+      .map(([, resource]) => properties(resource))
+      .filter((filter) =>
+        String(filter.FilterPattern).includes('scheduled-roster-publish'),
+      );
+
+    // Both ways it can fail to publish feed one metric: a publication that
+    // threw, and one a completeness guard refused. The consequence is the
+    // same either way.
+    expect(
+      filters
+        .map((filter) =>
+          asArray(filter.MetricTransformations).map(
+            (t) => asRecord(t).MetricName,
+          ),
+        )
+        .flat(),
+    ).toEqual([
+      'ScheduledRosterPublishFailureCount',
+      'ScheduledRosterPublishFailureCount',
+    ]);
+    for (const filter of filters) {
+      expect(JSON.stringify(filter.LogGroupName)).toContain(
+        'BootstrapLogGroup',
+      );
+    }
+
+    // `skipped` must not alarm: a tenant with no building source configured
+    // has no roster to publish, and that is not a fault.
+    const patterns = filters.map((filter) => String(filter.FilterPattern));
+    expect(patterns.some((pattern) => pattern.includes('"refused"'))).toBe(
+      true,
+    );
+    expect(patterns.some((pattern) => pattern.includes('skipped'))).toBe(false);
+
+    const alarm = resourceEntries('AWS::CloudWatch::Alarm')
+      .map(([, resource]) => resource)
+      .find(
+        (resource) =>
+          properties(resource).AlarmName ===
+          'psd-eoc-scheduled-roster-publish-failed',
+      );
+    if (alarm === undefined) {
+      throw new Error('Missing the scheduled roster-publish alarm.');
+    }
+    expect(alarm.Condition).toBeUndefined();
+    const properties_ = properties(alarm);
+    expect(properties_.Threshold).toBe(1);
+    expect(properties_.TreatMissingData).toBe('notBreaching');
+    expect(String(properties_.AlarmDescription)).toContain('Runbook: https://');
+    expect(JSON.stringify(asArray(properties_.AlarmActions)[0])).toContain(
+      'OperationsAlarmTopic',
+    );
+    expect(asArray(properties_.OKActions)).toHaveLength(1);
   });
 
   it('alarms when the scheduled membership task fails either leg', () => {
