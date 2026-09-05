@@ -145,11 +145,21 @@ function deterministicAttemptId(
  * A human confirmed the consequence, the integration is the verified SES one,
  * and the batch is an email batch. Nothing here describes what kind of event
  * it is: a real incident sends email for the same reasons a drill does.
+ *
+ * Both human confirmations count. An activation carries `human-confirmed`; an
+ * all-clear or a reactivation carries `human-confirmed-lifecycle`, which pins
+ * its own lifecycle preview and confirmed action set and is no weaker. Reading
+ * only the activation kind refused every all-clear ever queued: the batch was
+ * rejected on arrival, retried until the queue's redrive policy gave up, and
+ * dead-lettered, so staff were told an incident had started and never told it
+ * had ended. Push has no equivalent gate and sent those all the while, which is
+ * how the two channels came to disagree.
  */
 export function assertEmailBatch(batch: DispatchBatch): void {
   if (
     batch.channel !== 'email' ||
-    batch.authorization.kind !== 'human-confirmed' ||
+    (batch.authorization.kind !== 'human-confirmed' &&
+      batch.authorization.kind !== 'human-confirmed-lifecycle') ||
     batch.integrationStatus.integrationId !== 'ses-email' ||
     batch.integrationStatus.label !== 'live-verified'
   ) {
