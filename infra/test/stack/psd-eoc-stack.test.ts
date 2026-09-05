@@ -2342,11 +2342,21 @@ describe('protected access-membership publication boundary', () => {
         'DATABASE_PORT',
         'DATABASE_SSL_ROOT_CERT',
         'GOOGLE_OIDC_HOSTED_DOMAIN',
+        'PSD_EOC_PUSH_PROVIDER_CUTOVER',
         'SOURCE_SHA',
         'TMPDIR',
       ].sort(),
     );
     expect(environment.get('SOURCE_SHA')).toBe(SOURCE_SHA);
+    // This task publishes a roster snapshot after refreshing membership, and
+    // capturing a push endpoint requires knowing which provider this
+    // deployment sends on. Without it every publication throws
+    // `LOCAL_CONTACT_CAPTURE_INVALID` and the run publishes nothing, caught
+    // and logged -- so the symptom is a roster that silently never advances,
+    // the same shape as the hosted-domain omission below.
+    expect(
+      JSON.stringify(environment.get('PSD_EOC_PUSH_PROVIDER_CUTOVER')),
+    ).toContain('PushProviderCutover');
     // Without this the task cannot resolve a member address against the
     // district's staff domain, and every run fails closed with
     // `GOOGLE_OIDC_HOSTED_DOMAIN must be configured.` — which is exactly what

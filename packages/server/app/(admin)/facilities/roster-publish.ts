@@ -1,8 +1,6 @@
 import { IdempotencyKeySchema } from '@psd-eoc/contracts';
-import { desc, eq } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { rosterSourceConfigurations } from '../../../db/schema';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import { getDefaultAdminDatabase } from '../../../lib/capabilities/admin';
 import {
@@ -12,6 +10,7 @@ import {
   syncRoster,
   type AdministratorRosterSyncContext,
 } from '../../../lib/roster/groups-sync';
+import { currentStaffRosterConfiguration as currentStaffRosterConfigurationFrom } from '../../../lib/roster/scheduled-publish';
 import { AdminFormError } from './admin-request';
 
 type AdminDatabase = ReturnType<typeof getDefaultAdminDatabase>;
@@ -40,7 +39,9 @@ function publishKeyFor(saveKey: string): string {
  *
  * Asking an administrator to copy an identifier out of the page would be a way
  * to get it wrong, so the current staff configuration is resolved here. Null
- * means no building source is configured yet.
+ * means no building source is configured yet. The query itself lives in
+ * `lib/roster`, because the scheduled publication needs the same answer and an
+ * operations script must not import an application route to get it.
  */
 export async function currentStaffRosterConfiguration(
   database: AdminDatabase = getDefaultAdminDatabase(),
@@ -48,18 +49,7 @@ export async function currentStaffRosterConfiguration(
   id: string;
   version: number;
 }> | null> {
-  const [latest] = await database
-    .select({
-      id: rosterSourceConfigurations.id,
-      version: rosterSourceConfigurations.version,
-    })
-    .from(rosterSourceConfigurations)
-    .where(eq(rosterSourceConfigurations.population, 'staff'))
-    .orderBy(desc(rosterSourceConfigurations.version))
-    .limit(1);
-  return latest === undefined
-    ? null
-    : Object.freeze({ id: latest.id, version: latest.version });
+  return currentStaffRosterConfigurationFrom(database);
 }
 
 /**
