@@ -180,6 +180,45 @@ describe('which email batches this store will send', () => {
     ).not.toThrow();
   });
 
+  test('accepts the lifecycle authorization a real all-clear actually carries', () => {
+    // The test above varies `purpose`, which is not what distinguishes an
+    // all-clear to this guard: the batch it builds still carries
+    // `human-confirmed`. A real all-clear carries `human-confirmed-lifecycle`,
+    // and reading only the activation kind refused every one ever queued --
+    // rejected on arrival, retried until the redrive policy gave up, and
+    // dead-lettered, so staff were told an incident started and never told it
+    // ended. Push has no equivalent gate and sent them the whole time.
+    const lifecycle = {
+      ...batch,
+      purpose: 'all-clear' as const,
+      authorization: {
+        kind: 'human-confirmed-lifecycle' as const,
+        purpose: 'all-clear' as const,
+        targeting: {
+          kind: 'incident' as const,
+          facilityId: batch.facilityId,
+          rosterSnapshotId: batch.rosterSnapshotId,
+          rosterPopulation: batch.rosterPopulation,
+        },
+        lifecyclePreviewId: batch.id,
+        transitionId: batch.intentId,
+        consequenceDigest: 'a'.repeat(64),
+        requestId: batch.requestId,
+        actionIds: ['all-clear', 'send-real-notification'] as const,
+        confirmationId: batch.intentId,
+      },
+    } as unknown as Parameters<typeof assertEmailBatch>[0];
+    expect(() => assertEmailBatch(lifecycle)).not.toThrow();
+  });
+
+  test('still refuses an authorization no human confirmed', () => {
+    const synthetic = {
+      ...batch,
+      authorization: { ...batch.authorization, kind: 'synthetic-training' },
+    } as unknown as Parameters<typeof assertEmailBatch>[0];
+    expect(() => assertEmailBatch(synthetic)).toThrow();
+  });
+
   test('still refuses a batch this store must never send', () => {
     // A human confirmed it, it is the verified SES integration, and it is an
     // email batch. These remain the conditions for sending anything.
