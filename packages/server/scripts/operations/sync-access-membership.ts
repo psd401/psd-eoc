@@ -17,6 +17,7 @@ import {
   type AccessMembershipSyncScope,
 } from '../../lib/auth/access-membership-sync';
 import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
+import { publishScheduledRosterSnapshot } from '../../lib/roster/scheduled-publish';
 import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/auth/google-roster-config';
 import {
   describeFailure,
@@ -211,6 +212,41 @@ async function runFromCommandLine(): Promise<void> {
           scope: 'roster',
           sourceSha: run.sourceSha,
           failure: describeFailure('roster-membership sync', error),
+        }),
+      );
+    }
+
+    // Publish last, and unconditionally. Refreshing membership only updates
+    // who the sources name; an activation reads a published snapshot, so
+    // until this ran a person added to a Google group reached nobody, on
+    // every channel, until somebody remembered to press "Publish the roster".
+    // That is how staff came to be missing from an activation more than once.
+    //
+    // Unconditional because the sources that feed a roster are not only the
+    // Google ones: a district running entirely on manual sources configures
+    // no roster groups at all, and still has a roster to publish. Editing a
+    // manual source already publishes on save; this covers everything nobody
+    // touched.
+    //
+    // Separately guarded, and never fatal. A refusal is the completeness
+    // guard doing its job -- the last complete snapshot stays authoritative --
+    // and neither a refusal nor a failure may take down the run that keeps
+    // sign-in working.
+    try {
+      const publication = await publishScheduledRosterSnapshot(connection.db);
+      console.info(
+        JSON.stringify({
+          event: 'scheduled-roster-publish-complete',
+          sourceSha: run.sourceSha,
+          ...publication,
+        }),
+      );
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'scheduled-roster-publish-failed',
+          sourceSha: run.sourceSha,
+          failure: describeFailure('scheduled roster publish', error),
         }),
       );
     }

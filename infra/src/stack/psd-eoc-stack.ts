@@ -2664,6 +2664,14 @@ export class PsdEocStack extends Stack {
           // and was never added here, which broke every run from that deploy
           // onward: `GOOGLE_OIDC_HOSTED_DOMAIN must be configured.`
           GOOGLE_OIDC_HOSTED_DOMAIN: deploymentIdentity.hostedDomain,
+          // This task publishes a roster snapshot after refreshing membership,
+          // and capturing a push endpoint requires knowing which provider this
+          // deployment sends on. Without it every publication throws
+          // `LOCAL_CONTACT_CAPTURE_INVALID` and the run publishes nothing --
+          // caught and logged, so the symptom would be a roster that silently
+          // never advances. Exactly the shape of the hosted-domain omission
+          // recorded above.
+          PSD_EOC_PUSH_PROVIDER_CUTOVER: pushProviderCutover.valueAsString,
           SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },

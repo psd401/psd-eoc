@@ -33,6 +33,7 @@ import {
   type RosterSyncDependencies,
   type RosterSyncStore,
 } from './groups-sync';
+import { publishScheduledRosterSnapshot } from './scheduled-publish';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -856,6 +857,119 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
         result_reference: 'error:SOURCE_CONFIGURATION_ROLLBACK',
       },
     ]);
+  });
+
+  test('publishes from the scheduled run with nobody pressing a button', async () => {
+    const database = databaseConnection().db;
+    await ensureStaffConfiguration(database);
+
+    // Real curated membership, not a stubbed store: this is the path the
+    // deployed two-hourly task takes, and the gap it closes is that Google
+    // membership refreshed into `group_members` reached no activation until a
+    // person remembered to publish.
+    const userId = randomUUID();
+    const staffEmail = `synthetic-scheduled-${userId}@example.invalid`;
+    await database.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into users (
+          id, google_subject, email, display_name, facility_scope_kind, created_at
+        ) values (
+          ${userId}::uuid,
+          ${`synthetic-scheduled-${userId}`},
+          ${staffEmail},
+          'Synthetic Scheduled Publish Staff',
+          'district'::facility_scope_kind,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into group_members (group_source_id, email, captured_at)
+        values
+          (
+            ${STAFF_SOURCE_IDS.north}::uuid,
+            ${staffEmail},
+            ${SYNC_TIME}::timestamptz
+          ),
+          (
+            ${STAFF_SOURCE_IDS.south}::uuid,
+            ${staffEmail},
+            ${SYNC_TIME}::timestamptz
+          )
+        on conflict do nothing
+      `);
+    });
+
+    const priorCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
+    try {
+      const outcome = await publishScheduledRosterSnapshot(database, {
+        now: new Date('2026-09-04T18:00:00.000Z'),
+      });
+      expect(outcome.kind).toBe('published');
+      if (outcome.kind !== 'published') return;
+
+      // The person the source names is in the published snapshot, reachable,
+      // without an administrator having touched anything.
+      const rows = await database.execute<{ email: string }>(sql`
+        select endpoint.email
+          from roster_endpoints as endpoint
+         where endpoint.roster_snapshot_id = ${outcome.snapshotId}::uuid
+           and endpoint.channel = 'email'
+      `);
+      expect([...rows].map((row) => row.email)).toContain(staffEmail);
+
+      // The run is authorized as the scheduled job, so the append-only result
+      // records who published rather than attributing it to a person.
+      const [attribution] = [
+        ...(await database.execute<{ count: number }>(sql`
+          select count(*)::integer as count
+            from roster_sync_results
+           where published_snapshot_id = ${outcome.snapshotId}::uuid
+             and outcome = 'complete'
+        `)),
+      ];
+      expect(attribution?.count).toBe(1);
+    } finally {
+      if (priorCutover === undefined) {
+        delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+      } else {
+        process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorCutover;
+      }
+    }
+  });
+
+  test('reports a guard refusal from the scheduled run instead of hiding it', async () => {
+    const database = databaseConnection().db;
+    await ensureStaffConfiguration(database);
+
+    // One building source goes empty, whatever the others hold. Automating
+    // publication must not weaken the guard that stops an empty source
+    // publishing a roster that reaches nobody -- but a schedule has no
+    // operator reading an error page, so the refusal has to come back as a
+    // value the run can log and alarm on, and it must never throw and take
+    // down the task that keeps sign-in working.
+    await database.execute(sql`
+      delete from group_members
+       where group_source_id = ${STAFF_SOURCE_IDS.south}::uuid
+    `);
+    const priorCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
+    try {
+      const outcome = await publishScheduledRosterSnapshot(database, {
+        now: new Date('2026-09-04T22:00:00.000Z'),
+      });
+      expect(outcome.kind).toBe('refused');
+      if (outcome.kind !== 'refused') return;
+      expect(outcome.errorCodes).toContain('EMPTY_BUILDING_GROUP');
+    } finally {
+      if (priorCutover === undefined) {
+        delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+      } else {
+        process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorCutover;
+      }
+    }
   });
 
   test('carries a live SMS consent into the snapshot and drops a withdrawn one', async () => {
