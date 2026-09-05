@@ -22,6 +22,8 @@ import {
   PushEndpointSchema,
   type PushEndpoint,
   type PushEndpointSendEligibilityInput,
+  PushPlatformSchema,
+  type PushProviderCutover,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
@@ -77,6 +79,11 @@ import {
   securityAuditFactFromEntry,
   toSecurityAuditInsertValues,
 } from '../audit';
+import {
+  PUSH_PROVIDER_CUTOVER_ENV,
+  parsePushProviderCutover,
+  selectedPushProvider,
+} from '../push-provider-cutover';
 import { resolveAudience, type ResolveAudienceInput } from '../roster/resolve';
 import {
   DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
@@ -867,56 +874,67 @@ function orderedWithinCap(
   );
 }
 
-/** Platform, provider, and service environment together, order-free. */
-function pushProviderProfile(
-  value: Readonly<{
-    platform: string;
-    provider: string;
-    serviceEnvironment: string;
-  }>,
-): string {
-  return `${value.platform}|${value.provider}|${value.serviceEnvironment}`;
-}
-
 /**
  * Builds push endpoints for the recipient's live devices that no published
  * endpoint covers. Each one carries its own registration id, which is the same
  * identity a published push endpoint carries, so the policy store can resolve
  * it and delivery can record attempts against it exactly as it always has.
  *
- * Only a device registered under a provider profile the recipient's snapshot
- * already uses is added. A device registers under more than one provider at
- * once -- an APNs registration and an Expo fallback, say -- but the snapshot
- * was published under one provider cutover, so it carries an endpoint for only
- * one of them. Fanning out every provider would send the same person the same
- * notification twice, or send it through a provider this deployment does not
- * use. A recipient the snapshot holds no push endpoint for has no profile to
- * infer, so nothing is added until a publish records one.
+ * The recipient's own published endpoints are deliberately not consulted for
+ * which devices qualify. Inferring a provider profile from them meant a
+ * recipient the snapshot held no push endpoint for was unreachable on every
+ * device they owned until somebody republished, and a recipient whose only
+ * published endpoint was an iPhone never reached their Android phone at all.
+ * Both are the same mistake: a snapshot pins *who* is notified, not which
+ * devices that person happened to be carrying when it was published.
+ *
+ * One endpoint per device, never one per registration. A device registers
+ * under a native provider and an Expo fallback at once, so fanning out every
+ * registration would send the same person the same notification twice. The
+ * tenant's push-provider cutover -- the same rule roster publish applies when
+ * it chooses which registration to capture -- decides which of a device's
+ * registrations this deployment delivers on. A device already reached through
+ * a published endpoint is skipped for the same reason.
  *
  * Anything that does not parse as a push endpoint is dropped rather than
  * raised: an unusable registration must not take down an entire notification.
+ * A missing cutover adds nothing, because no registration can be shown to be
+ * the one this deployment sends on; roster publish refuses outright on the
+ * same condition, and a notification must degrade rather than fail.
  */
 function additionalPushEndpoints(
   recipient: RosterSnapshot['recipients'][number],
   registrations: readonly LivePushRegistration[],
+  resolved: ReadonlyMap<string, LivePushRegistration>,
+  capturedAt: string,
+  cutover: PushProviderCutover | null,
 ): readonly PushEndpoint[] {
-  if (registrations.length === 0) return [];
+  if (registrations.length === 0 || cutover === null) return [];
   const publishedIds = new Set<string>();
-  const publishedProfiles = new Set<string>();
-  let capturedAt: string | undefined;
+  const coveredDevices = new Set<string>();
   for (const endpoint of recipient.endpoints) {
     if (endpoint.channel !== 'push') continue;
     publishedIds.add(endpoint.id);
-    publishedProfiles.add(pushProviderProfile(endpoint));
-    capturedAt ??= endpoint.capturedAt;
+    const live = resolved.get(endpoint.id);
+    if (live !== undefined) coveredDevices.add(live.deviceEnrollmentId);
   }
-  if (capturedAt === undefined) return [];
-  return registrations.flatMap((registration) => {
+  // Registrations arrive newest first, so the first one a device offers on the
+  // selected provider is the install that replaced the rest.
+  const perDevice = new Map<string, PushEndpoint>();
+  for (const registration of registrations) {
     if (
       publishedIds.has(registration.id) ||
-      !publishedProfiles.has(pushProviderProfile(registration))
+      coveredDevices.has(registration.deviceEnrollmentId) ||
+      perDevice.has(registration.deviceEnrollmentId)
     ) {
-      return [];
+      continue;
+    }
+    const platform = PushPlatformSchema.safeParse(registration.platform);
+    if (
+      !platform.success ||
+      registration.provider !== selectedPushProvider(cutover, platform.data)
+    ) {
+      continue;
     }
     const parsed = PushEndpointSchema.safeParse({
       id: registration.id,
@@ -928,8 +946,11 @@ function additionalPushEndpoints(
       serviceEnvironment: registration.serviceEnvironment,
       token: registration.token,
     });
-    return parsed.success ? [parsed.data] : [];
-  });
+    if (parsed.success) {
+      perDevice.set(registration.deviceEnrollmentId, parsed.data);
+    }
+  }
+  return [...perDevice.values()];
 }
 
 function pushGroupKey(
@@ -1186,6 +1207,9 @@ export async function rosterSnapshotWithLivePushTokens(
   database: DeviceQueryDatabase,
   snapshot: RosterSnapshot,
   asOf?: string,
+  cutover: PushProviderCutover | null = parsePushProviderCutover(
+    process.env[PUSH_PROVIDER_CUTOVER_ENV],
+  ),
 ): Promise<RosterSnapshot> {
   const { resolved, unclaimed } = await loadLivePushRegistrations(
     database,
@@ -1213,6 +1237,9 @@ export async function rosterSnapshotWithLivePushTokens(
               additionalPushEndpoints(
                 recipient,
                 unclaimed.get(recipient.id) ?? [],
+                resolved,
+                snapshot.capturedAt,
+                cutover,
               ),
               resolved,
             ),

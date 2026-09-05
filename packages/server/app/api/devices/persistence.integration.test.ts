@@ -97,11 +97,14 @@ const fixture = Object.freeze({
   userId: randomUUID(),
   deviceId: randomUUID(),
   otherDeviceId: randomUUID(),
+  androidDeviceId: randomUUID(),
   sessionId: randomUUID(),
   otherSessionId: randomUUID(),
+  androidSessionId: randomUUID(),
   revokedSessionId: randomUUID(),
   connectivityEpochId: randomUUID(),
   otherConnectivityEpochId: randomUUID(),
+  androidConnectivityEpochId: randomUUID(),
   revokedConnectivityEpochId: randomUUID(),
   membershipSnapshotId: randomUUID(),
   groupSourceId: randomUUID(),
@@ -126,6 +129,8 @@ const contendedToken = `ExponentPushToken[synthetic-${fixtureSuffix}-contended]`
 const revokedSessionToken = `ExponentPushToken[synthetic-${fixtureSuffix}-revoked]`;
 const unrelatedToken = `synthetic-unroutable:device-${fixtureSuffix}-unrelated`;
 const runtimeToken = `synthetic-unroutable:push-runtime-${fixture.runtimeEndpointId}`;
+/** Stays registered once enrolled, so later tests see this user's Android phone too. */
+const crossPlatformAndroidToken = `ExponentPushToken[synthetic-${fixtureSuffix}-xpdroid]`;
 const pushBuild = Object.freeze({
   applicationId: 'example.synthetic.eoc',
   applicationVersion: '1.0.4',
@@ -414,6 +419,18 @@ async function installFixture(database: PostgresDatabase): Promise<void> {
         enrolledAt: oneMinuteAgo,
         lastSeenAt: now,
       },
+      // One person, carrying an Android phone alongside the iOS devices. An
+      // enrollment is bound to one platform for its lifetime, so this cannot
+      // be expressed by reusing either of the two above.
+      {
+        id: fixture.androidDeviceId,
+        userId: fixture.userId,
+        platform: 'android',
+        unlockMethod: 'biometric',
+        installationId: `synthetic-installation-${fixtureSuffix}-android`,
+        enrolledAt: oneMinuteAgo,
+        lastSeenAt: now,
+      },
     ]);
     await transaction.insert(sessions).values([
       {
@@ -430,6 +447,16 @@ async function installFixture(database: PostgresDatabase): Promise<void> {
         id: fixture.otherSessionId,
         userId: fixture.userId,
         deviceEnrollmentId: fixture.otherDeviceId,
+        membershipSnapshotId: fixture.membershipSnapshotId,
+        membershipValidUntil: oneHourLater,
+        membershipGraceUntil: twoHoursLater,
+        createdAt: now,
+        expiresAt: threeHoursLater,
+      },
+      {
+        id: fixture.androidSessionId,
+        userId: fixture.userId,
+        deviceEnrollmentId: fixture.androidDeviceId,
         membershipSnapshotId: fixture.membershipSnapshotId,
         membershipValidUntil: oneHourLater,
         membershipGraceUntil: twoHoursLater,
@@ -481,15 +508,18 @@ async function installFixture(database: PostgresDatabase): Promise<void> {
   });
 }
 
+/**
+ * One published endpoint. An email variant exists because the recipient this
+ * incident was about -- reachable, carrying a phone, and never once published
+ * with a push endpoint -- can only be expressed that way.
+ */
+type PublishedEndpointFixture =
+  | Readonly<{ id: string; token: string; platform?: 'ios' | 'android' }>
+  | Readonly<{ id: string; email: string }>;
+
 async function publishRosterEndpointFixture(
   database: PostgresDatabase,
-  registration:
-    | Readonly<{ id: string; token: string; platform?: 'ios' | 'android' }>
-    | readonly Readonly<{
-        id: string;
-        token: string;
-        platform?: 'ios' | 'android';
-      }>[],
+  registration: PublishedEndpointFixture | readonly PublishedEndpointFixture[],
   identity: Readonly<{
     rosterSnapshotId: string;
     rosterVersion: number;
@@ -551,28 +581,41 @@ async function publishRosterEndpointFixture(
       groupPurpose: 'building',
     });
     await transaction.insert(rosterEndpoints).values(
-      (Array.isArray(registration) ? registration : [registration]).map(
-        (
-          published: Readonly<{
-            id: string;
-            token: string;
-            platform?: 'ios' | 'android';
-          }>,
-        ) => ({
-          id: published.id,
-          rosterSnapshotId: identity.rosterSnapshotId,
-          recipientId: identity.recipientId,
-          population: 'staff' as const,
-          channel: 'push' as const,
-          status: 'active' as const,
-          capturedAt,
-          platform: published.platform ?? ('ios' as const),
-          provider: 'expo' as const,
-          serviceEnvironment: 'production' as const,
-          token: published.token,
-          email: null,
-          phoneNumber: null,
-        }),
+      (Array.isArray(registration)
+        ? registration
+        : [registration as PublishedEndpointFixture]
+      ).map((published: PublishedEndpointFixture) =>
+        'email' in published
+          ? {
+              id: published.id,
+              rosterSnapshotId: identity.rosterSnapshotId,
+              recipientId: identity.recipientId,
+              population: 'staff' as const,
+              channel: 'email' as const,
+              status: 'active' as const,
+              capturedAt,
+              platform: null,
+              provider: null,
+              serviceEnvironment: null,
+              token: null,
+              email: published.email,
+              phoneNumber: null,
+            }
+          : {
+              id: published.id,
+              rosterSnapshotId: identity.rosterSnapshotId,
+              recipientId: identity.recipientId,
+              population: 'staff' as const,
+              channel: 'push' as const,
+              status: 'active' as const,
+              capturedAt,
+              platform: published.platform ?? ('ios' as const),
+              provider: 'expo' as const,
+              serviceEnvironment: 'production' as const,
+              token: published.token,
+              email: null,
+              phoneNumber: null,
+            },
       ),
     );
   });
@@ -1107,10 +1150,19 @@ async function activeRegistrationsForToken(
 }
 
 describeWithDatabase('device push-token persistence', () => {
+  // Live fan-out picks the one registration per device this deployment
+  // delivers on, which is exactly what the tenant cutover names. Production
+  // always carries it -- roster publish refuses outright without one -- so
+  // these tests state it rather than resolving against an absent default.
+  let priorPushProviderCutover: string | undefined;
+
   beforeAll(async () => {
     if (baseTestDatabaseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required for integration tests.');
     }
+    priorPushProviderCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
     disposableContext = buildDisposableContext(baseTestDatabaseUrl);
     try {
       await createOwnedDatabase(disposableContext);
@@ -1141,6 +1193,11 @@ describeWithDatabase('device push-token persistence', () => {
   });
 
   afterAll(async () => {
+    if (priorPushProviderCutover === undefined) {
+      delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    } else {
+      process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorPushProviderCutover;
+    }
     await cleanupResources();
   });
 
@@ -2829,6 +2886,239 @@ describeWithDatabase('device push-token persistence', () => {
     );
   });
 
+  test('reaches a recipient the snapshot holds no push endpoint for', async () => {
+    const database = databaseConnection().db;
+    const store = deviceCapabilityStore(database);
+    const phoneToken = `ExponentPushToken[synthetic-${fixtureSuffix}-firstpush]`;
+
+    // This is the incident. Two staff members received the email and nothing
+    // else: they were in the roster, they were carrying phones the app had
+    // registered, and no published snapshot had ever recorded a push endpoint
+    // for them. Inferring the provider profile from their published endpoints
+    // meant there was nothing to infer it from, so every device they owned was
+    // dropped -- silently, and until somebody happened to republish.
+    const snapshotIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 5,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      {
+        id: randomUUID(),
+        email: `first-push-${fixtureSuffix}@example.invalid`,
+      },
+      snapshotIdentity,
+    );
+
+    // The device registers after that publication, exactly as installing the
+    // app always does.
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: phoneToken,
+      },
+      humanInvocation('first-push-phone'),
+      store,
+    );
+
+    const snapshot = await loadRosterSnapshot(
+      database as unknown as Parameters<typeof loadRosterSnapshot>[0],
+      'staff',
+      facilityId,
+      snapshotIdentity.rosterSnapshotId,
+    );
+    if (snapshot === null) {
+      throw new Error('The published roster snapshot was not readable.');
+    }
+    const live = await rosterSnapshotWithLivePushTokens(
+      database as unknown as Parameters<
+        typeof rosterSnapshotWithLivePushTokens
+      >[0],
+      snapshot,
+    );
+    const recipient = live.recipients.find(
+      (candidate) => candidate.id === snapshotIdentity.recipientId,
+    );
+    if (recipient === undefined) {
+      throw new Error('The recipient was not in the live audience.');
+    }
+
+    // The email endpoint is untouched, and the phone is now reachable without
+    // anyone republishing the roster. Any other device this recipient still
+    // holds live is reached too, which is the same fix, not a different one.
+    expect(
+      recipient.endpoints.some((endpoint) => endpoint.channel === 'email'),
+    ).toBe(true);
+    expect(
+      recipient.endpoints
+        .filter((endpoint) => endpoint.channel === 'push')
+        .map((endpoint) => endpoint.token),
+    ).toContain(phoneToken);
+  });
+
+  test('reaches an Android device for a recipient published only on iOS', async () => {
+    const database = databaseConnection().db;
+    const store = deviceCapabilityStore(database);
+    const iphoneToken = `ExponentPushToken[synthetic-${fixtureSuffix}-xpiphone]`;
+    const androidToken = crossPlatformAndroidToken;
+
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: iphoneToken,
+      },
+      humanInvocation('cross-platform-iphone'),
+      store,
+    );
+    const [iphone] = await activeRegistrationsForToken(database, iphoneToken);
+    if (iphone === undefined) {
+      throw new Error('The iPhone registration was not retained.');
+    }
+
+    // The snapshot captured the iPhone, profiled ios|expo|production.
+    const snapshotIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 6,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      { id: iphone.id, token: iphoneToken, platform: 'ios' },
+      snapshotIdentity,
+    );
+
+    // The same person also carries an Android phone. Its profile can never
+    // match an iOS endpoint's, so requiring a match dropped it every time --
+    // the reason one person received an alert on an iPhone and an iPad while
+    // their Android phone stayed silent.
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.androidDeviceId,
+        platform: 'android' as const,
+        ...registrationIdentity,
+        token: androidToken,
+      },
+      humanInvocation(
+        'cross-platform-android',
+        fixture.androidSessionId,
+        fixture.androidConnectivityEpochId,
+      ),
+      store,
+    );
+
+    const snapshot = await loadRosterSnapshot(
+      database as unknown as Parameters<typeof loadRosterSnapshot>[0],
+      'staff',
+      facilityId,
+      snapshotIdentity.rosterSnapshotId,
+    );
+    if (snapshot === null) {
+      throw new Error('The published roster snapshot was not readable.');
+    }
+    const live = await rosterSnapshotWithLivePushTokens(
+      database as unknown as Parameters<
+        typeof rosterSnapshotWithLivePushTokens
+      >[0],
+      snapshot,
+    );
+    const recipient = live.recipients.find(
+      (candidate) => candidate.id === snapshotIdentity.recipientId,
+    );
+    if (recipient === undefined) {
+      throw new Error('The recipient was not in the live audience.');
+    }
+    const pushEndpoints = recipient.endpoints.filter(
+      (endpoint) => endpoint.channel === 'push',
+    );
+    const tokens = pushEndpoints.map((endpoint) => endpoint.token);
+    expect(tokens).toContain(iphoneToken);
+    expect(tokens).toContain(androidToken);
+    expect(
+      pushEndpoints.some((endpoint) => endpoint.platform === 'android'),
+    ).toBe(true);
+  });
+
+  test('fans a dual-registered device out exactly once with no published push endpoint', async () => {
+    const database = databaseConnection().db;
+    const store = deviceCapabilityStore(database);
+    const expoToken = `ExponentPushToken[synthetic-${fixtureSuffix}-onceexpo]`;
+    const apnsToken = `synthetic-apns-${fixtureSuffix}-once`;
+
+    // One device, registered under both a native provider and its Expo
+    // fallback in the same transaction. Reaching every unclaimed registration
+    // would notify this person twice on one phone, and half of those would go
+    // through a provider this deployment does not send on. The cutover, not
+    // the recipient's published endpoints, is what decides which one counts --
+    // so the guard still holds for a recipient that has no published push
+    // endpoint to infer anything from.
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios' as const,
+        provider: 'apns' as const,
+        serviceEnvironment: 'production' as const,
+        build: pushBuild,
+        token: apnsToken,
+        expoFallbackToken: expoToken,
+      },
+      humanInvocation('once-dual-provider'),
+      store,
+    );
+
+    const snapshotIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 7,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      { id: randomUUID(), email: `once-${fixtureSuffix}@example.invalid` },
+      snapshotIdentity,
+    );
+
+    const snapshot = await loadRosterSnapshot(
+      database as unknown as Parameters<typeof loadRosterSnapshot>[0],
+      'staff',
+      facilityId,
+      snapshotIdentity.rosterSnapshotId,
+    );
+    if (snapshot === null) {
+      throw new Error('The published roster snapshot was not readable.');
+    }
+    const live = await rosterSnapshotWithLivePushTokens(
+      database as unknown as Parameters<
+        typeof rosterSnapshotWithLivePushTokens
+      >[0],
+      snapshot,
+    );
+    const recipient = live.recipients.find(
+      (candidate) => candidate.id === snapshotIdentity.recipientId,
+    );
+    if (recipient === undefined) {
+      throw new Error('The recipient was not in the live audience.');
+    }
+    // Scoped to the one device under test: this recipient may hold other live
+    // devices, and reaching those is the intended behaviour, not a duplicate.
+    const deviceEndpoints = recipient.endpoints
+      .filter((endpoint) => endpoint.channel === 'push')
+      .filter(
+        (endpoint) =>
+          endpoint.token === expoToken || endpoint.token === apnsToken,
+      );
+    expect(deviceEndpoints).toHaveLength(1);
+    expect(deviceEndpoints[0]?.token).toBe(expoToken);
+    expect(deviceEndpoints[0]?.provider).toBe('expo');
+  });
+
   test('a live device is never cut from a full recipient in favor of a dead placeholder', async () => {
     const database = databaseConnection().db;
     const store = deviceCapabilityStore(database);
@@ -2866,7 +3156,7 @@ describeWithDatabase('device push-token persistence', () => {
     }));
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 5,
+      rosterVersion: fixture.rosterVersion + 8,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -2923,7 +3213,10 @@ describeWithDatabase('device push-token persistence', () => {
     expect(recipient.endpoints).toHaveLength(10);
     expect(tokens).toContain(phoneToken);
     expect(tokens).toContain(tabletToken);
-    expect(tokens.filter((token) => token.includes('-dead-'))).toHaveLength(8);
+    // The Android phone is live too, so the ceiling now costs a third dead
+    // placeholder rather than a device anyone could be reached on.
+    expect(tokens).toContain(crossPlatformAndroidToken);
+    expect(tokens.filter((token) => token.includes('-dead-'))).toHaveLength(7);
   });
 
   test('reads the same devices on every page of a batch, pinned to its creation instant', async () => {
@@ -2950,7 +3243,7 @@ describeWithDatabase('device push-token persistence', () => {
     }
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 6,
+      rosterVersion: fixture.rosterVersion + 9,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -2998,9 +3291,14 @@ describeWithDatabase('device push-token persistence', () => {
         .map((endpoint) => endpoint.token);
 
     // The batch is created now. Page one reads the audience as of this
-    // instant and sees both devices.
+    // instant and sees every device this person is carrying, the Android
+    // phone included.
     const batchCreatedAt = new Date().toISOString();
-    expect(await pushTokens(batchCreatedAt)).toEqual([phoneToken, tabletToken]);
+    expect(await pushTokens(batchCreatedAt)).toEqual([
+      phoneToken,
+      tabletToken,
+      crossPlatformAndroidToken,
+    ]);
 
     // Between page one and page two the tablet unregisters and a third
     // device enrolls. Read as of the batch's creation, page two sees the
@@ -3031,7 +3329,11 @@ describeWithDatabase('device push-token persistence', () => {
       ),
       store,
     );
-    expect(await pushTokens(batchCreatedAt)).toEqual([phoneToken, tabletToken]);
+    expect(await pushTokens(batchCreatedAt)).toEqual([
+      phoneToken,
+      tabletToken,
+      crossPlatformAndroidToken,
+    ]);
 
     // Read against the present moment instead, the list has moved: that is
     // exactly the shift a numeric offset cannot survive.
