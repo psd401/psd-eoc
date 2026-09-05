@@ -12,6 +12,13 @@ coverage/
 cdk.out/
 .turbo/
 
+# Claude Code's local session state: its settings and the git worktrees agents
+# create while working. Never part of a build or an image. Untracked, it also
+# made every protected deployment fail: readSourceRevision runs `git status
+# --untracked-files=normal` and refuses to deploy on any output, so a fresh
+# clone could not deploy at all until this was ignored.
+.claude/
+
 # Maestro writes per-run debug output and device logs next to the retained
 # evidence. Only the JUnit results and screenshots are evidence.
 .verification/**/debug/
