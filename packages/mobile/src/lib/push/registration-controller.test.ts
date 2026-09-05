@@ -45,6 +45,7 @@ class NativePort implements PushNativePort {
   public settingsCalls = 0;
   public listener: ((token: NativePushToken) => Promise<void>) | null = null;
   public failPrepare = false;
+  public alertChannelMuted = false;
 
   public constructor(public permission: PushPermissionStatus) {}
 
@@ -55,6 +56,9 @@ class NativePort implements PushNativePort {
   public async getPermissionStatus(): Promise<PushPermissionStatus> {
     this.permissionChecks += 1;
     return this.permission;
+  }
+  public async isAlertChannelMuted(): Promise<boolean> {
+    return this.alertChannelMuted;
   }
   public async requestPermission(): Promise<PushPermissionStatus> {
     this.permissionRequests += 1;
@@ -243,6 +247,7 @@ describe('push registration controller', () => {
       phase: 'registered',
       platform: 'ios',
       message: null,
+      alertsMuted: false,
     });
   });
 
@@ -324,6 +329,7 @@ describe('push registration controller', () => {
       phase: 'idle',
       platform: null,
       message: null,
+      alertsMuted: false,
     });
   });
 
@@ -365,6 +371,7 @@ describe('push registration controller', () => {
       phase: 'idle',
       platform: null,
       message: null,
+      alertsMuted: false,
     });
   });
 
@@ -417,6 +424,7 @@ describe('push registration controller', () => {
       phase: 'denied',
       platform: 'ios',
       message: null,
+      alertsMuted: false,
     });
   });
 

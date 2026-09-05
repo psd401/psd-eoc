@@ -4,10 +4,6 @@ import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { NativePushBuildIdentitySchema } from '@psd-eoc/contracts';
 import {
-  AndroidImportance,
-  AndroidNotificationVisibility,
-} from 'expo-notifications/build/NotificationChannelManager.types';
-import {
   IosAuthorizationStatus,
   type NotificationPermissionsStatus,
 } from 'expo-notifications/build/NotificationPermissions.types';
@@ -34,6 +30,11 @@ import {
   ALERT_NOTIFICATION_CHANNEL_ID,
   configureAlertChannel,
 } from '../../notifications/alert-channel';
+import {
+  alertChannelMuted,
+  androidPushPermission,
+  type AlertChannelReadback,
+} from './alert-channel-state';
 import {
   disableExpoAutoRegistration,
   type ExpoServerRegistrationModule,
@@ -88,20 +89,26 @@ function permissionStatus(
   return 'granted';
 }
 
+/**
+ * Reads the alert channel back from Android, narrowed to the only two fields
+ * any decision may use. See `alert-channel-state` for why the field that is
+ * absent here is absent.
+ */
+async function readAlertChannel(): Promise<AlertChannelReadback | null> {
+  const channel = await getNotificationChannelAsync(
+    ALERT_NOTIFICATION_CHANNEL_ID,
+  );
+  return channel === null
+    ? null
+    : { importance: channel.importance, sound: channel.sound };
+}
+
 async function effectivePermissionStatus(
   status: NotificationPermissionsStatus,
 ): Promise<PushPermissionStatus> {
   const base = permissionStatus(status);
   if (base !== 'granted' || Platform.OS !== 'android') return base;
-  const channel = await getNotificationChannelAsync(
-    ALERT_NOTIFICATION_CHANNEL_ID,
-  );
-  return channel !== null &&
-    channel.importance >= AndroidImportance.HIGH &&
-    channel.lockscreenVisibility === AndroidNotificationVisibility.PUBLIC &&
-    channel.sound !== null
-    ? 'granted'
-    : 'denied';
+  return androidPushPermission(base, await readAlertChannel());
 }
 
 /** Native-only adapter; all network-bearing operations stay behind the controller gate. */
@@ -115,6 +122,10 @@ export const expoPushNativePort: PushNativePort = Object.freeze({
   },
   async getPermissionStatus() {
     return effectivePermissionStatus(await getPermissionsAsync());
+  },
+  async isAlertChannelMuted() {
+    if (Platform.OS !== 'android') return false;
+    return alertChannelMuted(await readAlertChannel());
   },
   async requestPermission() {
     return effectivePermissionStatus(

@@ -27,7 +27,43 @@ export function PushNotificationNotice({
   onRetry,
   snapshot,
 }: PushNotificationNoticeProps) {
-  if (snapshot.phase === 'idle' || snapshot.phase === 'registered') return null;
+  if (snapshot.phase === 'registered') {
+    // Registered and delivering. The only thing left worth saying is that this
+    // device will present the alert quietly, which the person can undo and the
+    // app cannot.
+    if (!snapshot.alertsMuted) return null;
+    return (
+      <View
+        accessibilityLiveRegion="polite"
+        accessibilityRole="alert"
+        style={[styles.notice, styles.mutedNotice]}
+      >
+        <View style={styles.noticeCopy}>
+          <Text accessibilityRole="header" style={styles.noticeTitle}>
+            Alerts will arrive quietly
+          </Text>
+          <Text style={styles.noticeBody}>
+            This device still receives PSD EOC alerts, but the PSD EOC incident
+            and drill alerts channel has been turned down, so they may arrive
+            without sound. Open device settings and set that channel back to
+            Urgent with a sound.
+          </Text>
+        </View>
+        <Pressable
+          accessibilityLabel="Open device notification settings"
+          accessibilityRole="button"
+          onPress={onOpenSettings}
+          style={({ pressed }) => [
+            styles.secondaryButton,
+            pressed && styles.buttonPressed,
+          ]}
+        >
+          <Text style={styles.secondaryButtonText}>Open device settings</Text>
+        </Pressable>
+      </View>
+    );
+  }
+  if (snapshot.phase === 'idle') return null;
   if (snapshot.phase === 'registering') {
     return (
       <View
@@ -146,6 +182,10 @@ const styles = StyleSheet.create({
   deniedNotice: {
     backgroundColor: '#FFF4E5',
     borderBottomColor: '#B56A00',
+  },
+  mutedNotice: {
+    backgroundColor: '#FFF9E5',
+    borderBottomColor: '#B58900',
   },
   noticeCopy: { gap: 4 },
   noticeTitle: { color: '#102A43', fontSize: 16, fontWeight: '800' },
