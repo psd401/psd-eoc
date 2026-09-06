@@ -22,15 +22,36 @@ export interface TextAlertsViewProps {
   readonly consent: SmsConsentState;
   readonly disclosure: SmsConsentDisclosure;
   readonly consentIdempotencyKey: string;
+  readonly displayTimeZone: string;
   readonly withdrawIdempotencyKey: string;
   readonly notice: TextAlertsNotice | null;
   readonly recordConsentAction: TextAlertsAction;
   readonly withdrawConsentAction: TextAlertsAction;
 }
 
+/**
+ * Renders the consent date in the district's own time zone.
+ *
+ * The stored value is a UTC instant, and formatting it as UTC showed tomorrow's
+ * date to anyone who consented after 5pm Pacific. On the one screen whose job
+ * is to be carrier evidence, a date that never happened locally is worse than
+ * no date at all.
+ */
+export function formatConsentDate(timestamp: string, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    timeZone,
+  }).format(new Date(timestamp));
+}
+
 function Notice({ notice }: Readonly<{ notice: TextAlertsNotice }>) {
   return (
-    <p className={`notice notice-${notice.kind}`} role="status">
+    <p
+      className={`status-message status-message--${notice.kind}`}
+      role="status"
+    >
       {notice.message}
     </p>
   );
@@ -47,6 +68,7 @@ export function TextAlertsView({
   consent,
   disclosure,
   consentIdempotencyKey,
+  displayTimeZone,
   withdrawIdempotencyKey,
   notice,
   recordConsentAction,
@@ -92,7 +114,7 @@ export function TextAlertsView({
             <p className="text-alerts-meta">
               Agreed on{' '}
               <time dateTime={consent.consentedAt}>
-                {new Date(consent.consentedAt).toISOString().slice(0, 10)}
+                {formatConsentDate(consent.consentedAt, displayTimeZone)}
               </time>{' '}
               to the {consent.disclosureVersion} terms below.
             </p>
