@@ -9,6 +9,7 @@ import {
   withdrawSmsConsentAction,
 } from './actions';
 import { TextAlertsView } from './text-alerts-view';
+import '../start/styles.css';
 import './styles.css';
 
 export const dynamic = 'force-dynamic';
