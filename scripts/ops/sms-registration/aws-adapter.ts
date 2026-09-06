@@ -167,8 +167,10 @@ export function createAwsApi(): SmsRegistrationApi {
         let nextToken: string | undefined;
         do {
           const output = await sms.send(
+            // No MaxResults: AWS refuses it alongside explicit ids with
+            // PARAMETERS_CANNOT_BE_USED_TOGETHER. The slice already bounds the
+            // page to five.
             new DescribeRegistrationAttachmentsCommand({
-              MaxResults: 5,
               ...(nextToken === undefined ? {} : { NextToken: nextToken }),
               RegistrationAttachmentIds: attachmentIds.slice(
                 offset,
@@ -199,8 +201,8 @@ export function createAwsApi(): SmsRegistrationApi {
       let nextToken: string | undefined;
       do {
         const output = await sms.send(
+          // No MaxResults alongside explicit ids; see describeAttachments.
           new DescribePhoneNumbersCommand({
-            MaxResults: 100,
             ...(nextToken === undefined ? {} : { NextToken: nextToken }),
             PhoneNumberIds: [...phoneNumberIds],
           }),
@@ -303,8 +305,8 @@ export function createAwsApi(): SmsRegistrationApi {
       let nextToken: string | undefined;
       do {
         const output = await sms.send(
+          // No MaxResults alongside explicit ids; see describeAttachments.
           new DescribeRegistrationsCommand({
-            MaxResults: 100,
             ...(nextToken === undefined ? {} : { NextToken: nextToken }),
             RegistrationIds: [...registrationIds],
           }),
@@ -398,7 +400,11 @@ export function createAwsApi(): SmsRegistrationApi {
           MessageType: 'TRANSACTIONAL',
           NumberCapabilities: ['SMS'],
           NumberType: 'TOLL_FREE',
-          RegistrationId: input.registrationId,
+          // No RegistrationId. The SDK documents that field as "attach your
+          // phone number for an external registration process"; this tool
+          // registers through AWS itself, so the number is bound afterwards by
+          // CreateRegistrationAssociation. Passing it here made every request
+          // fail with INVALID_PARAMETER Fields="registrationId".
           Tags: [{ Key: 'Name', Value: input.name }],
         }),
       );

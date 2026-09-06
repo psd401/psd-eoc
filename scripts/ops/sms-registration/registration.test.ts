@@ -160,6 +160,8 @@ function definitions(kind: RegistrationKind): readonly FieldDefinition[] {
 class FakeApi implements SmsRegistrationApi {
   readonly attachmentBodies: Uint8Array[] = [];
   readonly calls: string[] = [];
+  /** Every AWS Name tag value this run would have sent. */
+  readonly tagNames: string[] = [];
   readonly associations = new Map<string, string>();
   readonly registrationStatuses = new Map<string, string>();
   readonly submittedRegistrations = new Set<string>();
@@ -211,8 +213,10 @@ class FakeApi implements SmsRegistrationApi {
 
   async createRegistration(input: {
     readonly registrationType: string;
+    readonly name?: string;
   }): Promise<{ readonly registrationId: string }> {
     this.calls.push(`create:${input.registrationType}`);
+    if (input.name !== undefined) this.tagNames.push(input.name);
     this.createRegistrationStarted?.();
     await this.createRegistrationWait;
     const registrationId =
@@ -749,6 +753,30 @@ describe('offline safety boundary', () => {
 
     expect(harness.apiCreations()).toBe(0);
     expect(api.calls).toEqual([]);
+  });
+
+  it('tags every registration with a name AWS will accept', async () => {
+    // AWS End User Messaging rejects a tag value outside its permitted
+    // character set. The separator here was an em dash, so every real
+    // submission this tool attempted failed with
+    // INVALID_PARAMETER Fields="tags" before the first mutating call, and no
+    // registration was ever created. Length was already covered; the character
+    // set was not.
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const api = new FakeApi();
+    const harness = testRuntime(api);
+
+    await runSubmit(
+      'tollFree',
+      submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+      harness.runtime,
+    );
+
+    expect(api.tagNames.length).toBeGreaterThan(0);
+    for (const name of api.tagNames) {
+      expect(name).toMatch(/^[A-Za-z0-9 _.:/=+@-]+$/u);
+    }
   });
 });
 
@@ -1294,6 +1322,13 @@ describe('registration API ordering', () => {
       'put:messageSamples.messageSample1',
       'put:messageSamples.messageSample2',
       'request-toll-free',
+      // The lease does not bind the number to the registration; AWS only does
+      // that here. Passing RegistrationId to RequestPhoneNumber instead was
+      // refused with INVALID_PARAMETER, because that field is for external
+      // registration processes rather than AWS-managed ones.
+      'list-associations:registration-toll-free',
+      'associate:registration-toll-free:phone-1',
+      'list-associations:registration-toll-free',
       'describe-phone',
       'submit:registration-toll-free',
     ]);
