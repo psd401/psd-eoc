@@ -11,9 +11,10 @@ names are not deployment evidence.
 
 ## Meaning
 
-The scheduled membership task runs every two hours in two legs. The sign-in
+The scheduled membership task runs every two hours in three legs. The sign-in
 leg reads the Google groups that gate sign-in; the roster leg reads the Google
-groups behind building and district roster sources. Each leg logs one summary
+groups behind building and district roster sources; the publish leg then
+publishes a roster snapshot from whatever those sources now name. Each leg logs one summary
 line; a failed leg logs one failure line. Both alarms count those failure lines
 over two hours, one scheduled run, and alarm on the first one, treating a quiet
 period as normal.
@@ -27,6 +28,14 @@ closed`): the job failed. Sign-in itself still confirms each person with
   Google live at their next sign-in; stored membership stops authorizing
   anyone 24 hours after its last fresh read, so this is the path to a
   lockout and pages critical.
+- **Publish leg** (`psd-eoc-scheduled-roster-publish-failed`): membership was
+  refreshed but no snapshot was published, so an activation keeps resolving
+  against the previous one. Anyone added or removed since is wrong in it. Two
+  events feed this alarm and both mean the same thing:
+  `scheduled-roster-publish-failed` is a publication that threw, and
+  `scheduled-roster-publish-complete` with `"kind":"refused"` is one a
+  completeness guard stopped. A `"kind":"skipped"` line is not counted: it
+  means no building source is configured yet, which is not a fault.
 
 ## Safety posture
 
@@ -56,6 +65,22 @@ closed`): the job failed. Sign-in itself still confirms each person with
 4. For the sign-in leg, check the age of the last fresh read against the
    24-hour bound and escalate **SEV-2** while it is unresolved; **SEV-1** once
    within two hours of the bound.
+
+### Publish leg refused
+
+Read the `scheduled-roster-publish-complete` line's `errorCodes`. A refusal is
+the completeness guard working, not a bug in it: the previous complete snapshot
+stays authoritative rather than being replaced by one that reaches fewer people.
+
+- `EMPTY_BUILDING_GROUP` — a building source now resolves to nobody. Confirm
+  whether that is true before treating it as an outage; if it is not, the
+  source's membership is what to fix.
+- `SUSPICIOUS_BUILDING_GROUP_DROP` — membership fell far enough to look like a
+  bad read. Confirm the drop is intended, then publish once from
+  **Facilities → Publish the roster** to accept it.
+
+Publishing by hand is the immediate override; it does not fix the cause, and
+the next scheduled run will refuse again until the source is right.
 
 ## Verify recovery
 
