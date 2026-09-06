@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { MySmsConsentViewSchema } from '@psd-eoc/contracts';
 import type { Metadata } from 'next';
 
+import { displayTimeZone } from '../../../lib/config/deployment';
 import {
   readMySmsConsentForPage,
   recordSmsConsentAction,
@@ -30,6 +31,7 @@ export default async function TextAlertsPage() {
     <TextAlertsView
       consent={consent}
       consentIdempotencyKey={randomUUID()}
+      displayTimeZone={displayTimeZone()}
       disclosure={disclosure}
       notice={null}
       recordConsentAction={recordSmsConsentAction}
