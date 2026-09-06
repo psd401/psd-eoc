@@ -1322,6 +1322,13 @@ describe('registration API ordering', () => {
       'put:messageSamples.messageSample1',
       'put:messageSamples.messageSample2',
       'request-toll-free',
+      // The lease does not bind the number to the registration; AWS only does
+      // that here. Passing RegistrationId to RequestPhoneNumber instead was
+      // refused with INVALID_PARAMETER, because that field is for external
+      // registration processes rather than AWS-managed ones.
+      'list-associations:registration-toll-free',
+      'associate:registration-toll-free:phone-1',
+      'list-associations:registration-toll-free',
       'describe-phone',
       'submit:registration-toll-free',
     ]);

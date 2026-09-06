@@ -263,7 +263,6 @@ export interface SmsRegistrationApi {
   requestTollFreeNumber(input: {
     readonly clientToken: string;
     readonly name: string;
-    readonly registrationId: string;
   }): Promise<{
     readonly monthlyLeasingPrice?: string;
     readonly phoneNumberId: string;
@@ -296,6 +295,8 @@ interface PersistedRegistration {
 }
 
 type PersistedTollFreeRegistration = PersistedRegistration & {
+  associatedNumber?: true;
+  numberAssociationAttempted?: true;
   phoneClientToken: string;
   phoneNumberId?: string;
 };
@@ -761,11 +762,13 @@ function parsePersistedRegistration(
     record,
     [
       'associatedBrand',
+      'associatedNumber',
       'associationAttempted',
       'attachments',
       'clientToken',
       'inputFingerprint',
       'kind',
+      'numberAssociationAttempted',
       'phoneClientToken',
       'phoneNumberId',
       'registrationId',
@@ -870,7 +873,9 @@ function parsePersistedRegistration(
   if (!isTollFree) {
     if (
       record.phoneClientToken !== undefined ||
-      record.phoneNumberId !== undefined
+      record.phoneNumberId !== undefined ||
+      record.associatedNumber !== undefined ||
+      record.numberAssociationAttempted !== undefined
     ) {
       throw new TypeError(`${path} contains toll-free-only phone state.`);
     }
@@ -883,8 +888,28 @@ function parsePersistedRegistration(
   if (phoneNumberId !== undefined && registrationId === undefined) {
     throw new TypeError(`${path}.phoneNumberId requires registrationId.`);
   }
+  const associatedNumber = optionalBoolean(
+    record.associatedNumber,
+    `${path}.associatedNumber`,
+  );
+  const numberAssociationAttempted = optionalBoolean(
+    record.numberAssociationAttempted,
+    `${path}.numberAssociationAttempted`,
+  );
+  if (
+    (associatedNumber === true || numberAssociationAttempted === true) &&
+    phoneNumberId === undefined
+  ) {
+    throw new TypeError(
+      `${path} records number-association state without a phone number.`,
+    );
+  }
   return {
     ...base,
+    ...(associatedNumber === true ? { associatedNumber: true } : {}),
+    ...(numberAssociationAttempted === true
+      ? { numberAssociationAttempted: true }
+      : {}),
     phoneClientToken: requiredString(
       record.phoneClientToken,
       `${path}.phoneClientToken`,
@@ -2190,7 +2215,6 @@ export async function runSubmit(
         const number = await api.requestTollFreeNumber({
           clientToken: tollFree.phoneClientToken,
           name: registrationName(data, kind),
-          registrationId,
         });
         tollFree.phoneNumberId = number.phoneNumberId;
         responseRegistrationId = number.registrationId;
@@ -2202,6 +2226,43 @@ export async function runSubmit(
       const phoneNumberId = tollFree.phoneNumberId;
       if (phoneNumberId === undefined) {
         throw new Error('AWS did not return a toll-free phone number ID.');
+      }
+      // The lease does not bind the number to the registration; AWS only does
+      // that through CreateRegistrationAssociation. Guarded exactly like the
+      // campaign-to-brand association, because replaying it after an
+      // unresolved attempt can race AWS eventual consistency.
+      if (tollFree.associatedNumber !== true) {
+        const existing = await api.listRegistrationAssociations(registrationId);
+        const alreadyAssociated = existing.some(
+          (association) => association.resourceId === phoneNumberId,
+        );
+        if (!alreadyAssociated) {
+          if (tollFree.numberAssociationAttempted === true) {
+            throw new Error(
+              'Toll-free number association has unresolved prior intent but AWS does not report it. Do not replay CreateRegistrationAssociation until a human reconciles eventual consistency.',
+            );
+          }
+          tollFree.numberAssociationAttempted = true;
+          await persist();
+          await api.associateRegistration({
+            registrationId,
+            resourceId: phoneNumberId,
+          });
+          const verified =
+            await api.listRegistrationAssociations(registrationId);
+          if (
+            !verified.some(
+              (association) => association.resourceId === phoneNumberId,
+            )
+          ) {
+            throw new Error(
+              'AWS did not report the requested toll-free number association; submission stopped.',
+            );
+          }
+        }
+        tollFree.associatedNumber = true;
+        delete tollFree.numberAssociationAttempted;
+        await persist();
       }
       await verifyTollFreeNumberAssociation({
         api,
