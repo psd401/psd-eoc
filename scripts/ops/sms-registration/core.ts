@@ -1790,7 +1790,11 @@ function registrationName(
       : kind === 'campaign'
         ? '10DLC campaign'
         : 'toll-free';
-  return `${data.registrationNamePrefix} — ${suffix}`;
+  // ASCII hyphen, not an em dash. AWS End User Messaging rejects a tag value
+  // outside its permitted character set, and every submission this tool made
+  // failed with INVALID_PARAMETER Fields="tags" before the first mutating call
+  // because the separator here was "—".
+  return `${data.registrationNamePrefix} - ${suffix}`;
 }
 
 function assertAwsIdentifiers(data: RegistrationData): void {
