@@ -201,34 +201,98 @@ BEGIN
 	RAISE NOTICE 'Rewrote % outbox message(s) to the current channel plan shape', rewritten;
 END;
 $$;--> statement-breakpoint
-UPDATE "activation_previews"
-SET "channels" = (
-	SELECT coalesce(jsonb_agg(
-		CASE
-			WHEN channel ? 'integrationStatus' THEN
-				(channel - 'integrationStatus')
-					|| jsonb_build_object('integrationId', channel -> 'integrationStatus' -> 'integrationId')
-			ELSE channel
-		END
-		ORDER BY ordinality
-	), '[]'::jsonb)
-	FROM jsonb_array_elements("channels") WITH ORDINALITY AS plan(channel, ordinality)
-)
-WHERE jsonb_path_exists("channels", '$[*].integrationStatus');--> statement-breakpoint
-UPDATE "lifecycle_consequence_previews"
-SET "channels" = (
-	SELECT coalesce(jsonb_agg(
-		CASE
-			WHEN channel ? 'integrationStatus' THEN
-				(channel - 'integrationStatus')
-					|| jsonb_build_object('integrationId', channel -> 'integrationStatus' -> 'integrationId')
-			ELSE channel
-		END
-		ORDER BY ordinality
-	), '[]'::jsonb)
-	FROM jsonb_array_elements("channels") WITH ORDINALITY AS plan(channel, ordinality)
-)
-WHERE jsonb_path_exists("channels", '$[*].integrationStatus');--> statement-breakpoint
+-- Retained previews carry the same channel-plan shape. Both tables are
+-- append-only behind `<table>_immutable_guard` (migration 0000), so each
+-- guard is dropped for exactly this rewrite and recreated byte for byte, the
+-- same way the outbox payload guard is handled above.
+DO $$
+DECLARE
+	preview_table text;
+	guard_count integer;
+	stale_before integer;
+	stale_after integer;
+	rewritten integer;
+BEGIN
+	FOREACH preview_table IN ARRAY ARRAY['activation_previews', 'lifecycle_consequence_previews']
+	LOOP
+		SELECT count(*)::integer INTO guard_count
+		FROM pg_catalog.pg_trigger AS trigger
+		JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+		JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = 'public'
+			AND relation.relname = preview_table
+			AND trigger.tgname = preview_table || '_immutable_guard'
+			AND trigger.tgenabled = 'O'
+			AND trigger.tgfoid = 'public.psd_eoc_reject_immutable_mutation()'::pg_catalog.regprocedure
+			AND NOT trigger.tgisinternal;
+		IF guard_count <> 1 THEN
+			RAISE EXCEPTION 'Immutable guard on % is absent or disabled', preview_table
+				USING ERRCODE = '55000';
+		END IF;
+
+		EXECUTE format(
+			'SELECT count(*)::integer FROM public.%I WHERE jsonb_path_exists("channels", ''$[*].integrationStatus'')',
+			preview_table
+		) INTO stale_before;
+
+		EXECUTE format('DROP TRIGGER %I ON public.%I', preview_table || '_immutable_guard', preview_table);
+
+		EXECUTE format($sql$
+			UPDATE public.%I
+			SET "channels" = (
+					SELECT coalesce(jsonb_agg(
+						CASE
+							WHEN channel ? 'integrationStatus' THEN
+								(channel - 'integrationStatus')
+									|| jsonb_build_object('integrationId', channel -> 'integrationStatus' -> 'integrationId')
+							ELSE channel
+						END
+						ORDER BY ordinality
+					), '[]'::jsonb)
+					FROM jsonb_array_elements("channels") WITH ORDINALITY AS plan(channel, ordinality)
+				)
+			WHERE jsonb_path_exists("channels", '$[*].integrationStatus')
+		$sql$, preview_table);
+		GET DIAGNOSTICS rewritten = ROW_COUNT;
+
+		EXECUTE format(
+			'CREATE TRIGGER %I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION psd_eoc_reject_immutable_mutation()',
+			preview_table || '_immutable_guard', preview_table
+		);
+
+		SELECT count(*)::integer INTO guard_count
+		FROM pg_catalog.pg_trigger AS trigger
+		JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+		JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = 'public'
+			AND relation.relname = preview_table
+			AND trigger.tgname = preview_table || '_immutable_guard'
+			AND trigger.tgenabled = 'O'
+			AND trigger.tgfoid = 'public.psd_eoc_reject_immutable_mutation()'::pg_catalog.regprocedure
+			AND NOT trigger.tgisinternal;
+		IF guard_count <> 1 THEN
+			RAISE EXCEPTION 'Immutable guard on % was not restored exactly', preview_table
+				USING ERRCODE = '55000';
+		END IF;
+
+		IF rewritten <> stale_before THEN
+			RAISE EXCEPTION '% rewrite touched % row(s) instead of %', preview_table, rewritten, stale_before
+				USING ERRCODE = '55000';
+		END IF;
+
+		EXECUTE format(
+			'SELECT count(*)::integer FROM public.%I WHERE jsonb_path_exists("channels", ''$[*].integrationStatus'')',
+			preview_table
+		) INTO stale_after;
+		IF stale_after <> 0 THEN
+			RAISE EXCEPTION '% % row(s) still carry retired keys', stale_after, preview_table
+				USING ERRCODE = '55000';
+		END IF;
+
+		RAISE NOTICE 'Rewrote % % row(s) to the current channel plan shape', rewritten, preview_table;
+	END LOOP;
+END;
+$$;--> statement-breakpoint
 ALTER TABLE "outbox" ADD CONSTRAINT "outbox_channel_plan_shape" CHECK (case
         when jsonb_typeof("outbox"."channels") = 'array' then
           jsonb_array_length("outbox"."channels") between 2 and 3

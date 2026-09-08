@@ -822,7 +822,7 @@ interface OutboxPlanRow extends Record<string, unknown> {
 }
 
 describeWithDatabase('migration 0049 on retained dispatch rows', () => {
-  test('rewrites both copies of the outbox channel plan and keeps outbox_message_truth', async () => {
+  test('rewrites every retained channel plan behind its guards and keeps outbox_message_truth', async () => {
     if (testDatabaseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required for migration tests.');
     }
@@ -848,6 +848,47 @@ describeWithDatabase('migration 0049 on retained dispatch rows', () => {
       });
       await opened.db.transaction(async (transaction) => {
         await insertPre0049DispatchFixture(transaction);
+        // Retained previews carried the same plan shape. Both tables are
+        // append-only behind their immutable guards, so the fixture writes
+        // them the way a pre-0049 database holds them: bypassing the guard
+        // for this transaction only.
+        await transaction.execute(
+          sql`set local session_replication_role = replica`,
+        );
+        await transaction.execute(sql`
+          update activation_previews
+          set channels = (
+            select message -> 'channels' from outbox
+            where id = '00000000-0000-4000-8000-000000030033'::uuid
+          )
+          where id = '00000000-0000-4000-8000-000000030020'::uuid
+        `);
+        await transaction.execute(sql`
+          insert into lifecycle_consequence_previews (
+            id, event_id, purpose, kind, template_mode, event_type_version_id,
+            roster_snapshot_id, roster_population, recipient_count, channels,
+            send_readiness, blocking_reason_codes, consequence_digest,
+            created_at, expires_at
+          )
+          select
+            '00000000-0000-4000-8000-000000030021'::uuid,
+            '00000000-0000-4000-8000-000000030030'::uuid,
+            'all-clear'::notification_purpose,
+            'drill'::event_kind,
+            'drill'::template_mode,
+            '00000000-0000-4000-8000-000000000201'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            2,
+            message -> 'channels',
+            'ready',
+            '[]'::jsonb,
+            repeat('d', 64),
+            '2026-08-10T16:07:00.000Z'::timestamptz,
+            '2026-08-10T16:12:00.000Z'::timestamptz
+          from outbox
+          where id = '00000000-0000-4000-8000-000000030033'::uuid
+        `);
       });
 
       const [before] = await opened.db.execute<OutboxPlanRow>(sql`
@@ -893,6 +934,46 @@ describeWithDatabase('migration 0049 on retained dispatch rows', () => {
           ),
         );
       expect(withoutPlan(after)).toEqual(withoutPlan(before));
+
+      const previews = await opened.db.execute<{
+        source: string;
+        plan: unknown;
+      }>(sql`
+        select 'activation' as source, channels as plan from activation_previews
+        where id = '00000000-0000-4000-8000-000000030020'::uuid
+        union all
+        select 'lifecycle', channels from lifecycle_consequence_previews
+        where id = '00000000-0000-4000-8000-000000030021'::uuid
+        order by 1
+      `);
+      expect(previews.map((row) => row.source)).toEqual([
+        'activation',
+        'lifecycle',
+      ]);
+      for (const row of previews) {
+        expect(row.plan).toEqual(message.channels);
+      }
+      const guards = await opened.db.execute<{
+        trigger_name: string;
+        enabled: string;
+      }>(sql`
+        select tgname as trigger_name, tgenabled as enabled
+        from pg_catalog.pg_trigger
+        where tgname in (
+          'activation_previews_immutable_guard',
+          'lifecycle_consequence_previews_immutable_guard',
+          'outbox_payload_guard'
+        )
+        order by tgname
+      `);
+      expect([...guards]).toEqual([
+        { trigger_name: 'activation_previews_immutable_guard', enabled: 'O' },
+        {
+          trigger_name: 'lifecycle_consequence_previews_immutable_guard',
+          enabled: 'O',
+        },
+        { trigger_name: 'outbox_payload_guard', enabled: 'O' },
+      ]);
 
       const constraints = await opened.db.execute<{
         constraint_name: string;
