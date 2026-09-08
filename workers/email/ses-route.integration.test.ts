@@ -438,7 +438,6 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
           rosterSnapshotId: replacement.snapshotId,
           rosterPopulation: 'synthetic',
           endpointCount: 1,
-          deliveryTest: null,
           candidates: [
             {
               recipientId: replacement.recipientId,
@@ -451,7 +450,6 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
           recipientId: replacement.recipientId,
           endpointId: replacement.endpointId,
           status: 'disabled',
-          approvedForDeliveryTest: true,
         },
       ]);
     });

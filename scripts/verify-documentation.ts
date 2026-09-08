@@ -459,7 +459,7 @@ const RECORDS_RETENTION_CLASSES = Object.freeze([
   'audit-and-mutation-evidence',
   'configuration-and-governance',
   'dispatch-and-delivery-evidence',
-  'drills-and-delivery-tests',
+  'drills',
   'generated-reports-and-exports',
   'identity-device-and-session-lifecycle',
   'media-and-private-objects',

@@ -8,7 +8,6 @@ import {
   EmailWorkerAttemptWorkItemSchema,
   NotificationOutboxMessageSchema,
   ProviderSendOutcomeSchema,
-  SesVerificationReferenceSchema,
   SesSendLedgerClaimSchema,
   type ChannelAttempt,
   type DispatchBatch,
@@ -24,7 +23,6 @@ import {
   channelConfigurations,
   dispatchBatches,
   events,
-  integrationStatuses,
   outbox,
   sesEmailProviderIo,
 } from '../../db/schema';
@@ -36,8 +34,6 @@ import {
 import { lockEmailEndpointPolicy } from './email-endpoint-policy-lock';
 
 export const EMAIL_WORKER_ENABLED_ENV = 'PSD_EOC_EMAIL_WORKER_ENABLED' as const;
-export const SES_VERIFICATION_REFERENCE_ENV =
-  'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE' as const;
 export const EMAIL_SEND_HORIZON_MILLISECONDS = 15 * 60_000;
 
 /**
@@ -48,7 +44,6 @@ const EMAIL_PAGE_SIZE = 50;
 
 export interface EmailRuntimeDeploymentAuthorization {
   readonly workerEnabled: boolean;
-  readonly verificationReference: string | null;
 }
 
 export interface DrizzleEmailRuntimeStoreOptions {
@@ -160,41 +155,11 @@ export function assertEmailBatch(batch: DispatchBatch): void {
     batch.channel !== 'email' ||
     (batch.authorization.kind !== 'human-confirmed' &&
       batch.authorization.kind !== 'human-confirmed-lifecycle') ||
-    batch.integrationStatus.integrationId !== 'ses-email' ||
-    batch.integrationStatus.label !== 'live-verified'
+    batch.integrationId !== 'ses-email'
   ) {
     throw new EmailRuntimeStoreError(
       'BATCH_CONFLICT',
       'not-a-sendable-email-batch',
-    );
-  }
-}
-
-/**
- * What must additionally hold for a controlled canary.
- *
- * These conditions used to be applied to every batch, which meant the email
- * path accepted only the monthly canary: a batch with no delivery test was
- * refused as a conflict, and so was anything that was not a drill. A confirmed
- * activation queued its email and the worker rejected it on arrival, so an
- * ordinary drill notified nobody and a REAL incident would have sent no email
- * whatsoever.
- *
- * They are the canary's conditions and they still hold exactly, for the
- * canary: one endpoint, opted in through a delivery test, and never rendered
- * as anything but a drill.
- */
-export function assertControlledCanaryBatch(batch: DispatchBatch): void {
-  if (
-    batch.eventKind !== 'drill' ||
-    batch.templateMode !== 'drill' ||
-    batch.purpose !== 'activation' ||
-    batch.rosterPopulation !== 'staff' ||
-    batch.endpointCount !== 1
-  ) {
-    throw new EmailRuntimeStoreError(
-      'BATCH_CONFLICT',
-      'not-a-controlled-canary',
     );
   }
 }
@@ -241,18 +206,16 @@ async function persistedBatch(
     },
     rosterSnapshotId: record.batch.rosterSnapshotId,
     rosterPopulation: record.batch.rosterPopulation,
-    deliveryTest: message.deliveryTest,
     requestId: record.batch.requestId,
     authorization: record.batch.authorization,
     channel: record.batch.channel,
     renderedMessage: record.batch.renderedMessage,
-    integrationStatus: planned.integrationStatus,
+    integrationId: planned.integrationId,
     sequence: record.batch.sequence,
     endpointCount: record.batch.endpointCount,
     createdAt: iso(record.batch.createdAt),
   });
   assertEmailBatch(batch);
-  if (batch.deliveryTest != null) assertControlledCanaryBatch(batch);
   return batch;
 }
 
@@ -332,7 +295,6 @@ function attemptFor(
     eventTypeVersion: batch.eventTypeVersion,
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
-    deliveryTest: batch.deliveryTest!,
     recipientId,
     endpointId,
     channel: 'email',
@@ -360,32 +322,11 @@ function workItemFor(
   });
 }
 
-function validVerificationReference(value: string | undefined): string | null {
-  const parsed = SesVerificationReferenceSchema.safeParse(value);
-  return parsed.success ? parsed.data : null;
-}
-
-/** Exact immutable batch-to-deployment binding used by resolution and claims. */
-export function emailBatchMatchesDeploymentAuthorization(
-  batch: DispatchBatch,
-  deployment: EmailRuntimeDeploymentAuthorization,
-): boolean {
-  return (
-    deployment.workerEnabled &&
-    deployment.verificationReference !== null &&
-    batch.integrationStatus.authorizationReference ===
-      deployment.verificationReference
-  );
-}
-
 export function readEmailRuntimeDeploymentAuthorization(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): EmailRuntimeDeploymentAuthorization {
   return Object.freeze({
     workerEnabled: environment[EMAIL_WORKER_ENABLED_ENV] === 'true',
-    verificationReference: validVerificationReference(
-      environment[SES_VERIFICATION_REFERENCE_ENV],
-    ),
   });
 }
 
@@ -394,30 +335,19 @@ async function channelIsLive(
   deployment: EmailRuntimeDeploymentAuthorization,
   lock: boolean,
 ): Promise<boolean> {
-  if (!deployment.workerEnabled || deployment.verificationReference === null) {
+  if (!deployment.workerEnabled) {
     return false;
   }
+  // Enablement alone, matching SMS. The three truth-label conditions that used
+  // to sit here are hand-maintained state that can only disagree with reality,
+  // and disagreeing silently refuses to send.
   const [row] = await database
-    .select({
-      enabled: channelConfigurations.enabled,
-      statusLabel: channelConfigurations.statusLabel,
-      integrationLabel: integrationStatuses.label,
-      authorizationReference: integrationStatuses.authorizationReference,
-    })
+    .select({ enabled: channelConfigurations.enabled })
     .from(channelConfigurations)
-    .innerJoin(
-      integrationStatuses,
-      eq(channelConfigurations.statusId, integrationStatuses.id),
-    )
     .where(eq(channelConfigurations.integrationId, 'ses-email'))
     .limit(1)
     .for(lock ? 'share' : 'no key update');
-  return (
-    row?.enabled === true &&
-    row.statusLabel === 'live-verified' &&
-    row.integrationLabel === 'live-verified' &&
-    row.authorizationReference === deployment.verificationReference
-  );
+  return row?.enabled === true;
 }
 
 async function databaseNow(database: Database): Promise<Date> {
@@ -526,7 +456,6 @@ async function expectedWorkItem(
         },
         rosterSnapshotId: record.attempt.rosterSnapshotId,
         rosterPopulation: record.attempt.rosterPopulation,
-        deliveryTest: supplied.batch.deliveryTest,
         recipientId: record.attempt.recipientId,
         endpointId: record.attempt.endpointId,
         channel: record.attempt.channel,
@@ -561,14 +490,10 @@ async function workItemIsEligible(
 ): Promise<boolean> {
   const supplied = EmailWorkerAttemptWorkItemSchema.parse(suppliedValue);
   if (supplied.endpoint.channel !== 'email') return false;
-  if (!emailBatchMatchesDeploymentAuthorization(supplied.batch, deployment)) {
-    return false;
-  }
   const batch = await persistedBatch(database, supplied.batch.id);
   const now = await databaseNow(database);
   if (
     !sameJson(batch, supplied.batch) ||
-    !emailBatchMatchesDeploymentAuthorization(batch, deployment) ||
     now.getTime() > Date.parse(batch.createdAt) + sendHorizonMilliseconds ||
     !(await channelIsLive(database, deployment, lock)) ||
     !(await activeEvent(database, batch.eventId, lock))
@@ -729,11 +654,8 @@ export function createDrizzleEmailRuntimeStore(
           'queued-batch-differs-from-stored',
         );
       }
-      if (!emailBatchMatchesDeploymentAuthorization(batch, deployment)) {
-        throw new EmailRuntimeStoreError(
-          'BATCH_CONFLICT',
-          'deployment-authorization-moved-on',
-        );
+      if (!deployment.workerEnabled) {
+        throw new EmailRuntimeStoreError('BATCH_CONFLICT', 'worker-disabled');
       }
       if (Date.parse(input.enqueuedAt) < Date.parse(batch.createdAt)) {
         throw new EmailRuntimeStoreError(
@@ -753,23 +675,6 @@ export function createDrizzleEmailRuntimeStore(
           items: [],
           nextCursor: null,
           suppressedCount: 1,
-        });
-      }
-      // A controlled canary is one approved address by construction, and its
-      // contract already refuses any other shape. Leaving that path exact
-      // keeps the monthly delivery test unchanged by this paging.
-      if (batch.deliveryTest != null) {
-        if (endpoints.length !== 1) {
-          return EmailBatchResolutionPageSchema.parse({
-            items: [],
-            nextCursor: null,
-            suppressedCount: 1,
-          });
-        }
-        return EmailBatchResolutionPageSchema.parse({
-          items: [workItemFor(batch, endpoints[0]!, 1, batch.createdAt)],
-          nextCursor: null,
-          suppressedCount: 0,
         });
       }
       // An ordinary activation reaches everyone the snapshot names. Before
@@ -838,7 +743,7 @@ export function createDrizzleEmailRuntimeStore(
         return EmailRetryResolutionSchema.parse({ kind: 'expired' });
       }
       const batch = await persistedBatch(database, record.attempt.batchId);
-      if (!emailBatchMatchesDeploymentAuthorization(batch, deployment)) {
+      if (!deployment.workerEnabled) {
         return EmailRetryResolutionSchema.parse({ kind: 'ineligible' });
       }
       const retryAt = new Date(

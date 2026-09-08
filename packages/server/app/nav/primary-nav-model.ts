@@ -29,11 +29,6 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
     label: 'Text alerts',
     authorization: 'authenticated',
   },
-  {
-    href: '/delivery-tests',
-    label: 'Delivery tests',
-    authorization: 'authenticated',
-  },
   { href: '/admin', label: 'Readiness', authorization: 'district-admin' },
   { href: '/facilities', label: 'Schools', authorization: 'district-admin' },
   {

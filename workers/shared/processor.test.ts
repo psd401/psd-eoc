@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   DeliveryEvidenceSchema,
   type DeliveryEvidence,
-  type IntegrationTruthLabel,
 } from '@psd-eoc/contracts';
 
 import {
@@ -240,7 +239,6 @@ class MockAdapter implements AttemptIdempotentProviderAdapter {
   public readonly requests: ProviderSendRequest[] = [];
 
   public constructor(
-    public readonly truthLabel: IntegrationTruthLabel,
     private readonly handler: (
       request: ProviderSendRequest,
     ) => Promise<ProviderSendOutcome | unknown> = () =>
@@ -259,10 +257,6 @@ class RecoveringLiveAdapter extends MockAdapter {
   public recovery: ProviderRecoveryResult = { kind: 'missing' };
   public readonly recoveryRequests: ProviderSendRequest[] = [];
 
-  public constructor() {
-    super('live-verified');
-  }
-
   public recover(
     request: ProviderSendRequest,
   ): Promise<ProviderRecoveryResult> {
@@ -277,7 +271,6 @@ function runtime(
   writer = new MemoryEvidenceWriter(),
   options: Readonly<{
     maxAttempts?: number;
-    authorizeLive?: boolean;
     authorizeSend?: () => boolean | Promise<boolean>;
   }> = {},
 ) {
@@ -296,9 +289,6 @@ function runtime(
         jitterRatio: 0,
       },
       random: () => 0.5,
-      ...(options.authorizeLive === undefined
-        ? {}
-        : { authorizeLiveProvider: () => options.authorizeLive === true }),
       ...(options.authorizeSend === undefined
         ? {}
         : { authorizeProviderSend: options.authorizeSend }),
@@ -316,7 +306,7 @@ function deferred<T>() {
 
 describe('attempt-ID idempotent processing', () => {
   test('completed redelivery replays evidence without a duplicate provider send', async () => {
-    const adapter = new MockAdapter('mocked');
+    const adapter = new MockAdapter();
     const app = runtime(adapter);
     const item = workItem();
 
@@ -337,7 +327,7 @@ describe('attempt-ID idempotent processing', () => {
   });
 
   test('fails closed before evidence or provider I/O when current send policy denies', async () => {
-    const adapter = new MockAdapter('mocked');
+    const adapter = new MockAdapter();
     const app = runtime(adapter, new MemoryExecutionStore(), undefined, {
       authorizeSend: () => false,
     });
@@ -353,7 +343,7 @@ describe('attempt-ID idempotent processing', () => {
   });
 
   test('revalidates after attempted evidence and blocks revocation during its async write', async () => {
-    const adapter = new MockAdapter('mocked');
+    const adapter = new MockAdapter();
     const store = new MemoryExecutionStore();
     const writer = new DeferredAttemptEvidenceWriter();
     let eligible = true;
@@ -382,7 +372,7 @@ describe('attempt-ID idempotent processing', () => {
   });
 
   test('completed provider truth replays without consulting current send policy', async () => {
-    const adapter = new MockAdapter('mocked');
+    const adapter = new MockAdapter();
     const store = new MemoryExecutionStore();
     const writer = new MemoryEvidenceWriter();
     await runtime(adapter, store, writer, {
@@ -407,7 +397,7 @@ describe('attempt-ID idempotent processing', () => {
   });
 
   test('crash after durable completion resumes writeback without re-sending', async () => {
-    const adapter = new MockAdapter('mocked');
+    const adapter = new MockAdapter();
     const writer = new MemoryEvidenceWriter();
     writer.failOnceForState = 'provider-accepted';
     const app = runtime(adapter, new MemoryExecutionStore(), writer);
@@ -432,11 +422,11 @@ describe('attempt-ID idempotent processing', () => {
     ]);
   });
 
-  test('completed live truth replays read-only after live authorization is removed', async () => {
-    const adapter = new MockAdapter('live-verified');
+  test('completed truth replays read-only from a second processor', async () => {
+    const adapter = new MockAdapter();
     const store = new MemoryExecutionStore();
     const writer = new MemoryEvidenceWriter();
-    const live = runtime(adapter, store, writer, { authorizeLive: true });
+    const live = runtime(adapter, store, writer);
     const item = workItem(realBatch());
 
     await expect(live.processor.process(item)).resolves.toEqual(
@@ -452,22 +442,22 @@ describe('attempt-ID idempotent processing', () => {
     expect(store.claimCalls).toBe(1);
   });
 
-  test('in-progress live truth remains visible when current live authorization denies', async () => {
+  test('in-progress truth remains visible to a second processor', async () => {
     const provider = deferred<ProviderSendOutcome>();
     const started = deferred<void>();
-    const adapter = new MockAdapter('live-verified', () => {
+    const adapter = new MockAdapter(() => {
       started.resolve();
       return provider.promise;
     });
     const store = new MemoryExecutionStore();
     const writer = new MemoryEvidenceWriter();
-    const live = runtime(adapter, store, writer, { authorizeLive: true });
+    const live = runtime(adapter, store, writer);
     const item = workItem(realBatch());
 
     const first = live.processor.process(item);
     await started.promise;
 
-    const dark = runtime(adapter, store, writer, { authorizeLive: false });
+    const dark = runtime(adapter, store, writer);
     await expect(dark.processor.process(item)).resolves.toEqual({
       kind: 'in-progress',
       retryAfterMilliseconds: 1_000,
@@ -485,7 +475,7 @@ describe('attempt-ID idempotent processing', () => {
   test('crash after provider side effect relies on attempt-ID provider idempotency', async () => {
     let logicalSends = 0;
     const providerResults = new Map<string, ProviderSendOutcome>();
-    const adapter = new MockAdapter('mocked', (request) => {
+    const adapter = new MockAdapter((request) => {
       const existing = providerResults.get(request.idempotencyKey);
       if (existing !== undefined) return Promise.resolve(existing);
       logicalSends += 1;
@@ -547,7 +537,7 @@ describe('attempt-ID idempotent processing', () => {
   test('concurrent duplicate observes in-progress and cannot race a send', async () => {
     const provider = deferred<ProviderSendOutcome>();
     const started = deferred<void>();
-    const adapter = new MockAdapter('mocked', () => {
+    const adapter = new MockAdapter(() => {
       started.resolve();
       return provider.promise;
     });
@@ -570,7 +560,7 @@ describe('attempt-ID idempotent processing', () => {
   });
 
   test('ambiguous provider side effect becomes unknown and never auto-resends', async () => {
-    const adapter = new MockAdapter('mocked', () =>
+    const adapter = new MockAdapter(() =>
       Promise.reject(new Error('connection ended after request write')),
     );
     const app = runtime(adapter);
@@ -597,7 +587,7 @@ describe('attempt-ID idempotent processing', () => {
   });
 
   test('malformed provider outcome becomes unknown without a blind resend', async () => {
-    const adapter = new MockAdapter('mocked', () =>
+    const adapter = new MockAdapter(() =>
       Promise.resolve({ state: 'delivered', provider: 'mock-expo' }),
     );
     const app = runtime(adapter);
@@ -621,7 +611,7 @@ describe('attempt-ID idempotent processing', () => {
 
 describe('bounded retries and live-provider fail closed', () => {
   test('safe retries stop at the bound and produce failed plus DLQ', async () => {
-    const adapter = new MockAdapter('mocked', () =>
+    const adapter = new MockAdapter(() =>
       Promise.reject(
         new ProviderDispatchError('PROVIDER_THROTTLED', 'safe-to-retry'),
       ),
@@ -666,32 +656,5 @@ describe('bounded retries and live-provider fail closed', () => {
       'attempted',
       'failed',
     ]);
-  });
-
-  test('live-verified adapter requires an explicit successful gate', async () => {
-    const adapter = new MockAdapter('live-verified');
-    const item = workItem(realBatch());
-
-    await expect(runtime(adapter).processor.process(item)).rejects.toEqual(
-      expect.objectContaining({ code: 'LIVE_PROVIDER_DISABLED' }),
-    );
-    await expect(
-      runtime(adapter, undefined, undefined, {
-        authorizeLive: false,
-      }).processor.process(item),
-    ).rejects.toEqual(
-      expect.objectContaining({ code: 'LIVE_PROVIDER_DISABLED' }),
-    );
-    expect(adapter.requests).toHaveLength(0);
-  });
-
-  test('configured-unverified and blocked adapters cannot match canonical dispatch work', async () => {
-    for (const truthLabel of ['configured-unverified', 'blocked'] as const) {
-      const adapter = new MockAdapter(truthLabel);
-      await expect(
-        runtime(adapter).processor.process(workItem()),
-      ).rejects.toEqual(expect.objectContaining({ code: 'ADAPTER_MISMATCH' }));
-      expect(adapter.requests).toHaveLength(0);
-    }
   });
 });

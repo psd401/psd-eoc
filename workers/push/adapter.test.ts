@@ -282,7 +282,6 @@ describe('ledgered Expo live adapter', () => {
     expect(app.adapter).toMatchObject({
       channel: 'push',
       integrationId: 'expo-push',
-      truthLabel: 'live-verified',
       deliverySemantics: 'attempt-id-idempotent',
     });
     expect(app.transport.calls).toBe(1);

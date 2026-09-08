@@ -44,7 +44,6 @@ function isUnroutableEmail(value: string): boolean {
 export class MockSesEmailAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'email' as const;
   public readonly integrationId = SES_EMAIL_INTEGRATION_ID;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_SES_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -64,9 +63,7 @@ export class MockSesEmailAdapter implements AttemptIdempotentProviderAdapter {
       workItem.attempt.channel !== 'email' ||
       workItem.endpoint.channel !== 'email' ||
       workItem.batch.rosterPopulation !== 'synthetic' ||
-      workItem.batch.integrationStatus.integrationId !==
-        SES_EMAIL_INTEGRATION_ID ||
-      workItem.batch.integrationStatus.label !== 'mocked' ||
+      workItem.batch.integrationId !== SES_EMAIL_INTEGRATION_ID ||
       !isUnroutableEmail(workItem.endpoint.email)
     ) {
       throw new ProviderDispatchError(

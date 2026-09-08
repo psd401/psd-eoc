@@ -20,7 +20,6 @@ import {
 } from 'bun:test';
 import { sql } from 'drizzle-orm';
 import { migrate as migrateWithPostgres } from 'drizzle-orm/postgres-js/migrator';
-import { MUTATION_CAPABILITY_IDS } from '@psd-eoc/contracts';
 
 import {
   executeOperationWithCleanup,
@@ -33,6 +32,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../db/client';
 import { requireSyntheticTestDatabaseUrl } from '../lib/testing/database';
+import { mutationCapabilityEnum } from '../db/schema/enums';
 import { migrationsFolder } from './migrate';
 
 /**
@@ -470,9 +470,10 @@ describeWithDatabase('retiring removed capability values', () => {
         expect(after).not.toContain('set-user-roles');
         expect(after).not.toContain('set-fanout-control');
         // `applyRetirement` runs the whole folder, including later append-only
-        // capability additions. The final enum must match the canonical
-        // contract exactly, in order, after every retirement and addition.
-        expect(after).toEqual([...MUTATION_CAPABILITY_IDS]);
+        // capability additions and the values 0049 retired in place, which
+        // PostgreSQL cannot drop. The final enum must match the persisted order
+        // the schema declares, exactly and in order.
+        expect(after).toEqual([...mutationCapabilityEnum.enumValues]);
       },
     );
   });

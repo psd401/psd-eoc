@@ -19,7 +19,6 @@ import {
   type AttemptExecutionStore,
   type AttemptIdempotentProviderAdapter,
   type CompleteAttemptExecutionRequest,
-  type LiveProviderAuthorizer,
   type ProviderRecoveryResult,
   type ProviderSendOutcome,
   type ProviderSendRequest,
@@ -72,7 +71,6 @@ export interface ExpoPushWorkerOptions {
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
-  readonly authorizeLiveProvider?: LiveProviderAuthorizer;
 }
 
 /**
@@ -310,7 +308,6 @@ function failClosedExpoAdapter(
   return Object.freeze({
     channel: adapter.channel,
     integrationId: adapter.integrationId,
-    truthLabel: adapter.truthLabel,
     provider: adapter.provider,
     deliverySemantics: adapter.deliverySemantics,
     ...(adapter.recover === undefined
@@ -727,7 +724,7 @@ export class ExpoPushWorker {
       throw new TypeError('Expo endpoint eligibility checker is invalid.');
     }
     if (
-      options.adapter.truthLabel === 'live-verified' &&
+      options.adapter instanceof LedgeredExpoPushAdapter &&
       !LedgeredExpoPushAdapter.usesEndpointEligibility(
         options.adapter,
         options.endpointEligibility,
@@ -754,9 +751,6 @@ export class ExpoPushWorker {
         ? {}
         : { leaseMilliseconds: options.leaseMilliseconds }),
       ...(options.random === undefined ? {} : { random: options.random }),
-      ...(options.authorizeLiveProvider === undefined
-        ? {}
-        : { authorizeLiveProvider: options.authorizeLiveProvider }),
       authorizeProviderSend: (workItem) =>
         options.endpointEligibility.isEligible(workItem),
     });
@@ -891,8 +885,5 @@ export function createProductionExpoPushWorker(
       ? {}
       : { leaseMilliseconds: options.leaseMilliseconds }),
     ...(options.random === undefined ? {} : { random: options.random }),
-    ...(options.authorizeLiveProvider === undefined
-      ? {}
-      : { authorizeLiveProvider: options.authorizeLiveProvider }),
   });
 }

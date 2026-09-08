@@ -109,10 +109,7 @@ function smsWorkItem(
       channel: 'sms',
       body,
     },
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: 'aws-eum-sms',
-    },
+    integrationId: 'aws-eum-sms',
   });
   return Object.freeze({
     batch,
@@ -500,7 +497,7 @@ describe('AWS EUM SMS production runtime boundary', () => {
     await expect(
       value.runtime.processQueueAttempt(smsWorkItem(), QUEUE_INVOCATION),
     ).rejects.toEqual(
-      expect.objectContaining({ code: 'LIVE_PROVIDER_DISABLED' }),
+      expect.objectContaining({ code: 'PROVIDER_SEND_DISABLED' }),
     );
     expect(value.executionStore.lookupCalls).toBe(1);
     expect(value.executionStore.claimCalls).toBe(0);
@@ -530,11 +527,8 @@ describe('AWS EUM SMS production runtime boundary', () => {
     for (const mode of [
       { state: 'unexpected' },
       { state: 'enabled', authorizeLiveProvider: () => true },
-      { state: 'enabled', authorizeLiveSend: () => true },
       {
         state: 'enabled',
-        authorizeLiveProvider: () => true,
-        authorizeLiveSend: () => true,
       },
     ]) {
       expect(() => harness({ mode: mode as SmsRuntimeMode })).toThrow(
@@ -589,8 +583,6 @@ describe('AWS EUM SMS production runtime boundary', () => {
       const value = harness({
         mode: {
           state: 'enabled',
-          authorizeLiveProvider: () => true,
-          authorizeLiveSend: () => true,
           authorizeProviderSend: () => ({
             authorized: true,
             timeToLiveSeconds: 300,
@@ -981,8 +973,6 @@ describe('AWS EUM SMS production runtime boundary', () => {
     const value = harness({
       mode: {
         state: 'enabled',
-        authorizeLiveProvider: () => true,
-        authorizeLiveSend: () => true,
         authorizeProviderSend: () => ({
           authorized: true,
           timeToLiveSeconds: 300,
@@ -1052,8 +1042,6 @@ describe('AWS EUM SMS production runtime boundary', () => {
     const value = harness({
       mode: {
         state: 'enabled',
-        authorizeLiveProvider: () => true,
-        authorizeLiveSend: () => true,
         authorizeProviderSend: () => ({
           authorized: true,
           timeToLiveSeconds: 300,
@@ -1119,8 +1107,6 @@ describe('AWS EUM SMS production runtime boundary', () => {
     const value = harness({
       mode: {
         state: 'enabled',
-        authorizeLiveProvider: () => true,
-        authorizeLiveSend: () => true,
         authorizeProviderSend: () => ({
           authorized: true,
           timeToLiveSeconds: 300,
@@ -1196,8 +1182,6 @@ describe('AWS EUM SMS production runtime boundary', () => {
     const value = harness({
       mode: {
         state: 'enabled',
-        authorizeLiveProvider: () => true,
-        authorizeLiveSend: () => true,
         authorizeProviderSend: () => ({
           authorized: true,
           timeToLiveSeconds: 300,

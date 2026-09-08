@@ -306,7 +306,6 @@ class MemoryEvidenceWriter implements AttemptEvidenceWriter {
 class DeliveredExpoAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -330,7 +329,6 @@ class DeliveredExpoAdapter implements AttemptIdempotentProviderAdapter {
 class AccessorDeliveredExpoAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -355,7 +353,6 @@ class AccessorDeliveredExpoAdapter implements AttemptIdempotentProviderAdapter {
 class CorruptProviderExpoAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -376,7 +373,6 @@ class CorruptNonSuccessReferenceAdapter
 {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -395,7 +391,6 @@ class CorruptNonSuccessReferenceAdapter
 class StatefulRecoveryErrorAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -430,7 +425,6 @@ class StatefulRecoveryErrorAdapter implements AttemptIdempotentProviderAdapter {
 class OverBudgetRecoveryAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
   public recoveries = 0;
@@ -790,7 +784,6 @@ describe('Expo durable attempt worker', () => {
           endpointInvalidator: new RecordingInvalidator(),
           receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
           endpointEligibility: workerChecker,
-          authorizeLiveProvider: () => true,
         }),
     ).toThrow('Live Expo adapter endpoint eligibility checker is invalid.');
   });
@@ -831,7 +824,6 @@ describe('Expo durable attempt worker', () => {
         evidenceWriter: new MemoryEvidenceWriter(),
         endpointInvalidator: new RecordingInvalidator(),
         receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
-        authorizeLiveProvider: () => true,
         endpointEligibilityService: {
           serviceOrigin: 'https://eoc.example.test',
           bearerToken: 'synthetic-production-worker-token-000000000001',
@@ -1554,7 +1546,6 @@ describe('Expo durable attempt worker', () => {
       endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       retryPolicy: RETRY_POLICY,
       random: () => 0.5,
-      authorizeLiveProvider: () => true,
     });
     const items = [
       workItem(realBatch(), {
@@ -1615,7 +1606,6 @@ describe('Expo durable attempt worker', () => {
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
       endpointEligibility: sharedEligibility,
-      authorizeLiveProvider: () => true,
     });
     const item = workItem(realBatch());
 

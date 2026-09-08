@@ -6,7 +6,6 @@ import {
 } from '@psd-eoc/contracts';
 
 import type { ResolveAudienceInput } from '../roster/resolve';
-import { deliveryTestEndpointReferenceDigest } from '../testing/e2e-delivery';
 import {
   EmailEndpointResolutionError,
   resolveEmailEndpoints,
@@ -49,19 +48,6 @@ const GROUP = Object.freeze({
   purpose: 'building' as const,
   facilityId: IDS.facility,
 });
-
-const TARGET_DIGEST = deliveryTestEndpointReferenceDigest([
-  {
-    recipientId: IDS.canaryRecipient,
-    endpointId: IDS.canaryEmail,
-    channel: 'email',
-  },
-  {
-    recipientId: IDS.canaryRecipient,
-    endpointId: IDS.canaryPush,
-    channel: 'push',
-  },
-]);
 
 function audienceInput(): ResolveAudienceInput {
   return {
@@ -118,7 +104,6 @@ function audienceInput(): ResolveAudienceInput {
 function emailBatch(
   overrides: Readonly<{
     endpointCount?: number;
-    endpointReferenceDigest?: string;
     rosterSnapshotId?: string;
   }> = {},
 ): DispatchBatch {
@@ -136,12 +121,6 @@ function emailBatch(
     },
     rosterSnapshotId: overrides.rosterSnapshotId ?? IDS.roster,
     rosterPopulation: 'staff',
-    deliveryTest: {
-      purpose: 'monthly-live-delivery-test',
-      targetSet: { id: IDS.targetSet, version: 1 },
-      endpointReferenceDigest:
-        overrides.endpointReferenceDigest ?? TARGET_DIGEST,
-    },
     requestId: IDS.request,
     authorization: {
       kind: 'human-confirmed',
@@ -158,20 +137,12 @@ function emailBatch(
       purpose: 'activation',
       classificationMarker: 'DRILL',
       channel: 'email',
-      subject: '[DRILL] Monthly delivery test',
+      subject: '[DRILL] Staff drill',
       textBody: '[DRILL] LIVE CANARY — TRAINING ONLY.',
     },
-    integrationStatus: {
-      integrationId: 'ses-email',
-      label: 'live-verified',
-      verifiedAt: TIMESTAMP,
-      verifiedByUserId: IDS.actor,
-      authorizationReference: 'synthetic-product-owner-approval',
-      reasonCode: null,
-      observedAt: TIMESTAMP,
-    },
+    integrationId: 'ses-email',
     sequence: 1,
-    endpointCount: overrides.endpointCount ?? 1,
+    endpointCount: overrides.endpointCount ?? 2,
     createdAt: TIMESTAMP,
   });
 }
@@ -179,14 +150,12 @@ function emailBatch(
 function evidenceFor(
   query: EmailEndpointPolicyQuery,
   overrides: Readonly<{
-    canaryApproved?: boolean;
     canaryStatus?: 'active' | 'disabled' | 'invalid';
   }> = {},
 ): readonly Readonly<{
   recipientId: string;
   endpointId: string;
   status: 'active' | 'disabled' | 'invalid';
-  approvedForDeliveryTest: boolean;
 }>[] {
   return query.candidates.map((candidate) => ({
     ...candidate,
@@ -194,9 +163,6 @@ function evidenceFor(
       candidate.endpointId === IDS.canaryEmail
         ? (overrides.canaryStatus ?? 'active')
         : 'active',
-    approvedForDeliveryTest:
-      candidate.endpointId === IDS.canaryEmail &&
-      (overrides.canaryApproved ?? true),
   }));
 }
 
@@ -215,7 +181,7 @@ async function expectResolutionFailure(
 }
 
 describe('email exact-target destination boundary', () => {
-  test('excludes ordinary staff and sends no destination to the policy store', async () => {
+  test('resolves every active staff address and sends no destination to the policy store', async () => {
     const observedQueries: EmailEndpointPolicyQuery[] = [];
     const store: EmailEndpointPolicyStore = {
       loadEndpointPolicy(query) {
@@ -248,12 +214,14 @@ describe('email exact-target destination boundary', () => {
     );
 
     expect(observedQueries).toHaveLength(1);
-    expect(resolved).toHaveLength(1);
-    expect(resolved[0]?.recipientId).toBe(IDS.canaryRecipient);
-    expect(resolved[0]?.endpoint.email).toBe(CANARY_ADDRESS);
-    expect(resolved.map((item) => item.endpoint.email)).not.toContain(
+    expect(resolved.map((item) => item.recipientId)).toEqual([
+      IDS.canaryRecipient,
+      IDS.ordinaryRecipient,
+    ]);
+    expect(resolved.map((item) => item.endpoint.email)).toEqual([
+      CANARY_ADDRESS,
       ORDINARY_ADDRESS,
-    );
+    ]);
   });
 
   test('roster mismatch fails before policy lookup or destination release', async () => {
@@ -282,13 +250,27 @@ describe('email exact-target destination boundary', () => {
     expect(returnedDestination).toBeUndefined();
   });
 
-  test('digest mismatch fails closed without returning an address', async () => {
-    let returnedDestination: string | undefined;
+  test('drops an endpoint whose current status is no longer active', async () => {
     const store: EmailEndpointPolicyStore = {
       loadEndpointPolicy(query) {
-        if (query.deliveryTest?.endpointReferenceDigest !== TARGET_DIGEST) {
-          throw new Error('destination-free digest mismatch');
-        }
+        return Promise.resolve(evidenceFor(query, { canaryStatus: 'invalid' }));
+      },
+    };
+
+    const resolved = await resolveEmailEndpoints(
+      { batch: emailBatch(), audience: audienceInput() },
+      store,
+    );
+
+    expect(resolved.map((item) => item.endpoint.email)).toEqual([
+      ORDINARY_ADDRESS,
+    ]);
+  });
+
+  test('count mismatch returns no partial destination', async () => {
+    let returnedDestinations: readonly string[] | undefined;
+    const store: EmailEndpointPolicyStore = {
+      loadEndpointPolicy(query) {
         return Promise.resolve(evidenceFor(query));
       },
     };
@@ -296,54 +278,7 @@ describe('email exact-target destination boundary', () => {
     await expectResolutionFailure(
       resolveEmailEndpoints(
         {
-          batch: emailBatch({ endpointReferenceDigest: 'e'.repeat(64) }),
-          audience: audienceInput(),
-        },
-        store,
-      ).then((resolved) => {
-        returnedDestination = resolved[0]?.endpoint.email;
-      }),
-      'EMAIL_ENDPOINT_POLICY_INVALID',
-    );
-    expect(returnedDestination).toBeUndefined();
-  });
-
-  test.each([
-    {
-      name: 'revoked eligibility',
-      endpointCount: 1,
-      canaryApproved: false,
-      canaryStatus: 'active' as const,
-    },
-    {
-      name: 'invalid current endpoint status',
-      endpointCount: 1,
-      canaryApproved: true,
-      canaryStatus: 'invalid' as const,
-    },
-    {
-      name: 'channel target count mismatch',
-      endpointCount: 2,
-      canaryApproved: true,
-      canaryStatus: 'active' as const,
-    },
-  ])('$name returns no partial destination', async (scenario) => {
-    let returnedDestinations: readonly string[] | undefined;
-    const store: EmailEndpointPolicyStore = {
-      loadEndpointPolicy(query) {
-        return Promise.resolve(
-          evidenceFor(query, {
-            canaryApproved: scenario.canaryApproved,
-            canaryStatus: scenario.canaryStatus,
-          }),
-        );
-      },
-    };
-
-    await expectResolutionFailure(
-      resolveEmailEndpoints(
-        {
-          batch: emailBatch({ endpointCount: scenario.endpointCount }),
+          batch: emailBatch({ endpointCount: 1 }),
           audience: audienceInput(),
         },
         store,

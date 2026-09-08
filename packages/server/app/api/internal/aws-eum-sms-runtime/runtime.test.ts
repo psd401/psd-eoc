@@ -50,10 +50,6 @@ function fixture(overrides: Partial<SmsRuntimeStore> = {}) {
       calls.push({ method: 'authorizeProviderSend', input });
       return Promise.resolve({ authorized: false });
     },
-    authorizeLiveSend(input) {
-      calls.push({ method: 'authorizeLiveSend', input });
-      return Promise.resolve(false);
-    },
     executeLifecycle(input) {
       calls.push({ method: 'executeLifecycle', input });
       return Promise.resolve({});

@@ -512,9 +512,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
           title: '[DRILL] Synthetic lockdown drill',
           body: '[DRILL] Synthetic records integration notification.',
         },
-        integrationStatusId: SEEDED.integrationExpoPush,
         integrationId: 'expo-push',
-        integrationLabel: 'mocked',
       },
       {
         intentId: FIXTURE.northNotificationIntent,
@@ -535,9 +533,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
           subject: '[DRILL] Synthetic lockdown drill',
           textBody: '[DRILL] Synthetic records integration notification.',
         },
-        integrationStatusId: SEEDED.integrationSesEmail,
         integrationId: 'ses-email',
-        integrationLabel: 'mocked',
       },
     ]);
   });

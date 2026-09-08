@@ -99,14 +99,11 @@ The current synthesized stack contains exactly these parameters:
 <!-- docs-contract:template-parameters:start -->
 
 - `BootstrapVersion`
-- `DeliveryTestProductOwnerUserId`
-- `DirectPushCredentialVerificationReference`
 - `EnableAwsEumSmsWorker`
 - `EnableDirectPush`
 - `EnableEmailWorker`
 - `EnableExpoPushWorker`
 - `EnableMediaMalwareScanning`
-- `ExpoCredentialVerificationReference`
 - `GoogleGroupsSecretArn`
 - `GoogleOauthSecretArn`
 - `InitialAccessGroupEmail`
@@ -121,11 +118,9 @@ The current synthesized stack contains exactly these parameters:
 - `RollbackApplicationImageDigest`
 - `RollbackApplicationRepository`
 - `RuntimeDatabaseIdleTimeoutSeconds`
-- `SesCredentialVerificationReference`
 - `SmsDestinationCountryCode`
 - `SmsHelpMessage`
 - `SmsOriginationIdentityArn`
-- `SmsRegistrationVerificationReference`
 - `SmsStopMessage`
 <!-- docs-contract:template-parameters:end -->
 
@@ -166,9 +161,8 @@ updates:
 If the second update fails, CloudFormation therefore returns to the already-dark
 first update rather than restoring live provider workers. Clearing the rollback
 selector later also remains dark until a separately approved deployment
-explicitly re-verifies and re-enables a provider. The SMS registration reference
-may remain because it also proves retained carrier resource provisioning;
-`EnableAwsEumSmsWorker=false` remains the send boundary.
+explicitly re-enables a provider. `EnableAwsEumSmsWorker=false` remains the
+send boundary.
 
 The source also defines three canary-only parameters inside the full monitoring
 composition: `MonitoringCanaryCredentialSecretArn`,
@@ -217,11 +211,8 @@ Enabling the worker can consume retained queue items. While its desired count
 is still zero, review the queue and append-only attempt state by sanitized ID,
 establish a quiescence fence, and reconcile every retained or ambiguous item.
 Do not purge, redrive, replay, or inspect message bodies. Physical proof still
-requires an authenticated human to initiate one bounded drill in the running
-application on each approved device. The delivery-test target mode for this
-drill is `controlled-push-canary`, which permits exactly one current
-product-owner-approved push endpoint without requiring the unrelated email
-provider; ordinary delivery-test target sets still require push and email.
+requires an authenticated human to start one bounded drill in the running
+application on each approved device.
 
 ## Direct APNs/FCM activation and cutover
 
@@ -288,16 +279,13 @@ verifying, idempotent callback and deletes it only after durable acceptance.
 That consumer has no SES authority and follows the application independently
 of send enablement. The email send task definition and service always exist for
 review, but desired count is zero unless `EMAIL_WORKER_ENABLED` is exactly
-`true` and `SES_CREDENTIAL_VERIFICATION_REFERENCE` is a bounded, non-secret
-reference to retained sender, production-access, callback, and suppression
-evidence.
+`true`.
 
-After deployment, an authenticated administrator uses “Verify and enable
-email” on the integrations page. That one action appends the `live-verified`
-observation bound to the deployment reference and enables the channel; it does
-not send a message. All provider I/O remains behind the existing one-recipient
-DRILL preview and the authenticated human activation action. The worker
-rechecks that exact endpoint and channel state immediately before SES.
+After deployment, an authenticated administrator sets the email channel to
+**Enabled** on the integrations page. That one action enables the channel; it
+does not send a message. All provider I/O remains behind the activation
+preview and the authenticated human activation action. The worker rechecks
+that exact endpoint and channel state immediately before SES.
 
 Before changing `EMAIL_WORKER_ENABLED` from its default `false`, inspect the
 retained email queue and append-only attempt/evidence state by sanitized ID. Do
@@ -340,14 +328,17 @@ authoritative country boundary because AWS protect configurations default
 omitted countries to allow. The fixed five-minute lifetime includes time spent
 waiting in SQS and all retries; it is not restarted when the worker resumes.
 
-The carrier-registration evidence reference gates provider provisioning and
-worker readiness; it is not the live channel-change authorization. Separately,
-the application records `live-verified` with the canonical digest of the exact
-product-owner channel-change artifact. Only that authenticated human may consume
-the artifact and enable the channel while the deployed worker is ready. A real
-handset drill is still human-only. Use
-`controlled-sms-canary`, which accepts exactly one current, independently
-approved SMS endpoint; no automation starts the drill or sends a real message.
+The stack registers an EventBridge event destination
+(`psd-eoc-sms-eventbridge`, every event type) on the `psd-eoc-sms`
+configuration set through a custom resource, because CloudFormation has no
+resource for that destination type. Without it AWS publishes no delivery-status
+events, the `psd-eoc-sms-delivery-events` rule stays silent, and the worker
+records nothing after provider acceptance.
+
+`EnableAwsEumSmsWorker` runs the worker; the SMS channel itself is enabled by
+an authenticated administrator on the integrations page. A real handset drill
+is still human-only: an authenticated human starts it in the running
+application, and no automation sends a real message.
 
 ## Validate without a provider
 

@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   ChannelConfigurationSchema,
   IntegrationHealthSchema,
-  IntegrationStatusSchema,
   StaleRosterReportSchema,
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -13,82 +12,35 @@ import {
 } from './integrations-admin-view';
 
 const AT = '2026-08-10T12:00:00.000Z';
-const USER_ID = '00000000-0000-4000-8000-000000002650';
 const SNAPSHOT_ID = '00000000-0000-4000-8000-000000002651';
 const RECIPIENT_ID = '00000000-0000-4000-8000-000000002652';
 const GROUP_ID = '00000000-0000-4000-8000-000000002653';
 const FACILITY_ID = '00000000-0000-4000-8000-000000002654';
 
-const STATUSES = [
-  IntegrationStatusSchema.parse({
-    integrationId: 'expo-push',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: AT,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 'ses-email',
-    label: 'configured-unverified',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: AT,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 'google-groups',
-    label: 'live-verified',
-    verifiedAt: AT,
-    verifiedByUserId: USER_ID,
-    authorizationReference: 'approved-integration-verification',
-    reasonCode: null,
-    observedAt: AT,
-  }),
-  IntegrationStatusSchema.parse({
+const CHANNELS = [
+  ChannelConfigurationSchema.parse({
     integrationId: 'aws-eum-sms',
-    label: 'blocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: 'CARRIER_REGISTRATION_PENDING',
-    observedAt: AT,
+    enabled: false,
+    changedAt: AT,
+  }),
+  ChannelConfigurationSchema.parse({
+    integrationId: 'mobile-push',
+    enabled: true,
+    changedAt: AT,
+  }),
+  ChannelConfigurationSchema.parse({
+    integrationId: 'ses-email',
+    enabled: false,
+    changedAt: AT,
   }),
 ];
 
 const PROPS = Object.freeze({
   integrationHealth: IntegrationHealthSchema.parse({
-    statuses: STATUSES,
+    channels: CHANNELS,
     observedAt: AT,
   }),
-  channelConfigurations: [
-    ChannelConfigurationSchema.parse({
-      integrationId: 'expo-push',
-      enabled: true,
-      status: STATUSES[0],
-      changedAt: AT,
-    }),
-    ChannelConfigurationSchema.parse({
-      integrationId: 'aws-eum-sms',
-      enabled: false,
-      status: STATUSES[3],
-      changedAt: AT,
-    }),
-    ChannelConfigurationSchema.parse({
-      integrationId: 'ses-email',
-      enabled: false,
-      status: STATUSES[1],
-      changedAt: AT,
-    }),
-    ChannelConfigurationSchema.parse({
-      integrationId: 'google-groups',
-      enabled: false,
-      status: STATUSES[2],
-      changedAt: AT,
-    }),
-  ],
+  channelConfigurations: CHANNELS,
   lastRosterSync: {
     population: 'synthetic' as const,
     outcome: 'partial-rejected' as const,
@@ -125,52 +77,32 @@ function render(props: IntegrationsAdminViewProps = PROPS): string {
 }
 
 describe('integrations admin view', () => {
-  test('renders a compact summary of observed integration state', () => {
+  test('renders a compact summary of channel state', () => {
     const markup = render();
 
     expect(markup).toContain(
       `<main aria-labelledby="integrations-admin-heading" id="main-content" tabindex="-1">`,
     );
     expect(markup).toContain(
-      '<strong>Current integration state:</strong> 1 of 4 observed integrations are live-verified; 1 of 4 notification channels are enabled.',
+      '<strong>Current channel state:</strong> 1 of 3 notification channels are enabled, observed',
     );
-    expect(markup).toContain(
-      'Channel enablement is configuration state, not proof that a notification was sent or received.',
-    );
+    expect(markup).toContain(`<time dateTime="${AT}">${AT}</time>`);
     expect(markup).not.toContain('TEST — SYNTHETIC RECIPIENTS ONLY');
     expect(markup).not.toContain('class="test-boundary"');
     expect(markup).not.toContain('<nav');
   });
 
-  test('shows every truth label, channel state, and safe health evidence as text', () => {
+  test('offers one enable switch per channel and nothing else', () => {
     const markup = render();
 
-    for (const label of [
-      'mocked',
-      'configured-unverified',
-      'live-verified',
-      'blocked',
-    ]) {
-      expect(markup).toContain(label);
-    }
     expect(markup).toContain('Enabled');
     expect(markup).toContain('Disabled');
-    expect(markup).toContain('CARRIER_REGISTRATION_PENDING');
     expect(markup).toContain('partial-rejected');
     expect(markup).toContain('Recipients shown without a usable endpoint');
     expect(markup).toContain(
-      'This is a bounded page of endpoint evidence, not a district-wide total.',
+      '<caption>Administrative channel enablement</caption>',
     );
-    expect(markup).toContain('<dd>1</dd>');
-    expect(markup).toContain(`<time dateTime="${AT}">${AT}</time>`);
-    expect(markup).toContain(
-      '<caption>Current external integration truth</caption>',
-    );
-    expect(markup).toContain(
-      '<caption>Administrative channel enablement and truth</caption>',
-    );
-    expect(markup).toContain('<th scope="col">Truth label</th>');
-    expect(markup).toContain('<th scope="row">expo-push</th>');
+    expect(markup).toContain('<th scope="row">aws-eum-sms</th>');
     expect(markup).toMatch(
       /<form action="\/integrations\/api" method="post">/u,
     );
@@ -180,66 +112,21 @@ describe('integrations admin view', () => {
     expect(markup).toMatch(
       /<input[^>]*name="idempotencyKey"[^>]*value="[0-9a-f-]{36}"/u,
     );
-    expect(markup).toContain(
-      'Paste only the non-secret, change-specific JSON artifact issued for this integration and requested state.',
-    );
+    // Every channel, including SMS, can be switched on from the page.
     expect(markup).toMatch(
-      /<textarea[^>]*name="authorization"[^>]*required=""[^>]*><\/textarea>/u,
+      /name="integrationId" value="aws-eum-sms"[\s\S]*?<option value="true">Enabled<\/option>/u,
     );
-    expect(markup).not.toContain('productOwnerApprovalReference');
-    expect(markup).toMatch(
-      /name="integrationId" value="aws-eum-sms"[\s\S]*?<option disabled="" value="true">Enabled<\/option>/u,
-    );
-    expect(markup).toContain('Verify and enable email');
-    expect(markup).toContain(
-      'Uses the retained, address-free SES verification reference configured on this deployment.',
-    );
-    expect(markup).toMatch(/name="intent" value="verify-email-integration"/u);
-  });
-
-  test('offers deployment re-verification only while live SES remains enabled', () => {
-    const liveEmailStatus = IntegrationStatusSchema.parse({
-      integrationId: 'ses-email',
-      label: 'live-verified',
-      verifiedAt: AT,
-      verifiedByUserId: USER_ID,
-      authorizationReference: 'ses-deployment-reference-v1',
-      reasonCode: null,
-      observedAt: AT,
-    });
-    const configuration = ChannelConfigurationSchema.parse({
-      integrationId: 'ses-email',
-      enabled: true,
-      status: liveEmailStatus,
-      changedAt: AT,
-    });
-    const enabledMarkup = render({
-      ...PROPS,
-      channelConfigurations: PROPS.channelConfigurations.map((item) =>
-        item.integrationId === 'ses-email' ? configuration : item,
-      ),
-    });
-
-    expect(enabledMarkup).toContain('Re-verify email deployment');
-    expect(enabledMarkup).toMatch(
-      /name="intent" value="verify-email-integration"/u,
-    );
-
-    const disabledMarkup = render({
-      ...PROPS,
-      channelConfigurations: PROPS.channelConfigurations.map((item) =>
-        item.integrationId === 'ses-email'
-          ? { ...configuration, enabled: false }
-          : item,
-      ),
-    });
-    expect(disabledMarkup).not.toContain('Re-verify email deployment');
+    expect(markup).not.toContain('Truth label');
+    expect(markup).not.toContain('authorization');
+    expect(markup).not.toContain('verificationReference');
+    expect(markup).not.toContain('verify-email-integration');
+    expect(markup).not.toContain('<option disabled=""');
   });
 
   test('renders explicit empty and unknown states', () => {
     const markup = render({
       integrationHealth: IntegrationHealthSchema.parse({
-        statuses: [],
+        channels: [],
         observedAt: AT,
       }),
       channelConfigurations: [],
@@ -255,48 +142,9 @@ describe('integrations admin view', () => {
       }),
     });
 
-    expect(markup).toContain('No integration observations are available.');
     expect(markup).toContain('No notification channels are configured.');
     expect(markup).toContain('No roster synchronization result is available.');
     expect(markup).toContain('<dd>unknown</dd>');
     expect(markup).toContain('<dd>None recorded</dd>');
-  });
-
-  test('renders an executable initial mobile-push verification path', () => {
-    const mobileStatus = IntegrationStatusSchema.parse({
-      integrationId: 'mobile-push',
-      label: 'configured-unverified',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: AT,
-    });
-    const markup = render({
-      ...PROPS,
-      integrationHealth: IntegrationHealthSchema.parse({
-        statuses: [...STATUSES, mobileStatus],
-        observedAt: AT,
-      }),
-      channelConfigurations: [
-        ...PROPS.channelConfigurations,
-        ChannelConfigurationSchema.parse({
-          integrationId: 'mobile-push',
-          enabled: false,
-          status: mobileStatus,
-          changedAt: AT,
-        }),
-      ],
-    });
-
-    expect(markup).toMatch(
-      /name="integrationId" value="mobile-push"[\s\S]*?<option value="true">Enabled<\/option>/u,
-    );
-    expect(markup).toMatch(
-      /<input(?=[^>]*name="verificationReference")(?=[^>]*required="")[^>]*>/u,
-    );
-    expect(markup).toContain(
-      'Saving Enabled appends live verification and enables the channel atomically.',
-    );
   });
 });

@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import {
   RecordDeliveryEvidenceInputSchema,
   UuidSchema,
-  type IntegrationTruthLabel,
 } from '@psd-eoc/contracts';
 
 import {
@@ -109,7 +108,6 @@ export interface SesV2EmailAdapterOptions {
   readonly client: SesV2Client;
   readonly sendLedger: DurableSesSendLedger;
   readonly fromEmailAddress: string;
-  readonly truthLabel: IntegrationTruthLabel;
 }
 
 export type SesV2EmailAdapterErrorCode =
@@ -167,7 +165,6 @@ function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
   if (
     options === null ||
     typeof options !== 'object' ||
-    options.truthLabel !== 'live-verified' ||
     options.client === null ||
     typeof options.client !== 'object' ||
     typeof options.client.sendEmail !== 'function' ||
@@ -201,9 +198,7 @@ function parseWork(request: ProviderSendRequest): Readonly<{
     workItem.batch.channel !== 'email' ||
     workItem.attempt.channel !== 'email' ||
     workItem.endpoint.channel !== 'email' ||
-    workItem.batch.integrationStatus.integrationId !==
-      SES_EMAIL_INTEGRATION_ID ||
-    workItem.batch.integrationStatus.label !== 'live-verified' ||
+    workItem.batch.integrationId !== SES_EMAIL_INTEGRATION_ID ||
     workItem.batch.rosterPopulation === 'synthetic'
   ) {
     throw new ProviderDispatchError(
@@ -422,13 +417,12 @@ function parseLedgerClaim(
 }
 
 /**
- * Live SES adapter. Construction and direct sends both fail closed unless the
- * canonical integration is live-verified and a durable send ledger is present.
+ * Live SES adapter. Construction and direct sends both fail closed unless a
+ * durable send ledger is present.
  */
 export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'email' as const;
   public readonly integrationId = SES_EMAIL_INTEGRATION_ID;
-  public readonly truthLabel = 'live-verified' as const;
   public readonly provider = SES_V2_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 

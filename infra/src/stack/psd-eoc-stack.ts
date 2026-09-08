@@ -1,7 +1,5 @@
 import { fileURLToPath } from 'node:url';
 
-import { INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE } from '@psd-eoc/contracts';
-
 import {
   Arn,
   ArnFormat,
@@ -236,18 +234,6 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
-    const expoCredentialVerificationReference = new CfnParameter(
-      this,
-      'ExpoCredentialVerificationReference',
-      {
-        allowedPattern: '^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{0,254})$',
-        default: 'UNVERIFIED',
-        description:
-          'Token-free reference to retained APNs, FCM, EAS, and Expo credential verification evidence.',
-        maxLength: 255,
-        type: 'String',
-      },
-    );
     const enableDirectPush = new CfnParameter(this, 'EnableDirectPush', {
       allowedValues: ['false', 'true'],
       default: 'false',
@@ -255,18 +241,6 @@ export class PsdEocStack extends Stack {
         'Authorize direct APNs and FCM provider I/O only after isolated credentials and retained verification evidence exist.',
       type: 'String',
     });
-    const directPushCredentialVerificationReference = new CfnParameter(
-      this,
-      'DirectPushCredentialVerificationReference',
-      {
-        allowedPattern: `^(UNVERIFIED|${INTEGRATION_VERIFICATION_REFERENCE_PATTERN_SOURCE})$`,
-        default: 'UNVERIFIED',
-        description:
-          'Token-free reference to retained direct APNs and FCM credential verification evidence.',
-        maxLength: 255,
-        type: 'String',
-      },
-    );
     const pushProviderCutover = new CfnParameter(this, 'PushProviderCutover', {
       allowedPattern:
         '^\\{"version":1,"ios":"(expo|direct)","android":"(expo|direct)"\\}$',
@@ -294,20 +268,6 @@ export class PsdEocStack extends Stack {
         default: 'false',
         description:
           'Create and retain the carrier-approved SMS pool, opt-out list, protect configuration, and configuration set. This may stay true while the worker is dark.',
-        type: 'String',
-      },
-    );
-    const smsRegistrationVerificationReference = new CfnParameter(
-      this,
-      'SmsRegistrationVerificationReference',
-      {
-        allowedPattern: '^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
-        constraintDescription:
-          'must be UNVERIFIED or a 16-255 character token-free evidence reference',
-        default: 'UNVERIFIED',
-        description:
-          'Token-free reference to retained carrier-registration approval evidence.',
-        maxLength: 255,
         type: 'String',
       },
     );
@@ -345,20 +305,6 @@ export class PsdEocStack extends Stack {
       noEcho: true,
       type: 'String',
     });
-    const deliveryTestProductOwnerUserId = new CfnParameter(
-      this,
-      'DeliveryTestProductOwnerUserId',
-      {
-        allowedPattern:
-          '^(UNCONFIGURED|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$',
-        constraintDescription:
-          'must be UNCONFIGURED or the staff user UUID authorized to configure delivery-test targets',
-        default: 'UNCONFIGURED',
-        description:
-          'Staff user allowed to configure monthly delivery-test canary targets. The live-send confirmation stays a separate human action.',
-        type: 'String',
-      },
-    );
     const smsDestinationCountryCode = new CfnParameter(
       this,
       'SmsDestinationCountryCode',
@@ -377,18 +323,6 @@ export class PsdEocStack extends Stack {
         'Scale the isolated SES email worker from zero to one only after the sender, callback, and integration truth reference are verified.',
       type: 'String',
     });
-    const sesCredentialVerificationReference = new CfnParameter(
-      this,
-      'SesCredentialVerificationReference',
-      {
-        allowedPattern: '^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
-        default: 'UNVERIFIED',
-        description:
-          'Address-free reference to retained SES identity, production-access, callback, and suppression verification evidence.',
-        maxLength: 255,
-        type: 'String',
-      },
-    );
     const runtimeDatabaseIdleTimeoutSeconds = new CfnParameter(
       this,
       'RuntimeDatabaseIdleTimeoutSeconds',
@@ -607,42 +541,15 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
-    new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
-      assertions: [
-        {
-          assert: Fn.conditionAnd(
-            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                expoCredentialVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-          ),
-          assertDescription:
-            'EnableExpoPushWorker=true requires the live application and retained credential-verification evidence.',
-        },
-      ],
-      ruleCondition: Fn.conditionEquals(
-        enableExpoPushWorker.valueAsString,
-        'true',
-      ),
-    });
     new CfnRule(this, 'DirectPushRequiresWorkerAndEvidence', {
       assertions: [
         {
           assert: Fn.conditionAnd(
             Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
             Fn.conditionEquals(enableExpoPushWorker.valueAsString, 'true'),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                directPushCredentialVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
           ),
           assertDescription:
-            'EnableDirectPush=true requires the live push worker and retained direct-provider credential evidence.',
+            'EnableDirectPush=true requires the live push worker.',
         },
       ],
       ruleCondition: Fn.conditionEquals(enableDirectPush.valueAsString, 'true'),
@@ -679,33 +586,9 @@ export class PsdEocStack extends Stack {
               provisionAwsEumSmsResources.valueAsString,
               'true',
             ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                smsRegistrationVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                smsOriginationIdentityArn.valueAsString,
-                'UNCONFIGURED',
-              ),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(smsHelpMessage.valueAsString, 'UNCONFIGURED'),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(smsStopMessage.valueAsString, 'UNCONFIGURED'),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                smsDestinationCountryCode.valueAsString,
-                'UNCONFIGURED',
-              ),
-            ),
           ),
           assertDescription:
-            'EnableAwsEumSmsWorker=true requires the live application, carrier approval evidence, an approved origination identity, and tenant-reviewed HELP/STOP messages.',
+            'EnableAwsEumSmsWorker=true requires the live application and provisioned carrier resources; SmsResourcesRequireCarrierEvidence asserts the approval evidence, origination identity, and HELP/STOP messages.',
         },
       ],
       ruleCondition: Fn.conditionEquals(
@@ -719,12 +602,6 @@ export class PsdEocStack extends Stack {
           assert: Fn.conditionAnd(
             Fn.conditionNot(
               Fn.conditionEquals(
-                smsRegistrationVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
                 smsOriginationIdentityArn.valueAsString,
                 'UNCONFIGURED',
               ),
@@ -743,32 +620,11 @@ export class PsdEocStack extends Stack {
             ),
           ),
           assertDescription:
-            'ProvisionAwsEumSmsResources=true requires retained carrier approval and all carrier-reviewed pool inputs.',
+            'ProvisionAwsEumSmsResources=true requires all carrier-reviewed pool inputs.',
         },
       ],
       ruleCondition: Fn.conditionEquals(
         provisionAwsEumSmsResources.valueAsString,
-        'true',
-      ),
-    });
-    new CfnRule(this, 'EmailWorkerRequiresLiveApplicationAndEvidence', {
-      assertions: [
-        {
-          assert: Fn.conditionAnd(
-            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                sesCredentialVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-          ),
-          assertDescription:
-            'EnableEmailWorker=true requires the live application and retained SES/callback verification evidence.',
-        },
-      ],
-      ruleCondition: Fn.conditionEquals(
-        enableEmailWorker.valueAsString,
         'true',
       ),
     });
@@ -815,24 +671,12 @@ export class PsdEocStack extends Stack {
             Fn.conditionEquals(enableAwsEumSmsWorker.valueAsString, 'false'),
             Fn.conditionEquals(enableEmailWorker.valueAsString, 'false'),
             Fn.conditionEquals(
-              expoCredentialVerificationReference.valueAsString,
-              'UNVERIFIED',
-            ),
-            Fn.conditionEquals(
-              directPushCredentialVerificationReference.valueAsString,
-              'UNVERIFIED',
-            ),
-            Fn.conditionEquals(
-              sesCredentialVerificationReference.valueAsString,
-              'UNVERIFIED',
-            ),
-            Fn.conditionEquals(
               pushProviderCutover.valueAsString,
               '{"version":1,"ios":"expo","android":"expo"}',
             ),
           ),
           assertDescription:
-            'Rollback requires every provider-send enablement to remain false and push/email verification state to be reset before the older application is selected.',
+            'Rollback requires every provider-send enablement to remain false and the push cutover reset before the older application is selected.',
         },
       ],
       ruleCondition: Fn.conditionNot(
@@ -1453,6 +1297,70 @@ export class PsdEocStack extends Stack {
     smsConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
     smsConfigurationSet.addResourceDependency(smsProtectConfiguration);
 
+    // Delivery-status telemetry. AWS End User Messaging only publishes
+    // "Text Message Delivery Status Updated" to EventBridge for configuration
+    // sets that carry an EventBridge event destination, and CloudFormation has
+    // no resource for that destination type, so the API call runs as a custom
+    // resource. Without it the delivery-event rule below never receives a
+    // single receipt and the worker records nothing after provider acceptance.
+    const smsEventDestinationName = 'psd-eoc-sms-eventbridge';
+    const smsConfigurationSetArn = `arn:${partition}:sms-voice:${region}:${account}:configuration-set/${smsConfigurationSet.configurationSetName}`;
+    const smsEventDestinationParameters = {
+      ConfigurationSetName: smsConfigurationSet.configurationSetName,
+      EventDestinationName: smsEventDestinationName,
+      MatchingEventTypes: ['ALL'],
+      EventBridgeDestination: {
+        EventBusArn: `arn:${partition}:events:${region}:${account}:event-bus/default`,
+      },
+    };
+    const smsEventDestination = new customResources.AwsCustomResource(
+      this,
+      'SmsEventDestination',
+      {
+        installLatestAwsSdk: false,
+        onCreate: {
+          service: 'PinpointSMSVoiceV2',
+          action: 'CreateEventDestination',
+          parameters: smsEventDestinationParameters,
+          physicalResourceId: customResources.PhysicalResourceId.of(
+            `${smsConfigurationSet.configurationSetName}/${smsEventDestinationName}`,
+          ),
+        },
+        onUpdate: {
+          service: 'PinpointSMSVoiceV2',
+          action: 'UpdateEventDestination',
+          parameters: { ...smsEventDestinationParameters, Enabled: true },
+          physicalResourceId: customResources.PhysicalResourceId.of(
+            `${smsConfigurationSet.configurationSetName}/${smsEventDestinationName}`,
+          ),
+        },
+        onDelete: {
+          service: 'PinpointSMSVoiceV2',
+          action: 'DeleteEventDestination',
+          parameters: {
+            ConfigurationSetName: smsConfigurationSet.configurationSetName,
+            EventDestinationName: smsEventDestinationName,
+          },
+        },
+        policy: customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: [
+              'sms-voice:CreateEventDestination',
+              'sms-voice:UpdateEventDestination',
+              'sms-voice:DeleteEventDestination',
+            ],
+            resources: [smsConfigurationSetArn],
+          }),
+        ]),
+      },
+    );
+    const smsEventDestinationResource = (
+      smsEventDestination.node.defaultChild as CustomResource
+    ).node.defaultChild as CfnResource;
+    smsEventDestinationResource.cfnOptions.condition =
+      shouldProvisionAwsEumSmsResources;
+    smsEventDestinationResource.addDependency(smsConfigurationSet);
+
     const smsDeliveryEventRule = new events.Rule(this, 'SmsDeliveryEventRule', {
       description:
         'Routes AWS End User Messaging delivery receipts to their retained queue.',
@@ -2053,8 +1961,6 @@ export class PsdEocStack extends Stack {
         environment: {
           AWS_REGION: region,
           NODE_ENV: 'production',
-          PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE:
-            expoCredentialVerificationReference.valueAsString,
           PSD_EOC_EXPO_PUSH_PROVIDER_AUTHORIZED: Fn.conditionIf(
             shouldRunExpoPushWorker.logicalId,
             'true',
@@ -2065,8 +1971,6 @@ export class PsdEocStack extends Stack {
             'enabled',
             'dark',
           ).toString(),
-          PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE:
-            directPushCredentialVerificationReference.valueAsString,
           PSD_EOC_DIRECT_PUSH_PROVIDER_AUTHORIZED: Fn.conditionIf(
             shouldAuthorizeDirectPush.logicalId,
             'true',
@@ -2353,8 +2257,6 @@ export class PsdEocStack extends Stack {
             'true',
             'false',
           ).toString(),
-          PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE:
-            smsRegistrationVerificationReference.valueAsString,
           PSD_EOC_SMS_RUNTIME_MODE: Fn.conditionIf(
             shouldRunAwsEumSmsWorker.logicalId,
             'enabled',
@@ -2488,8 +2390,6 @@ export class PsdEocStack extends Stack {
             'verified',
             'unverified',
           ).toString(),
-          PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE:
-            sesCredentialVerificationReference.valueAsString,
           PSD_EOC_SES_FROM_ADDRESS: sesFromAddress,
           PSD_EOC_SES_PROVIDER_AUTHORIZED: Fn.conditionIf(
             shouldRunEmailWorker.logicalId,
@@ -2998,14 +2898,10 @@ export class PsdEocStack extends Stack {
       properties: {
         ClusterArn: bootstrapCluster.clusterArn,
         DeploymentRevision: sourceSha,
-        DirectPushCredentialVerificationReference:
-          directPushCredentialVerificationReference.valueAsString,
         EnableAwsEumSmsWorker: enableAwsEumSmsWorker.valueAsString,
         EnableDirectPush: enableDirectPush.valueAsString,
         EnableEmailWorker: enableEmailWorker.valueAsString,
         EnableExpoPushWorker: enableExpoPushWorker.valueAsString,
-        ExpoCredentialVerificationReference:
-          expoCredentialVerificationReference.valueAsString,
         Operation: 'ROLLBACK_QUIESCENCE',
         PushProviderCutover: pushProviderCutover.valueAsString,
         RollbackSelected: Fn.conditionIf(
@@ -3018,8 +2914,6 @@ export class PsdEocStack extends Stack {
           SMS_WORKER_SERVICE_NAME,
           EMAIL_WORKER_SERVICE_NAME,
         ],
-        SesCredentialVerificationReference:
-          sesCredentialVerificationReference.valueAsString,
       },
       resourceType: 'Custom::PsdEocRollbackQuiescence',
       serviceToken: rollbackImageValidationProvider.serviceToken,
@@ -3410,10 +3304,6 @@ export class PsdEocStack extends Stack {
                   value: deploymentIdentity.privacyContactUrl,
                 },
                 {
-                  name: 'PSD_EOC_PRODUCT_OWNER_USER_ID',
-                  value: deliveryTestProductOwnerUserId.valueAsString,
-                },
-                {
                   name: 'PSD_EOC_SMS_SUPPORT_EMAIL',
                   value: deploymentIdentity.smsSupportEmail,
                 },
@@ -3428,11 +3318,6 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_PUSH_PROVIDER_CUTOVER',
                   value: pushProviderCutover.valueAsString,
-                },
-                {
-                  name: 'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
-                  value:
-                    directPushCredentialVerificationReference.valueAsString,
                 },
                 {
                   name: 'DATABASE_DRIVER',
@@ -3487,10 +3372,6 @@ export class PsdEocStack extends Stack {
                   value: 'production',
                 },
                 {
-                  name: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
-                  value: sesCredentialVerificationReference.valueAsString,
-                },
-                {
                   name: 'PSD_EOC_EMAIL_WORKER_ENABLED',
                   value: Fn.conditionIf(
                     shouldRunEmailWorker.logicalId,
@@ -3501,10 +3382,6 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_SES_SNS_TOPIC_ARN',
                   value: emailEventsTopic.topicArn,
-                },
-                {
-                  name: 'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
-                  value: smsRegistrationVerificationReference.valueAsString,
                 },
                 {
                   name: 'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',

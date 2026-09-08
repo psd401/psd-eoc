@@ -13,18 +13,22 @@ import {
   type RecordEndpointStatusInput,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
-import { ZodError } from 'zod';
 
 import { authenticateSessionRequest } from '../../../../lib/auth/middleware';
-import {
-  getDefaultSessionService,
-  SessionAccessError,
-} from '../../../../lib/auth/sessions';
+import { getDefaultSessionService } from '../../../../lib/auth/sessions';
 import {
   CapabilityEngineError,
   resolveHumanCapabilityInvocation,
   type TrustedCapabilityInvocation,
 } from '../../../../lib/capabilities/engine';
+import {
+  executeHumanRoute,
+  HumanRequestError,
+  readBoundedJson,
+  type HumanRouteInvocationRequest,
+  type HumanRouteRuntime,
+  type HumanRouteSubject,
+} from '../../../../lib/http/human-route';
 import {
   getDefaultDeviceCapabilityRuntime,
   PUSH_ENDPOINT_INVALIDATION_REASONS,
@@ -37,13 +41,8 @@ export const PUSH_ENDPOINT_WORKER_TOKEN_ENV =
   'PSD_EOC_PUSH_ENDPOINT_WORKER_TOKEN' as const;
 export const PUSH_ENDPOINT_MAX_BODY_BYTES = 8 * 1_024;
 
-const JSON_MEDIA_TYPE = 'application/json';
 const DEFAULT_DEVICE_PAGE_LIMIT = 50;
 const MAX_DEVICE_REQUEST_BODY_BYTES = 8 * 1_024;
-const HUMAN_RESPONSE_HEADERS = Object.freeze({
-  'Cache-Control': 'no-store',
-  Vary: 'Authorization, Cookie',
-});
 const WORKER_RESPONSE_HEADERS = Object.freeze({
   'Cache-Control': 'no-store, max-age=0',
   Pragma: 'no-cache',
@@ -56,30 +55,8 @@ type HumanDeviceCapabilityId = Extract<
   'list-my-devices' | 'register-push-token' | 'unregister-push-token'
 >;
 
-export interface DeviceRouteInvocationRequest {
-  readonly requestId: string;
-  readonly serverTime: Date;
-  readonly mutation: Readonly<{ idempotencyKey: string }> | null;
-}
-
-export interface DeviceRouteCapabilityExecutor {
-  execute(
-    capabilityId: HumanDeviceCapabilityId,
-    input: unknown,
-    invocation: TrustedCapabilityInvocation,
-  ): Promise<unknown>;
-}
-
-/** Test seam; production still derives the actor from session middleware. */
-export interface DeviceRouteRuntime {
-  readonly capabilities: DeviceRouteCapabilityExecutor;
-  createRequestId(): string;
-  now(): Date;
-  resolveInvocation(
-    request: Request,
-    input: DeviceRouteInvocationRequest,
-  ): Promise<TrustedCapabilityInvocation>;
-}
+export type DeviceRouteRuntime = HumanRouteRuntime<HumanDeviceCapabilityId>;
+export type DeviceRouteInvocationRequest = HumanRouteInvocationRequest;
 
 export function getDefaultDeviceRouteRuntime(): DeviceRouteRuntime {
   const sessions = getDefaultSessionService();
@@ -96,7 +73,7 @@ export function getDefaultDeviceRouteRuntime(): DeviceRouteRuntime {
     now: () => new Date(),
     async resolveInvocation(
       request: Request,
-      input: DeviceRouteInvocationRequest,
+      input: HumanRouteInvocationRequest,
     ) {
       const authenticated = await authenticateSessionRequest(
         request,
@@ -118,155 +95,16 @@ export function getDefaultDeviceRouteRuntime(): DeviceRouteRuntime {
   });
 }
 
-function apiCodeForStatus(status: number): ApiErrorCode {
-  switch (status) {
-    case 400:
-      return 'VALIDATION_ERROR';
-    case 401:
-      return 'UNAUTHENTICATED';
-    case 403:
-      return 'FORBIDDEN';
-    case 404:
-      return 'NOT_FOUND';
-    case 409:
-      return 'CONFLICT';
-    case 413:
-      return 'VALIDATION_ERROR';
-    case 415:
-      return 'VALIDATION_ERROR';
-    case 429:
-      return 'RATE_LIMITED';
-    default:
-      return 'INTERNAL_ERROR';
-  }
-}
+const SUBJECT: HumanRouteSubject = Object.freeze({
+  maxBodyBytes: MAX_DEVICE_REQUEST_BODY_BYTES,
+  noun: 'device',
+});
 
-function humanErrorResponse(error: unknown, requestId: string): NextResponse {
-  const engineError = error instanceof CapabilityEngineError ? error : null;
-  const sessionError = error instanceof SessionAccessError ? error : null;
-  const requestError = error instanceof DeviceRequestError ? error : null;
-  const validationError =
-    error instanceof ZodError || error instanceof SyntaxError;
-  const status =
-    requestError?.status ??
-    (validationError
-      ? 400
-      : (engineError?.status ?? sessionError?.status ?? 500));
-  return NextResponse.json(
-    ApiErrorSchema.parse({
-      code: engineError?.code ?? apiCodeForStatus(status),
-      message:
-        engineError?.message ??
-        sessionError?.message ??
-        (validationError
-          ? 'The device request is invalid.'
-          : 'The device request failed.'),
-      requestId,
-      retryable: engineError?.retryable ?? status >= 500,
-      fieldErrors: [],
-    }),
-    { status, headers: HUMAN_RESPONSE_HEADERS },
-  );
-}
-
-class DeviceRequestError extends SyntaxError {
-  public constructor(
-    public readonly status: 400 | 413 | 415,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'DeviceRequestError';
-  }
-}
-
-function assertJsonContentType(request: Request): void {
-  if (request.headers.has('content-encoding')) {
-    throw new DeviceRequestError(
-      415,
-      'Compressed device requests are not accepted.',
-    );
-  }
-  const mediaType = request.headers
-    .get('content-type')
-    ?.split(';', 1)[0]
-    ?.trim()
-    .toLowerCase();
-  if (mediaType !== JSON_MEDIA_TYPE) {
-    throw new DeviceRequestError(415, 'Device mutations require JSON content.');
-  }
-}
-
-async function readBoundedJson(
-  request: Request,
-  maxBytes: number,
-): Promise<unknown> {
-  assertJsonContentType(request);
-  const declaredLength = request.headers.get('content-length');
-  if (declaredLength !== null && !/^\d+$/u.test(declaredLength)) {
-    throw new DeviceRequestError(400, 'The content length is invalid.');
-  }
-  if (declaredLength !== null && Number(declaredLength) > maxBytes) {
-    throw new DeviceRequestError(413, 'The device request body is too large.');
-  }
-  if (request.body === null) {
-    throw new DeviceRequestError(400, 'The device request body is required.');
-  }
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new DeviceRequestError(
-          413,
-          'The device request body is too large.',
-        );
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    throw new DeviceRequestError(
-      400,
-      'The device request body is not valid UTF-8.',
-    );
-  }
-  if (text.trim().length === 0) {
-    throw new DeviceRequestError(400, 'The device request body is required.');
-  }
-  return JSON.parse(text) as unknown;
-}
-
-function parseMutationMetadata(
-  request: Request,
-): DeviceRouteInvocationRequest['mutation'] {
-  return Object.freeze({
-    idempotencyKey: IdempotencyKeySchema.parse(
-      request.headers.get(DEVICE_IDEMPOTENCY_KEY_HEADER) ?? '',
-    ),
-  });
-}
-
-function assertQueryHasNoMutationHeaders(request: Request): void {
-  if (request.headers.has(DEVICE_IDEMPOTENCY_KEY_HEADER)) {
-    throw new SyntaxError('Device queries cannot carry mutation metadata.');
-  }
-}
+/** The Expo worker routes carry their own ceiling and their own wording. */
+const WORKER_SUBJECT: HumanRouteSubject = Object.freeze({
+  maxBodyBytes: PUSH_ENDPOINT_MAX_BODY_BYTES,
+  noun: 'push endpoint',
+});
 
 function listMyDevicesInput(request: Request) {
   const parameters = new URL(request.url).searchParams;
@@ -292,75 +130,50 @@ function listMyDevicesInput(request: Request) {
   });
 }
 
-async function executeHumanDeviceRoute(
-  request: Request,
-  runtime: DeviceRouteRuntime | undefined,
-  capabilityId: HumanDeviceCapabilityId,
-  mutation: boolean,
-  loadInput: () => unknown | Promise<unknown>,
-): Promise<NextResponse> {
-  let requestId: string = randomUUID();
-  try {
-    const resolvedRuntime = runtime ?? getDefaultDeviceRouteRuntime();
-    requestId = resolvedRuntime.createRequestId();
-    const invocation = await resolvedRuntime.resolveInvocation(request, {
-      requestId,
-      serverTime: resolvedRuntime.now(),
-      mutation: mutation ? parseMutationMetadata(request) : null,
-    });
-    if (!mutation) assertQueryHasNoMutationHeaders(request);
-    const result = await resolvedRuntime.capabilities.execute(
-      capabilityId,
-      await loadInput(),
-      invocation,
-    );
-    return NextResponse.json(result, { headers: HUMAN_RESPONSE_HEADERS });
-  } catch (error) {
-    return humanErrorResponse(error, requestId);
-  }
-}
-
 export function handleListMyDevices(
   request: Request,
-  runtime?: DeviceRouteRuntime,
+  runtime: DeviceRouteRuntime = getDefaultDeviceRouteRuntime(),
 ): Promise<NextResponse> {
-  return executeHumanDeviceRoute(
+  return executeHumanRoute(
     request,
     runtime,
     'list-my-devices',
     false,
+    SUBJECT,
     () => listMyDevicesInput(request),
   );
 }
 
 export function handleRegisterPushToken(
   request: Request,
-  runtime?: DeviceRouteRuntime,
+  runtime: DeviceRouteRuntime = getDefaultDeviceRouteRuntime(),
 ): Promise<NextResponse> {
-  return executeHumanDeviceRoute(
+  return executeHumanRoute(
     request,
     runtime,
     'register-push-token',
     true,
+    SUBJECT,
     async () =>
       RegisterPushTokenInputSchema.parse(
-        await readBoundedJson(request, MAX_DEVICE_REQUEST_BODY_BYTES),
+        await readBoundedJson(request, SUBJECT),
       ),
   );
 }
 
 export function handleUnregisterPushToken(
   request: Request,
-  runtime?: DeviceRouteRuntime,
+  runtime: DeviceRouteRuntime = getDefaultDeviceRouteRuntime(),
 ): Promise<NextResponse> {
-  return executeHumanDeviceRoute(
+  return executeHumanRoute(
     request,
     runtime,
     'unregister-push-token',
     true,
+    SUBJECT,
     async () =>
       UnregisterPushTokenInputSchema.parse(
-        await readBoundedJson(request, MAX_DEVICE_REQUEST_BODY_BYTES),
+        await readBoundedJson(request, SUBJECT),
       ),
   );
 }
@@ -512,10 +325,10 @@ export async function handlePushEndpointEligibility(
     let input: unknown;
     try {
       input = PushEndpointSendEligibilityInputSchema.parse(
-        await readBoundedJson(request, PUSH_ENDPOINT_MAX_BODY_BYTES),
+        await readBoundedJson(request, WORKER_SUBJECT),
       );
     } catch (error) {
-      const routeError = error instanceof DeviceRequestError ? error : null;
+      const routeError = error instanceof HumanRequestError ? error : null;
       return workerErrorResponse(
         routeError?.status ?? 400,
         'VALIDATION_ERROR',
@@ -594,7 +407,7 @@ export async function handlePushEndpointInvalidation(
     let input: RecordEndpointStatusInput;
     try {
       input = RecordEndpointStatusInputSchema.parse(
-        await readBoundedJson(request, PUSH_ENDPOINT_MAX_BODY_BYTES),
+        await readBoundedJson(request, WORKER_SUBJECT),
       );
       if (
         input.status !== 'invalid' ||
@@ -605,7 +418,7 @@ export async function handlePushEndpointInvalidation(
         throw new SyntaxError('The endpoint status is outside route scope.');
       }
     } catch (error) {
-      const routeError = error instanceof DeviceRequestError ? error : null;
+      const routeError = error instanceof HumanRequestError ? error : null;
       return workerErrorResponse(
         routeError?.status ?? 400,
         'VALIDATION_ERROR',

@@ -25,7 +25,6 @@ export const IDS = Object.freeze({
   endpoint: '00000000-0000-4000-8000-000000000012',
   attempt: '00000000-0000-4000-8000-000000000013',
   secondAttempt: '00000000-0000-4000-8000-000000000014',
-  deliveryTargetSet: '00000000-0000-4000-8000-000000000015',
 });
 
 export const TIMES = Object.freeze({
@@ -63,15 +62,7 @@ export function syntheticBatch(): DispatchBatch {
       title: '[DRILL] Synthetic lockdown test',
       body: '[DRILL] Synthetic training only.',
     },
-    integrationStatus: {
-      integrationId: 'expo-push',
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: TIMES.created,
-    },
+    integrationId: 'expo-push',
     sequence: 1,
     endpointCount: 1,
     createdAt: TIMES.created,
@@ -109,22 +100,14 @@ export function realBatch(): DispatchBatch {
       title: '[INCIDENT] Lockdown',
       body: '[INCIDENT] Follow district safety procedures.',
     },
-    integrationStatus: {
-      integrationId: 'expo-push',
-      label: 'live-verified',
-      verifiedAt: TIMES.created,
-      verifiedByUserId: IDS.actor,
-      authorizationReference: 'synthetic-product-owner-approval-reference',
-      reasonCode: null,
-      observedAt: TIMES.created,
-    },
+    integrationId: 'expo-push',
     sequence: 1,
     endpointCount: 1,
     createdAt: TIMES.created,
   });
 }
 
-export function deliveryTestBatch(): DispatchBatch {
+export function staffDrillBatch(): DispatchBatch {
   return DispatchBatchSchema.parse({
     id: IDS.batch,
     intentId: IDS.intent,
@@ -136,11 +119,6 @@ export function deliveryTestBatch(): DispatchBatch {
     eventTypeVersion: { id: IDS.eventTypeVersion, templateMode: 'drill' },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
-    deliveryTest: {
-      purpose: 'monthly-live-delivery-test',
-      targetSet: { id: IDS.deliveryTargetSet, version: 1 },
-      endpointReferenceDigest: 'd'.repeat(64),
-    },
     requestId: IDS.request,
     authorization: {
       kind: 'human-confirmed',
@@ -160,23 +138,15 @@ export function deliveryTestBatch(): DispatchBatch {
       title: '[DRILL] Live canary test',
       body: '[DRILL] LIVE CANARY — TRAINING ONLY.',
     },
-    integrationStatus: {
-      integrationId: 'expo-push',
-      label: 'live-verified',
-      verifiedAt: TIMES.created,
-      verifiedByUserId: IDS.actor,
-      authorizationReference: 'synthetic-live-verification-reference',
-      reasonCode: null,
-      observedAt: TIMES.created,
-    },
+    integrationId: 'expo-push',
     sequence: 1,
     endpointCount: 1,
     createdAt: TIMES.created,
   });
 }
 
-export function emailDeliveryTestBatch(): DispatchBatch {
-  const batch = deliveryTestBatch();
+export function emailStaffDrillBatch(): DispatchBatch {
+  const batch = staffDrillBatch();
   return DispatchBatchSchema.parse({
     ...batch,
     channel: 'email',
@@ -189,15 +159,12 @@ export function emailDeliveryTestBatch(): DispatchBatch {
       subject: '[DRILL] Live canary email test',
       textBody: '[DRILL] LIVE CANARY — TRAINING ONLY.',
     },
-    integrationStatus: {
-      ...batch.integrationStatus,
-      integrationId: 'ses-email',
-    },
+    integrationId: 'ses-email',
   });
 }
 
-export function emailDeliveryTestWorkItem(): WorkerAttemptWorkItem {
-  const batch = emailDeliveryTestBatch();
+export function emailStaffDrillWorkItem(): WorkerAttemptWorkItem {
+  const batch = emailStaffDrillBatch();
   return Object.freeze({
     batch,
     attempt: ChannelAttemptSchema.parse({
@@ -229,7 +196,6 @@ export function attemptFor(
     eventTypeVersion: batch.eventTypeVersion,
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
-    ...(batch.deliveryTest == null ? {} : { deliveryTest: batch.deliveryTest }),
     recipientId: IDS.recipient,
     endpointId: IDS.endpoint,
     channel: batch.channel,

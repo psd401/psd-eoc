@@ -1,11 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
 import { EmailRuntimeClient, EmailRuntimeClientError } from './state-client';
-import { IDS, emailDeliveryTestWorkItem } from '../shared/test-fixtures';
+import { IDS, emailStaffDrillWorkItem } from '../shared/test-fixtures';
 
 const TOKEN = 'email-worker-token-'.padEnd(48, 'x');
 const ATTEMPT_ID = IDS.attempt;
-const VERIFICATION_REFERENCE = 'deployment:commit-277';
 
 describe('email runtime HTTP client', () => {
   test('authenticates a strict durable provider-I/O claim', async () => {
@@ -29,10 +28,9 @@ describe('email runtime HTTP client', () => {
     const client = new EmailRuntimeClient({
       serviceOrigin: 'https://eoc.example.invalid',
       bearerToken: TOKEN,
-      verificationReference: VERIFICATION_REFERENCE,
       fetch: fetchMock,
     });
-    const workItem = emailDeliveryTestWorkItem();
+    const workItem = emailStaffDrillWorkItem();
     await expect(
       client.claim({
         attemptId: ATTEMPT_ID,
@@ -46,7 +44,6 @@ describe('email runtime HTTP client', () => {
     expect(requests[0]?.authorization).toBe(`Bearer ${TOKEN}`);
     expect(JSON.parse(requests[0]?.body ?? '')).toEqual({
       operation: 'claim-provider-io',
-      verificationReference: VERIFICATION_REFERENCE,
       attemptId: ATTEMPT_ID,
       requestFingerprint: 'a'.repeat(64),
       workItem,
@@ -59,19 +56,17 @@ describe('email runtime HTTP client', () => {
         new EmailRuntimeClient({
           serviceOrigin: 'http://eoc.example.invalid',
           bearerToken: TOKEN,
-          verificationReference: VERIFICATION_REFERENCE,
         }),
     ).toThrow(EmailRuntimeClientError);
     const client = new EmailRuntimeClient({
       serviceOrigin: 'https://eoc.example.invalid',
       bearerToken: TOKEN,
-      verificationReference: VERIFICATION_REFERENCE,
       fetch: (() =>
         Promise.resolve(
           Response.json({ kind: 'acquired', leaseToken: 'bad' }),
         )) as unknown as typeof globalThis.fetch,
     });
-    const workItem = emailDeliveryTestWorkItem();
+    const workItem = emailStaffDrillWorkItem();
     await expect(
       client.claim({
         attemptId: ATTEMPT_ID,
@@ -86,7 +81,6 @@ describe('email runtime HTTP client', () => {
     const client = new EmailRuntimeClient({
       serviceOrigin: 'https://eoc.example.invalid',
       bearerToken: TOKEN,
-      verificationReference: VERIFICATION_REFERENCE,
       fetch: (() =>
         Promise.resolve(
           new Response(
@@ -107,16 +101,5 @@ describe('email runtime HTTP client', () => {
       expect.objectContaining({ code: 'INVALID_RESPONSE' }),
     );
     expect(cancelled).toBe(true);
-  });
-
-  test('rejects a stale-shaped verification reference before networking', () => {
-    expect(
-      () =>
-        new EmailRuntimeClient({
-          serviceOrigin: 'https://eoc.example.invalid',
-          bearerToken: TOKEN,
-          verificationReference: 'stale',
-        }),
-    ).toThrow(EmailRuntimeClientError);
   });
 });

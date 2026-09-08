@@ -718,18 +718,6 @@ async function publishSyntheticRosterEndpointFixture(
   });
 }
 
-function mockedIntegrationStatus(integrationId: 'expo-push' | 'ses-email') {
-  return Object.freeze({
-    integrationId,
-    label: 'mocked' as const,
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEEDED.integrationObservedAt,
-  });
-}
-
 function pushResolutionFixture(
   registrations: readonly Readonly<{ id: string; token: string }>[],
   identity: Readonly<{
@@ -811,7 +799,7 @@ function pushResolutionFixture(
       title: '[DRILL] Device status overlay test',
       body: '[DRILL] Synthetic and unroutable test only.',
     },
-    integrationStatus: mockedIntegrationStatus('expo-push'),
+    integrationId: 'expo-push',
     sequence: 1,
     endpointCount: registrations.length,
     createdAt: SEEDED.integrationObservedAt,
@@ -877,13 +865,13 @@ async function installDeviceNotRegisteredAttemptFixture(
       channel: 'push' as const,
       endpointCount: 1,
       renderedMessage: pushMessage,
-      integrationStatus: mockedIntegrationStatus('expo-push'),
+      integrationId: 'expo-push',
     }),
     Object.freeze({
       channel: 'email' as const,
       endpointCount: 1,
       renderedMessage: emailMessage,
-      integrationStatus: mockedIntegrationStatus('ses-email'),
+      integrationId: 'ses-email',
     }),
   ]);
   const message = NotificationOutboxMessageSchema.parse({
@@ -924,7 +912,7 @@ async function installDeviceNotRegisteredAttemptFixture(
     authorization,
     channel: 'push',
     renderedMessage: pushMessage,
-    integrationStatus: mockedIntegrationStatus('expo-push'),
+    integrationId: 'expo-push',
     sequence: 1,
     endpointCount: 1,
     createdAt: createdAt.toISOString(),
@@ -983,9 +971,7 @@ async function installDeviceNotRegisteredAttemptFixture(
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: pushMessage,
-        integrationStatusId: SEEDED.pushIntegrationStatusId,
         integrationId: 'expo-push',
-        integrationLabel: 'mocked',
       },
       {
         intentId: ids.intent,
@@ -998,9 +984,7 @@ async function installDeviceNotRegisteredAttemptFixture(
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: emailMessage,
-        integrationStatusId: SEEDED.emailIntegrationStatusId,
         integrationId: 'ses-email',
-        integrationLabel: 'mocked',
       },
     ]);
     await transaction.insert(outbox).values({
@@ -1042,9 +1026,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       authorization,
       channel: 'push',
       renderedMessage: pushMessage,
-      integrationStatusId: SEEDED.pushIntegrationStatusId,
       integrationId: 'expo-push',
-      integrationLabel: 'mocked',
       sequence: 1,
       endpointCount: 1,
       createdAt,
@@ -1629,7 +1611,6 @@ describeWithDatabase('device push-token persistence', () => {
     const adapter = Object.freeze({
       channel: 'push' as const,
       integrationId: 'expo-push',
-      truthLabel: 'mocked' as const,
       provider: 'mock-expo',
       deliverySemantics: 'attempt-id-idempotent' as const,
       recover: () => {

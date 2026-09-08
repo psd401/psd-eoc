@@ -23,7 +23,6 @@ import { seedDatabase } from '../../packages/server/db/seed';
 import {
   deliveryEvidence,
   events,
-  integrationStatuses,
   notificationIntentChannels,
   notificationIntents,
   outbox,
@@ -65,8 +64,6 @@ const SEEDED = Object.freeze({
   recipient: '00000000-0000-4000-8000-000000000050',
   pushEndpoint: '00000000-0000-4000-8000-000000000060',
   eventTypeVersion: '00000000-0000-4000-8000-000000000201',
-  pushIntegrationStatus: '00000000-0000-4000-8000-000000000301',
-  emailIntegrationStatus: '00000000-0000-4000-8000-000000000302',
   integrationObservedAt: '2026-08-06T12:00:00.000Z',
 });
 
@@ -77,7 +74,6 @@ const ids = Object.freeze({
   request: randomUUID(),
   preview: randomUUID(),
   attempt: randomUUID(),
-  sloSmsIntegrationStatus: randomUUID(),
 });
 
 let connection: PostgresDatabaseConnection | undefined;
@@ -100,20 +96,6 @@ function deferred(): Readonly<{
     resolve = resolvePromise;
   });
   return { promise, resolve };
-}
-
-function integrationStatus(
-  integrationId: 'expo-push' | 'ses-email' | 'aws-eum-sms',
-) {
-  return {
-    integrationId,
-    label: 'mocked' as const,
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEEDED.integrationObservedAt,
-  };
 }
 
 async function installAtomicEventOutboxFixture(): Promise<void> {
@@ -139,7 +121,7 @@ async function installAtomicEventOutboxFixture(): Promise<void> {
         title: '[DRILL] Dispatcher database test',
         body: '[DRILL] Synthetic and unroutable test only.',
       }),
-      integrationStatus: integrationStatus('expo-push'),
+      integrationId: 'expo-push',
     }),
     Object.freeze({
       channel: 'email' as const,
@@ -153,7 +135,7 @@ async function installAtomicEventOutboxFixture(): Promise<void> {
         subject: '[DRILL] Dispatcher database test',
         textBody: '[DRILL] Synthetic and unroutable test only.',
       }),
-      integrationStatus: integrationStatus('ses-email'),
+      integrationId: 'ses-email',
     }),
   ]);
   const message = NotificationOutboxMessageSchema.parse({
@@ -224,9 +206,7 @@ async function installAtomicEventOutboxFixture(): Promise<void> {
         classificationMarker: 'DRILL' as const,
         endpointCount: channels[0]!.endpointCount,
         renderedMessage: channels[0]!.renderedMessage,
-        integrationStatusId: SEEDED.pushIntegrationStatus,
         integrationId: 'expo-push',
-        integrationLabel: 'mocked',
       },
       {
         intentId: ids.intent,
@@ -239,9 +219,7 @@ async function installAtomicEventOutboxFixture(): Promise<void> {
         classificationMarker: 'DRILL',
         endpointCount: channels[1]!.endpointCount,
         renderedMessage: channels[1]!.renderedMessage,
-        integrationStatusId: SEEDED.emailIntegrationStatus,
         integrationId: 'ses-email',
-        integrationLabel: 'mocked',
       },
     ]);
     await transaction.insert(outbox).values({
@@ -327,13 +305,12 @@ async function installSyntheticSloOutboxFixture(
     channel,
     endpointCount: 1_200,
     renderedMessage: renderedMessageFor(channel),
-    integrationStatus: integrationStatus(
+    integrationId:
       channel === 'push'
         ? 'expo-push'
         : channel === 'email'
           ? 'ses-email'
           : 'aws-eum-sms',
-    ),
   }));
   const message = NotificationOutboxMessageSchema.parse({
     version: messageVersion,
@@ -403,13 +380,7 @@ async function installSyntheticSloOutboxFixture(
         classificationMarker: 'DRILL' as const,
         endpointCount: plan.endpointCount,
         renderedMessage: plan.renderedMessage,
-        integrationStatusId: {
-          push: SEEDED.pushIntegrationStatus,
-          email: SEEDED.emailIntegrationStatus,
-          sms: ids.sloSmsIntegrationStatus,
-        }[plan.channel],
-        integrationId: plan.integrationStatus.integrationId,
-        integrationLabel: plan.integrationStatus.label,
+        integrationId: plan.integrationId,
       })),
     );
     await transaction.insert(outbox).values({
@@ -482,16 +453,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     try {
       await migrateDatabase(createdIsolatedConnection);
       await seedDatabase(createdIsolatedConnection.db);
-      await createdIsolatedConnection.db.insert(integrationStatuses).values({
-        id: ids.sloSmsIntegrationStatus,
-        integrationId: 'aws-eum-sms',
-        label: 'mocked',
-        verifiedAt: null,
-        verifiedByUserId: null,
-        authorizationReference: null,
-        reasonCode: null,
-        observedAt: new Date(),
-      });
       await installAtomicEventOutboxFixture();
     } catch (error) {
       await closeAndDropDisposableDatabase(

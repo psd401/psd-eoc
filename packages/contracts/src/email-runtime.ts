@@ -7,13 +7,6 @@ import { TimestampSchema, UuidSchema } from './shared';
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 
-/** Exact deploy-time evidence reference shared by the email worker and server. */
-export const SesVerificationReferenceSchema = z
-  .string()
-  .min(16)
-  .max(255)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$/u);
-
 /** Exact email endpoint attempt released by the trusted server resolver. */
 export const EmailWorkerAttemptWorkItemSchema = z
   .object({
@@ -105,7 +98,6 @@ export const EmailRuntimeRequestSchema = z
     z
       .object({
         operation: z.literal('claim-provider-io'),
-        verificationReference: SesVerificationReferenceSchema,
         attemptId: UuidSchema,
         requestFingerprint: DigestSchema,
         workItem: EmailWorkerAttemptWorkItemSchema,
@@ -114,7 +106,6 @@ export const EmailRuntimeRequestSchema = z
     z
       .object({
         operation: z.literal('complete-provider-io'),
-        verificationReference: SesVerificationReferenceSchema,
         attemptId: UuidSchema,
         requestFingerprint: DigestSchema,
         leaseToken: UuidSchema,
@@ -124,7 +115,6 @@ export const EmailRuntimeRequestSchema = z
     z
       .object({
         operation: z.literal('resolve-batch'),
-        verificationReference: SesVerificationReferenceSchema,
         batch: DispatchBatchSchema,
         enqueuedAt: TimestampSchema,
         cursor: z.number().int().nonnegative().max(12_000),
@@ -133,14 +123,12 @@ export const EmailRuntimeRequestSchema = z
     z
       .object({
         operation: z.literal('resolve-retry'),
-        verificationReference: SesVerificationReferenceSchema,
         sourceAttemptId: UuidSchema,
       })
       .strict(),
     z
       .object({
         operation: z.literal('authorize-provider-send'),
-        verificationReference: SesVerificationReferenceSchema,
         workItem: EmailWorkerAttemptWorkItemSchema,
       })
       .strict(),

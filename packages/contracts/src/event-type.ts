@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { PaginationCursorSchema, paginatedSchema } from './api';
 import { ActorSchema } from './capability';
-import { IntegrationStatusSchema } from './integration';
+import { IntegrationIdSchema } from './integration';
 import { TimestampSchema, UuidSchema, VersionSchema } from './shared';
 
 /**
@@ -519,7 +519,7 @@ export const ChannelConsequencePreviewSchema = z
     channel: NotificationChannelSchema,
     endpointCount: z.number().int().nonnegative().max(12_000),
     renderedMessage: RenderedMessageSchema,
-    integrationStatus: IntegrationStatusSchema,
+    integrationId: IntegrationIdSchema,
   })
   .strict()
   .superRefine((preview, context) => {
@@ -537,13 +537,13 @@ export const ChannelConsequencePreviewSchema = z
     } as const;
     if (
       !(integrationsByChannel[preview.channel] as readonly string[]).includes(
-        preview.integrationStatus.integrationId,
+        preview.integrationId,
       )
     ) {
       context.addIssue({
         code: 'custom',
         message: 'Integration identity must match the selected channel.',
-        path: ['integrationStatus', 'integrationId'],
+        path: ['integrationId'],
       });
     }
   })

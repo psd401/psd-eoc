@@ -2,7 +2,6 @@ import { timingSafeEqual } from 'node:crypto';
 
 import {
   EmailRuntimeRequestSchema,
-  SesVerificationReferenceSchema,
   type EmailRuntimeRequest,
 } from '@psd-eoc/contracts';
 
@@ -13,7 +12,6 @@ import {
 import {
   createDrizzleEmailRuntimeStore,
   EmailRuntimeStoreError,
-  readEmailRuntimeDeploymentAuthorization,
   type EmailRuntimeStore,
 } from '../../../../lib/notify/email-runtime-store';
 
@@ -23,7 +21,6 @@ export const EMAIL_RUNTIME_MAX_BODY_BYTES = 128 * 1024;
 
 export interface EmailRuntimeRouteDependencies {
   readonly readExpectedBearerToken: () => string;
-  readonly readExpectedVerificationReference: () => string;
   readonly openStore: () => EmailRuntimeStore | Promise<EmailRuntimeStore>;
 }
 
@@ -173,12 +170,8 @@ export function createEmailRuntimeRouteHandler(
       );
     }
     let token: string;
-    let expectedVerificationReference: string;
     try {
       token = dependencies.readExpectedBearerToken();
-      expectedVerificationReference = SesVerificationReferenceSchema.parse(
-        dependencies.readExpectedVerificationReference(),
-      );
     } catch {
       return errorResponse(
         503,
@@ -221,13 +214,6 @@ export function createEmailRuntimeRouteHandler(
             'INVALID_EMAIL_RUNTIME_REQUEST',
             'The email runtime request could not be read.',
           );
-    }
-    if (body.verificationReference !== expectedVerificationReference) {
-      return errorResponse(
-        403,
-        'STALE_EMAIL_RUNTIME_AUTHORIZATION',
-        'The email worker deployment authorization is no longer current.',
-      );
     }
     try {
       return await runOperation(await dependencies.openStore(), body);
@@ -273,14 +259,6 @@ function defaultStore(): EmailRuntimeStore {
 const defaultHandler = createEmailRuntimeRouteHandler({
   openStore: defaultStore,
   readExpectedBearerToken: readEmailRuntimeWorkerToken,
-  readExpectedVerificationReference: () => {
-    const reference =
-      readEmailRuntimeDeploymentAuthorization().verificationReference;
-    if (reference === null) {
-      throw new Error('The email runtime deployment is not verified.');
-    }
-    return reference;
-  },
 });
 
 export function handleEmailRuntimePost(request: Request): Promise<Response> {

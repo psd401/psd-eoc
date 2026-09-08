@@ -12,7 +12,6 @@ import {
   ActivationPreviewSchema,
   EventTransitionSchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
-  IntegrationStatusSchema,
   MediaRecordSchema,
   SessionEstablishmentResultSchema,
   type JournalEntry,
@@ -39,7 +38,6 @@ import {
   facilities,
   humanConfirmationActions,
   humanConfirmationRecords,
-  integrationStatuses,
   journalEntries,
   lifecycleConsequencePreviews,
   mediaRecords,
@@ -1367,32 +1365,6 @@ describeWithDatabase('event journal database guarantees', () => {
         .where(inArray(channelConfigurations.integrationId, integrationIds));
 
       try {
-        const statusRows = await transaction
-          .select()
-          .from(integrationStatuses)
-          .where(inArray(integrationStatuses.integrationId, integrationIds));
-        const integrationStatusFor = (
-          integrationId: (typeof integrationIds)[number],
-        ) => {
-          const row = statusRows.find(
-            (candidate) => candidate.integrationId === integrationId,
-          );
-          if (row === undefined || row.label !== 'mocked') {
-            throw new Error(
-              `The ${integrationId} fixture is not a fail-closed mock.`,
-            );
-          }
-          return IntegrationStatusSchema.parse({
-            integrationId: row.integrationId,
-            label: row.label,
-            verifiedAt:
-              row.verifiedAt === null ? null : row.verifiedAt.toISOString(),
-            verifiedByUserId: row.verifiedByUserId,
-            authorizationReference: row.authorizationReference,
-            reasonCode: row.reasonCode,
-            observedAt: row.observedAt.toISOString(),
-          });
-        };
         const [recipientRows, pushEndpointRows, emailEndpointRows] =
           await Promise.all([
             transaction
@@ -1478,7 +1450,7 @@ describeWithDatabase('event journal database guarantees', () => {
                 title: '[DRILL] SYNTHETIC TEST ACTIVATION',
                 body: '[DRILL] Synthetic test activation only.',
               },
-              integrationStatus: integrationStatusFor('mobile-push'),
+              integrationId: 'mobile-push',
             },
             {
               channel: 'email',
@@ -1492,7 +1464,7 @@ describeWithDatabase('event journal database guarantees', () => {
                 subject: '[DRILL] SYNTHETIC TEST ACTIVATION',
                 textBody: '[DRILL] Synthetic test activation only.',
               },
-              integrationStatus: integrationStatusFor('ses-email'),
+              integrationId: 'ses-email',
             },
           ],
           sendReadiness: 'ready',
@@ -1658,11 +1630,11 @@ describeWithDatabase('event journal database guarantees', () => {
           lifecyclePreview.channels.map((channel) => ({
             channel: channel.channel,
             marker: channel.renderedMessage.classificationMarker,
-            integration: channel.integrationStatus.label,
+            integrationId: channel.integrationId,
           })),
         ).toEqual([
-          { channel: 'push', marker: 'DRILL', integration: 'mocked' },
-          { channel: 'email', marker: 'DRILL', integration: 'mocked' },
+          { channel: 'push', marker: 'DRILL', integrationId: 'mobile-push' },
+          { channel: 'email', marker: 'DRILL', integrationId: 'ses-email' },
         ]);
 
         const allClearInput = {
@@ -1709,8 +1681,7 @@ describeWithDatabase('event journal database guarantees', () => {
         expect(
           allClearIntent.channels.every(
             (channel) =>
-              channel.renderedMessage.classificationMarker === 'DRILL' &&
-              channel.integrationStatus.label === 'mocked',
+              channel.renderedMessage.classificationMarker === 'DRILL',
           ),
         ).toBe(true);
         const allClearReplay = await executeEventCapability(
@@ -1805,7 +1776,7 @@ describeWithDatabase('event journal database guarantees', () => {
             channel: notificationIntentChannels.channel,
             classificationMarker:
               notificationIntentChannels.classificationMarker,
-            integrationLabel: notificationIntentChannels.integrationLabel,
+            integrationId: notificationIntentChannels.integrationId,
           })
           .from(notificationIntentChannels)
           .where(eq(notificationIntentChannels.intentId, allClearIntent.id))
@@ -1814,12 +1785,12 @@ describeWithDatabase('event journal database guarantees', () => {
           {
             channel: 'push',
             classificationMarker: 'DRILL',
-            integrationLabel: 'mocked',
+            integrationId: 'mobile-push',
           },
           {
             channel: 'email',
             classificationMarker: 'DRILL',
-            integrationLabel: 'mocked',
+            integrationId: 'ses-email',
           },
         ]);
         const persistedOutbox = await transaction
@@ -2154,45 +2125,10 @@ describeWithDatabase('event journal database guarantees', () => {
       );
     }
     try {
-      const verifiedAt = new Date(fixtureTime.getTime() - 5_000);
-      const observedAt = new Date(fixtureTime.getTime() - 4_000);
-      const liveStatuses = integrationIds.map((integrationId) => ({
-        id: randomUUID(),
-        value: IntegrationStatusSchema.parse({
-          integrationId,
-          label: 'live-verified',
-          verifiedAt: verifiedAt.toISOString(),
-          verifiedByUserId: HUMAN_ACTOR.userId,
-          authorizationReference: 'synthetic-issue77-test-authorization',
-          reasonCode: null,
-          observedAt: observedAt.toISOString(),
-        }),
-      }));
-      await fixtureDatabase.insert(integrationStatuses).values(
-        liveStatuses.map(({ id, value }) => ({
-          id,
-          integrationId: value.integrationId,
-          label: value.label,
-          verifiedAt,
-          verifiedByUserId: value.verifiedByUserId,
-          authorizationReference: value.authorizationReference,
-          reasonCode: value.reasonCode,
-          observedAt,
-        })),
-      );
-      for (const status of liveStatuses) {
-        await fixtureDatabase
-          .update(channelConfigurations)
-          .set({
-            enabled: true,
-            statusId: status.id,
-            statusLabel: status.value.label,
-            changedAt: fixtureTime,
-          })
-          .where(
-            eq(channelConfigurations.integrationId, status.value.integrationId),
-          );
-      }
+      await fixtureDatabase
+        .update(channelConfigurations)
+        .set({ enabled: true, changedAt: fixtureTime })
+        .where(inArray(channelConfigurations.integrationId, integrationIds));
 
       const sourceCreatedAt = new Date(fixtureTime.getTime() - 3_000);
       const activatedAt = new Date(fixtureTime.getTime() - 2_000);
@@ -2200,15 +2136,6 @@ describeWithDatabase('event journal database guarantees', () => {
         fixture: 'issue-77-real-staff-activation',
         sourcePreviewId,
       });
-      const statusFor = (integrationId: (typeof integrationIds)[number]) => {
-        const status = liveStatuses.find(
-          (candidate) => candidate.value.integrationId === integrationId,
-        );
-        if (status === undefined) {
-          throw new Error(`The ${integrationId} status fixture is missing.`);
-        }
-        return status.value;
-      };
       const sourcePreview = ActivationPreviewSchema.parse({
         id: sourcePreviewId,
         facilityId: ids.northFacilityId,
@@ -2240,7 +2167,7 @@ describeWithDatabase('event journal database guarantees', () => {
               title: '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
               body: '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
             },
-            integrationStatus: statusFor('mobile-push'),
+            integrationId: 'mobile-push',
           },
           {
             channel: 'email',
@@ -2255,7 +2182,7 @@ describeWithDatabase('event journal database guarantees', () => {
               textBody:
                 '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
             },
-            integrationStatus: statusFor('ses-email'),
+            integrationId: 'ses-email',
           },
         ],
         sendReadiness: 'ready',
@@ -2444,11 +2371,11 @@ describeWithDatabase('event journal database guarantees', () => {
       expect(
         firstPreview.channels.map((channel) => ({
           marker: channel.renderedMessage.classificationMarker,
-          integration: channel.integrationStatus.label,
+          integrationId: channel.integrationId,
         })),
       ).toEqual([
-        { marker: 'INCIDENT', integration: 'live-verified' },
-        { marker: 'INCIDENT', integration: 'live-verified' },
+        { marker: 'INCIDENT', integrationId: 'mobile-push' },
+        { marker: 'INCIDENT', integrationId: 'ses-email' },
       ]);
       expect(secondPreview.consequenceDigest).not.toBe(
         firstPreview.consequenceDigest,
@@ -2700,31 +2627,13 @@ describeWithDatabase('event journal database guarantees', () => {
         status: 403,
       });
 
-      const pushStatus = liveStatuses.find(
-        (status) => status.value.integrationId === 'mobile-push',
-      );
-      if (pushStatus === undefined) {
-        throw new Error('The live push fixture is unavailable.');
-      }
-      const newerPushStatusId = randomUUID();
-      const newerObservedAt = new Date(fixtureTime.getTime() - 1_000);
-      await fixtureDatabase.insert(integrationStatuses).values({
-        id: newerPushStatusId,
-        integrationId: 'mobile-push',
-        label: 'live-verified',
-        verifiedAt,
-        verifiedByUserId: HUMAN_ACTOR.userId,
-        authorizationReference: 'synthetic-issue77-newer-test-authorization',
-        reasonCode: null,
-        observedAt: newerObservedAt,
-      });
+      // A channel switched off after the preview was reviewed refuses the send
+      // at confirmation, the same way stale integration truth once did.
       await fixtureDatabase
         .update(channelConfigurations)
         .set({
-          enabled: true,
-          statusId: newerPushStatusId,
-          statusLabel: 'live-verified',
-          changedAt: newerObservedAt,
+          enabled: false,
+          changedAt: new Date(fixtureTime.getTime() - 1_000),
         })
         .where(eq(channelConfigurations.integrationId, 'mobile-push'));
       await expect(
@@ -2751,12 +2660,7 @@ describeWithDatabase('event journal database guarantees', () => {
       expect(confirmationAfterStaleIntegration?.status).toBe('issued');
       await fixtureDatabase
         .update(channelConfigurations)
-        .set({
-          enabled: true,
-          statusId: pushStatus.id,
-          statusLabel: pushStatus.value.label,
-          changedAt: fixtureTime,
-        })
+        .set({ enabled: true, changedAt: fixtureTime })
         .where(eq(channelConfigurations.integrationId, 'mobile-push'));
 
       const allClearIdempotencyKey = `issue77-real-all-clear-${suffix}`;
@@ -2815,8 +2719,7 @@ describeWithDatabase('event journal database guarantees', () => {
       expect(
         allClearIntent.channels.every(
           (channel) =>
-            channel.renderedMessage.classificationMarker === 'INCIDENT' &&
-            channel.integrationStatus.label === 'live-verified',
+            channel.renderedMessage.classificationMarker === 'INCIDENT',
         ),
       ).toBe(true);
       expect(allClear.journalEntries.map(systemJournalCode)).toContain(
@@ -3057,8 +2960,6 @@ describeWithDatabase('event journal database guarantees', () => {
           .update(channelConfigurations)
           .set({
             enabled: configuration.enabled,
-            statusId: configuration.statusId,
-            statusLabel: configuration.statusLabel,
             changedAt: configuration.changedAt,
           })
           .where(

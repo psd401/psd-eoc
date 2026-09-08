@@ -276,12 +276,7 @@ async function createSyntheticDrill(
     invocation(identity, null),
     createDrizzleStartFlowCapabilityStore(connection.db),
   );
-  if (
-    preview.sendReadiness !== 'ready' ||
-    preview.channels.some(
-      ({ integrationStatus }) => integrationStatus.label !== 'mocked',
-    )
-  ) {
+  if (preview.sendReadiness !== 'ready') {
     throw new Error(
       `Synthetic drill preview was not safely ready: ${preview.blockingReasonCodes.join(', ')}`,
     );

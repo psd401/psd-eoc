@@ -109,28 +109,18 @@ function renderedMessage(channel: NotificationChannel) {
   }
 }
 
-function integrationStatus(channel: NotificationChannel) {
-  return {
-    integrationId: {
-      push: 'expo-push',
-      email: 'ses-email',
-      sms: 'aws-eum-sms',
-    }[channel],
-    label: 'mocked' as const,
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: TIMES.created,
-  };
-}
+const INTEGRATION_IDS = {
+  push: 'expo-push',
+  email: 'ses-email',
+  sms: 'aws-eum-sms',
+} as const;
 
 function channelPlans(endpointCount = 1_200) {
   return (['push', 'email', 'sms'] as const).map((channel) => ({
     channel,
     endpointCount,
     renderedMessage: renderedMessage(channel),
-    integrationStatus: integrationStatus(channel),
+    integrationId: INTEGRATION_IDS[channel],
   }));
 }
 
@@ -179,7 +169,7 @@ function dispatchBatches(endpointCount = 1_200): readonly DispatchBatch[] {
         authorization: AUTHORIZATION,
         channel: plan.channel,
         renderedMessage: plan.renderedMessage,
-        integrationStatus: plan.integrationStatus,
+        integrationId: plan.integrationId,
         sequence: index + 1,
         endpointCount,
         createdAt: TIMES.created,
@@ -501,7 +491,6 @@ describe('dispatcher crash, replay, and stable worker idempotency', () => {
     const adapter = {
       channel: 'push' as const,
       integrationId: 'expo-push',
-      truthLabel: 'mocked' as const,
       provider: 'mock-expo',
       deliverySemantics: 'attempt-id-idempotent' as const,
       send: (request: Readonly<{ idempotencyKey: string }>) => {
@@ -762,7 +751,9 @@ describe('production SQS protocol', () => {
     // Generated independently with @smithy/signature-v4 and pinned here so
     // this issue does not depend on an undeclared transitive package at test
     // runtime. Re-derived the same way when the signed body changed: retiring
-    // the audience layer removed `audienceConfig` from the outbox message.
+    // the audience layer removed `audienceConfig` from the outbox message,
+    // and again when channel plans replaced `integrationStatus` with
+    // `integrationId`.
     const signed = signSqsSendMessageBatchRequest(
       {
         queueUrl: 'https://sqs.us-west-2.amazonaws.com/123456789012/test-queue',
@@ -782,7 +773,7 @@ describe('production SQS protocol', () => {
     expect(signed.endpoint).toBe('https://sqs.us-west-2.amazonaws.com/');
     expect(signed.headers['x-amz-date']).toBe('20260810T123456Z');
     expect(signed.headers.authorization).toBe(
-      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLEKEY0000/20260810/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=11e263ac713f63972924125ef53b6daf56ee60679c7cf3038d1e0a87b0dfaac0',
+      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLEKEY0000/20260810/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=67eab2ee61a1c4daac38feaa3db14eaae599fb5d96b86d521af5c18f4b248a4b',
     );
     const body = JSON.parse(signed.body) as {
       QueueUrl: string;

@@ -205,10 +205,6 @@ async function runOperation(
       return safeJson(200, await store.resolveRetry(body.attemptId));
     case 'authorize-provider-send':
       return safeJson(200, await store.authorizeProviderSend(body.workItem));
-    case 'authorize-live-send':
-      return safeJson(200, {
-        authorized: await store.authorizeLiveSend(body.context),
-      });
     case 'record-sms-opt-out':
       return safeJson(200, await store.executeLifecycle(body));
     case 'resolve-sms-destination':

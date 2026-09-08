@@ -136,15 +136,7 @@ const TEST_CHANNELS = [
       title: '[DRILL] Synthetic earthquake drill',
       body: '[DRILL] Synthetic recipients only.',
     },
-    integrationStatus: {
-      integrationId: 'expo-push',
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: '2026-08-11T18:00:00.000Z',
-    },
+    integrationId: 'expo-push',
   },
   {
     channel: 'email',
@@ -158,15 +150,7 @@ const TEST_CHANNELS = [
       subject: '[DRILL] Synthetic earthquake drill',
       textBody: '[DRILL] Synthetic recipients only.',
     },
-    integrationStatus: {
-      integrationId: 'ses-email',
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: '2026-08-11T18:00:00.000Z',
-    },
+    integrationId: 'ses-email',
   },
 ] as const satisfies ActivationPreview['channels'];
 
@@ -183,15 +167,7 @@ const REAL_TEST_CHANNELS = [
       title: '[INCIDENT] Synthetic safety test',
       body: '[INCIDENT] Synthetic fixture; no provider contacted.',
     },
-    integrationStatus: {
-      integrationId: 'expo-push',
-      label: 'live-verified',
-      verifiedAt: '2026-08-11T18:00:00.000Z',
-      verifiedByUserId: '61000000-0000-4000-8000-000000000001',
-      authorizationReference: 'contract-fixture-not-provider-evidence',
-      reasonCode: null,
-      observedAt: '2026-08-11T18:00:00.000Z',
-    },
+    integrationId: 'expo-push',
   },
   {
     channel: 'email',
@@ -205,15 +181,7 @@ const REAL_TEST_CHANNELS = [
       subject: '[INCIDENT] Synthetic safety test',
       textBody: '[INCIDENT] Synthetic fixture; no provider contacted.',
     },
-    integrationStatus: {
-      integrationId: 'ses-email',
-      label: 'live-verified',
-      verifiedAt: '2026-08-11T18:00:00.000Z',
-      verifiedByUserId: '61000000-0000-4000-8000-000000000001',
-      authorizationReference: 'contract-fixture-not-provider-evidence',
-      reasonCode: null,
-      observedAt: '2026-08-11T18:00:00.000Z',
-    },
+    integrationId: 'ses-email',
   },
 ] as const satisfies ActivationPreview['channels'];
 
@@ -419,7 +387,6 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(text).toContain('Who gets notified');
     expect(text).toContain('DRILL — TRAINING ONLY · Push notifications');
     expect(text).toContain('Reaches: 2');
-    expect(text).toContain('Mocked — training data only');
     expect(text).toContain('Text messages');
     expect(text).toContain('Not included.');
     expect(text).toContain('No text message is sent.');

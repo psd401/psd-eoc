@@ -1,5 +1,3 @@
-import type { IntegrationTruthLabel } from '@psd-eoc/contracts';
-
 import { parseWorkerAttemptWorkItem } from '../shared/attempt';
 import type {
   AttemptIdempotentProviderAdapter,
@@ -46,8 +44,7 @@ export interface MockExpoPushTransportOptions {
 function assertMockedWork(value: unknown) {
   const workItem = parseWorkerAttemptWorkItem(value);
   if (
-    workItem.batch.integrationStatus.label !== 'mocked' ||
-    workItem.batch.integrationStatus.integrationId !== 'expo-push' ||
+    workItem.batch.integrationId !== 'expo-push' ||
     workItem.batch.rosterPopulation !== 'synthetic'
   ) {
     throw new TypeError('Mock Expo transport accepts synthetic work only.');
@@ -123,7 +120,6 @@ export class MockExpoPushTransport implements ExpoPushTransport {
 export class MockExpoPushAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
-  public readonly truthLabel: IntegrationTruthLabel = 'mocked';
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
   public readonly requests: ProviderSendRequest[] = [];

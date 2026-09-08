@@ -329,9 +329,6 @@ function providerConfigurationIsPersistentlyDark(properties) {
     properties.EnableDirectPush === 'false' &&
     properties.EnableAwsEumSmsWorker === 'false' &&
     properties.EnableEmailWorker === 'false' &&
-    properties.ExpoCredentialVerificationReference === 'UNVERIFIED' &&
-    properties.DirectPushCredentialVerificationReference === 'UNVERIFIED' &&
-    properties.SesCredentialVerificationReference === 'UNVERIFIED' &&
     properties.PushProviderCutover ===
       '{"version":1,"ios":"expo","android":"expo"}'
   );

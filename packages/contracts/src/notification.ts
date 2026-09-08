@@ -6,10 +6,9 @@ import {
   isActorSourceCompatible,
 } from './capability';
 import { FacilityIdSchema } from './facility';
-import { IntegrationStatusSchema } from './integration';
+import { IntegrationIdSchema } from './integration';
 import {
   ActivationAuthorizationSchema,
-  DeliveryTestNotificationMetadataSchema,
   EventClassificationSchema,
   EventIdSchema,
   EventKindSchema,
@@ -229,45 +228,12 @@ function addNotificationTargetingIssues(
   }
 }
 
-function addDeliveryTestNotificationIssues(
-  value: {
-    readonly eventKind: EventKind;
-    readonly templateMode: TemplateMode;
-    readonly rosterPopulation: RosterPopulation;
-    readonly purpose: NotificationPurpose;
-    readonly deliveryTest?:
-      | z.infer<typeof DeliveryTestNotificationMetadataSchema>
-      | null
-      | undefined;
-  },
-  context: z.RefinementCtx,
-): void {
-  if (
-    value.deliveryTest != null &&
-    (value.eventKind !== 'drill' ||
-      value.templateMode !== 'drill' ||
-      value.rosterPopulation !== 'staff' ||
-      value.purpose !== 'activation')
-  ) {
-    context.addIssue({
-      code: 'custom',
-      message:
-        'Monthly live delivery-test provenance is valid only for a staff drill activation.',
-      path: ['deliveryTest'],
-    });
-  }
-}
-
 function addChannelPlanIssues(
   value: {
     readonly eventKind: EventKind;
     readonly templateMode: TemplateMode;
     readonly rosterPopulation: RosterPopulation;
     readonly purpose: NotificationPurpose;
-    readonly deliveryTest?:
-      | z.infer<typeof DeliveryTestNotificationMetadataSchema>
-      | null
-      | undefined;
     readonly channels: readonly z.infer<
       typeof ChannelConsequencePreviewSchema
     >[];
@@ -282,22 +248,7 @@ function addChannelPlanIssues(
       path: ['channels'],
     });
   }
-  const controlledSingleCanary =
-    names.length === 1 &&
-    (names[0] === 'email' || names[0] === 'push' || names[0] === 'sms') &&
-    value.channels[0]?.endpointCount === 1;
-  if (controlledSingleCanary && value.deliveryTest == null) {
-    context.addIssue({
-      code: 'custom',
-      message:
-        'A single-channel canary plan requires exact controlled delivery-test provenance.',
-      path: ['deliveryTest'],
-    });
-  }
-  if (
-    !controlledSingleCanary &&
-    (!names.includes('push') || !names.includes('email'))
-  ) {
+  if (!names.includes('push') || !names.includes('email')) {
     context.addIssue({
       code: 'custom',
       message: 'Notification channel plan requires push and email.',
@@ -316,16 +267,6 @@ function addChannelPlanIssues(
         path: ['channels', index, 'renderedMessage'],
       });
     }
-    const expectedLabel =
-      value.rosterPopulation === 'synthetic' ? 'mocked' : 'live-verified';
-    if (channel.integrationStatus.label !== expectedLabel) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'Staff sends require live verification; synthetic sends require mocks.',
-        path: ['channels', index, 'integrationStatus', 'label'],
-      });
-    }
   });
 }
 
@@ -335,54 +276,7 @@ const MultiChannelNotificationPlanSchema = z
   .max(3)
   .readonly();
 
-const ControlledEmailCanaryNotificationPlanSchema = z
-  .tuple([ChannelConsequencePreviewSchema])
-  .superRefine(([channel], context) => {
-    if (channel.channel !== 'email' || channel.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled email canary plan must contain exactly one email endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const ControlledPushCanaryNotificationPlanSchema = z
-  .tuple([ChannelConsequencePreviewSchema])
-  .superRefine(([channel], context) => {
-    if (channel.channel !== 'push' || channel.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled push canary plan must contain exactly one push endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const ControlledSmsCanaryNotificationPlanSchema = z
-  .tuple([ChannelConsequencePreviewSchema])
-  .superRefine(([channel], context) => {
-    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled SMS canary plan must contain exactly one SMS endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const NotificationChannelPlanSchema = z.union([
-  MultiChannelNotificationPlanSchema,
-  ControlledEmailCanaryNotificationPlanSchema,
-  ControlledPushCanaryNotificationPlanSchema,
-  ControlledSmsCanaryNotificationPlanSchema,
-]);
+const NotificationChannelPlanSchema = MultiChannelNotificationPlanSchema;
 
 function addNotificationAuthorizationIssues(
   value: {
@@ -463,7 +357,6 @@ export const NotificationIntentSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     createdBy: ActorSchema,
     source: InvocationSourceSchema,
     requestId: UuidSchema,
@@ -474,7 +367,6 @@ export const NotificationIntentSchema = z
   .strict()
   .superRefine((intent, context) => {
     addNotificationTargetingIssues(intent, context);
-    addDeliveryTestNotificationIssues(intent, context);
     addChannelPlanIssues(intent, context);
     addNotificationAuthorizationIssues(intent, context);
     if (intent.eventTypeVersion.templateMode !== intent.templateMode) {
@@ -524,12 +416,11 @@ export const DispatchBatchSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     requestId: UuidSchema,
     authorization: NotificationAuthorizationSchema,
     channel: NotificationChannelSchema,
     renderedMessage: RenderedMessageSchema,
-    integrationStatus: IntegrationStatusSchema,
+    integrationId: IntegrationIdSchema,
     sequence: z.number().int().positive(),
     endpointCount: z.number().int().nonnegative().max(12_000),
     createdAt: TimestampSchema,
@@ -537,7 +428,6 @@ export const DispatchBatchSchema = z
   .strict()
   .superRefine((batch, context) => {
     addNotificationTargetingIssues(batch, context);
-    addDeliveryTestNotificationIssues(batch, context);
     addNotificationAuthorizationIssues(batch, context);
     if (batch.eventTypeVersion.templateMode !== batch.templateMode) {
       context.addIssue({
@@ -563,23 +453,13 @@ export const DispatchBatchSchema = z
         channel: batch.channel,
         endpointCount: batch.endpointCount,
         renderedMessage: batch.renderedMessage,
-        integrationStatus: batch.integrationStatus,
+        integrationId: batch.integrationId,
       }).success
     ) {
       context.addIssue({
         code: 'custom',
         message: 'Dispatch batch channel plan is internally inconsistent.',
-        path: ['integrationStatus'],
-      });
-    }
-    const expectedLabel =
-      batch.rosterPopulation === 'synthetic' ? 'mocked' : 'live-verified';
-    if (batch.integrationStatus.label !== expectedLabel) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'Dispatch integration truth must match staff or synthetic population.',
-        path: ['integrationStatus', 'label'],
+        path: ['integrationId'],
       });
     }
   })
@@ -605,7 +485,6 @@ export const ChannelAttemptSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
-    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     recipientId: RecipientIdSchema,
     endpointId: EndpointIdSchema,
     channel: NotificationChannelSchema,
@@ -615,7 +494,6 @@ export const ChannelAttemptSchema = z
   .strict()
   .superRefine((attempt, context) => {
     addNotificationTargetingIssues(attempt, context);
-    addDeliveryTestNotificationIssues(attempt, context);
     if (attempt.eventTypeVersion.templateMode !== attempt.templateMode) {
       context.addIssue({
         code: 'custom',
@@ -959,7 +837,6 @@ const NotificationOutboxMessageCommonShape = {
   eventTypeVersion: EventTypeVersionRefSchema,
   rosterSnapshotId: RosterSnapshotIdSchema,
   rosterPopulation: RosterPopulationSchema,
-  deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
   requestId: UuidSchema,
   authorization: NotificationAuthorizationSchema,
   channels: NotificationChannelPlanSchema,
@@ -988,7 +865,6 @@ export const NotificationOutboxMessageSchema = z
   ])
   .superRefine((message, context) => {
     addNotificationTargetingIssues(message, context);
-    addDeliveryTestNotificationIssues(message, context);
     addChannelPlanIssues(message, context);
     addNotificationAuthorizationIssues(message, context);
     if (message.eventTypeVersion.templateMode !== message.templateMode) {
@@ -1114,58 +990,11 @@ const MultiChannelDispatchBatchListSchema = z
   .max(3)
   .readonly();
 
-const ControlledEmailCanaryDispatchBatchListSchema = z
-  .tuple([DispatchBatchSchema])
-  .superRefine(([batch], context) => {
-    if (batch.channel !== 'email' || batch.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled email canary dispatch must contain exactly one email endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const ControlledPushCanaryDispatchBatchListSchema = z
-  .tuple([DispatchBatchSchema])
-  .superRefine(([batch], context) => {
-    if (batch.channel !== 'push' || batch.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled push canary dispatch must contain exactly one push endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const ControlledSmsCanaryDispatchBatchListSchema = z
-  .tuple([DispatchBatchSchema])
-  .superRefine(([batch], context) => {
-    if (batch.channel !== 'sms' || batch.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled SMS canary dispatch must contain exactly one SMS endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
 export const DispatchOutboxResultSchema = z
   .object({
     facilityId: FacilityIdSchema,
     outboxRecord: OutboxRecordSchema,
-    batches: z.union([
-      MultiChannelDispatchBatchListSchema,
-      ControlledEmailCanaryDispatchBatchListSchema,
-      ControlledPushCanaryDispatchBatchListSchema,
-      ControlledSmsCanaryDispatchBatchListSchema,
-    ]),
+    batches: MultiChannelDispatchBatchListSchema,
   })
   .strict()
   .superRefine((result, context) => {
@@ -1218,8 +1047,6 @@ export const DispatchOutboxResultSchema = z
           message.eventTypeVersion.templateMode ||
         batch.rosterSnapshotId !== message.rosterSnapshotId ||
         batch.rosterPopulation !== message.rosterPopulation ||
-        JSON.stringify(batch.deliveryTest) !==
-          JSON.stringify(message.deliveryTest) ||
         batch.requestId !== message.requestId ||
         JSON.stringify(batch.authorization) !==
           JSON.stringify(message.authorization) ||
@@ -1227,8 +1054,7 @@ export const DispatchOutboxResultSchema = z
         batch.endpointCount !== plannedChannel.endpointCount ||
         JSON.stringify(batch.renderedMessage) !==
           JSON.stringify(plannedChannel.renderedMessage) ||
-        JSON.stringify(batch.integrationStatus) !==
-          JSON.stringify(plannedChannel.integrationStatus)
+        batch.integrationId !== plannedChannel.integrationId
       ) {
         context.addIssue({
           code: 'custom',
@@ -1734,8 +1560,6 @@ export const NotificationStatusSchema = z
           status.intent.eventTypeVersion.templateMode ||
         batch.rosterSnapshotId !== status.intent.rosterSnapshotId ||
         batch.rosterPopulation !== status.intent.rosterPopulation ||
-        JSON.stringify(batch.deliveryTest) !==
-          JSON.stringify(status.intent.deliveryTest) ||
         batch.requestId !== status.intent.requestId ||
         JSON.stringify(batch.authorization) !==
           JSON.stringify(status.intent.authorization) ||
@@ -1744,8 +1568,7 @@ export const NotificationStatusSchema = z
         batch.endpointCount !== plannedChannel.endpointCount ||
         JSON.stringify(batch.renderedMessage) !==
           JSON.stringify(plannedChannel.renderedMessage) ||
-        JSON.stringify(batch.integrationStatus) !==
-          JSON.stringify(plannedChannel.integrationStatus) ||
+        batch.integrationId !== plannedChannel.integrationId ||
         !isAtOrAfter(batch.createdAt, status.intent.createdAt)
       ) {
         context.addIssue({

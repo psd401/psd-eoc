@@ -103,21 +103,6 @@ function channelName(
   }
 }
 
-function integrationLabel(
-  label: ActivationPreview['channels'][number]['integrationStatus']['label'],
-) {
-  switch (label) {
-    case 'live-verified':
-      return 'Live integration verified';
-    case 'mocked':
-      return 'Mocked — training data only';
-    case 'configured-unverified':
-      return 'Configured, not verified';
-    case 'blocked':
-      return 'Blocked';
-  }
-}
-
 function notifiedByLabel(preview: ActivationPreview): string {
   const names = preview.channels.map((channel) =>
     channelName(channel.channel).toLowerCase(),
@@ -584,7 +569,7 @@ export function ActivationConfirm({
         mode={selection.templateMode}
         detail={
           selection.templateMode === 'real'
-            ? 'Final confirmation starts a real incident and creates real staff-notification intents only when integrations are live-verified.'
+            ? 'Final confirmation starts a real incident and creates real staff-notification intents.'
             : 'Final confirmation starts a training drill. Every resulting event and message remains marked DRILL.'
         }
       />
@@ -650,8 +635,7 @@ export function ActivationConfirm({
                       <h3>{channelName(channel.channel)}</h3>
                       <p>
                         <strong>{channel.endpointCount}</strong> recipient
-                        {channel.endpointCount === 1 ? '' : 's'} —{' '}
-                        {integrationLabel(channel.integrationStatus.label)}
+                        {channel.endpointCount === 1 ? '' : 's'}
                       </p>
                       <ExactChannelMessage channel={channel} />
                     </article>

@@ -29,8 +29,8 @@ or another channel outage. Safety-boundary failures are **SEV-0**.
    send authority. Follow [alarm-sqs-dlq.md](alarm-sqs-dlq.md) for common
    evidence handling.
 2. Confirm account/region, exact queue or callback DLQ, oldest age, counts, and
-   SES integration truth. Non-`live-verified` truth must make zero provider
-   calls.
+   whether the email channel is enabled. A disabled channel must make zero
+   provider calls.
 3. Review `/psd-eoc/workers/email` by UTC interval, sanitized attempt ID, and
    bounded reason code. Never expose an address, message content, or raw SES
    response/event.
