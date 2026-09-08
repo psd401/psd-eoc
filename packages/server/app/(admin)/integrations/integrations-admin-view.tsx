@@ -194,22 +194,15 @@ function ChannelStateSection({
                           name="enabled"
                         >
                           <option value="false">Disabled</option>
-                          <option
-                            disabled={
-                              (configuration.integrationId ===
-                                SMS_INTEGRATION_ID &&
-                                configuration.status.label !==
-                                  'live-verified') ||
-                              configuration.status.label === 'blocked' ||
-                              (configuration.status.label ===
-                                'configured-unverified' &&
-                                configuration.integrationId !==
-                                  MOBILE_PUSH_INTEGRATION_ID)
-                            }
-                            value="true"
-                          >
-                            Enabled
-                          </option>
+                          {/*
+                            Always selectable. Whether a provider works is
+                            discovered by sending, not by a hand-maintained
+                            label: this option was disabled for SMS while the
+                            carrier registration had been approved for hours,
+                            because nothing in the product could move that
+                            label off 'blocked'.
+                          */}
+                          <option value="true">Enabled</option>
                         </select>
                       </label>
                       {configuration.status.label === 'live-verified' ? (

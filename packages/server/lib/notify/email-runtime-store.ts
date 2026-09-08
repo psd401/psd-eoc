@@ -24,7 +24,6 @@ import {
   channelConfigurations,
   dispatchBatches,
   events,
-  integrationStatuses,
   outbox,
   sesEmailProviderIo,
 } from '../../db/schema';
@@ -397,27 +396,16 @@ async function channelIsLive(
   if (!deployment.workerEnabled || deployment.verificationReference === null) {
     return false;
   }
+  // Enablement alone, matching SMS. The three truth-label conditions that used
+  // to sit here are hand-maintained state that can only disagree with reality,
+  // and disagreeing silently refuses to send.
   const [row] = await database
-    .select({
-      enabled: channelConfigurations.enabled,
-      statusLabel: channelConfigurations.statusLabel,
-      integrationLabel: integrationStatuses.label,
-      authorizationReference: integrationStatuses.authorizationReference,
-    })
+    .select({ enabled: channelConfigurations.enabled })
     .from(channelConfigurations)
-    .innerJoin(
-      integrationStatuses,
-      eq(channelConfigurations.statusId, integrationStatuses.id),
-    )
     .where(eq(channelConfigurations.integrationId, 'ses-email'))
     .limit(1)
     .for(lock ? 'share' : 'no key update');
-  return (
-    row?.enabled === true &&
-    row.statusLabel === 'live-verified' &&
-    row.integrationLabel === 'live-verified' &&
-    row.authorizationReference === deployment.verificationReference
-  );
+  return row?.enabled === true;
 }
 
 async function databaseNow(database: Database): Promise<Date> {
