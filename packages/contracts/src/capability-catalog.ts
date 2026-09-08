@@ -332,7 +332,6 @@ const systemScheduledInvocationPolicy = invocationPolicy(
   ['system'],
   ['scheduled-job'],
 );
-const systemWorkerInvocationPolicy = invocationPolicy(['system'], ['worker']);
 const systemWorkerWebhookInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'webhook'],

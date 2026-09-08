@@ -26,11 +26,10 @@ import {
   rosterSyncOutcomeEnum,
 } from './enums';
 
-import { auditCode, digest, occurredAt } from './shared';
+import { auditCode, occurredAt } from './shared';
 
 import { facilities, groupSources } from './configuration';
 
-import { sessions } from './identity';
 /** Immutable versions of the expected staff or synthetic roster sources. */
 export const rosterSourceConfigurations = pgTable(
   'roster_source_configurations',

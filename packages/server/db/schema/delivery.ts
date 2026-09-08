@@ -26,18 +26,15 @@ import {
   deliveryTruthStateEnum,
   deliveryEvidenceSubjectKindEnum,
   outboxStatusEnum,
-  humanConfirmationStatusEnum,
 } from './enums';
 
 import { auditCode, digest, occurredAt } from './shared';
-
-import { sessions, humanConfirmationRecords } from './identity';
 
 import { rosterSnapshots, rosterEndpoints } from './roster';
 
 import { eventTypeVersions } from './event-types';
 
-import { activationPreviews, events } from './events';
+import { events } from './events';
 /** Immutable, transactionally recorded notification send intents. */
 export const notificationIntents = pgTable(
   'notification_intents',

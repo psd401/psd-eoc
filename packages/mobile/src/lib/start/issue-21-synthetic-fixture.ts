@@ -228,7 +228,7 @@ function mockedChannelConsequences() {
   ] as const;
 }
 
-function mockedAllClearChannels(createdAt: string) {
+function mockedAllClearChannels() {
   return [
     {
       channel: 'push' as const,
@@ -294,7 +294,7 @@ function lifecyclePreview(event: Event, now: Date) {
     rosterSnapshotId: event.rosterSnapshotId,
     rosterPopulation: event.rosterPopulation,
     recipientCount: 2,
-    channels: mockedAllClearChannels(now.toISOString()),
+    channels: mockedAllClearChannels(),
     sendReadiness: 'ready',
     blockingReasonCodes: [],
     consequenceDigest: 'b'.repeat(64),

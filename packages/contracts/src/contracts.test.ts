@@ -426,9 +426,11 @@ function channelPlan(
     channel,
     endpointCount: 14,
     renderedMessage: renderedMessage(channel, target, purpose),
-    integrationId: { push: 'expo-push', email: 'ses-email', sms: 'aws-eum-sms' }[
-      channel
-    ],
+    integrationId: {
+      push: 'expo-push',
+      email: 'ses-email',
+      sms: 'aws-eum-sms',
+    }[channel],
   }));
 }
 

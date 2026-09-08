@@ -21,7 +21,6 @@ import {
   type ChannelConfiguration,
   type FacilityPage,
   type GroupSourceKind,
-  type NotificationChannel,
   type RegisteredCapabilityId,
   type RosterGroupSourceRef,
   type RosterPopulation,
@@ -74,7 +73,7 @@ import {
   type TrustedCapabilityInvocation,
 } from './engine';
 import { DrizzleEventTypeStore, EventTypeCapabilityError } from './event-types';
-import { AudienceResolutionError, resolveAudience } from '../roster/resolve';
+import { AudienceResolutionError } from '../roster/resolve';
 import {
   BoundedDatabaseQueryError,
   START_FLOW_DATABASE_PAGE_SIZE,
@@ -89,9 +88,7 @@ import {
 
 type StartFlowCapabilityId = Extract<
   RegisteredCapabilityId,
-  | 'create-activation-preview'
-  | 'list-facilities'
-  | 'list-threats'
+  'create-activation-preview' | 'list-facilities' | 'list-threats'
 >;
 
 type StartFlowQueryDatabase = DatabaseQuery;

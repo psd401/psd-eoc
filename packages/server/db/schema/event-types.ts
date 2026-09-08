@@ -23,9 +23,7 @@ import {
   classificationMarkerEnum,
 } from './enums';
 
-import { auditCode, digest, occurredAt } from './shared';
-
-import { users, sessions } from './identity';
+import { occurredAt } from './shared';
 /** Stable selectable real or drill event-type identities. */
 export const eventTypes = pgTable(
   'event_types',
