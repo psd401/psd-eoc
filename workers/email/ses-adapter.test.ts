@@ -99,25 +99,7 @@ function batch(live: boolean): DispatchBatch {
           textBody:
             '[DRILL] TRAINING ONLY - ACTIVATION: Follow the training plan. [DRILL]',
         },
-    integrationStatus: real
-      ? {
-          integrationId: 'ses-email',
-          label: 'live-verified',
-          verifiedAt: CREATED_AT,
-          verifiedByUserId: IDS.actor,
-          authorizationReference: 'reviewed-product-owner-authorization',
-          reasonCode: null,
-          observedAt: CREATED_AT,
-        }
-      : {
-          integrationId: 'ses-email',
-          label: 'mocked',
-          verifiedAt: null,
-          verifiedByUserId: null,
-          authorizationReference: null,
-          reasonCode: null,
-          observedAt: CREATED_AT,
-        },
+    integrationId: 'ses-email',
     sequence: 1,
     endpointCount: 1,
     createdAt: CREATED_AT,
@@ -240,7 +222,6 @@ function adapter(
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
-      truthLabel: 'live-verified',
     }),
   };
 }
@@ -472,7 +453,6 @@ describe('SES v2 live adapter', () => {
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
-      truthLabel: 'live-verified',
     });
 
     await expect(
@@ -500,7 +480,6 @@ describe('SES v2 live adapter', () => {
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
-      truthLabel: 'live-verified',
     });
 
     await expect(
@@ -517,23 +496,15 @@ describe('SES v2 live adapter', () => {
     expect(client.inputs).toHaveLength(0);
   });
 
-  test('construction fails closed without live truth, durable ledger, or safe sender', () => {
+  test('construction fails closed without a durable ledger or safe sender', () => {
     const client = new CapturingSesClient();
     const ledger = new MemoryDurableLedger();
     const base = {
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
-      truthLabel: 'live-verified' as const,
     };
 
-    expect(
-      () =>
-        new SesV2EmailAdapter({
-          ...base,
-          truthLabel: 'mocked',
-        }),
-    ).toThrow(SesV2EmailAdapterError);
     expect(
       () =>
         new SesV2EmailAdapter({

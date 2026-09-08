@@ -38,10 +38,7 @@ function directWork(provider: 'apns' | 'fcm' = 'apns'): WorkerAttemptWorkItem {
   const base = realBatch();
   const batch = DispatchBatchSchema.parse({
     ...base,
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: DIRECT_PUSH_INTEGRATION_ID,
-    },
+    integrationId: DIRECT_PUSH_INTEGRATION_ID,
   });
   const endpoint: Endpoint = EndpointSchema.parse({
     id: '00000000-0000-4000-8000-000000000012',
@@ -162,7 +159,6 @@ describe('ledgered direct push adapter', () => {
     expect(app.adapter).toMatchObject({
       channel: 'push',
       integrationId: DIRECT_PUSH_INTEGRATION_ID,
-      truthLabel: 'live-verified',
       deliverySemantics: 'attempt-id-idempotent',
     });
     expect(app.ledger.claims).toEqual([

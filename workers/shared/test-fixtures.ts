@@ -107,7 +107,7 @@ export function realBatch(): DispatchBatch {
   });
 }
 
-export function deliveryTestBatch(): DispatchBatch {
+export function staffDrillBatch(): DispatchBatch {
   return DispatchBatchSchema.parse({
     id: IDS.batch,
     intentId: IDS.intent,
@@ -145,8 +145,8 @@ export function deliveryTestBatch(): DispatchBatch {
   });
 }
 
-export function emailDeliveryTestBatch(): DispatchBatch {
-  const batch = deliveryTestBatch();
+export function emailStaffDrillBatch(): DispatchBatch {
+  const batch = staffDrillBatch();
   return DispatchBatchSchema.parse({
     ...batch,
     channel: 'email',
@@ -163,8 +163,8 @@ export function emailDeliveryTestBatch(): DispatchBatch {
   });
 }
 
-export function emailDeliveryTestWorkItem(): WorkerAttemptWorkItem {
-  const batch = emailDeliveryTestBatch();
+export function emailStaffDrillWorkItem(): WorkerAttemptWorkItem {
+  const batch = emailStaffDrillBatch();
   return Object.freeze({
     batch,
     attempt: ChannelAttemptSchema.parse({

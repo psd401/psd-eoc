@@ -27,7 +27,7 @@ const CREATED_AT = '2026-08-10T16:00:00.000Z';
 const ATTEMPTED_AT = '2026-08-10T16:00:01.000Z';
 
 /** Address-safe controlled-email fixture for server boundary tests. */
-export function emailDeliveryTestBatch(): DispatchBatch {
+export function emailStaffDrillBatch(): DispatchBatch {
   return DispatchBatchSchema.parse({
     id: IDS.batch,
     intentId: IDS.intent,
@@ -68,8 +68,8 @@ export function emailDeliveryTestBatch(): DispatchBatch {
   });
 }
 
-export function emailDeliveryTestWorkItem(): EmailWorkerAttemptWorkItem {
-  const batch = emailDeliveryTestBatch();
+export function emailStaffDrillWorkItem(): EmailWorkerAttemptWorkItem {
+  const batch = emailStaffDrillBatch();
   return EmailWorkerAttemptWorkItemSchema.parse({
     batch,
     attempt: ChannelAttemptSchema.parse({

@@ -11,10 +11,8 @@ import {
 import {
   DispatchBatchSchema,
   EmailBatchResolutionPageSchema,
-  IntegrationStatusSchema,
   NotificationOutboxMessageSchema,
   type DispatchBatch,
-  type IntegrationStatus,
 } from '@psd-eoc/contracts';
 import { eq } from 'drizzle-orm';
 
@@ -30,7 +28,6 @@ import {
   endpointStatusRecords,
   events,
   groupSources,
-  integrationStatuses,
   notificationIntentChannels,
   notificationIntents,
   outbox,
@@ -76,7 +73,6 @@ const NOW = Date.now();
 const CREATED_AT = new Date(NOW - 60_000).toISOString();
 const BATCH_CREATED_AT = new Date(NOW - 59_500).toISOString();
 const VERIFIED_AT = new Date(NOW - 300_000).toISOString();
-const EMAIL_AUTHORIZATION_REFERENCE = 'ses:case:279';
 const ORDINARY_ENDPOINT_COUNT = 3;
 const PAGED_ENDPOINT_COUNT = 51;
 
@@ -87,9 +83,6 @@ const fixture = Object.freeze({
   rosterConfigurationId: randomUUID(),
   ordinarySnapshotId: randomUUID(),
   pagedSnapshotId: randomUUID(),
-  pushStatusId: randomUUID(),
-  emailStatusId: randomUUID(),
-  smsStatusId: randomUUID(),
 });
 
 const ordinaryRecipients = Object.freeze(
@@ -158,34 +151,9 @@ function runtimeStore(): EmailRuntimeStore {
   return createDrizzleEmailRuntimeStore(databaseConnection().db, {
     deploymentAuthorization: {
       workerEnabled: true,
-      verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
     },
   });
 }
-
-function liveIntegrationStatus(
-  integrationId: 'expo-push' | 'ses-email' | 'aws-eum-sms',
-): IntegrationStatus {
-  const authorizationReference =
-    integrationId === 'ses-email'
-      ? EMAIL_AUTHORIZATION_REFERENCE
-      : `synthetic:${integrationId}`;
-  return IntegrationStatusSchema.parse({
-    integrationId,
-    label: 'live-verified',
-    verifiedAt: VERIFIED_AT,
-    verifiedByUserId: fixture.userId,
-    authorizationReference,
-    reasonCode: null,
-    observedAt: VERIFIED_AT,
-  });
-}
-
-const integrationTruth = Object.freeze({
-  push: liveIntegrationStatus('expo-push'),
-  email: liveIntegrationStatus('ses-email'),
-  sms: liveIntegrationStatus('aws-eum-sms'),
-});
 
 function humanAuthorization(requestId: string) {
   return Object.freeze({
@@ -331,19 +299,19 @@ async function installNotificationBundle(
       channel: 'push' as const,
       endpointCount: 1,
       renderedMessage: pushMessage,
-      integrationStatus: integrationTruth.push,
+      integrationId: 'expo-push',
     }),
     Object.freeze({
       channel: 'email' as const,
       endpointCount: emailEndpointCount,
       renderedMessage: emailMessage,
-      integrationStatus: integrationTruth.email,
+      integrationId: 'ses-email',
     }),
     Object.freeze({
       channel: 'sms' as const,
       endpointCount: 1,
       renderedMessage: smsMessage,
-      integrationStatus: integrationTruth.sms,
+      integrationId: 'aws-eum-sms',
     }),
   ]);
   const message = NotificationOutboxMessageSchema.parse({
@@ -384,7 +352,7 @@ async function installNotificationBundle(
     authorization,
     channel: 'email',
     renderedMessage: emailMessage,
-    integrationStatus: integrationTruth.email,
+    integrationId: 'ses-email',
     sequence: 2,
     endpointCount: emailEndpointCount,
     createdAt: BATCH_CREATED_AT,
@@ -445,9 +413,7 @@ async function installNotificationBundle(
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: pushMessage,
-        integrationStatusId: fixture.pushStatusId,
         integrationId: 'expo-push',
-        integrationLabel: 'live-verified',
       },
       {
         intentId: ids.intent,
@@ -460,9 +426,7 @@ async function installNotificationBundle(
         classificationMarker: 'DRILL',
         endpointCount: emailEndpointCount,
         renderedMessage: emailMessage,
-        integrationStatusId: fixture.emailStatusId,
         integrationId: 'ses-email',
-        integrationLabel: 'live-verified',
       },
       {
         intentId: ids.intent,
@@ -475,9 +439,7 @@ async function installNotificationBundle(
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: smsMessage,
-        integrationStatusId: fixture.smsStatusId,
         integrationId: 'aws-eum-sms',
-        integrationLabel: 'live-verified',
       },
     ]);
     await transaction.insert(outbox).values({
@@ -519,9 +481,7 @@ async function installNotificationBundle(
       authorization,
       channel: 'email',
       renderedMessage: emailMessage,
-      integrationStatusId: fixture.emailStatusId,
       integrationId: 'ses-email',
-      integrationLabel: 'live-verified',
       sequence: 2,
       endpointCount: emailEndpointCount,
       createdAt: new Date(BATCH_CREATED_AT),
@@ -565,32 +525,10 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
           createdAt: new Date(VERIFIED_AT),
           disabledAt: null,
         });
-        await transaction.insert(integrationStatuses).values([
-          {
-            id: fixture.pushStatusId,
-            ...integrationTruth.push,
-            verifiedAt: new Date(integrationTruth.push.verifiedAt!),
-            observedAt: new Date(integrationTruth.push.observedAt),
-          },
-          {
-            id: fixture.emailStatusId,
-            ...integrationTruth.email,
-            verifiedAt: new Date(integrationTruth.email.verifiedAt!),
-            observedAt: new Date(integrationTruth.email.observedAt),
-          },
-          {
-            id: fixture.smsStatusId,
-            ...integrationTruth.sms,
-            verifiedAt: new Date(integrationTruth.sms.verifiedAt!),
-            observedAt: new Date(integrationTruth.sms.observedAt),
-          },
-        ]);
         await transaction
           .update(channelConfigurations)
           .set({
             enabled: true,
-            statusId: fixture.emailStatusId,
-            statusLabel: 'live-verified',
             changedAt: new Date(VERIFIED_AT),
           })
           .where(eq(channelConfigurations.integrationId, 'ses-email'));
@@ -675,7 +613,6 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     const page = EmailBatchResolutionPageSchema.parse(
       await store.resolveBatch({
         operation: 'resolve-batch',
-        verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
         batch,
         enqueuedAt: BATCH_CREATED_AT,
         cursor: 0,
@@ -699,7 +636,6 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     const page = EmailBatchResolutionPageSchema.parse(
       await store.resolveBatch({
         operation: 'resolve-batch',
-        verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
         batch,
         enqueuedAt: BATCH_CREATED_AT,
         cursor: 0,
@@ -720,7 +656,6 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     const first = EmailBatchResolutionPageSchema.parse(
       await store.resolveBatch({
         operation: 'resolve-batch',
-        verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
         batch,
         enqueuedAt: BATCH_CREATED_AT,
         cursor: 0,
@@ -732,7 +667,6 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     const second = EmailBatchResolutionPageSchema.parse(
       await store.resolveBatch({
         operation: 'resolve-batch',
-        verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
         batch,
         enqueuedAt: BATCH_CREATED_AT,
         cursor: first.nextCursor!,
@@ -753,7 +687,6 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     const first = EmailBatchResolutionPageSchema.parse(
       await store.resolveBatch({
         operation: 'resolve-batch',
-        verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
         batch,
         enqueuedAt: BATCH_CREATED_AT,
         cursor: 0,
@@ -786,7 +719,6 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     const second = EmailBatchResolutionPageSchema.parse(
       await store.resolveBatch({
         operation: 'resolve-batch',
-        verificationReference: EMAIL_AUTHORIZATION_REFERENCE,
         batch,
         enqueuedAt: BATCH_CREATED_AT,
         cursor: first.nextCursor!,

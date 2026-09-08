@@ -3,43 +3,19 @@ import { describe, expect, test } from 'bun:test';
 import type { Database } from '../../db/client';
 import { channelAttempts, dispatchBatches } from '../../db/schema';
 import {
-  emailDeliveryTestBatch,
-  emailDeliveryTestWorkItem,
+  emailStaffDrillBatch,
+  emailStaffDrillWorkItem,
 } from '../testing/email-runtime';
 import {
-  assertControlledCanaryBatch,
   assertEmailBatch,
   createDrizzleEmailRuntimeStore,
-  emailBatchMatchesDeploymentAuthorization,
 } from './email-runtime-store';
 
-const batch = emailDeliveryTestBatch();
-const reference = batch.integrationStatus.authorizationReference!;
+const batch = emailStaffDrillBatch();
 
-describe('email runtime deployment authorization', () => {
-  test('binds immutable batches to the exact active verification reference', () => {
-    expect(
-      emailBatchMatchesDeploymentAuthorization(batch, {
-        workerEnabled: true,
-        verificationReference: reference,
-      }),
-    ).toBeTrue();
-    expect(
-      emailBatchMatchesDeploymentAuthorization(batch, {
-        workerEnabled: true,
-        verificationReference: 'superseding-verification-reference',
-      }),
-    ).toBeFalse();
-    expect(
-      emailBatchMatchesDeploymentAuthorization(batch, {
-        workerEnabled: false,
-        verificationReference: reference,
-      }),
-    ).toBeFalse();
-  });
-
-  test('rejects a stale retry batch before returning not-before', async () => {
-    const workItem = emailDeliveryTestWorkItem();
+describe('email runtime retry resolution', () => {
+  test('refuses a retry while the worker is disabled, before reading the clock', async () => {
+    const workItem = emailStaffDrillWorkItem();
     const outboxId = '00000000-0000-4000-8000-000000000018';
     const readOrder: string[] = [];
     let rows: readonly unknown[] = [];
@@ -89,10 +65,8 @@ describe('email runtime deployment authorization', () => {
                 authorization: batch.authorization,
                 channel: batch.channel,
                 renderedMessage: batch.renderedMessage,
-                integrationStatusId: '00000000-0000-4000-8000-000000000019',
-                integrationId: batch.integrationStatus.integrationId,
-                integrationLabel: batch.integrationStatus.label,
-                sequence: batch.sequence,
+                integrationId: batch.integrationId,
+                sequence: 2,
                 endpointCount: batch.endpointCount,
                 createdAt: new Date(batch.createdAt),
               },
@@ -108,15 +82,28 @@ describe('email runtime deployment authorization', () => {
                 eventTypeVersion: batch.eventTypeVersion,
                 rosterSnapshotId: batch.rosterSnapshotId,
                 rosterPopulation: batch.rosterPopulation,
-                deliveryTest: batch.deliveryTest,
                 requestId: batch.requestId,
                 authorization: batch.authorization,
                 channels: [
                   {
+                    channel: 'push',
+                    endpointCount: 1,
+                    renderedMessage: {
+                      eventKind: batch.eventKind,
+                      templateMode: batch.templateMode,
+                      purpose: batch.purpose,
+                      classificationMarker: 'DRILL',
+                      channel: 'push',
+                      title: '[DRILL] Staff drill push',
+                      body: '[DRILL] TRAINING ONLY.',
+                    },
+                    integrationId: 'expo-push',
+                  },
+                  {
                     channel: batch.channel,
                     endpointCount: batch.endpointCount,
                     renderedMessage: batch.renderedMessage,
-                    integrationStatus: batch.integrationStatus,
+                    integrationId: batch.integrationId,
                   },
                 ],
                 createdAt: batch.createdAt,
@@ -144,10 +131,7 @@ describe('email runtime deployment authorization', () => {
       select: () => query,
     } as unknown as Database;
     const store = createDrizzleEmailRuntimeStore(database, {
-      deploymentAuthorization: {
-        workerEnabled: true,
-        verificationReference: 'superseding-verification-reference',
-      },
+      deploymentAuthorization: { workerEnabled: false },
     });
 
     await expect(store.resolveRetry(workItem.attempt.id)).resolves.toEqual({
@@ -158,8 +142,8 @@ describe('email runtime deployment authorization', () => {
 });
 
 describe('which email batches this store will send', () => {
-  test('accepts an ordinary activation that is not a controlled canary', () => {
-    // The canary's conditions were applied to every batch, so a confirmed
+  test('accepts an ordinary activation', () => {
+    // The canary's conditions were once applied to every batch, so a confirmed
     // activation queued its email and was refused on arrival: an ordinary
     // drill notified nobody, and a REAL incident would have sent no email at
     // all. This is that batch.
@@ -169,7 +153,6 @@ describe('which email batches this store will send', () => {
       templateMode: 'real' as const,
       purpose: 'activation' as const,
       endpointCount: 42,
-      deliveryTest: null,
     };
     expect(() => assertEmailBatch(activation)).not.toThrow();
   });
@@ -220,32 +203,13 @@ describe('which email batches this store will send', () => {
   });
 
   test('still refuses a batch this store must never send', () => {
-    // A human confirmed it, it is the verified SES integration, and it is an
-    // email batch. These remain the conditions for sending anything.
+    // A human confirmed it, it is the SES integration, and it is an email
+    // batch. These remain the conditions for sending anything.
     expect(() =>
       assertEmailBatch({ ...batch, channel: 'push' as const }),
     ).toThrow();
     expect(() =>
-      assertEmailBatch({
-        ...batch,
-        integrationStatus: { ...batch.integrationStatus, label: 'mocked' },
-      }),
-    ).toThrow();
-  });
-
-  test('holds a controlled canary to every condition it always had', () => {
-    expect(() => assertControlledCanaryBatch(batch)).not.toThrow();
-    expect(() =>
-      assertControlledCanaryBatch({ ...batch, endpointCount: 2 }),
-    ).toThrow();
-    expect(() =>
-      assertControlledCanaryBatch({ ...batch, eventKind: 'incident' as const }),
-    ).toThrow();
-    expect(() =>
-      assertControlledCanaryBatch({ ...batch, templateMode: 'real' as const }),
-    ).toThrow();
-    expect(() =>
-      assertControlledCanaryBatch({ ...batch, purpose: 'all-clear' as const }),
+      assertEmailBatch({ ...batch, integrationId: 'expo-push' as const }),
     ).toThrow();
   });
 });

@@ -7,9 +7,6 @@ describe('integrations administration page query state', () => {
     expect(integrationsAdminStatusMessage('channel-updated')).toBe(
       'The notification channel configuration was updated.',
     );
-    expect(integrationsAdminStatusMessage('email-verified')).toContain(
-      'No email was sent',
-    );
     expect(integrationsAdminStatusMessage('unknown')).toBeNull();
     expect(integrationsAdminStatusMessage(undefined)).toBeNull();
   });

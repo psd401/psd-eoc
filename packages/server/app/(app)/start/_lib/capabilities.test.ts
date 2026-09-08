@@ -16,96 +16,10 @@ import {
   type TrustedCapabilityInvocation,
 } from '../../../../lib/capabilities/engine';
 import {
-  deliveryTestCredentialIsVerified,
   executeStartFlowCapability,
-  readDeliveryTestCredentialVerificationReferences,
   type StartFlowCapabilityStore,
   type StartFlowCapabilityTransaction,
 } from '../../../../lib/capabilities/start';
-
-describe('monthly delivery-test credential readiness', () => {
-  const liveStatus = Object.freeze({
-    label: 'live-verified',
-    verifiedAt: '2026-08-10T16:00:00.000Z',
-    authorizationReference: 'credential-verification-reference-v1',
-  });
-
-  test('keeps exact deployment-to-status equality for push and email', () => {
-    expect(deliveryTestCredentialIsVerified(liveStatus, null, 'push')).toBe(
-      false,
-    );
-    expect(
-      deliveryTestCredentialIsVerified(
-        liveStatus,
-        'different-reference-v1',
-        'push',
-      ),
-    ).toBe(false);
-    expect(
-      deliveryTestCredentialIsVerified(
-        liveStatus,
-        'credential-verification-reference-v1',
-        'push',
-      ),
-    ).toBe(true);
-    expect(
-      deliveryTestCredentialIsVerified(
-        { ...liveStatus, label: 'mocked' },
-        'credential-verification-reference-v1',
-        'email',
-      ),
-    ).toBe(false);
-    expect(
-      deliveryTestCredentialIsVerified(
-        liveStatus,
-        'credential-verification-reference-v1',
-        'email',
-      ),
-    ).toBe(true);
-  });
-
-  test('keeps carrier-registration evidence separate from SMS live authorization', () => {
-    const registrationReference = 'carrier-registration-case-279';
-    expect(liveStatus.authorizationReference).not.toBe(registrationReference);
-    expect(
-      deliveryTestCredentialIsVerified(
-        liveStatus,
-        registrationReference,
-        'sms',
-      ),
-    ).toBe(true);
-    for (const [status, reference] of [
-      [
-        { ...liveStatus, label: 'configured-unverified' },
-        registrationReference,
-      ],
-      [{ ...liveStatus, verifiedAt: null }, registrationReference],
-      [liveStatus, null],
-      [liveStatus, 'UNVERIFIED'],
-      [liveStatus, ' too-short '],
-    ] as const) {
-      expect(deliveryTestCredentialIsVerified(status, reference, 'sms')).toBe(
-        false,
-      );
-    }
-  });
-
-  test('accepts only bounded, non-secret deployment references', () => {
-    const references = readDeliveryTestCredentialVerificationReferences({
-      PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE:
-        'credential-verification-reference-v1',
-      PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE: ' too-short ',
-      PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE:
-        'carrier-registration-case-279',
-    });
-    expect(references).toEqual({
-      push: 'credential-verification-reference-v1',
-      email: null,
-      sms: 'carrier-registration-case-279',
-    });
-    expect(JSON.stringify(references)).not.toContain('token');
-  });
-});
 
 const uuid = (suffix: number): string =>
   `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
@@ -142,15 +56,6 @@ const FACILITY_PAGE = FacilityPageSchema.parse({
   pageInfo: { hasMore: false, nextCursor: null },
 });
 
-const MOCK_STATUS = Object.freeze({
-  label: 'mocked' as const,
-  verifiedAt: null,
-  verifiedByUserId: null,
-  authorizationReference: null,
-  reasonCode: null,
-  observedAt: NOW.toISOString(),
-});
-
 const PREVIEW = ActivationPreviewSchema.parse({
   id: IDS.preview,
   facilityId: IDS.facility,
@@ -176,10 +81,7 @@ const PREVIEW = ActivationPreviewSchema.parse({
         title: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
         body: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
       },
-      integrationStatus: {
-        integrationId: 'expo-push',
-        ...MOCK_STATUS,
-      },
+      integrationId: 'expo-push',
     },
     {
       channel: 'email',
@@ -193,10 +95,7 @@ const PREVIEW = ActivationPreviewSchema.parse({
         subject: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
         textBody: '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: Test [DRILL]',
       },
-      integrationStatus: {
-        integrationId: 'ses-email',
-        ...MOCK_STATUS,
-      },
+      integrationId: 'ses-email',
     },
   ],
   sendReadiness: 'ready',

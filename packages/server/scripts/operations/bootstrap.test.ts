@@ -51,7 +51,6 @@ const referenceSeedSummary: ReferenceSeedSummary = Object.freeze({
   eventTypes: 12,
   eventTypeVersions: 12,
   eventTypeTemplates: 108,
-  integrationStatuses: 6,
   channelConfigurations: 3,
   events: 0,
   outboxMessages: 0,

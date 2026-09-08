@@ -250,11 +250,8 @@ describe('deployment boundary', () => {
     );
   });
 
-  it('rejects blank or padded carrier evidence and response parameters', () => {
+  it('rejects blank or padded SMS response parameters', () => {
     const parameters = asRecord(synthesized.Parameters);
-    expect(
-      asRecord(parameters.SmsRegistrationVerificationReference).AllowedPattern,
-    ).toBe('^(UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$');
     expect(asRecord(parameters.SmsHelpMessage)).toMatchObject({
       AllowedPattern: '^(UNCONFIGURED|\\S(?:[\\s\\S]{0,158}\\S)?)$',
       MaxLength: 160,
@@ -597,14 +594,10 @@ describe('deployment boundary', () => {
       'EnableDirectPush',
       'EnableEmailWorker',
       'EnableExpoPushWorker',
-      'DirectPushCredentialVerificationReference',
-      'ExpoCredentialVerificationReference',
-      'SesCredentialVerificationReference',
       'PushProviderCutover',
     ]) {
       expect(serializedRollbackDarkRule).toContain(parameter);
     }
-    expect(serializedRollbackDarkRule).toContain('UNVERIFIED');
     expect(JSON.stringify(rollbackDarkRule.RuleCondition)).toContain(
       'RollbackApplicationImageDigest',
     );
@@ -1223,7 +1216,6 @@ describe('App Runner runtime safety boundary', () => {
         'DELIVERY_QUEUE_URL',
         'NODE_ENV',
         'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
-        'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_DISPLAY_TIME_ZONE',
         'PSD_EOC_EMAIL_WORKER_ENABLED',
         'PSD_EOC_IOS_BUNDLE_ID',
@@ -1231,13 +1223,10 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_ORGANIZATION_NAME',
         'PSD_EOC_PUSH_PROVIDER_CUTOVER',
         'PSD_EOC_PRIVACY_CONTACT_URL',
-        'PSD_EOC_PRODUCT_OWNER_USER_ID',
         'PSD_EOC_SMS_SUPPORT_EMAIL',
         'PSD_EOC_SMS_SUPPORT_PHONE',
-        'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_SES_SNS_TOPIC_ARN',
         'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',
-        'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
         'PSD_EOC_SMS_WORKER_READY',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',
@@ -1271,9 +1260,6 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('PSD_EOC_PUSH_PROVIDER_CUTOVER')).toEqual({
       Ref: 'PushProviderCutover',
     });
-    expect(
-      variables.get('PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE'),
-    ).toEqual({ Ref: 'DirectPushCredentialVerificationReference' });
     expect(JSON.stringify(variables.get('SOURCE_SHA'))).toContain(
       'RollbackImageValidation',
     );
@@ -1283,18 +1269,12 @@ describe('App Runner runtime safety boundary', () => {
     expect(variables.get('PSD_EOC_CRITICAL_ALARM_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('CriticalAlarmTopic'),
     });
-    expect(
-      variables.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE'),
-    ).toEqual({ Ref: 'SesCredentialVerificationReference' });
     expect(variables.get('PSD_EOC_SES_SNS_TOPIC_ARN')).toEqual({
       Ref: expect.stringContaining('EmailEventsTopic'),
     });
     expect(variables.get('PSD_EOC_SMS_DESTINATION_COUNTRY_CODE')).toEqual({
       Ref: 'SmsDestinationCountryCode',
     });
-    expect(
-      variables.get('PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE'),
-    ).toEqual({ Ref: 'SmsRegistrationVerificationReference' });
     expect(variables.get('PSD_EOC_SMS_WORKER_READY')).toEqual({
       'Fn::If': ['ShouldRunAwsEumSmsWorker', 'true', 'false'],
     });
@@ -1415,9 +1395,6 @@ describe('App Runner runtime safety boundary', () => {
     expect(environment.get('PSD_EOC_PUSH_PROVIDER_CUTOVER')).toEqual({
       Ref: 'PushProviderCutover',
     });
-    expect(
-      environment.get('PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE'),
-    ).toEqual({ Ref: 'DirectPushCredentialVerificationReference' });
 
     const injectedSecrets = new Map(
       asArray(container.Secrets).map((item) => {
@@ -3082,7 +3059,6 @@ describe('configured-unverified provider readiness boundary', () => {
     ).toEqual([
       'psd-eoc-access-membership-sync-every-two-hours',
       'psd-eoc-aurora-failover-events',
-      'psd-eoc-monthly-live-delivery-test-due-reminder',
       'psd-eoc-sms-delivery-events',
       'psd-eoc-sms-opt-out-reconciliation',
     ]);

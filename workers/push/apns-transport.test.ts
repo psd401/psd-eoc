@@ -28,10 +28,7 @@ function directBatch() {
   const batch = realBatch();
   return DispatchBatchSchema.parse({
     ...batch,
-    integrationStatus: {
-      ...batch.integrationStatus,
-      integrationId: 'mobile-push',
-    },
+    integrationId: 'mobile-push',
   });
 }
 

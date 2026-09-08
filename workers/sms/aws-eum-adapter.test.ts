@@ -27,7 +27,6 @@ import {
   type AwsEumSmsLedgerCompletion,
   type AwsEumSmsLedgerLookup,
   type AwsEumSmsLedgerLookupRequest,
-  type AwsEumSmsLiveAuthorizationContext,
   type AwsEumSmsSendLedger,
 } from './aws-eum-adapter';
 
@@ -50,10 +49,7 @@ function smsBatch(mode: 'live' | 'mock' = 'live'): DispatchBatch {
       channel: 'sms',
       body: mode === 'live' ? INCIDENT_BODY : DRILL_BODY,
     },
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: 'aws-eum-sms',
-    },
+    integrationId: 'aws-eum-sms',
   });
 }
 
@@ -248,25 +244,18 @@ function adapter(
   adapter: AwsEumSmsAdapter;
   client: RecordingClient;
   ledger: MemorySendLedger;
-  authorizationContexts: AwsEumSmsLiveAuthorizationContext[];
   providerAuthorizationWorkItems: ProviderSendRequest['workItem'][];
 }> {
-  const authorizationContexts: AwsEumSmsLiveAuthorizationContext[] = [];
   const providerAuthorizationWorkItems: ProviderSendRequest['workItem'][] = [];
   return Object.freeze({
     client,
     ledger,
-    authorizationContexts,
     providerAuthorizationWorkItems,
     adapter: new AwsEumSmsAdapter({
       client,
       ledger,
       ...BASE_OPTIONS,
       featureEnabled: true,
-      authorizeLiveSend: (context) => {
-        authorizationContexts.push(context);
-        return true;
-      },
       authorizeProviderSend: (workItem) => {
         providerAuthorizationWorkItems.push(workItem);
         return Object.freeze({ authorized: true, timeToLiveSeconds: 299 });
@@ -330,17 +319,10 @@ describe('AWS EUM SMS request and live gates', () => {
         ProtectConfigurationId: 'protect-synthetic',
       },
     ]);
-    expect(app.authorizationContexts).toHaveLength(1);
-    expect(JSON.stringify(app.authorizationContexts[0])).not.toContain(
-      '+12025550123',
-    );
-    expect(JSON.stringify(app.authorizationContexts[0])).not.toContain(
-      INCIDENT_BODY,
-    );
     expect(app.providerAuthorizationWorkItems).toEqual([request.workItem]);
   });
 
-  test('preserves an exact live-verified staff DRILL request at the provider boundary', async () => {
+  test('preserves an exact staff DRILL request at the provider boundary', async () => {
     const app = adapter();
     const request = providerRequest(staffDrillSmsBatch());
 
@@ -366,13 +348,6 @@ describe('AWS EUM SMS request and live gates', () => {
         ProtectConfigurationId: 'protect-synthetic',
       },
     ]);
-    expect(app.authorizationContexts).toEqual([
-      expect.objectContaining({
-        eventKind: 'drill',
-        templateMode: 'drill',
-        attemptId: IDS.attempt,
-      }),
-    ]);
   });
 
   test('fails closed for an arbitrary client that does not prove single-wire semantics', () => {
@@ -392,7 +367,6 @@ describe('AWS EUM SMS request and live gates', () => {
           ledger,
           ...BASE_OPTIONS,
           featureEnabled: true,
-          authorizeLiveSend: () => true,
         }),
     ).toThrow('must guarantee one wire attempt');
     expect(hiddenWireAttempts).toBe(0);
@@ -404,28 +378,12 @@ describe('AWS EUM SMS request and live gates', () => {
     for (const overrides of [
       {
         featureEnabled: false,
-        authorizeLiveSend: () => true,
         authorizeProviderSend: () => ({
           authorized: true,
           timeToLiveSeconds: 300,
         }),
       },
-      {
-        featureEnabled: true,
-        authorizeLiveSend: () => false,
-        authorizeProviderSend: () => ({
-          authorized: true,
-          timeToLiveSeconds: 300,
-        }),
-      },
-      { featureEnabled: true, authorizeLiveSend: () => true },
-      {
-        featureEnabled: true,
-        authorizeProviderSend: () => ({
-          authorized: true,
-          timeToLiveSeconds: 300,
-        }),
-      },
+      { featureEnabled: true },
     ] satisfies readonly Partial<AwsEumSmsAdapterOptions>[]) {
       const client = new RecordingClient();
       const ledger = new MemorySendLedger();

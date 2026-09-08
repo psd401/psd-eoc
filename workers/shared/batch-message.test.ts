@@ -21,7 +21,6 @@ import {
   IDS,
   TIMES,
   attemptFor,
-  deliveryTestBatch,
   syntheticBatch,
   workItem,
 } from './test-fixtures';
@@ -39,10 +38,7 @@ function syntheticSmsWorkItem(phoneNumber: string) {
       channel: 'sms',
       body: '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic test. [DRILL]',
     },
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: 'aws-eum-sms',
-    },
+    integrationId: 'aws-eum-sms',
   });
   return {
     batch,
@@ -137,33 +133,6 @@ describe('resolved endpoint attempt', () => {
 
     expect(digest).not.toBe(workerAttemptFingerprint(original));
     expect(digest).not.toContain('another-device');
-  });
-
-  test('requires attempt canary provenance to exactly match its batch', () => {
-    const item = workItem(deliveryTestBatch());
-    expect(parseWorkerAttemptWorkItem(item)).toEqual(item);
-
-    for (const deliveryTest of [
-      null,
-      {
-        ...item.attempt.deliveryTest,
-        endpointReferenceDigest: 'e'.repeat(64),
-      },
-      {
-        ...item.attempt.deliveryTest,
-        targetSet: {
-          ...item.attempt.deliveryTest?.targetSet,
-          version: 2,
-        },
-      },
-    ]) {
-      expect(() =>
-        parseWorkerAttemptWorkItem({
-          ...item,
-          attempt: { ...item.attempt, deliveryTest },
-        }),
-      ).toThrow(expect.objectContaining({ code: 'ATTEMPT_BATCH_MISMATCH' }));
-    }
   });
 
   test('accepts only the reserved synthetic SMS fixture namespaces', () => {

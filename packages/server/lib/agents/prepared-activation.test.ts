@@ -57,8 +57,6 @@ const IDS = Object.freeze({
   confirmation: '00000000-0000-4000-8000-000000000116',
   humanRequest: '00000000-0000-4000-8000-000000000117',
   agentStartRequest: '00000000-0000-4000-8000-000000000118',
-  pushIntegrationStatus: '00000000-0000-4000-8000-000000000119',
-  emailIntegrationStatus: '00000000-0000-4000-8000-000000000120',
   event: '00000000-0000-4000-8000-000000000121',
   humanAllowedRead: '00000000-0000-4000-8000-000000000122',
   agentAllowedRead: '00000000-0000-4000-8000-000000000123',
@@ -77,15 +75,6 @@ function realActivationPreview(
   input: Readonly<{ expiresAt?: string }> = {},
 ): ActivationPreview {
   const createdAt = '2026-08-10T18:00:00.000Z';
-  const integrationStatus = (integrationId: 'expo-push' | 'ses-email') => ({
-    integrationId,
-    label: 'live-verified' as const,
-    verifiedAt: createdAt,
-    verifiedByUserId: '00000000-0000-4000-8000-000000000111',
-    authorizationReference: 'approved-synthetic-test-fixture',
-    reasonCode: null,
-    observedAt: createdAt,
-  });
   return ActivationPreviewSchema.parse({
     id: IDS.preview,
     facilityId: IDS.facility,
@@ -108,7 +97,7 @@ function realActivationPreview(
           title: '[INCIDENT] Synthetic event update',
           body: '[INCIDENT] Synthetic event fixture message.',
         },
-        integrationStatus: integrationStatus('expo-push'),
+        integrationId: 'expo-push',
       },
       {
         channel: 'email',
@@ -122,7 +111,7 @@ function realActivationPreview(
           subject: '[INCIDENT] Synthetic event update',
           textBody: '[INCIDENT] Synthetic event fixture message.',
         },
-        integrationStatus: integrationStatus('ses-email'),
+        integrationId: 'ses-email',
       },
     ],
     sendReadiness: 'ready',
@@ -421,10 +410,6 @@ class PreparedConsumptionEventStore
     return {
       preview: this.preparedActivation.preview,
       preparedActivation: this.preparedActivation,
-      integrationStatusIds: {
-        push: IDS.pushIntegrationStatus,
-        email: IDS.emailIntegrationStatus,
-      },
       currentActiveEventIds: [],
     };
   }

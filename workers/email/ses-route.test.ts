@@ -27,7 +27,7 @@ import {
   type SesCallbackClaim,
   type SesWebhookStore,
 } from '../../packages/server/app/api/webhooks/ses/runtime';
-import { IDS, emailDeliveryTestWorkItem } from '../shared/test-fixtures';
+import { IDS } from '../shared/test-fixtures';
 import {
   SnsSignatureError,
   canonicalSnsEnvelopeDigest,
@@ -64,7 +64,6 @@ const ATTEMPT = ChannelAttemptSchema.parse({
   attemptNumber: 1,
   attemptedAt: '2026-08-11T20:00:00.000Z',
 });
-const DELIVERY_TEST_ATTEMPT = emailDeliveryTestWorkItem().attempt;
 
 type SupportedFixtureType = 'Send' | 'Delivery' | 'Bounce' | 'Complaint';
 
@@ -242,15 +241,9 @@ interface EndpointWrite {
   readonly semanticIdempotencyKey: string;
 }
 
-interface ReportProjectionWrite {
-  readonly attempt: ChannelAttempt;
-  readonly evidence: DeliveryEvidence;
-}
-
 class MemorySesWebhookStore implements SesWebhookStore {
   public readonly evidenceWrites: EvidenceWrite[] = [];
   public readonly endpointWrites: EndpointWrite[] = [];
-  public readonly reportProjectionWrites: ReportProjectionWrite[] = [];
   public readonly failedCallbacks: Readonly<{
     recordId: string;
     reasonCode: string;
@@ -391,14 +384,6 @@ class MemorySesWebhookStore implements SesWebhookStore {
         diagnosticDigest: input.diagnosticDigest,
       }),
     );
-  }
-
-  public reprojectDeliveryTestReport(
-    attempt: ChannelAttempt,
-    evidence: DeliveryEvidence,
-  ): Promise<void> {
-    this.reportProjectionWrites.push({ attempt, evidence });
-    return Promise.resolve();
   }
 
   public recordEndpointStatus(
@@ -582,35 +567,6 @@ describe('SES signed SNS webhook route', () => {
     expect(app.store.endpointWrites[0]?.semanticIdempotencyKey).toBe(
       `${SES_MESSAGE_ID}:Bounce:SES_PERMANENT_BOUNCE`,
     );
-  });
-
-  test('reprojects a controlled email report after each terminal provider fact', async () => {
-    const store = new MemorySesWebhookStore(DELIVERY_TEST_ATTEMPT);
-    const app = createHarness(store);
-    const correlation = { eventKind: 'drill' as const };
-    const send = signedEnvelope({ eventType: 'Send', correlation });
-    const delivery = signedEnvelope({
-      eventType: 'Delivery',
-      snsMessageId: randomUUID(),
-      correlation,
-    });
-
-    const acceptedResponse = await app.handler(requestForEnvelope(send));
-    const deliveredResponse = await app.handler(requestForEnvelope(delivery));
-    const replayResponse = await app.handler(requestForEnvelope(delivery));
-
-    expect(acceptedResponse.status).toBe(204);
-    expect(deliveredResponse.status).toBe(204);
-    expect(replayResponse.status).toBe(204);
-    expect(
-      store.reportProjectionWrites.map(({ evidence }) => evidence.state),
-    ).toEqual(['provider-accepted', 'delivered']);
-    expect(
-      store.reportProjectionWrites.map(({ attempt }) => attempt.deliveryTest),
-    ).toEqual([
-      DELIVERY_TEST_ATTEMPT.deliveryTest,
-      DELIVERY_TEST_ATTEMPT.deliveryTest,
-    ]);
   });
 
   test('Complaint disables the endpoint without regressing delivery evidence', async () => {

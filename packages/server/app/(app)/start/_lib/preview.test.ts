@@ -21,7 +21,6 @@ import {
   renderedThreatLabel,
   type ActivationPreviewEvidence,
 } from '../../../../lib/capabilities/start-preview';
-import { digestCapabilityValue } from '../../../../lib/capabilities/engine';
 import { formatNotificationStartTime } from '../../../../lib/notify/render';
 
 const CREATED_AT = new Date('2026-08-10T17:00:00.000Z');
@@ -45,7 +44,6 @@ const IDS = Object.freeze({
   verifier: '00000000-0000-4000-8000-000000000015',
   activeEventA: '00000000-0000-4000-8000-000000000016',
   activeEventB: '00000000-0000-4000-8000-000000000017',
-  targetSet: '00000000-0000-4000-8000-000000000018',
   ordinaryEndpoint: '00000000-0000-4000-8000-000000000019',
   threat: '00000000-0000-4000-8000-000000000020',
 });
@@ -195,38 +193,21 @@ function eventTypeVersion(templateMode: TemplateMode): EventTypeVersion {
   });
 }
 
-function channelConfigurations(
-  population: RosterPopulation,
-): readonly ChannelConfiguration[] {
-  const label = population === 'staff' ? 'live-verified' : 'mocked';
-  const status = (integrationId: string) =>
-    Object.freeze({
-      integrationId,
-      label,
-      verifiedAt: population === 'staff' ? CREATED_AT_ISO : null,
-      verifiedByUserId: population === 'staff' ? IDS.verifier : null,
-      authorizationReference:
-        population === 'staff' ? 'approved-synthetic-test-evidence' : null,
-      reasonCode: null,
-      observedAt: CREATED_AT_ISO,
-    });
+function channelConfigurations(): readonly ChannelConfiguration[] {
   return Object.freeze([
     Object.freeze({
       integrationId: 'mobile-push',
       enabled: true,
-      status: status('mobile-push'),
       changedAt: CREATED_AT_ISO,
     }),
     Object.freeze({
       integrationId: 'ses-email',
       enabled: true,
-      status: status('ses-email'),
       changedAt: CREATED_AT_ISO,
     }),
     Object.freeze({
       integrationId: 'aws-eum-sms',
       enabled: false,
-      status: status('aws-eum-sms'),
       changedAt: CREATED_AT_ISO,
     }),
   ]);
@@ -253,7 +234,7 @@ function evidence(
     facility: FACILITY,
     eventTypeVersion: eventTypeVersion(templateMode),
     rosterSnapshot: roster(population),
-    channelConfigurations: channelConfigurations(population),
+    channelConfigurations: channelConfigurations(),
     activeEventIds: [IDS.activeEventB, IDS.activeEventA],
     initiator: ACTOR,
     initiatorDisplayName: 'Taylor Morgan',
@@ -412,171 +393,12 @@ describe('activation consequence preview', () => {
     expect(preview.sendReadiness).toBe('ready');
     expect(
       preview.channels.every(
-        ({ integrationStatus, renderedMessage }) =>
-          integrationStatus.label === 'live-verified' &&
+        ({ renderedMessage }) =>
           renderedMessage.classificationMarker === 'INCIDENT' &&
           renderedMessage.templateMode === 'real' &&
           renderedMessage.eventKind === 'incident',
       ),
     ).toBe(true);
-  });
-
-  test('narrows a live delivery-test consequence to exact approved refs', () => {
-    const base = evidence('drill', 'staff');
-    const snapshot = roster('staff');
-    const recipients = snapshot.recipients.map((recipient) =>
-      recipient.id === IDS.recipientPush
-        ? {
-            ...recipient,
-            endpoints: [
-              ...recipient.endpoints,
-              {
-                id: IDS.ordinaryEndpoint,
-                channel: 'email' as const,
-                status: 'active' as const,
-                capturedAt: CREATED_AT_ISO,
-                email: 'ordinary-staff@example.invalid',
-              },
-            ],
-          }
-        : recipient,
-    );
-    const endpointReferenceDigest = 'a'.repeat(64);
-    const preview = buildActivationPreview({
-      ...base,
-      rosterSnapshot: { ...snapshot, recipients },
-      deliveryTest: {
-        purpose: 'monthly-live-delivery-test',
-        targetSet: { id: IDS.targetSet, version: 1 },
-        endpointReferenceDigest,
-      },
-      deliveryTestEndpointReferences: [
-        {
-          recipientId: IDS.recipientEmail,
-          endpointId: IDS.emailEndpoint,
-          channel: 'email',
-        },
-        {
-          recipientId: IDS.recipientPush,
-          endpointId: IDS.pushEndpoint,
-          channel: 'push',
-        },
-      ],
-    });
-
-    expect(preview.recipientCount).toBe(2);
-    expect(
-      preview.channels.map(({ channel, endpointCount }) => [
-        channel,
-        endpointCount,
-      ]),
-    ).toEqual([
-      ['push', 1],
-      ['email', 1],
-    ]);
-    expect(JSON.stringify(preview)).not.toContain(IDS.ordinaryEndpoint);
-    expect(preview.deliveryTest?.endpointReferenceDigest).toBe(
-      endpointReferenceDigest,
-    );
-  });
-
-  test('builds one exact controlled DRILL email and signs only that consequence', () => {
-    const base = evidence('drill', 'staff');
-    const endpointReferenceDigest = 'b'.repeat(64);
-    const preview = buildActivationPreview({
-      ...base,
-      deliveryTest: {
-        purpose: 'monthly-live-delivery-test',
-        targetSet: { id: IDS.targetSet, version: 1 },
-        endpointReferenceDigest,
-      },
-      deliveryTestEndpointReferences: [
-        {
-          recipientId: IDS.recipientEmail,
-          endpointId: IDS.emailEndpoint,
-          channel: 'email',
-        },
-      ],
-    });
-
-    expect(preview.recipientCount).toBe(1);
-    expect(
-      preview.channels.map(({ channel, endpointCount }) => [
-        channel,
-        endpointCount,
-      ]),
-    ).toEqual([['email', 1]]);
-    expect(preview.channels[0]?.renderedMessage).toMatchObject({
-      channel: 'email',
-      classificationMarker: 'DRILL',
-      eventKind: 'drill',
-      templateMode: 'drill',
-    });
-    expect(JSON.stringify(preview)).not.toContain('expo-push');
-    expect(preview.sendReadiness).toBe('ready');
-    expect(preview.blockingReasonCodes).toEqual([]);
-    const { id: previewId, consequenceDigest, ...consequence } = preview;
-    expect(previewId).toBe(IDS.preview);
-    expect(consequenceDigest).toBe(
-      digestCapabilityValue({
-        capabilityId: 'start-event',
-        consequence,
-      }),
-    );
-  });
-
-  test('blocks a controlled email canary on email truth without inventing push requirements', () => {
-    const base = evidence('drill', 'staff');
-    const preview = buildActivationPreview({
-      ...base,
-      deliveryTest: {
-        purpose: 'monthly-live-delivery-test',
-        targetSet: { id: IDS.targetSet, version: 1 },
-        endpointReferenceDigest: 'c'.repeat(64),
-      },
-      deliveryTestEndpointReferences: [
-        {
-          recipientId: IDS.recipientEmail,
-          endpointId: IDS.emailEndpoint,
-          channel: 'email',
-        },
-      ],
-      channelConfigurations: channelConfigurations('synthetic'),
-    });
-
-    expect(preview.channels.map(({ channel }) => channel)).toEqual(['email']);
-    expect(preview.sendReadiness).toBe('blocked');
-    expect(preview.blockingReasonCodes).toEqual(['EMAIL_NOT_LIVE_VERIFIED']);
-  });
-
-  test('builds one exact controlled DRILL push without requiring email', () => {
-    const base = evidence('drill', 'staff');
-    const preview = buildActivationPreview({
-      ...base,
-      deliveryTest: {
-        purpose: 'monthly-live-delivery-test',
-        targetSet: { id: IDS.targetSet, version: 1 },
-        endpointReferenceDigest: 'd'.repeat(64),
-      },
-      deliveryTestEndpointReferences: [
-        {
-          recipientId: IDS.recipientPush,
-          endpointId: IDS.pushEndpoint,
-          channel: 'push',
-        },
-      ],
-    });
-
-    expect(preview.recipientCount).toBe(1);
-    expect(
-      preview.channels.map(({ channel, endpointCount }) => [
-        channel,
-        endpointCount,
-      ]),
-    ).toEqual([['push', 1]]);
-    expect(preview.sendReadiness).toBe('ready');
-    expect(preview.blockingReasonCodes).toEqual([]);
-    expect(JSON.stringify(preview)).not.toContain('ses-email');
   });
 
   test('keeps exact persisted activation copy independent of preview creation time', () => {
@@ -643,33 +465,5 @@ describe('activation consequence preview', () => {
         'EVENT_TYPE_UNAVAILABLE',
       );
     }
-  });
-
-  test('fails closed when synthetic flow is pointed at non-mocked channels', () => {
-    const base = evidence('drill', 'synthetic');
-    const preview = buildActivationPreview({
-      ...base,
-      channelConfigurations: channelConfigurations('staff'),
-    });
-
-    expect(preview.sendReadiness).toBe('blocked');
-    expect(preview.blockingReasonCodes).toEqual([
-      'EMAIL_NOT_MOCKED',
-      'PUSH_NOT_MOCKED',
-    ]);
-  });
-
-  test('blocks staff sends unless required channels are live-verified', () => {
-    const base = evidence('real', 'staff');
-    const preview = buildActivationPreview({
-      ...base,
-      channelConfigurations: channelConfigurations('synthetic'),
-    });
-
-    expect(preview.sendReadiness).toBe('blocked');
-    expect(preview.blockingReasonCodes).toEqual([
-      'EMAIL_NOT_LIVE_VERIFIED',
-      'PUSH_NOT_LIVE_VERIFIED',
-    ]);
   });
 });

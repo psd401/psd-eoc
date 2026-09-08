@@ -184,20 +184,6 @@ function eventTypeVersionFixture(
   });
 }
 
-function integrationStatus(channel: 'push' | 'email', live: boolean) {
-  return {
-    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-    label: live ? ('live-verified' as const) : ('mocked' as const),
-    verifiedAt: live ? NOW : null,
-    verifiedByUserId: live ? IDS.user : null,
-    authorizationReference: live
-      ? 'contract-only-response-fixture-not-live-provider-evidence'
-      : null,
-    reasonCode: null,
-    observedAt: NOW,
-  };
-}
-
 function previewFixture(
   selection: CreateActivationPreviewInput,
   input: Readonly<{
@@ -207,7 +193,6 @@ function previewFixture(
 ): ActivationPreview {
   const marker = selection.templateMode === 'real' ? 'INCIDENT' : 'DRILL';
   const prefix = `[${marker}]`;
-  const live = selection.rosterPopulation === 'staff';
   return ActivationPreviewSchema.parse({
     id: input.previewId ?? IDS.preview,
     facilityId: selection.facilityId,
@@ -232,7 +217,7 @@ function previewFixture(
           title: `${prefix} Synthetic start preview`,
           body: `${prefix} Synthetic recipients only.`,
         },
-        integrationStatus: integrationStatus('push', live),
+        integrationId: 'expo-push',
       },
       {
         channel: 'email',
@@ -246,7 +231,7 @@ function previewFixture(
           subject: `${prefix} Synthetic start preview`,
           textBody: `${prefix} Synthetic recipients only.`,
         },
-        integrationStatus: integrationStatus('email', live),
+        integrationId: 'ses-email',
       },
     ],
     sendReadiness: 'ready',

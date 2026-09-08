@@ -312,11 +312,6 @@ describe('issue-21 synthetic Maestro transport', () => {
       PREVIEW_IDEMPOTENCY_KEY,
     );
     expect(preview.rosterPopulation).toBe('synthetic');
-    expect(
-      preview.channels.every(
-        (item) => item.integrationStatus.label === 'mocked',
-      ),
-    ).toBe(true);
     expect(preview.activeEventIds).toEqual([activeEvent.event.id]);
 
     const result = await activate(request, preview, IDEMPOTENCY_KEY);
@@ -325,11 +320,6 @@ describe('issue-21 synthetic Maestro transport', () => {
     expect(result.event.activationAuthorization?.kind).toBe(
       'synthetic-training',
     );
-    expect(
-      result.notificationIntent?.channels.every(
-        (item) => item.integrationStatus.label === 'mocked',
-      ),
-    ).toBe(true);
 
     await expect(activate(request, preview, IDEMPOTENCY_KEY)).resolves.toEqual(
       result,
@@ -374,11 +364,6 @@ describe('issue-21 synthetic Maestro transport', () => {
       'issue-32-synthetic-all-clear-preview-0001',
     );
     expect(consequence.rosterPopulation).toBe('synthetic');
-    expect(
-      consequence.channels.every(
-        (channel) => channel.integrationStatus.label === 'mocked',
-      ),
-    ).toBe(true);
     const allClear = await room.allClear(
       started.event.id,
       consequence.id,

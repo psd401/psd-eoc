@@ -15,7 +15,7 @@ import {
   type Recipient,
   type RosterGroupSourceRef,
 } from '@psd-eoc/contracts';
-import { desc, inArray, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -697,16 +697,20 @@ export async function seedReferenceData(
       .values(templateRows)
       .onConflictDoNothing();
 
-    await transaction
-      .insert(channelConfigurations)
-      .values(
-        channelConfigurationRows.map((configuration) => ({
-          integrationId: configuration.integrationId,
-          enabled: configuration.enabled,
-          changedAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
+    if (options.insertChannelConfigurations !== undefined) {
+      await options.insertChannelConfigurations(transaction);
+    } else {
+      await transaction
+        .insert(channelConfigurations)
+        .values(
+          channelConfigurationRows.map((configuration) => ({
+            integrationId: configuration.integrationId,
+            enabled: configuration.enabled,
+            changedAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
   });
 
   return referenceSeedSummary;
@@ -762,12 +766,21 @@ export interface SeedDatabaseOptions {
   readonly insertEventTypes?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
+  /**
+   * Writes the channel configurations in place of the seed. A fixture held at
+   * a migration before `0049_gut_delivery_tests_and_truth_labels` still has
+   * the retired `status_id` and `status_label` columns, which the seed no
+   * longer writes, so the fixture writes the rows its schema actually needs.
+   */
+  readonly insertChannelConfigurations?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
 }
 
-/** The reference seed only ever needs the event type override. */
+/** The reference seed only ever needs the held-back schema overrides. */
 export type ReferenceSeedOptions = Pick<
   SeedDatabaseOptions,
-  'insertEventTypes'
+  'insertEventTypes' | 'insertChannelConfigurations'
 >;
 
 export async function seedDatabase(

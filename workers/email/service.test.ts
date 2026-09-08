@@ -12,7 +12,6 @@ const ENABLED_ENV = Object.freeze({
   PSD_EOC_EMAIL_RUNTIME_MODE: 'enabled',
   PSD_EOC_SES_PROVIDER_AUTHORIZED: 'true',
   PSD_EOC_SES_CREDENTIAL_STATUS: 'verified',
-  PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE: 'deployment:commit-277',
   EMAIL_QUEUE_URL:
     'https://sqs.us-east-1.amazonaws.com/000000000000/example-email',
   EMAIL_QUEUE_ARN: 'arn:aws:sqs:us-east-1:000000000000:example-email',
@@ -41,18 +40,11 @@ describe('email service configuration', () => {
     expect(readEmailServiceConfiguration(ENABLED_ENV)).toEqual(
       expect.objectContaining({
         fromEmailAddress: 'alerts@example.invalid',
-        verificationReference: 'deployment:commit-277',
       }),
     );
   });
 
-  test('rejects unverified deployment references and non-HTTPS origins', () => {
-    expect(() =>
-      readEmailServiceConfiguration({
-        ...ENABLED_ENV,
-        PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE: 'UNVERIFIED',
-      }),
-    ).toThrow(EmailServiceError);
+  test('rejects non-HTTPS origins', () => {
     expect(() =>
       readEmailServiceConfiguration({
         ...ENABLED_ENV,
