@@ -16,6 +16,10 @@ const ENABLED_ENV = Object.freeze({
   EMAIL_QUEUE_URL:
     'https://sqs.us-east-1.amazonaws.com/000000000000/example-email',
   EMAIL_QUEUE_ARN: 'arn:aws:sqs:us-east-1:000000000000:example-email',
+  EMAIL_DEAD_LETTER_QUEUE_URL:
+    'https://sqs.us-east-1.amazonaws.com/000000000000/example-email-dlq',
+  EMAIL_DEAD_LETTER_QUEUE_ARN:
+    'arn:aws:sqs:us-east-1:000000000000:example-email-dlq',
   PSD_EOC_SERVICE_ORIGIN: 'https://eoc.example.invalid',
   PSD_EOC_SES_FROM_ADDRESS: 'alerts@example.invalid',
   PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN: TOKEN,

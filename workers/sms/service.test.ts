@@ -41,6 +41,10 @@ const ENABLED_ENVIRONMENT = Object.freeze({
   PSD_EOC_SMS_TTL_SECONDS: '300',
   SMS_QUEUE_ARN: 'arn:aws:sqs:us-east-1:000000000000:psd-eoc-sms',
   SMS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/psd-eoc-sms',
+  SMS_DEAD_LETTER_QUEUE_URL:
+    'https://sqs.us-east-1.amazonaws.com/000000000000/psd-eoc-sms-dlq',
+  SMS_RECEIPT_DEAD_LETTER_QUEUE_URL:
+    'https://sqs.us-east-1.amazonaws.com/000000000000/psd-eoc-sms-receipts-dlq',
   SMS_RECEIPT_QUEUE_ARN:
     'arn:aws:sqs:us-east-1:000000000000:psd-eoc-sms-receipts',
   SMS_RECEIPT_QUEUE_URL:

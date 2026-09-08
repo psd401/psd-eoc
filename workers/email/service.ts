@@ -12,6 +12,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import { failureDetail } from '../shared/failure-detail';
+import { isTerminalFailure, retireMessage } from '../shared/terminal-failure';
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { AwsSesV2Client } from './aws-client';
@@ -28,6 +29,7 @@ type SafeLogEvent = Readonly<{
     | 'email-worker-heartbeat'
     | 'email-worker-message-completed'
     | 'email-worker-message-failed'
+    | 'email-worker-message-retired'
     | 'email-worker-message-incomplete'
     | 'email-worker-message-suppressed'
     | 'email-worker-started';
@@ -40,6 +42,8 @@ type SafeLogEvent = Readonly<{
 export interface EmailServiceConfiguration {
   readonly queueUrl: string;
   readonly queueArn: string;
+  /** Where a message that cannot succeed goes, instead of round-tripping. */
+  readonly deadLetterQueueUrl: string;
   readonly serviceOrigin: string;
   readonly fromEmailAddress: string;
   readonly attemptExecutionToken: string;
@@ -127,10 +131,15 @@ export function readEmailServiceConfiguration(
   }
   const queueArn = required(environment, 'EMAIL_QUEUE_ARN', 2_048);
   let queueUrl: string;
+  let deadLetterQueueUrl: string;
   try {
     queueUrl = sqsQueueUrlForArn(
       required(environment, 'EMAIL_QUEUE_URL', 2_048),
       queueArn,
+    );
+    deadLetterQueueUrl = sqsQueueUrlForArn(
+      required(environment, 'EMAIL_DEAD_LETTER_QUEUE_URL', 2_048),
+      required(environment, 'EMAIL_DEAD_LETTER_QUEUE_ARN', 2_048),
     );
   } catch {
     throw new EmailServiceError('INVALID_CONFIGURATION');
@@ -138,6 +147,7 @@ export function readEmailServiceConfiguration(
   return Object.freeze({
     queueUrl,
     queueArn,
+    deadLetterQueueUrl,
     serviceOrigin: exactHttpsOrigin(
       required(environment, 'PSD_EOC_SERVICE_ORIGIN', 2_048),
     ),
@@ -313,6 +323,11 @@ export async function runEmailService(
     try {
       message = parseMessage(raw);
     } catch (error) {
+      // Not retired here. The envelope failed validation, so its receipt
+      // handle is unvalidated input and reaching into it to delete a message
+      // is not something this worker does on a value it just refused. The
+      // redrive policy still retires it, and this has never happened in
+      // production.
       log({
         event: 'email-worker-message-failed',
         count: 1,
@@ -376,12 +391,33 @@ export async function runEmailService(
         }
       }
     } catch (error) {
-      // Leave the message for the queue's bounded redrive policy and alarm.
-      log({
-        event: 'email-worker-message-failed',
-        count: 1,
-        detail: failureDetail(error),
-      });
+      const detail = failureDetail(error);
+      if (isTerminalFailure(error)) {
+        // Retrying cannot change this answer, so retire it now rather than
+        // let it oscillate on and off the queue for five receives. See
+        // `workers/shared/terminal-failure.ts`.
+        try {
+          await retireMessage({
+            client: sqs,
+            queueUrl: configuration.queueUrl,
+            deadLetterQueueUrl: configuration.deadLetterQueueUrl,
+            receiptHandle: message.receiptHandle,
+            body: message.body,
+          });
+          log({ event: 'email-worker-message-retired', count: 1, detail });
+        } catch (retireError) {
+          // The redrive policy is still behind this. Falling back to it costs
+          // the oscillation this change removes, never the message.
+          log({
+            event: 'email-worker-message-failed',
+            count: 1,
+            detail: failureDetail(retireError),
+          });
+        }
+      } else {
+        // Leave the message for the queue's bounded redrive policy and alarm.
+        log({ event: 'email-worker-message-failed', count: 1, detail });
+      }
     } finally {
       clearInterval(heartbeat);
     }

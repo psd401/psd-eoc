@@ -55,6 +55,16 @@ export const MONITORING_METRIC_NAMESPACE = 'PSD/EOC';
 export const MONITORING_DASHBOARD_NAME = 'psd-eoc-operations';
 
 const ONE_MINUTE = Duration.minutes(1);
+/**
+ * The cluster's Serverless v2 ceiling, in ACU.
+ *
+ * The stack sets `serverlessV2MaxCapacity` from this same constant rather than
+ * repeating the number, because the capacity alarm asks whether Aurora is
+ * pinned at the ceiling and that question is meaningless if the two disagree.
+ * Raising the ceiling here raises it on the cluster and moves the alarm with
+ * it, which is the only way they stay true together.
+ */
+export const AURORA_MAX_CAPACITY_ACU = 1;
 /** Every log group this module creates lives under one prefix. */
 const MONITORING_LOG_GROUP_PREFIX = '/psd-eoc/monitoring/';
 
@@ -68,6 +78,16 @@ export interface MonitoringProps {
   /** Where the scheduled membership task writes; its failures are alarmed. */
   readonly bootstrapLogGroup: logs.ILogGroup;
   readonly criticalAlarmTopic: sns.ITopic;
+  /**
+   * Where every alarm's OK transition goes.
+   *
+   * A recovery is not a page. Routing it to the same topic as the alarm meant
+   * every flap woke the operations team twice -- once to say something broke
+   * and once to say it had stopped -- and sent two texts with it. Recoveries
+   * still reach the mailbox, because "it came back on its own" is worth
+   * knowing; they no longer reach the phone.
+   */
+  readonly recoveryAlarmTopic: sns.ITopic;
   readonly database: rds.DatabaseCluster;
   readonly displayTimeZone: string;
   readonly delivery: QueueWithDeadLetterQueue;
@@ -143,10 +163,19 @@ function configureSmsWorkerMonitoring(
       datapointsToAlarm: 2,
       evaluationPeriods: 2,
       id: 'SmsWorkerHealthAlarm',
+      // The worker heartbeats every five minutes; see
+      // `HEARTBEAT_LOG_INTERVAL_MILLISECONDS` in `workers/sms/service.ts`. A
+      // fifteen-minute window holds three of them, so one late or lost
+      // heartbeat cannot empty a period. Two empty windows running means the
+      // worker is actually gone.
+      //
+      // This was a twenty-minute window against a fifteen-minute cadence,
+      // which leaves no margin at all: a single slow poll emptied a period and
+      // the alarm treats missing data as breaching.
       metric: new cloudwatch.Metric({
         metricName: 'SmsWorkerHeartbeat',
         namespace: MONITORING_METRIC_NAMESPACE,
-        period: Duration.minutes(20),
+        period: Duration.minutes(15),
         statistic: 'Sum',
         unit: cloudwatch.Unit.COUNT,
       }),
@@ -199,9 +228,12 @@ function configureSmsWorkerMonitoring(
       threshold: definition.threshold,
       treatMissingData: definition.treatMissingData,
     });
-    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
-    alarm.addAlarmAction(action);
-    alarm.addOkAction(action);
+    alarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(props.criticalAlarmTopic),
+    );
+    alarm.addOkAction(
+      new cloudwatchActions.SnsAction(props.recoveryAlarmTopic),
+    );
     (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
       props.smsWorkerCondition;
   }
@@ -347,9 +379,12 @@ function configurePushWorkerMonitoring(
       threshold: definition.threshold,
       treatMissingData: definition.treatMissingData,
     });
-    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
-    alarm.addAlarmAction(action);
-    alarm.addOkAction(action);
+    alarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(props.criticalAlarmTopic),
+    );
+    alarm.addOkAction(
+      new cloudwatchActions.SnsAction(props.recoveryAlarmTopic),
+    );
     (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
       props.pushWorkerCondition;
   }
@@ -481,9 +516,12 @@ function configureEmailWorkerMonitoring(
       threshold: definition.threshold,
       treatMissingData: definition.treatMissingData,
     });
-    const action = new cloudwatchActions.SnsAction(props.criticalAlarmTopic);
-    alarm.addAlarmAction(action);
-    alarm.addOkAction(action);
+    alarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(props.criticalAlarmTopic),
+    );
+    alarm.addOkAction(
+      new cloudwatchActions.SnsAction(props.recoveryAlarmTopic),
+    );
     (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
       definition.condition;
   }
@@ -512,11 +550,11 @@ interface AlarmDefinition {
   readonly evaluationPeriods: number;
   readonly treatMissingData: cloudwatch.TreatMissingData;
   readonly topic: sns.ITopic;
+  readonly recoveryTopic: sns.ITopic;
 }
 
 interface MonitoringMetrics {
   readonly activationAcceptLatency: ExactPercentileMetrics;
-  readonly acuUtilization: cloudwatch.Metric;
   readonly appRunner5xx: cloudwatch.Metric;
   readonly appRunnerLatency: cloudwatch.Metric;
   readonly auroraFailover: cloudwatch.Metric;
@@ -528,6 +566,7 @@ interface MonitoringMetrics {
   readonly monthlyDeliveryTestFailedRuns: cloudwatch.Metric;
   readonly monthlyDeliveryTestMissed: cloudwatch.Metric;
   readonly replicaLag: cloudwatch.Metric;
+  readonly serverlessCapacity: cloudwatch.Metric;
   readonly rosterFailureAge: cloudwatch.Metric;
   readonly rosterSuccessAge: cloudwatch.Metric;
   readonly stuckOutbox: cloudwatch.Metric;
@@ -571,9 +610,8 @@ function createAlarm(
     threshold: definition.threshold,
     treatMissingData: definition.treatMissingData,
   });
-  const action = new cloudwatchActions.SnsAction(definition.topic);
-  alarm.addAlarmAction(action);
-  alarm.addOkAction(action);
+  alarm.addAlarmAction(new cloudwatchActions.SnsAction(definition.topic));
+  alarm.addOkAction(new cloudwatchActions.SnsAction(definition.recoveryTopic));
   // An alarm dimensioned on the App Runner service cannot outlive it: the
   // service is created under a provisioning condition, so an unconditional
   // alarm would reference a resource CloudFormation may not have made.
@@ -668,7 +706,10 @@ function exactPercentileMetrics(
 
 function configureAlarmRecipients(
   scope: Construct,
-  topics: readonly sns.ITopic[],
+  /** Topics that page: both the mailbox and the phone. */
+  pagingTopics: readonly sns.ITopic[],
+  /** Topics that inform: the mailbox only, never the phone. */
+  mailOnlyTopics: readonly sns.ITopic[],
   sesIdentityDomain: string,
 ): void {
   const email = new CfnParameter(scope, 'OperationsTeamAlarmEmail', {
@@ -753,8 +794,11 @@ function configureAlarmRecipients(
     }),
   );
 
-  for (const topic of topics) {
+  for (const topic of [...pagingTopics, ...mailOnlyTopics]) {
     topic.addSubscription(new subscriptions.LambdaSubscription(mailer));
+  }
+  // A recovery is not worth a text message at 3am. See `recoveryAlarmTopic`.
+  for (const topic of pagingTopics) {
     topic.addSubscription(new subscriptions.SmsSubscription(sms.valueAsString));
   }
 }
@@ -1317,8 +1361,13 @@ function configureDashboard(
   dashboard.addWidgets(
     new cloudwatch.GraphWidget({
       height: 7,
-      left: [metrics.acuUtilization],
-      leftYAxis: { label: 'Percent', max: 100, min: 0 },
+      left: [metrics.serverlessCapacity],
+      leftYAxis: {
+        label: 'ACU',
+        max: AURORA_MAX_CAPACITY_ACU,
+        min: 0,
+        showUnits: false,
+      },
       right: [metrics.replicaLag],
       rightYAxis: { label: 'Milliseconds', min: 0, showUnits: false },
       title: 'Aurora capacity and failover readiness',
@@ -1354,13 +1403,14 @@ function configureAlarms(
   // missing data as breaching — deploying them would page the operations team
   // continuously and teach everyone to ignore the address. See
   // `configureInfrastructureMonitoring`.
-  const emit = (definition: AlarmDefinition): void => {
+  // Every alarm recovers to the same place, so no call site states it.
+  const emit = (definition: Omit<AlarmDefinition, 'recoveryTopic'>): void => {
     if (definition.tier === 'application' && !includeApplicationTier) {
       return;
     }
     createAlarm(
       scope,
-      definition,
+      { ...definition, recoveryTopic: props.recoveryAlarmTopic },
       props.monitoringRunbookBaseUrl,
       props.applicationCondition,
     );
@@ -1371,16 +1421,40 @@ function configureAlarms(
     period: ONE_MINUTE,
     usingMetrics: { canarySuccess: metrics.canarySuccess },
   });
+  // A single 5xx is not an outage worth waking someone for.
+  //
+  // At `threshold: 1` over one period this paged on any one 500, and most of
+  // what it caught was a browser tab left open across a deploy: Next.js
+  // answers a server action it no longer recognises with a 500. That is a real
+  // defect -- the operator's click silently failed, and the client now reloads
+  // instead -- but it is one person's stale tab, not a service in trouble.
+  //
+  // Five in a minute, or three minutes running with any, is a service failing.
   emit({
     tier: 'infrastructure',
-    evaluationPeriods: 1,
+    datapointsToAlarm: 3,
+    evaluationPeriods: 3,
     dependsOnApplication: true,
     id: 'AppRunner5xxAlarm',
     metric: metrics.appRunner5xx,
     name: 'psd-eoc-apprunner-5xx',
     runbookAnchor: 'runbook-app-runner-errors-and-latency',
-    summary: 'One or more App Runner 5xx responses occurred in one minute.',
+    summary: 'App Runner returned 5xx responses in three consecutive minutes.',
     threshold: 1,
+    topic: props.criticalAlarmTopic,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  emit({
+    tier: 'infrastructure',
+    evaluationPeriods: 1,
+    dependsOnApplication: true,
+    id: 'AppRunner5xxBurstAlarm',
+    metric: metrics.appRunner5xx,
+    name: 'psd-eoc-apprunner-5xx-burst',
+    runbookAnchor: 'runbook-app-runner-errors-and-latency',
+    summary:
+      'App Runner returned five or more 5xx responses within one minute.',
+    threshold: 5,
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
@@ -1425,18 +1499,33 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  // Aurora capacity, measured as time spent pinned at the ceiling.
+  //
+  // This used to alarm on `ACUUtilization >= 80`, which cannot work on this
+  // cluster: capacity ranges from 0.5 to 1.0 ACU, so utilization is
+  // `capacity / max` and has exactly two attainable values -- 50 at idle and
+  // 100 whenever the database scales up at all. Over a fortnight the metric
+  // reported nothing else. An 80 percent threshold therefore meant "Aurora
+  // scaled up", which it does routinely with three connections and no load,
+  // and the alarm said nothing about capacity being short.
+  //
+  // What actually matters is whether the ceiling has become the constraint:
+  // capacity at maximum, and staying there. A burst that scales up and back
+  // within a few minutes is Aurora working. Twenty minutes pinned is Aurora
+  // asking for a larger ceiling, and that is a deliberate cost decision rather
+  // than something to page about, so it stays on the operations topic.
   emit({
     tier: 'infrastructure',
-    datapointsToAlarm: 3,
-    evaluationPeriods: 5,
+    datapointsToAlarm: 20,
+    evaluationPeriods: 20,
     id: 'AuroraCapacityAlarm',
-    metric: metrics.acuUtilization,
-    name: 'psd-eoc-aurora-acu-utilization',
+    metric: metrics.serverlessCapacity,
+    name: 'psd-eoc-aurora-capacity-pinned',
     runbookAnchor: 'runbook-aurora-failover-readiness-and-capacity',
-    summary: 'Aurora ACU utilization remained at or above 80 percent.',
-    threshold: 80,
+    summary: `Aurora ran at its ${AURORA_MAX_CAPACITY_ACU} ACU ceiling for twenty consecutive minutes; the ceiling, not the load, is now the limit.`,
+    threshold: AURORA_MAX_CAPACITY_ACU,
     topic: props.operationsAlarmTopic,
-    treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   emit({
     tier: 'application',
@@ -1585,9 +1674,21 @@ function configureAlarms(
     ),
   ] as const;
   for (const [idPrefix, name, pair] of queues) {
+    // Queue age, measured over three minutes rather than one.
+    //
+    // A message that fails and returns to the queue drives this metric as a
+    // sawtooth: the age climbs past the threshold while the message waits, and
+    // drops to zero the moment a worker takes it again. At one datapoint the
+    // alarm followed every tooth, so a single undeliverable message produced
+    // dozens of alarm-and-recovery pairs before the redrive policy retired it.
+    //
+    // Three of three keeps the meaning -- work is not draining -- and drops the
+    // oscillation, because a queue that is genuinely backed up stays backed up
+    // across consecutive minutes while a sawtooth does not.
     emit({
       tier: 'infrastructure',
-      evaluationPeriods: 1,
+      datapointsToAlarm: 3,
+      evaluationPeriods: 3,
       id: `${idPrefix}QueueAgeAlarm`,
       metric: pair.queue.metricApproximateAgeOfOldestMessage({
         period: ONE_MINUTE,
@@ -1595,7 +1696,7 @@ function configureAlarms(
       }),
       name: `psd-eoc-${name}-queue-age`,
       runbookAnchor: 'runbook-queue-age-and-dead-letter-queues',
-      summary: `The oldest ${name} queue message reached 60 seconds.`,
+      summary: `The oldest ${name} queue message stayed past 60 seconds for three minutes.`,
       threshold: 60,
       topic: props.criticalAlarmTopic,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
@@ -1680,7 +1781,11 @@ function assembleMetrics(
 ): MonitoringMetrics {
   return {
     activationAcceptLatency: exactPercentileMetrics('ActivationAcceptLatency'),
-    acuUtilization: props.database.metricACUUtilization({
+    // Capacity in ACU, not `ACUUtilization`. On a 0.5-to-1.0 range that
+    // percentage only ever reads 50 or 100, so it can neither be alarmed on
+    // nor read off a graph; the ACU value is what says whether the ceiling is
+    // the constraint.
+    serverlessCapacity: props.database.metric('ServerlessDatabaseCapacity', {
       period: ONE_MINUTE,
       statistic: 'Maximum',
     }),
@@ -1944,9 +2049,10 @@ function configureMembershipSyncMonitoring(
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    const action = new cloudwatchActions.SnsAction(definition.topic);
-    alarm.addAlarmAction(action);
-    alarm.addOkAction(action);
+    alarm.addAlarmAction(new cloudwatchActions.SnsAction(definition.topic));
+    alarm.addOkAction(
+      new cloudwatchActions.SnsAction(props.recoveryAlarmTopic),
+    );
   }
 }
 
@@ -1957,11 +2063,13 @@ export function configureInfrastructureMonitoring(
   configureAlarmRecipients(
     scope,
     [props.operationsAlarmTopic, props.criticalAlarmTopic],
+    [props.recoveryAlarmTopic],
     props.sesIdentityDomain,
   );
   allowScopedCloudWatchAlarmPublish(scope, [
     props.operationsAlarmTopic,
     props.criticalAlarmTopic,
+    props.recoveryAlarmTopic,
   ]);
   allowMonitoringLogEncryption(scope, props.operationsKey);
   const failoverBridgeErrors = createFailoverBridge(
@@ -1993,11 +2101,13 @@ export function configureMonitoring(
   configureAlarmRecipients(
     scope,
     [props.operationsAlarmTopic, props.criticalAlarmTopic],
+    [props.recoveryAlarmTopic],
     props.sesIdentityDomain,
   );
   allowScopedCloudWatchAlarmPublish(scope, [
     props.operationsAlarmTopic,
     props.criticalAlarmTopic,
+    props.recoveryAlarmTopic,
   ]);
   allowMonitoringLogEncryption(scope, props.operationsKey);
 

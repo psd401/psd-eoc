@@ -82,7 +82,11 @@ describe('Expo push runtime HTTP client', () => {
       unauthorized.resolveRetry(IDS.secondAttempt),
     ).rejects.toMatchObject({
       code: 'REQUEST_UNAUTHORIZED',
-      retryable: false,
+      // Retryable: an unauthorized answer is deployment skew, and a worker
+      // presenting a reference the deployment moved past is replaced rather
+      // than right. Terminal here would dead-letter live notifications for
+      // the length of a deploy.
+      retryable: true,
       status: 401,
     });
 

@@ -23,6 +23,16 @@ FROM manifests AS build
 ARG SOURCE_SHA
 
 RUN printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+
+# Version skew protection, embedded in the client bundle at build time.
+#
+# Next.js compares this against the id the running server reports and hard
+# reloads a page whose JavaScript is from an older deployment. Without it a tab
+# left open across a deploy answered its next click with "Failed to find Server
+# Action" -- a 500 that lost the operator's click and paged the on-call team.
+# The runtime stage sets the same value; they must match.
+ENV NEXT_DEPLOYMENT_ID=$SOURCE_SHA
+
 RUN bun install --frozen-lockfile
 
 COPY packages/contracts/src packages/contracts/src
@@ -36,6 +46,7 @@ COPY workers/shared/delivery-state-client.ts workers/shared/delivery-state-clien
 COPY workers/shared/failure-detail.ts workers/shared/failure-detail.ts
 COPY workers/shared/processor.ts workers/shared/processor.ts
 COPY workers/shared/retry.ts workers/shared/retry.ts
+COPY workers/shared/terminal-failure.ts workers/shared/terminal-failure.ts
 COPY workers/shared/index.ts workers/shared/index.ts
 COPY workers/email/aws-arn.ts workers/email/aws-arn.ts
 COPY workers/email/aws-client.ts workers/email/aws-client.ts
@@ -95,6 +106,7 @@ LABEL org.opencontainers.image.source="$SOURCE_REPOSITORY_URL" \
       org.psd-eoc.data-classification="staff-minimized"
 
 ENV HOSTNAME=0.0.0.0 \
+    NEXT_DEPLOYMENT_ID=$SOURCE_SHA \
     NODE_ENV=production \
     PORT=3000
 
