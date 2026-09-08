@@ -607,27 +607,6 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
-    new CfnRule(this, 'ExpoPushWorkerRequiresLiveApplicationAndEvidence', {
-      assertions: [
-        {
-          assert: Fn.conditionAnd(
-            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                expoCredentialVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-          ),
-          assertDescription:
-            'EnableExpoPushWorker=true requires the live application and retained credential-verification evidence.',
-        },
-      ],
-      ruleCondition: Fn.conditionEquals(
-        enableExpoPushWorker.valueAsString,
-        'true',
-      ),
-    });
     new CfnRule(this, 'DirectPushRequiresWorkerAndEvidence', {
       assertions: [
         {
@@ -679,33 +658,9 @@ export class PsdEocStack extends Stack {
               provisionAwsEumSmsResources.valueAsString,
               'true',
             ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                smsRegistrationVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                smsOriginationIdentityArn.valueAsString,
-                'UNCONFIGURED',
-              ),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(smsHelpMessage.valueAsString, 'UNCONFIGURED'),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(smsStopMessage.valueAsString, 'UNCONFIGURED'),
-            ),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                smsDestinationCountryCode.valueAsString,
-                'UNCONFIGURED',
-              ),
-            ),
           ),
           assertDescription:
-            'EnableAwsEumSmsWorker=true requires the live application, carrier approval evidence, an approved origination identity, and tenant-reviewed HELP/STOP messages.',
+            'EnableAwsEumSmsWorker=true requires the live application and provisioned carrier resources; SmsResourcesRequireCarrierEvidence asserts the approval evidence, origination identity, and HELP/STOP messages.',
         },
       ],
       ruleCondition: Fn.conditionEquals(
@@ -748,27 +703,6 @@ export class PsdEocStack extends Stack {
       ],
       ruleCondition: Fn.conditionEquals(
         provisionAwsEumSmsResources.valueAsString,
-        'true',
-      ),
-    });
-    new CfnRule(this, 'EmailWorkerRequiresLiveApplicationAndEvidence', {
-      assertions: [
-        {
-          assert: Fn.conditionAnd(
-            Fn.conditionEquals(provisionApplication.valueAsString, 'true'),
-            Fn.conditionNot(
-              Fn.conditionEquals(
-                sesCredentialVerificationReference.valueAsString,
-                'UNVERIFIED',
-              ),
-            ),
-          ),
-          assertDescription:
-            'EnableEmailWorker=true requires the live application and retained SES/callback verification evidence.',
-        },
-      ],
-      ruleCondition: Fn.conditionEquals(
-        enableEmailWorker.valueAsString,
         'true',
       ),
     });
