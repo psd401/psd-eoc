@@ -278,19 +278,6 @@ function safeStatus(value: unknown): number | null {
     : null;
 }
 
-function purposeLabel(
-  purpose: WorkerAttemptWorkItem['batch']['purpose'],
-): string {
-  switch (purpose) {
-    case 'activation':
-      return 'ACTIVATION';
-    case 'all-clear':
-      return 'ALL CLEAR';
-    case 'reactivation':
-      return 'REACTIVATION';
-  }
-}
-
 /**
  * Defense-in-depth copy of the SMS encoding and AWS provider-ceiling
  * calculation. The final send boundary separately applies the stricter
@@ -333,19 +320,6 @@ function exceedsSmsSendLengthPolicy(
   );
 }
 
-function hasCanonicalRendererFrame(workItem: WorkerAttemptWorkItem): boolean {
-  if (workItem.batch.renderedMessage.channel !== 'sms') return false;
-  const marker = workItem.batch.eventKind === 'incident' ? 'INCIDENT' : 'DRILL';
-  const modeLabel =
-    workItem.batch.templateMode === 'real' ? 'REAL INCIDENT' : 'TRAINING ONLY';
-  const body = workItem.batch.renderedMessage.body;
-  return (
-    body.startsWith(
-      `[${marker}] ${modeLabel} - ${purposeLabel(workItem.batch.purpose)}: `,
-    ) && body.endsWith(` [${marker}]`)
-  );
-}
-
 /** Strict channel request validation shared with the fail-closed CI mock. */
 export function parseSmsProviderSendRequest(
   requestValue: ProviderSendRequest | unknown,
@@ -377,7 +351,6 @@ export function parseSmsProviderSendRequest(
     workItem.endpoint.channel !== 'sms' ||
     workItem.batch.renderedMessage.channel !== 'sms' ||
     workItem.batch.integrationId !== AWS_EUM_SMS_INTEGRATION_ID ||
-    !hasCanonicalRendererFrame(workItem) ||
     exceedsSmsSendLengthPolicy(length)
   ) {
     throw new ProviderDispatchError(

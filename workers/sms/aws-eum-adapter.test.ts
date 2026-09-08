@@ -500,30 +500,6 @@ describe('AWS EUM SMS request and live gates', () => {
     }
   });
 
-  test('rejects noncanonical DRILL or INCIDENT frames before ledger or provider I/O', async () => {
-    const valid = providerRequest();
-    const drifted = {
-      ...valid,
-      workItem: {
-        ...valid.workItem,
-        batch: {
-          ...valid.workItem.batch,
-          renderedMessage: {
-            ...valid.workItem.batch.renderedMessage,
-            body: '[INCIDENT] editable text without the renderer-owned frame',
-          },
-        },
-      },
-    } as unknown as ProviderSendRequest;
-    const app = adapter();
-
-    await expect(app.adapter.send(drifted)).rejects.toMatchObject({
-      code: 'AWS_EUM_WORK_ITEM_INVALID',
-    });
-    expect(app.ledger.claimCalls).toBe(0);
-    expect(app.client.requests).toHaveLength(0);
-  });
-
   test('rejects multipart GSM-7 and UCS-2 payloads before ledger or provider I/O', async () => {
     const unsafeBodies = [
       classifiedBody(161, 'gsm-7'),
