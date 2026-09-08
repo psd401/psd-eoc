@@ -43,7 +43,7 @@ EOC is not a 911 service.
 | Application data paths        | [Stuck outbox](alarm-outbox-stuck.md), [stale roster](alarm-roster-stale.md), [membership task failure](alarm-membership-sync-failure.md)                                         |
 | Expo push worker              | [Worker health and receipt polling](alarm-push-worker-health.md), [provider handoff](provider-expo.md)                                                                            |
 | Direct push providers         | [APNs/FCM activation, rotation, and rollback](provider-direct-push.md)                                                                                                            |
-| Monitoring publishers         | [Metrics collector](alarm-metrics-collector.md), [monthly delivery test](alarm-monthly-delivery-test.md), [shallow canary](alarm-canary-failure.md)                               |
+| Monitoring publishers         | [Metrics collector](alarm-metrics-collector.md), [shallow canary](alarm-canary-failure.md)                                                                                        |
 
 ## Provider and roster response
 

@@ -128,10 +128,8 @@ names, file formats, or one blanket DAN for the database. The inventory is:
 - `dispatch-and-delivery-evidence`
   Outbox work, batches, channel attempts and executions, provider facts,
   delivery evidence, endpoint-status facts, and SMS opt-out facts.
-- `drills-and-delivery-tests`
-  Drill events, unroutable synthetic tests, and authenticated-human controlled
-  live delivery tests to approved staff endpoints, plus canary eligibility,
-  target-set versions, endpoints, runs, and append-only reports.
+- `drills`
+  Drill events and unroutable synthetic tests.
 - `media-and-private-objects`
   Upload intents, sanitized metadata and checksums, quarantine objects,
   sanitized private objects, and journal references. A presentation redaction
@@ -153,7 +151,7 @@ names, file formats, or one blanket DAN for the database. The inventory is:
   versions/templates and drafts, integration observations, channel
   configuration, and governance decisions.
 - `generated-reports-and-exports`
-  Derived event/drill projections, delivery-test reports, and immutable,
+  Derived event/drill projections and immutable,
   content-addressed CSV/PDF objects. Expiration of a signed download URL does
   not dispose of its object.
 - `transport-and-operational-copies`

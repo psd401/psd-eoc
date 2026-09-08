@@ -75,11 +75,10 @@ every adapter must declare and actually implement attempt-ID idempotency:
 
 - Use the exact rendered message in the batch. Do not re-render it, remove its
   `[INCIDENT]` or `[DRILL]` marker, or infer classification from editable text.
-- Adapter channel, integration ID, and truth label must exactly match the
-  batch. Synthetic work uses `mocked` adapters and unroutable fixtures.
-- A `live-verified` adapter is disabled unless its worker supplies an explicit
-  runtime authorization gate. `configured-unverified` and `blocked`
-  integrations never send.
+- Adapter channel and integration ID must exactly match the batch. Synthetic
+  work uses mock adapters and unroutable fixtures.
+- A provider adapter sends only while its channel is enabled; the worker
+  rechecks that immediately before provider I/O.
 - Shared worker code contains no provider SDK and performs no live send. Dev
   and CI adapters are mocks that fail closed.
 

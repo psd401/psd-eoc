@@ -23,8 +23,8 @@ boundary bypass is **SEV-0**.
 ## Respond
 
 1. Confirm the protected account/region, exact deployed image digest, worker
-   desired/running task counts, alarm time, and Expo readiness label. If the
-   label is not `live-verified`, preserve evidence and keep provider I/O dark.
+   desired/running task counts, alarm time, and whether the push channel is
+   enabled. If it is disabled, preserve evidence and keep provider I/O dark.
 2. Inspect `/psd-eoc/workers/push` only by UTC interval, sanitized attempt ID,
    and bounded event/reason code. Never copy a push token, recipient, raw queue
    body, provider response, or credential.
