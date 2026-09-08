@@ -3,14 +3,12 @@ import { describe, expect, test } from 'bun:test';
 import {
   EmailAttemptReferenceMessageSchema,
   EmailRuntimeRequestSchema,
-  SesVerificationReferenceSchema,
   SesSendLedgerClaimSchema,
 } from './email-runtime';
 
 const ATTEMPT_ID = '10000000-0000-4000-8000-000000000001';
 const LEASE_TOKEN = '10000000-0000-4000-8000-000000000002';
 const FINGERPRINT = 'a'.repeat(64);
-const VERIFICATION_REFERENCE = 'deployment:commit-277';
 
 describe('email runtime contracts', () => {
   test('accepts only destination-free retry references', () => {
@@ -35,7 +33,6 @@ describe('email runtime contracts', () => {
   test('requires an exact digest and lease for durable SES completion', () => {
     const request = {
       operation: 'complete-provider-io',
-      verificationReference: VERIFICATION_REFERENCE,
       attemptId: ATTEMPT_ID,
       requestFingerprint: FINGERPRINT,
       leaseToken: LEASE_TOKEN,
@@ -56,23 +53,6 @@ describe('email runtime contracts', () => {
         requestFingerprint: 'not-a-digest',
       }).success,
     ).toBeFalse();
-  });
-
-  test('owns one exact SES verification-reference format', () => {
-    expect(SesVerificationReferenceSchema.parse(VERIFICATION_REFERENCE)).toBe(
-      VERIFICATION_REFERENCE,
-    );
-    for (const value of [
-      'short',
-      'UNVERIFIED',
-      ` ${VERIFICATION_REFERENCE}`,
-      `${VERIFICATION_REFERENCE}/unsafe`,
-      'x'.repeat(256),
-    ]) {
-      expect(
-        SesVerificationReferenceSchema.safeParse(value).success,
-      ).toBeFalse();
-    }
   });
 
   test('preserves an unfinished provider claim as in-progress', () => {

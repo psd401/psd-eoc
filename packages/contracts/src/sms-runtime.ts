@@ -166,24 +166,6 @@ export const SmsRuntimeRequestSchema = z.discriminatedUnion('operation', [
     .strict(),
   z
     .object({
-      operation: z.literal('authorize-live-send'),
-      context: z
-        .object({
-          attemptId: UuidSchema,
-          batchId: UuidSchema,
-          eventId: UuidSchema,
-          eventKind: z.enum(['incident', 'drill', 'test']),
-          templateMode: z.enum(['real', 'drill']),
-          purpose: z.enum(['activation', 'all-clear', 'reactivation']),
-          requestId: UuidSchema,
-          authorizationKind: z.string().trim().min(1).max(100),
-          integrationAuthorizationReference: z.string().trim().min(1).max(255),
-        })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
       operation: z.literal('record-sms-opt-out'),
       context: SmsLifecycleCapabilityContextSchema,
       input: RecordSmsOptOutInputSchema,

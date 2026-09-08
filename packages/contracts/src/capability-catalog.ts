@@ -30,18 +30,6 @@ import {
   SyncEventRoomInputSchema,
 } from './event-room';
 import {
-  CreateDeliveryTestPreviewInputSchema,
-  CreateDeliveryTestTargetSetVersionInputSchema,
-  DeliveryTestPreviewSchema,
-  DeliveryTestTargetSetVersionSchema,
-  FinalizeDeliveryTestReportInputSchema,
-  ListDeliveryTestReportsInputSchema,
-  MonthlyDeliveryTestReportPageSchema,
-  MonthlyDeliveryTestReportSchema,
-  RecordDeliveryTestCanaryEligibilityInputSchema,
-  DeliveryTestCanaryEligibilityFactSchema,
-} from './delivery-test';
-import {
   CreateEventTypeDraftInputSchema,
   EventTypePageSchema,
   EventTypeRenderingPreviewSchema,
@@ -132,7 +120,6 @@ import {
   GetIntegrationHealthInputSchema,
   IntegrationHealthSchema,
   SetChannelEnabledInputSchema,
-  VerifyEmailIntegrationInputSchema,
   ChannelConfigurationSchema,
 } from './integration';
 import {
@@ -1084,22 +1071,6 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     inputSchema: SyncAccessMembershipInputSchema,
     outputSchema: SyncAccessMembershipResultSchema,
   }),
-  'record-delivery-test-canary-eligibility': canonicalCapability({
-    id: 'record-delivery-test-canary-eligibility',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    invocationPolicy: humanWebAdministrationInvocationPolicy,
-    inputSchema: RecordDeliveryTestCanaryEligibilityInputSchema,
-    outputSchema: DeliveryTestCanaryEligibilityFactSchema,
-  }),
-  'create-delivery-test-target-set-version': canonicalCapability({
-    id: 'create-delivery-test-target-set-version',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    invocationPolicy: humanWebAdministrationInvocationPolicy,
-    inputSchema: CreateDeliveryTestTargetSetVersionInputSchema,
-    outputSchema: DeliveryTestTargetSetVersionSchema,
-  }),
   'prepare-activation': canonicalCapability({
     id: 'prepare-activation',
     operation: 'mutation',
@@ -1263,14 +1234,6 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     inputSchema: RecordSmsOptOutInputSchema,
     outputSchema: SmsOptOutRecordSchema,
   }),
-  'finalize-delivery-test-report': canonicalCapability({
-    id: 'finalize-delivery-test-report',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    invocationPolicy: systemWorkerInvocationPolicy,
-    inputSchema: FinalizeDeliveryTestReportInputSchema,
-    outputSchema: MonthlyDeliveryTestReportSchema,
-  }),
   'register-push-token': canonicalCapability({
     id: 'register-push-token',
     operation: 'mutation',
@@ -1367,15 +1330,6 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     inputSchema: SetChannelEnabledInputSchema,
     outputSchema: ChannelConfigurationSchema,
   }),
-  'verify-email-integration': canonicalCapability({
-    id: 'verify-email-integration',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    invocationPolicy: humanInteractiveInvocationPolicy,
-    inputSchema: VerifyEmailIntegrationInputSchema,
-    outputSchema: ChannelConfigurationSchema,
-    mutationOrderAfter: 'set-channel-enabled',
-  }),
   'create-activation-preview': canonicalCapability({
     id: 'create-activation-preview',
     operation: 'query',
@@ -1383,14 +1337,6 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: CreateActivationPreviewInputSchema,
     outputSchema: ActivationPreviewSchema,
-  }),
-  'create-delivery-test-preview': canonicalCapability({
-    id: 'create-delivery-test-preview',
-    operation: 'query',
-    safetyEffect: 'none',
-    invocationPolicy: humanInteractiveInvocationPolicy,
-    inputSchema: CreateDeliveryTestPreviewInputSchema,
-    outputSchema: DeliveryTestPreviewSchema,
   }),
   'create-lifecycle-consequence-preview': canonicalCapability({
     id: 'create-lifecycle-consequence-preview',
@@ -1558,14 +1504,6 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     inputSchema: RunDeliveryReportInputSchema,
     outputSchema: DeliveryReportSchema,
   }),
-  'list-delivery-test-reports': canonicalCapability({
-    id: 'list-delivery-test-reports',
-    operation: 'query',
-    safetyEffect: 'none',
-    invocationPolicy: humanAgentInvocationPolicy,
-    inputSchema: ListDeliveryTestReportsInputSchema,
-    outputSchema: MonthlyDeliveryTestReportPageSchema,
-  }),
   'get-integration-health': canonicalCapability({
     id: 'get-integration-health',
     operation: 'query',
@@ -1707,7 +1645,7 @@ const AGENT_API_CAPABILITY_METADATA = Object.freeze({
     operation: 'mutation',
     safetyEffect: 'none',
     invocationPolicy: humanWebAdministrationInvocationPolicy,
-    mutationOrderAfter: 'verify-email-integration',
+    mutationOrderAfter: 'set-channel-enabled',
   }),
   'revoke-agent-api-key': Object.freeze({
     id: 'revoke-agent-api-key',
