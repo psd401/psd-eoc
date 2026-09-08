@@ -99,6 +99,7 @@ The current synthesized stack contains exactly these parameters:
 <!-- docs-contract:template-parameters:start -->
 
 - `BootstrapVersion`
+- `DeliveryTestProductOwnerUserId`
 - `DirectPushCredentialVerificationReference`
 - `EnableAwsEumSmsWorker`
 - `EnableDirectPush`
