@@ -1,6 +1,6 @@
 # Alarm runbook: Aurora capacity
 
-**Source-defined CloudWatch alarm name:** `psd-eoc-aurora-acu-utilization`.
+**Source-defined CloudWatch alarm name:** `psd-eoc-aurora-capacity-pinned`.
 
 Current deployment and alarm read-back state lives only in the
 [operational readiness register](../INTEGRATIONS.md). A source-defined alarm
@@ -8,10 +8,23 @@ name is not deployment evidence.
 
 ## Meaning
 
-The source-defined alarm reports Aurora Serverless v2 ACU utilization at or
-above 80% in 3 of 5 one-minute periods; missing data is breaching. The
-deployable stack sets minimum capacity to `0.5` ACU and maximum capacity to `4`
-ACUs with no auto-pause. Source configuration is not deployment evidence.
+The source-defined alarm reports Aurora Serverless v2 running at its capacity
+ceiling for 20 consecutive one-minute periods; missing data is non-breaching.
+The deployable stack sets minimum capacity to `0.5` ACU and maximum capacity to
+`1` ACU with no auto-pause. Source configuration is not deployment evidence.
+
+The alarm reads `ServerlessDatabaseCapacity` in ACU, not `ACUUtilization`.
+Utilization is capacity divided by the ceiling, so on a `0.5`-to-`1` range it
+has two attainable values -- 50 at idle and 100 whenever the cluster scales up
+at all -- and a percentage threshold could only ever mean "Aurora scaled up".
+It fired that way on 2026-09-02 with three connections and no load. What this
+alarm asks instead is whether the ceiling has become the constraint: a burst
+that scales up and back within a few minutes is the cluster working normally,
+while twenty consecutive minutes at the ceiling is the cluster asking for a
+larger one.
+
+Raising the ceiling is a cost decision for the product owner, which is why this
+alarm reaches the operations topic rather than paging.
 
 ## Safety posture
 

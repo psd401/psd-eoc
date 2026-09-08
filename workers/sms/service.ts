@@ -20,6 +20,7 @@ import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { workerAttemptFingerprint } from '../shared/attempt';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import type { WorkerAttemptProcessResult } from '../shared/processor';
+import { isTerminalFailure, retireMessage } from '../shared/terminal-failure';
 import { AwsEumSmsRuntime } from './runtime';
 import { AwsEumSmsDeliveryEventError } from './delivery-events';
 import { SmsRuntimeClient } from './state-client';
@@ -27,7 +28,16 @@ import { SmsRuntimeClient } from './state-client';
 const VISIBILITY_HEARTBEAT_MILLISECONDS = 30_000;
 const VISIBILITY_TIMEOUT_SECONDS = 120;
 const MAX_RECONCILIATION_SEGMENTS = 10;
-const HEARTBEAT_LOG_INTERVAL_MILLISECONDS = 15 * 60 * 1_000;
+/**
+ * How often the worker says it is alive.
+ *
+ * `psd-eoc-sms-worker-health` sums these over a fifteen-minute period and
+ * alarms on two empty periods, treating missing data as breaching. At the
+ * previous fifteen-minute cadence a period held exactly one heartbeat, so one
+ * slow poll emptied it; five minutes puts three in every window. Keep this
+ * comfortably under the alarm's period or the alarm goes off on its own.
+ */
+const HEARTBEAT_LOG_INTERVAL_MILLISECONDS = 5 * 60 * 1_000;
 
 type SafeLogEvent = Readonly<{
   event:
@@ -36,6 +46,7 @@ type SafeLogEvent = Readonly<{
     | 'sms-worker-message-completed'
     | 'sms-worker-message-deferred'
     | 'sms-worker-message-failed'
+    | 'sms-worker-message-retired'
     | 'sms-worker-delivery-event-recorded'
     | 'sms-worker-delivery-event-ignored'
     | 'sms-worker-opt-outs-reconciled';
@@ -53,6 +64,9 @@ export interface SmsServiceConfiguration {
   readonly queueArn: string;
   readonly receiptQueueUrl: string;
   readonly receiptQueueArn: string;
+  /** Where a work message that cannot succeed goes, per queue. */
+  readonly deadLetterQueueUrl: string;
+  readonly receiptDeadLetterQueueUrl: string;
   readonly serviceOrigin: string;
   readonly attemptExecutionToken: string;
   readonly deliveryStateToken: string;
@@ -262,6 +276,12 @@ export function readSmsServiceConfiguration(
     accountId,
     region,
     queueUrl: queueUrl(required(environment, 'SMS_QUEUE_URL', 2_048)),
+    deadLetterQueueUrl: queueUrl(
+      required(environment, 'SMS_DEAD_LETTER_QUEUE_URL', 2_048),
+    ),
+    receiptDeadLetterQueueUrl: queueUrl(
+      required(environment, 'SMS_RECEIPT_DEAD_LETTER_QUEUE_URL', 2_048),
+    ),
     queueArn,
     receiptQueueUrl: queueUrl(
       required(environment, 'SMS_RECEIPT_QUEUE_URL', 2_048),
@@ -785,13 +805,48 @@ export async function runSmsService(
         log({ event: 'sms-worker-message-deferred', count: result.count });
       }
     } catch (error) {
-      log({
-        event: 'sms-worker-message-failed',
-        count: 1,
-        stage: 'process',
-        code: safeFailureCode(error),
-        receiveCount: message.receiveCount,
-      });
+      const code = safeFailureCode(error);
+      if (isTerminalFailure(error)) {
+        // Retrying cannot change this answer, so retire it now rather than
+        // let it oscillate on and off the queue for five receives. See
+        // `workers/shared/terminal-failure.ts`.
+        try {
+          await retireMessage({
+            client: sqs,
+            queueUrl: currentQueueUrl,
+            deadLetterQueueUrl:
+              queueKind === 'work'
+                ? configuration.deadLetterQueueUrl
+                : configuration.receiptDeadLetterQueueUrl,
+            receiptHandle: message.receiptHandle,
+            body: message.body,
+          });
+          log({
+            event: 'sms-worker-message-retired',
+            count: 1,
+            stage: 'process',
+            code,
+            receiveCount: message.receiveCount,
+          });
+        } catch (retireError) {
+          // The redrive policy is still behind this.
+          log({
+            event: 'sms-worker-message-failed',
+            count: 1,
+            stage: 'process',
+            code: safeFailureCode(retireError),
+            receiveCount: message.receiveCount,
+          });
+        }
+      } else {
+        log({
+          event: 'sms-worker-message-failed',
+          count: 1,
+          stage: 'process',
+          code,
+          receiveCount: message.receiveCount,
+        });
+      }
     } finally {
       clearInterval(heartbeat);
     }

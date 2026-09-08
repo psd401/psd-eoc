@@ -53,7 +53,10 @@ import {
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
 } from '../config';
-import { configureInfrastructureMonitoring } from '../monitoring';
+import {
+  AURORA_MAX_CAPACITY_ACU,
+  configureInfrastructureMonitoring,
+} from '../monitoring';
 import {
   DATABASE_NAME,
   DATABASE_PORT,
@@ -1285,7 +1288,9 @@ export class PsdEocStack extends Stack {
       // retirement is a separately reviewed human data-lifecycle decision.
       removalPolicy: RemovalPolicy.RETAIN,
       securityGroups: [databaseSecurityGroup],
-      serverlessV2MaxCapacity: 1,
+      // Shared with the capacity alarm, which asks whether the cluster is
+      // pinned at this value; see `AURORA_MAX_CAPACITY_ACU`.
+      serverlessV2MaxCapacity: AURORA_MAX_CAPACITY_ACU,
       serverlessV2MinCapacity: 0.5,
       storageEncrypted: true,
       vpc: network as unknown as ec2.IVpc,
@@ -1523,6 +1528,17 @@ export class PsdEocStack extends Stack {
     const criticalAlarmTopic = new sns.Topic(this, 'CriticalAlarmTopic', {
       displayName: 'PSD EOC critical',
       topicName: 'psd-eoc-critical-alarms',
+    });
+    // Where alarms go when they clear.
+    //
+    // Recoveries used to publish to the alarm's own topic, so a flapping alarm
+    // paged twice per cycle and texted twice per cycle. One poison message in
+    // the email queue produced 79 of those in a fortnight. The recovery is
+    // still mailed -- an operator wants to know a thing fixed itself -- but it
+    // is not a page, so this topic has no SMS subscription.
+    const recoveryAlarmTopic = new sns.Topic(this, 'RecoveryAlarmTopic', {
+      displayName: 'PSD EOC recoveries',
+      topicName: 'psd-eoc-alarm-recoveries',
     });
 
     // The delivery queue's consumer. It moves each authorized batch to the
@@ -2060,6 +2076,7 @@ export class PsdEocStack extends Stack {
           PSD_EOC_SERVICE_ORIGIN: deploymentIdentity.applicationOrigin,
           PSD_EOC_IOS_BUNDLE_ID: deploymentIdentity.iosBundleId,
           PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
+          PUSH_DEAD_LETTER_QUEUE_URL: queuePairs.Push.deadLetterQueue.queueUrl,
           SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
@@ -2157,6 +2174,10 @@ export class PsdEocStack extends Stack {
     }
     queuePairs.Push.queue.grantConsumeMessages(pushWorkerTaskRole);
     queuePairs.Push.queue.grantSendMessages(pushWorkerTaskRole);
+    // Retiring an undeliverable message writes it to the dead-letter queue
+    // directly rather than waiting out five receives; see
+    // `workers/shared/terminal-failure.ts`.
+    queuePairs.Push.deadLetterQueue.grantSendMessages(pushWorkerTaskRole);
     const pushWorkerService = new ecs.FargateService(
       this,
       'PushWorkerService',
@@ -2222,7 +2243,9 @@ export class PsdEocStack extends Stack {
     });
     queuePairs.Sms.queue.grantConsumeMessages(smsWorkerTaskRole);
     queuePairs.Sms.queue.grantSendMessages(smsWorkerTaskRole);
+    queuePairs.Sms.deadLetterQueue.grantSendMessages(smsWorkerTaskRole);
     queuePairs.SmsReceipt.queue.grantConsumeMessages(smsWorkerTaskRole);
+    queuePairs.SmsReceipt.deadLetterQueue.grantSendMessages(smsWorkerTaskRole);
     smsWorkerTaskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['sms-voice:SendTextMessage'],
@@ -2342,6 +2365,9 @@ export class PsdEocStack extends Stack {
           SMS_QUEUE_URL: queuePairs.Sms.queue.queueUrl,
           SMS_RECEIPT_QUEUE_ARN: queuePairs.SmsReceipt.queue.queueArn,
           SMS_RECEIPT_QUEUE_URL: queuePairs.SmsReceipt.queue.queueUrl,
+          SMS_DEAD_LETTER_QUEUE_URL: queuePairs.Sms.deadLetterQueue.queueUrl,
+          SMS_RECEIPT_DEAD_LETTER_QUEUE_URL:
+            queuePairs.SmsReceipt.deadLetterQueue.queueUrl,
           SOURCE_SHA: sourceSha,
           TMPDIR: '/tmp',
         },
@@ -2448,6 +2474,8 @@ export class PsdEocStack extends Stack {
           AWS_REGION: region,
           EMAIL_QUEUE_ARN: emailQueue.queueArn,
           EMAIL_QUEUE_URL: emailQueue.queueUrl,
+          EMAIL_DEAD_LETTER_QUEUE_ARN: emailDeadLetterQueue.queueArn,
+          EMAIL_DEAD_LETTER_QUEUE_URL: emailDeadLetterQueue.queueUrl,
           NODE_ENV: 'production',
           PSD_EOC_EMAIL_RUNTIME_MODE: Fn.conditionIf(
             shouldRunEmailWorker.logicalId,
@@ -2506,6 +2534,7 @@ export class PsdEocStack extends Stack {
     }
     emailQueue.grantConsumeMessages(emailWorkerRole);
     emailQueue.grantSendMessages(emailWorkerRole);
+    emailDeadLetterQueue.grantSendMessages(emailWorkerRole);
     const emailWorkerService = new ecs.FargateService(
       this,
       'EmailWorkerService',
@@ -3723,6 +3752,7 @@ export class PsdEocStack extends Stack {
         sms: queuePairs.Sms,
       },
       criticalAlarmTopic,
+      recoveryAlarmTopic,
       database,
       displayTimeZone: deploymentIdentity.displayTimeZone,
       delivery: queuePairs.Delivery,
