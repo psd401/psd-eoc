@@ -328,13 +328,6 @@ authoritative country boundary because AWS protect configurations default
 omitted countries to allow. The fixed five-minute lifetime includes time spent
 waiting in SQS and all retries; it is not restarted when the worker resumes.
 
-The stack registers an EventBridge event destination
-(`psd-eoc-sms-eventbridge`, every event type) on the `psd-eoc-sms`
-configuration set through a custom resource, because CloudFormation has no
-resource for that destination type. Without it AWS publishes no delivery-status
-events, the `psd-eoc-sms-delivery-events` rule stays silent, and the worker
-records nothing after provider acceptance.
-
 `EnableAwsEumSmsWorker` runs the worker; the SMS channel itself is enabled by
 an authenticated administrator on the integrations page. A real handset drill
 is still human-only: an authenticated human starts it in the running
