@@ -172,6 +172,11 @@ export interface WorkerAttemptProcessorOptions {
   readonly random?: () => number;
   /** Fresh enablement and endpoint truth checked after the claim, before I/O. */
   readonly authorizeProviderSend?: ProviderSendAuthorizer;
+  /**
+   * False keeps the provider dark: retained truth still replays read-only, but
+   * no new attempt is claimed and no provider I/O can start.
+   */
+  readonly providerSendEnabled?: boolean;
 }
 
 export type WorkerProcessingErrorCode =
@@ -417,6 +422,7 @@ export class WorkerAttemptProcessor {
   readonly #leaseMilliseconds: number;
   readonly #random: () => number;
   readonly #authorizeSend: ProviderSendAuthorizer | undefined;
+  readonly #sendEnabled: boolean;
 
   public constructor(options: WorkerAttemptProcessorOptions) {
     validateAdapter(options.adapter);
@@ -429,6 +435,7 @@ export class WorkerAttemptProcessor {
     this.#leaseMilliseconds = parseLease(options.leaseMilliseconds);
     this.#random = options.random ?? Math.random;
     this.#authorizeSend = options.authorizeProviderSend;
+    this.#sendEnabled = options.providerSendEnabled !== false;
   }
 
   public async process(
@@ -525,6 +532,9 @@ export class WorkerAttemptProcessor {
       }
     }
 
+    if (!this.#sendEnabled) {
+      throw new WorkerProcessingError('PROVIDER_SEND_DISABLED');
+    }
     if (attempt.attemptNumber > this.#retryPolicy.maxAttempts) {
       throw new WorkerProcessingError('RETRY_BUDGET_EXCEEDED');
     }

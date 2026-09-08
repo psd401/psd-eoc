@@ -38,6 +38,12 @@ export class MockAwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
     requestValue: ProviderSendRequest,
   ): Promise<ProviderSendOutcome> {
     const request = parseSmsProviderSendRequest(requestValue);
+    if (request.workItem.batch.rosterPopulation !== 'synthetic') {
+      throw new ProviderDispatchError(
+        'AWS_EUM_WORK_ITEM_INVALID',
+        'terminal-failure',
+      );
+    }
     const fingerprint = workerAttemptFingerprint(request.workItem);
     const existing = this.#sends.get(request.idempotencyKey);
     if (existing !== undefined) {

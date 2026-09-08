@@ -323,6 +323,7 @@ export class AwsEumSmsRuntime {
         : {}),
     });
     this.#attemptProcessor = new WorkerAttemptProcessor({
+      providerSendEnabled: mode.state === 'enabled',
       adapter,
       executionStore: options.executionStore,
       evidenceWriter: options.evidenceWriter,

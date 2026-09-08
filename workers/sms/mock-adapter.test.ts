@@ -36,10 +36,7 @@ function smsBatch(population: 'synthetic' | 'staff'): DispatchBatch {
           ? DRILL_BODY
           : '[INCIDENT] REAL INCIDENT - ACTIVATION: Synthetic test. [INCIDENT]',
     },
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: 'aws-eum-sms',
-    },
+    integrationId: 'aws-eum-sms',
   });
 }
 
@@ -89,7 +86,7 @@ describe('fail-closed AWS EUM SMS CI mock', () => {
     });
   });
 
-  test('rejects live-verified work and routable synthetic destinations', async () => {
+  test('rejects staff work and routable synthetic destinations', async () => {
     for (const request of [
       requestFor(smsBatch('staff')),
       requestFor(smsBatch('synthetic'), endpoint('+12065550123')),
