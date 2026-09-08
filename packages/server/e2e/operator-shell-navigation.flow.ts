@@ -7,7 +7,6 @@ const DISTRICT_ADMIN_DESTINATIONS = [
   ['Start event', '/start', 'Start an event'],
   ['Records', '/records', 'Records'],
   ['Text alerts', '/text-alerts', 'Emergency text messages'],
-  ['Delivery tests', '/delivery-tests', 'Monthly live delivery test'],
   ['Readiness', '/admin', 'Deployment readiness'],
   ['Schools', '/facilities', /^Facilities, neighborhoods,/u],
   ['Responses', '/event-types', 'Responses and message templates'],
@@ -24,7 +23,7 @@ test.describe('operator-shell-navigation', () => {
   }) => {
     await page.goto('/');
     const primary = page.getByRole('navigation', { name: 'Primary' });
-    await expect(primary.getByRole('link')).toHaveCount(14);
+    await expect(primary.getByRole('link')).toHaveCount(13);
     await expect(
       primary.getByRole('link', {
         name: 'Synthetic Example School District emergency operations',
@@ -111,20 +110,13 @@ test.describe('operator-shell-navigation', () => {
           'Start event',
           'Records',
           'Text alerts',
-          'Delivery tests',
           'Devices',
           'Audit',
         ],
       },
       {
         state: 'facility-staff.json',
-        labels: [
-          'Events',
-          'Start event',
-          'Records',
-          'Text alerts',
-          'Delivery tests',
-        ],
+        labels: ['Events', 'Start event', 'Records', 'Text alerts'],
       },
     ] as const;
     for (const testCase of cases) {
