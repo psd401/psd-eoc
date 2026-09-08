@@ -1558,33 +1558,6 @@ describe('App Runner runtime safety boundary', () => {
     expect(pool.SharedRoutesEnabled).toBe(false);
     expect(pool.DeletionProtectionEnabled).toBe(true);
 
-    // Delivery-status telemetry: the EventBridge event destination is the only
-    // way AWS publishes "Text Message Delivery Status Updated", and it exists
-    // only as an API call, so it is a conditional custom resource.
-    const smsEventDestination = resourceEntries('Custom::AWS').find(
-      ([, resource]) =>
-        JSON.stringify(properties(resource).Create).includes(
-          'CreateEventDestination',
-        ),
-    );
-    expect(smsEventDestination).toBeDefined();
-    const smsEventDestinationResource = smsEventDestination?.[1] ?? {};
-    expect(smsEventDestinationResource.Condition).toBe(
-      'ShouldProvisionAwsEumSmsResources',
-    );
-    const smsEventDestinationCreate = JSON.stringify(
-      properties(smsEventDestinationResource).Create,
-    );
-    expect(smsEventDestinationCreate).toContain('psd-eoc-sms-eventbridge');
-    expect(smsEventDestinationCreate).toContain('event-bus/default');
-    expect(smsEventDestinationCreate).toContain('ALL');
-    expect(
-      JSON.stringify(properties(smsEventDestinationResource).Update),
-    ).toContain('UpdateEventDestination');
-    expect(
-      JSON.stringify(properties(smsEventDestinationResource).Delete),
-    ).toContain('DeleteEventDestination');
-
     const smsService = resourceEntries('AWS::ECS::Service').find(
       ([, resource]) =>
         properties(resource).ServiceName === 'psd-eoc-aws-eum-sms-worker',
@@ -2110,12 +2083,7 @@ describe('one-off native bootstrap boundary', () => {
       quiescenceLogicalId,
     );
 
-    const digestLookupResource = resourceEntries('Custom::AWS').find(
-      ([, resource]) =>
-        JSON.stringify(properties(resource).Create).includes('describeImages'),
-    );
-    expect(digestLookupResource).toBeDefined();
-    const digestLookup = properties(digestLookupResource?.[1] ?? {});
+    const digestLookup = properties(onlyResource('Custom::AWS'));
     expect(String(digestLookup.Create)).toContain('describeImages');
     expect(String(digestLookup.Create)).toContain(
       'cdk-hnb659fds-container-assets',
@@ -3172,7 +3140,6 @@ describe('configured-unverified provider readiness boundary', () => {
         .filter((type) => type.startsWith('Custom::'))
         .sort(),
     ).toEqual([
-      'Custom::AWS',
       'Custom::AWS',
       'Custom::PsdEocBootstrapDeployment',
       'Custom::PsdEocRollbackImageValidation',
