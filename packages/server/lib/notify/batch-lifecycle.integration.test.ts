@@ -47,6 +47,10 @@ const EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const ACTIVATED_AT = new Date('2026-09-08T20:32:42.000Z');
 const ALL_CLEAR_AT = new Date('2026-09-08T21:09:22.000Z');
 const CLOSED_AT = new Date('2026-09-08T21:09:23.000Z');
+// For the cleared-reactivated-cleared-closed sequence: an earlier all-clear
+// and the reactivation that superseded it, both before ALL_CLEAR_AT.
+const STALE_ALL_CLEAR_AT = new Date('2026-09-08T20:50:00.000Z');
+const STALE_REACTIVATED_AT = new Date('2026-09-08T20:55:00.000Z');
 const actor = Object.freeze({
   kind: 'human' as const,
   userId: randomUUID(),
@@ -102,12 +106,13 @@ function allClearAuthorization(requestId: string, transitionId: string) {
  */
 async function installDrill(
   status: 'active' | 'all-clear' | 'closed',
-  options: Readonly<{ reactivatedAt?: Date }> = {},
+  options: Readonly<{ reactivatedAt?: Date; staleAllClear?: boolean }> = {},
 ): Promise<
   Readonly<{
     eventId: string;
     activation: ReturnType<typeof activationAuthorization>;
     allClear: ReturnType<typeof allClearAuthorization> | null;
+    staleAllClear: ReturnType<typeof allClearAuthorization> | null;
   }>
 > {
   const eventId = randomUUID();
@@ -119,6 +124,16 @@ async function installDrill(
   const allClear = cleared
     ? allClearAuthorization(allClearRequestId, transitionId)
     : null;
+  // An earlier all-clear that a reactivation superseded: the event was
+  // cleared, reactivated, and cleared again before it closed.
+  const staleTransitionId = randomUUID();
+  const staleAllClear =
+    cleared && options.staleAllClear === true
+      ? allClearAuthorization(randomUUID(), staleTransitionId)
+      : null;
+  const reactivatedAt =
+    options.reactivatedAt ??
+    (staleAllClear === null ? null : STALE_REACTIVATED_AT);
   await database().transaction(async (transaction) => {
     await transaction.insert(events).values({
       id: eventId,
@@ -133,7 +148,7 @@ async function installDrill(
       createdAt: ACTIVATED_AT,
       activatedAt: ACTIVATED_AT,
       allClearAt: cleared ? ALL_CLEAR_AT : null,
-      reactivatedAt: options.reactivatedAt ?? null,
+      reactivatedAt,
       closedAt: status === 'closed' ? CLOSED_AT : null,
       correctionOfEventId: null,
       correctionReason: null,
@@ -177,7 +192,39 @@ async function installDrill(
       });
     });
   }
-  return Object.freeze({ eventId, activation, allClear });
+  if (staleAllClear !== null) {
+    await database().transaction(async (transaction) => {
+      await transaction.execute(
+        sql`set local session_replication_role = replica`,
+      );
+      await transaction.insert(eventTransitions).values({
+        id: staleTransitionId,
+        sequence: 4,
+        transition: 'all-clear',
+        eventId,
+        sourceEventId: null,
+        correctionEventId: null,
+        journalEventId: eventId,
+        fromStatus: 'active',
+        toStatus: 'all-clear',
+        kind: 'drill',
+        templateMode: 'drill',
+        rosterPopulation: 'staff',
+        actor,
+        source: 'web',
+        occurredAt: STALE_ALL_CLEAR_AT,
+        requestId: staleAllClear.requestId,
+        confirmationId: randomUUID(),
+        confirmationStatus: 'consumed',
+        consequenceDigest: staleAllClear.consequenceDigest,
+        idempotencyKey: randomUUID(),
+        activationAuthorization: null,
+        notificationAuthorization: staleAllClear,
+        correctionReason: null,
+      });
+    });
+  }
+  return Object.freeze({ eventId, activation, allClear, staleAllClear });
 }
 
 function batch(
@@ -362,5 +409,24 @@ describeWithDatabase('dispatch batch lifecycle currency', () => {
         ),
       ),
     ).resolves.toBe(false);
+  });
+
+  test('a closed event keeps only its latest all-clear current, not one a reactivation superseded', async () => {
+    // Cleared, reactivated, cleared again, then closed. The first all-clear's
+    // batch names a transition whose time no longer matches the event's
+    // all-clear time, so it stays stale even though the status is closed.
+    const closed = await installDrill('closed', { staleAllClear: true });
+    await expect(
+      batchHasCurrentLifecycle(
+        database(),
+        batch(closed.eventId, 'all-clear', closed.staleAllClear!),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      batchHasCurrentLifecycle(
+        database(),
+        batch(closed.eventId, 'all-clear', closed.allClear!),
+      ),
+    ).resolves.toBe(true);
   });
 });

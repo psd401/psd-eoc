@@ -24,7 +24,17 @@ import {
   type RegisteredCapabilityHandler,
   type RegisteredCapabilityId,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableName,
+  inArray,
+  lte,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   databaseExecuteRows,
@@ -1713,7 +1723,7 @@ async function loadDrizzleEmailEndpointPolicy(
           and historical_endpoint.channel = historical_status.channel
         where historical_status.channel = 'email'
           and historical_status.status in ('invalid', 'disabled')
-          and lower(historical_endpoint.email) = lower(${sql.raw('"roster_endpoints"."email"')})
+          and lower(historical_endpoint.email) = lower(${sql.raw(`"${getTableName(rosterEndpoints)}"."email"`)})
       )`,
     })
     .from(rosterEndpoints)

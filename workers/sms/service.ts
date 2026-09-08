@@ -26,6 +26,15 @@ import { AwsEumSmsDeliveryEventError } from './delivery-events';
 import { SmsRuntimeClient } from './state-client';
 
 const VISIBILITY_HEARTBEAT_MILLISECONDS = 30_000;
+/**
+ * How many times a receipt that names no retained send is read before it is
+ * given up as foreign. The send's provider reference is written after AWS
+ * has already returned the MessageId, over two further server round trips,
+ * and a worker replaced between them rewrites it only after its work message
+ * becomes visible again; a receipt for that send can arrive first. Two more
+ * receives, each after the visibility timeout, cover that window.
+ */
+const UNMATCHED_RECEIPT_RECEIVES = 3;
 const VISIBILITY_TIMEOUT_SECONDS = 120;
 const MAX_RECONCILIATION_SEGMENTS = 10;
 /**
@@ -524,6 +533,7 @@ async function processWorkItem(
 async function processBody(
   body: string,
   enqueuedAt: string,
+  receiveCount: number,
   queueKind: 'work' | 'receipt',
   runtime: Pick<
     AwsEumSmsRuntime,
@@ -538,6 +548,7 @@ async function processBody(
     kind: 'complete' | 'defer';
     count: number;
     event: 'attempts' | 'delivery-event' | 'opt-outs';
+    code?: string;
   }>
 > {
   let value: unknown;
@@ -561,13 +572,23 @@ async function processBody(
         ruleArn: configuration.deliveryEventRuleArn,
         authorization: 'eventbridge-sqs-receipt-queue',
       });
-      // A receipt that names no send this system retained is finished the
-      // moment it is read: it is logged as ignored and leaves the queue,
-      // never retried toward the dead-letter queue.
+      if (result.kind !== 'unmatched') {
+        return Object.freeze({
+          kind: 'complete',
+          count: 1,
+          event: 'delivery-event',
+        });
+      }
+      // A receipt that names no send this system retained is either foreign
+      // (an account verification text, say) or early: its send's provider
+      // reference is not written yet. It is retried a bounded number of
+      // times for the second case, then logged as ignored and deleted for
+      // the first, never toward the dead-letter queue.
       return Object.freeze({
-        kind: 'complete',
-        count: result.kind === 'unmatched' ? 0 : 1,
+        kind: receiveCount < UNMATCHED_RECEIPT_RECEIVES ? 'defer' : 'complete',
+        count: 0,
         event: 'delivery-event',
+        code: 'UNMATCHED_RECEIPT',
       });
     } catch (error) {
       if (
@@ -578,6 +599,7 @@ async function processBody(
           kind: 'complete',
           count: 0,
           event: 'delivery-event',
+          code: error.code,
         });
       }
       throw error;
@@ -745,6 +767,7 @@ export async function runSmsService(
       const result = await processBody(
         message.body,
         message.enqueuedAt,
+        message.receiveCount,
         queueKind,
         runtime,
         state,
@@ -768,13 +791,21 @@ export async function runSmsService(
           }),
         );
       }
-      if (result.event === 'delivery-event') {
+      if (result.event === 'delivery-event' && result.kind === 'defer') {
+        log({
+          event: 'sms-worker-message-deferred',
+          count: result.count,
+          ...(result.code === undefined ? {} : { code: result.code }),
+          receiveCount: message.receiveCount,
+        });
+      } else if (result.event === 'delivery-event') {
         log({
           event:
             result.count === 0
               ? 'sms-worker-delivery-event-ignored'
               : 'sms-worker-delivery-event-recorded',
           count: result.count,
+          ...(result.code === undefined ? {} : { code: result.code }),
         });
       } else if (result.event === 'opt-outs') {
         log({ event: 'sms-worker-opt-outs-reconciled', count: result.count });
