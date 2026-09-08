@@ -886,25 +886,17 @@ export function createDrizzleSmsRuntimeStore(
       ) {
         return false;
       }
+      // Enablement alone. This previously also required the truth label to be
+      // 'live-verified' and a stored authorization reference to match the send
+      // context. Three pieces of hand-maintained state across two tables had to
+      // agree, and when they did not this returned false with nothing logged:
+      // a drill delivered push and email while SMS vanished silently.
       const [configuration] = await database
-        .select({
-          enabled: channelConfigurations.enabled,
-          statusLabel: channelConfigurations.statusLabel,
-          authorizationReference: integrationStatuses.authorizationReference,
-        })
+        .select({ enabled: channelConfigurations.enabled })
         .from(channelConfigurations)
-        .innerJoin(
-          integrationStatuses,
-          eq(integrationStatuses.id, channelConfigurations.statusId),
-        )
         .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
         .limit(1);
-      return (
-        configuration?.enabled === true &&
-        configuration.statusLabel === 'live-verified' &&
-        configuration.authorizationReference ===
-          context.integrationAuthorizationReference
-      );
+      return configuration?.enabled === true;
     },
 
     async executeLifecycle(input) {
