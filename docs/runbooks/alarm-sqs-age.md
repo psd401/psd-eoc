@@ -13,9 +13,23 @@ names are not deployment evidence.
 
 ## Meaning
 
-Each source-defined alarm fires when its queue's oldest visible message reaches
-60 seconds in one one-minute evaluation period; missing data is non-breaching.
-It does not reveal whether a provider was called or a person received anything.
+Each source-defined alarm fires when its queue's oldest visible message stays
+at or past 60 seconds for three consecutive one-minute periods; missing data is
+non-breaching. It does not reveal whether a provider was called or a person
+received anything.
+
+Three periods rather than one, because a message that fails and returns to the
+queue drives this metric as a sawtooth -- the age climbs while the message
+waits and drops to zero the moment a worker takes it again. At one datapoint
+the alarm followed every tooth, and a single undeliverable message produced
+dozens of alarm-and-recovery notifications before the redrive policy retired
+it. A queue that is genuinely not draining stays past the threshold across
+consecutive minutes; a sawtooth does not.
+
+A worker now retires a message whose failure states it cannot be retried,
+copying it to the dead-letter queue and deleting it from the source instead of
+leaving it to round-trip. The `*-dlq-depth` alarm is what fires in that case,
+and it fires sooner than it used to.
 PSD EOC queues are at-least-once boundaries; replay can duplicate provider
 side effects unless the exact attempt is safely fenced.
 

@@ -36,6 +36,7 @@ import {
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
 } from '../../src/config';
+import { AURORA_MAX_CAPACITY_ACU } from '../../src/monitoring';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -708,8 +709,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
     template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 1);
-    // Three topics: SES event evidence, and the two alarm routes.
-    template.resourceCountIs('AWS::SNS::Topic', 3);
+    // Four topics: SES event evidence, the two paging routes, and the
+    // recovery route that carries every alarm's OK transition.
+    template.resourceCountIs('AWS::SNS::Topic', 4);
 
     const repository = properties(onlyResource('AWS::ECR::Repository'));
     expect(repository.RepositoryName).toBe(SERVER_REPOSITORY_NAME);
@@ -2461,6 +2463,122 @@ describe('protected access-membership publication boundary', () => {
 });
 
 describe('alarm topic delivery', () => {
+  it('sends every recovery to the recovery topic and never to the phone', () => {
+    // Alarm and recovery used to publish to the same topic, so a flapping
+    // alarm both mailed and texted twice per cycle; one undeliverable email
+    // message produced 79 of those in a fortnight. Recoveries still reach the
+    // mailbox and no longer reach the phone.
+    const alarms = resourceEntries('AWS::CloudWatch::Alarm').map(
+      ([, resource]) => properties(resource),
+    );
+    expect(alarms.length).toBeGreaterThan(0);
+    let recoveries = 0;
+    for (const alarm of alarms) {
+      if (alarm.OKActions === undefined) continue;
+      for (const action of asArray(alarm.OKActions)) {
+        expect(JSON.stringify(action)).toContain('RecoveryAlarmTopic');
+        recoveries += 1;
+      }
+    }
+    expect(recoveries).toBeGreaterThan(0);
+
+    const smsSubscriptions = resourceEntries('AWS::SNS::Subscription')
+      .map(([, resource]) => properties(resource))
+      .filter((subscription) => subscription.Protocol === 'sms');
+    expect(smsSubscriptions.length).toBeGreaterThan(0);
+    for (const subscription of smsSubscriptions) {
+      expect(JSON.stringify(subscription.TopicArn)).not.toContain(
+        'RecoveryAlarmTopic',
+      );
+    }
+    // The recovery topic still mails, or a recovery would go nowhere at all.
+    const lambdaSubscriptions = resourceEntries('AWS::SNS::Subscription')
+      .map(([, resource]) => properties(resource))
+      .filter((subscription) => subscription.Protocol === 'lambda');
+    expect(
+      lambdaSubscriptions.some((subscription) =>
+        JSON.stringify(subscription.TopicArn).includes('RecoveryAlarmTopic'),
+      ),
+    ).toBe(true);
+  });
+
+  it('needs a queue to stay backed up for three minutes before it pages', () => {
+    // A message that fails and returns drives the age metric as a sawtooth. At
+    // one datapoint the alarm followed every tooth.
+    const queueAgeAlarms = resourceEntries('AWS::CloudWatch::Alarm')
+      .map(([, resource]) => properties(resource))
+      .filter((alarm) => String(alarm.AlarmName).endsWith('-queue-age'));
+    expect(queueAgeAlarms.length).toBeGreaterThan(0);
+    for (const alarm of queueAgeAlarms) {
+      expect(alarm.DatapointsToAlarm).toBe(3);
+      expect(alarm.EvaluationPeriods).toBe(3);
+      expect(alarm.Threshold).toBe(60);
+    }
+  });
+
+  it('does not page on a single App Runner 5xx', () => {
+    // One 500 was most often a browser tab left open across a deploy, whose
+    // server action the new build no longer recognises.
+    const sustained = resourceEntries('AWS::CloudWatch::Alarm')
+      .map(([, resource]) => properties(resource))
+      .find((alarm) => alarm.AlarmName === 'psd-eoc-apprunner-5xx');
+    if (sustained === undefined) {
+      throw new Error('Missing the App Runner 5xx alarm.');
+    }
+    expect(sustained.DatapointsToAlarm).toBe(3);
+    expect(sustained.EvaluationPeriods).toBe(3);
+
+    // A genuine burst still pages immediately.
+    const burst = resourceEntries('AWS::CloudWatch::Alarm')
+      .map(([, resource]) => properties(resource))
+      .find((alarm) => alarm.AlarmName === 'psd-eoc-apprunner-5xx-burst');
+    if (burst === undefined) {
+      throw new Error('Missing the App Runner 5xx burst alarm.');
+    }
+    expect(burst.Threshold).toBe(5);
+    expect(burst.EvaluationPeriods).toBe(1);
+  });
+
+  it('measures Aurora capacity in ACU, not as a share of the ceiling', () => {
+    // `ACUUtilization` is `capacity / max`. With a 0.5-to-1.0 range it has two
+    // attainable values, 50 and 100, so an 80 percent threshold meant "Aurora
+    // scaled up at all" -- which it does routinely with three connections and
+    // no load. Alarming on it again would restore the noise.
+    const alarms = resourceEntries('AWS::CloudWatch::Alarm').map(
+      ([, resource]) => properties(resource),
+    );
+    for (const alarm of alarms) {
+      expect(alarm.MetricName).not.toBe('ACUUtilization');
+    }
+
+    const capacity = alarms.find(
+      (alarm) => alarm.AlarmName === 'psd-eoc-aurora-capacity-pinned',
+    );
+    if (capacity === undefined) {
+      throw new Error('Missing the Aurora capacity alarm.');
+    }
+    expect(capacity.MetricName).toBe('ServerlessDatabaseCapacity');
+    expect(capacity.DatapointsToAlarm).toBe(20);
+    expect(capacity.EvaluationPeriods).toBe(20);
+    // The threshold is the cluster's own ceiling; a lower one would fire on a
+    // scale-up that never reached it.
+    expect(capacity.Threshold).toBe(AURORA_MAX_CAPACITY_ACU);
+  });
+
+  it('gives the SMS heartbeat alarm room for more than one heartbeat', () => {
+    // The worker heartbeats every five minutes. A twenty-minute window against
+    // the previous fifteen-minute cadence held exactly one, so a single slow
+    // poll emptied a period and the alarm treats missing data as breaching.
+    const alarm = resourceEntries('AWS::CloudWatch::Alarm')
+      .map(([, resource]) => properties(resource))
+      .find((candidate) => candidate.AlarmName === 'psd-eoc-sms-worker-health');
+    if (alarm === undefined) {
+      throw new Error('Missing the SMS worker health alarm.');
+    }
+    expect(alarm.Period).toBe(900);
+    expect(alarm.TreatMissingData).toBe('breaching');
+  });
+
   it('deploys sanitized channel-worker metrics and alarms only with each worker', () => {
     const filters = resourceEntries('AWS::Logs::MetricFilter');
     // 15 channel-worker and membership filters, plus the two that count a
@@ -2834,7 +2952,10 @@ describe('alarm topic delivery', () => {
           )
           .map((statement) => statement.Sid),
     );
+    // Three topics now: operations, critical, and the recovery topic that
+    // every alarm's OK transition publishes to.
     expect(publishSids).toEqual([
+      'AllowScopedCloudWatchAlarmPublish',
       'AllowScopedCloudWatchAlarmPublish',
       'AllowScopedCloudWatchAlarmPublish',
     ]);
@@ -3034,7 +3155,9 @@ describe('configured-unverified provider readiness boundary', () => {
       resourceEntries('AWS::SNS::Subscription')
         .map(([, resource]) => String(properties(resource).Protocol))
         .sort(),
-    ).toEqual(['lambda', 'lambda', 'sms', 'sms', 'sqs']);
+      // Three mailer subscriptions and two SMS ones: the recovery topic mails
+      // but never texts, so a recovery cannot page anybody.
+    ).toEqual(['lambda', 'lambda', 'lambda', 'sms', 'sms', 'sqs']);
     expect(
       Object.values(resources)
         .map((resource) => String(asRecord(resource).Type))

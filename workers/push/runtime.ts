@@ -56,8 +56,19 @@ export class ExpoPushRuntimeError extends Error {
      * hold the push token or the recipient it was for, and never reaches here.
      */
     public readonly causeName: string | null = null,
+    /**
+     * The thrown value this wraps, so a caller can ask whether retrying it
+     * could ever succeed. Never logged; `causeName` is the loggable part.
+     */
+    cause: unknown = undefined,
+    /**
+     * Whether handing this message back to the queue could ever succeed.
+     * `undefined` defers to the cause; see
+     * `workers/shared/terminal-failure.ts`.
+     */
+    public readonly retryable: boolean | undefined = undefined,
   ) {
-    super('The Expo push runtime request failed safely.');
+    super('The Expo push runtime request failed safely.', { cause });
     this.name = 'ExpoPushRuntimeError';
   }
 }
@@ -109,7 +120,12 @@ function parseQueueMessage(
   try {
     parsed = JSON.parse(body) as unknown;
   } catch {
-    throw new ExpoPushRuntimeError('INVALID_QUEUE_MESSAGE');
+    throw new ExpoPushRuntimeError(
+      'INVALID_QUEUE_MESSAGE',
+      null,
+      undefined,
+      false,
+    );
   }
   const reference = ExpoPushAttemptReferenceMessageSchema.safeParse(parsed);
   if (reference.success) {
@@ -123,7 +139,12 @@ function parseQueueMessage(
     if (batch.channel !== 'push') throw new TypeError();
     return Object.freeze({ kind: 'batch', batch });
   } catch {
-    throw new ExpoPushRuntimeError('INVALID_QUEUE_MESSAGE');
+    throw new ExpoPushRuntimeError(
+      'INVALID_QUEUE_MESSAGE',
+      null,
+      undefined,
+      false,
+    );
   }
 }
 
@@ -225,7 +246,11 @@ export class ExpoPushRuntime {
     try {
       result = await this.#worker.process(workItem);
     } catch (error) {
-      throw new ExpoPushRuntimeError('ATTEMPT_FAILED', causeClass(error));
+      throw new ExpoPushRuntimeError(
+        'ATTEMPT_FAILED',
+        causeClass(error),
+        error,
+      );
     }
     if (result.kind === 'in-progress') {
       throw new ExpoPushRuntimeError('ATTEMPT_IN_PROGRESS');
@@ -244,6 +269,8 @@ export class ExpoPushRuntime {
             ? ''
             : `/${result.outcome.reasonCode}`
         }`,
+        undefined,
+        false,
       );
     }
     if (result.kind === 'retry') {
