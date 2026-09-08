@@ -1,7 +1,4 @@
-import {
-  IntegrationChannelChangeAuthorizationSchema,
-  type RegisteredCapabilityId,
-} from '@psd-eoc/contracts';
+import type { RegisteredCapabilityId } from '@psd-eoc/contracts';
 import {
   BeginTransactionCommand,
   CommitTransactionCommand,
@@ -17,12 +14,8 @@ import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import { createDrizzleStaleRosterReportStore } from '../../../lib/roster/stale-report';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
-  ADMINISTRATOR_ENABLEMENT_REFERENCE,
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
-  liveChannelChangeAuthorizationCommitment,
-  liveChannelChangeConsequenceDigest,
-  liveChannelChangeRequestDigest,
 } from '../integrations/capabilities';
 import { executeRosterHealthProjection } from '../integrations/roster-health';
 import { createDrizzleAdminCapabilityStore } from '../../../lib/capabilities/admin';
@@ -46,10 +39,7 @@ const USER_ID = '00000000-0000-4000-8000-000000002670';
 const SECOND_USER_ID = '00000000-0000-4000-8000-000000002675';
 const SESSION_ID = '00000000-0000-4000-8000-000000002671';
 const MOCKED_INTEGRATION_ID = 'synthetic-mocked-push';
-const MOCKED_STATUS_ID = '00000000-0000-4000-8000-000000002676';
 const LIVE_INTEGRATION_ID = 'synthetic-live-push';
-const LIVE_STATUS_ID = '00000000-0000-4000-8000-000000002677';
-const LIVE_AUTHORIZATION_ID = '00000000-0000-4000-8000-000000002678';
 const FACILITY_ID = '00000000-0000-4000-8000-000000009001';
 const NEIGHBORHOOD_ID = '00000000-0000-4000-8000-000000009002';
 const ORIGINAL_GROUP_SOURCE_ID = '00000000-0000-4000-8000-000000009003';
@@ -88,31 +78,6 @@ const CAPABILITY_MATRIX = Object.freeze([
   'set-channel-enabled',
   'get-stale-roster-report',
 ] as const satisfies readonly RegisteredCapabilityId[]);
-
-const liveAuthorizationBase = {
-  reference: 'synthetic-data-api-live-authorization',
-  integrationStatusId: LIVE_STATUS_ID,
-  integrationId: LIVE_INTEGRATION_ID,
-  desiredEnabled: true,
-  requestDigest: '0'.repeat(64),
-  consequenceDigest: '0'.repeat(64),
-  authorizedByUserId: USER_ID,
-  authorizedWithSessionId: SESSION_ID,
-  issuedAt: CLOCK_VALUE,
-  expiresAt: '2026-08-10T12:15:00.000Z',
-} as const;
-const LIVE_AUTHORIZATION = IntegrationChannelChangeAuthorizationSchema.parse({
-  ...liveAuthorizationBase,
-  requestDigest: liveChannelChangeRequestDigest(liveAuthorizationBase),
-  consequenceDigest: liveChannelChangeConsequenceDigest({
-    integrationId: LIVE_INTEGRATION_ID,
-    previousConfiguration: null,
-    desiredEnabled: true,
-    integrationStatusId: LIVE_STATUS_ID,
-  }),
-});
-const LIVE_AUTHORIZATION_COMMITMENT =
-  liveChannelChangeAuthorizationCommitment(LIVE_AUTHORIZATION);
 
 interface RecordedStatement {
   readonly sql: string;
@@ -153,7 +118,9 @@ class FakeRdsDataClient {
   readonly committedTransactionIds: string[] = [];
   readonly rolledBackTransactionIds: string[] = [];
 
-  private readonly configuredIntegrations = new Set<string>();
+  private readonly configuredIntegrations = new Set<string>([
+    LIVE_INTEGRATION_ID,
+  ]);
   private readonly groupSources = new Map<
     string,
     Readonly<{
@@ -293,8 +260,8 @@ class FakeRdsDataClient {
       }
       if (
         this.failHealthStatusRead &&
-        normalizedSql.startsWith('select distinct on') &&
-        normalizedSql.includes('from "integration_statuses"')
+        normalizedSql.startsWith('select') &&
+        normalizedSql.includes('from "channel_configurations"')
       ) {
         this.failHealthStatusRead = false;
         throw new Error('Synthetic integration health projection failure.');
@@ -940,15 +907,6 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
-    if (
-      sql.startsWith('insert into "integration_channel_change_authorizations"')
-    ) {
-      return {
-        records: [[{ stringValue: LIVE_AUTHORIZATION_ID }]],
-        numberOfRecordsUpdated: 1,
-        $metadata: {},
-      };
-    }
     if (sql.startsWith('insert into "channel_configurations"')) {
       const integrationId = parameterStrings.find(
         (value) =>
@@ -962,93 +920,31 @@ class FakeRdsDataClient {
       this.configuredIntegrations.add(integrationId);
       return { numberOfRecordsUpdated: 1, $metadata: {} };
     }
-    if (sql.includes('from "integration_statuses"')) {
-      const integrationId = parameterStrings.find(
+    if (sql.includes('from "channel_configurations"')) {
+      const requested = parameterStrings.find(
         (value) =>
           value === MOCKED_INTEGRATION_ID || value === LIVE_INTEGRATION_ID,
       );
-      if (integrationId === undefined) {
-        return { records: [], $metadata: {} };
-      }
-      const live = integrationId === LIVE_INTEGRATION_ID;
-      return {
-        records: [
-          [
-            { stringValue: live ? LIVE_STATUS_ID : MOCKED_STATUS_ID },
-            { stringValue: integrationId },
-            { stringValue: live ? 'live-verified' : 'mocked' },
-            live ? { stringValue: CLOCK_VALUE } : { isNull: true },
-            live ? { stringValue: USER_ID } : { isNull: true },
-            live
-              ? { stringValue: LIVE_AUTHORIZATION_COMMITMENT }
-              : { isNull: true },
-            { isNull: true },
-            { stringValue: CLOCK_VALUE },
-          ],
-        ],
-        $metadata: {},
-      };
+      const rows = [...this.configuredIntegrations]
+        .filter(
+          (integrationId) =>
+            requested === undefined || integrationId === requested,
+        )
+        .sort()
+        .map((integrationId) => [
+          { stringValue: integrationId },
+          { booleanValue: true },
+          { stringValue: CLOCK_VALUE },
+        ]);
+      return { records: rows, $metadata: {} };
     }
     if (
-      sql.includes('from "channel_configurations"') &&
-      sql.includes('inner join "integration_statuses"')
-    ) {
-      const integrationId = parameterStrings.find(
-        (value) =>
-          value === MOCKED_INTEGRATION_ID || value === LIVE_INTEGRATION_ID,
-      );
-      if (
-        integrationId === undefined ||
-        !this.configuredIntegrations.has(integrationId)
-      ) {
-        return { records: [], $metadata: {} };
-      }
-      const live = integrationId === LIVE_INTEGRATION_ID;
-      return {
-        records: [
-          [
-            { stringValue: integrationId },
-            { booleanValue: true },
-            { stringValue: CLOCK_VALUE },
-            { stringValue: live ? 'live-verified' : 'mocked' },
-            live ? { stringValue: CLOCK_VALUE } : { isNull: true },
-            live ? { stringValue: USER_ID } : { isNull: true },
-            live
-              ? { stringValue: LIVE_AUTHORIZATION_COMMITMENT }
-              : { isNull: true },
-            { isNull: true },
-            { stringValue: CLOCK_VALUE },
-          ],
-        ],
-        $metadata: {},
-      };
-    }
-    if (
-      sql.includes('from "channel_configurations"') ||
       sql.includes('from "roster_snapshots"') ||
       sql.includes('from "roster_sync_results"') ||
       sql.includes('from "security_audit_chain_anchors"') ||
       sql.includes('from "security_audit_entries"')
     ) {
       return { records: [], $metadata: {} };
-    }
-    if (sql.startsWith('insert into "integration_statuses"')) {
-      // Enabling a channel appends the observation naming the administrator.
-      return {
-        records: [
-          [
-            { stringValue: LIVE_STATUS_ID },
-            { stringValue: LIVE_INTEGRATION_ID },
-            { stringValue: 'live-verified' },
-            { stringValue: CLOCK_VALUE },
-            { stringValue: USER_ID },
-            { stringValue: ADMINISTRATOR_ENABLEMENT_REFERENCE },
-            { isNull: true },
-            { stringValue: CLOCK_VALUE },
-          ],
-        ],
-        $metadata: {},
-      };
     }
     if (
       sql.startsWith('set transaction isolation level') ||
@@ -1215,7 +1111,7 @@ describe('admin Aurora Data API transport regression', () => {
         sql.startsWith('insert into "security_audit_entries"'),
       ),
     );
-    expect(projection.health.statuses).toHaveLength(1);
+    expect(projection.health.channels).toHaveLength(1);
     expect(settled).toBe(true);
     expect(client.committedTransactionIds).toContain(auditInsert.transactionId);
   });
@@ -1831,21 +1727,13 @@ describe('admin Aurora Data API transport regression', () => {
     });
     executedCapabilities.add('get-integration-health');
     expect(integration.health.observedAt).toBe(CLOCK_VALUE);
-    expect(integration.health.statuses).toHaveLength(1);
-    const [healthStatus] = integration.health.statuses;
-    expect(healthStatus).toMatchObject({
+    expect(integration.health.channels).toHaveLength(1);
+    expect(integration.health.channels[0]).toMatchObject({
       integrationId: LIVE_INTEGRATION_ID,
-      label: 'live-verified',
-      observedAt: CLOCK_VALUE,
-      verifiedAt: CLOCK_VALUE,
+      enabled: true,
+      changedAt: CLOCK_VALUE,
     });
-    if (healthStatus?.verifiedAt === null || healthStatus === undefined) {
-      throw new Error('The synthetic live health status lost verification.');
-    }
-    expect(Date.parse(healthStatus.verifiedAt)).toBeLessThanOrEqual(
-      Date.parse(integration.health.observedAt),
-    );
-    expect(integration.channels).toEqual([]);
+    expect(integration.channels).toEqual(integration.health.channels);
     const healthStatements = client.statements.slice(healthStatementStart);
     const healthAuditPreflightStatement = healthStatements.findIndex(
       ({ sql }) => sql.includes('from "security_audit_entries"'),
@@ -1854,13 +1742,8 @@ describe('admin Aurora Data API transport regression', () => {
       ({ sql }) =>
         sql === 'set transaction isolation level repeatable read read only',
     );
-    const healthStatusStatement = healthStatements.findIndex(({ sql }) =>
-      sql.includes('from "integration_statuses"'),
-    );
-    const healthChannelStatement = healthStatements.findIndex(
-      ({ sql }) =>
-        sql.includes('from "channel_configurations"') &&
-        sql.includes('inner join "integration_statuses"'),
+    const healthChannelStatement = healthStatements.findIndex(({ sql }) =>
+      sql.includes('from "channel_configurations"'),
     );
     const healthClockStatement = healthStatements.findIndex(({ sql }) =>
       sql.includes('clock_timestamp()'),
@@ -1872,10 +1755,9 @@ describe('admin Aurora Data API transport regression', () => {
     expect(healthAuditPreflightStatement).toBeGreaterThan(
       healthSnapshotStatement,
     );
-    expect(healthStatusStatement).toBeGreaterThan(
+    expect(healthChannelStatement).toBeGreaterThan(
       healthAuditPreflightStatement,
     );
-    expect(healthChannelStatement).toBeGreaterThan(healthStatusStatement);
     expect(healthClockStatement).toBeGreaterThan(healthChannelStatement);
     expect(healthSuccessAuditStatement).toBeGreaterThan(healthClockStatement);
     const snapshotTransactionId =
@@ -1886,9 +1768,6 @@ describe('admin Aurora Data API transport regression', () => {
     expect(successAuditTransactionId).toBeTruthy();
     expect(successAuditTransactionId).not.toBe(snapshotTransactionId);
     expect(healthStatements[healthAuditPreflightStatement]?.transactionId).toBe(
-      snapshotTransactionId,
-    );
-    expect(healthStatements[healthStatusStatement]?.transactionId).toBe(
       snapshotTransactionId,
     );
     expect(healthStatements[healthChannelStatement]?.transactionId).toBe(
@@ -1996,7 +1875,6 @@ describe('admin Aurora Data API transport regression', () => {
       command: {
         integrationId: MOCKED_INTEGRATION_ID,
         enabled: true,
-        authorization: null,
       },
       metadata: {
         idempotencyKey: 'synthetic-data-api-mocked-channel',
@@ -2007,7 +1885,6 @@ describe('admin Aurora Data API transport regression', () => {
     expect(mockedChannel).toMatchObject({
       integrationId: MOCKED_INTEGRATION_ID,
       enabled: true,
-      status: { label: 'mocked' },
     });
     expect(
       await executeSetChannelEnabledCapability({
@@ -2016,7 +1893,6 @@ describe('admin Aurora Data API transport regression', () => {
         command: {
           integrationId: MOCKED_INTEGRATION_ID,
           enabled: true,
-          authorization: null,
         },
         metadata: {
           idempotencyKey: 'synthetic-data-api-mocked-channel',
@@ -2032,7 +1908,6 @@ describe('admin Aurora Data API transport regression', () => {
       command: {
         integrationId: LIVE_INTEGRATION_ID,
         enabled: true,
-        authorization: LIVE_AUTHORIZATION,
       },
       metadata: {
         idempotencyKey: 'synthetic-data-api-live-channel',
@@ -2043,7 +1918,6 @@ describe('admin Aurora Data API transport regression', () => {
     expect(liveChannel).toMatchObject({
       integrationId: LIVE_INTEGRATION_ID,
       enabled: true,
-      status: { label: 'live-verified' },
     });
     expect(
       await executeSetChannelEnabledCapability({
@@ -2052,7 +1926,6 @@ describe('admin Aurora Data API transport regression', () => {
         command: {
           integrationId: LIVE_INTEGRATION_ID,
           enabled: true,
-          authorization: LIVE_AUTHORIZATION,
         },
         metadata: {
           idempotencyKey: 'synthetic-data-api-live-channel',
@@ -2076,11 +1949,6 @@ describe('admin Aurora Data API transport regression', () => {
       client.statements.some(
         ({ sql }) =>
           sql === 'set transaction isolation level repeatable read read only',
-      ),
-    ).toBe(true);
-    expect(
-      client.statements.some(({ sql }) =>
-        sql.startsWith('insert into "integration_statuses"'),
       ),
     ).toBe(true);
     expect([...executedCapabilities].sort()).toEqual(

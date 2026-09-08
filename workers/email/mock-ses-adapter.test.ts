@@ -43,10 +43,7 @@ function emailBatch(live = false): DispatchBatch {
           textBody:
             '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic proof only. [DRILL]',
         },
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: 'ses-email',
-    },
+    integrationId: 'ses-email',
   });
 }
 
@@ -85,7 +82,6 @@ describe('mock SES adapter', () => {
 
     expect(adapter.channel).toBe('email');
     expect(adapter.integrationId).toBe('ses-email');
-    expect(adapter.truthLabel).toBe('mocked');
     expect(adapter.provider).toBe(MOCK_SES_PROVIDER);
     expect(adapter.deliverySemantics).toBe('attempt-id-idempotent');
     expect(adapter.logicalSendCount).toBe(1);

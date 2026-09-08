@@ -41,10 +41,7 @@ function workItem() {
       channel: 'sms',
       body: '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic test. [DRILL]',
     },
-    integrationStatus: {
-      ...base.integrationStatus,
-      integrationId: 'aws-eum-sms',
-    },
+    integrationId: 'aws-eum-sms',
   });
   return Object.freeze({
     batch,

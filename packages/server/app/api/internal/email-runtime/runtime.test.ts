@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import type { EmailRuntimeStore } from '../../../../lib/notify/email-runtime-store';
 import {
   EMAIL_RUNTIME_FIXTURE_ATTEMPT_ID,
-  emailDeliveryTestWorkItem,
+  emailStaffDrillWorkItem,
 } from '../../../../lib/testing/email-runtime';
 import {
   createEmailRuntimeRouteHandler,
@@ -14,7 +14,6 @@ import {
 const TOKEN = 'email-runtime-worker-token-'.padEnd(48, 'x');
 const ATTEMPT_ID = EMAIL_RUNTIME_FIXTURE_ATTEMPT_ID;
 const FINGERPRINT = 'a'.repeat(64);
-const VERIFICATION_REFERENCE = 'deployment:commit-277';
 
 function fixture(overrides: Partial<EmailRuntimeStore> = {}) {
   const calls: { method: string; input: unknown }[] = [];
@@ -51,7 +50,6 @@ function fixture(overrides: Partial<EmailRuntimeStore> = {}) {
     opens: () => opens,
     handler: createEmailRuntimeRouteHandler({
       readExpectedBearerToken: () => TOKEN,
-      readExpectedVerificationReference: () => VERIFICATION_REFERENCE,
       openStore: () => {
         opens += 1;
         return store;
@@ -87,11 +85,10 @@ describe('email runtime route', () => {
 
   test('exposes a strict irreversible SES claim operation', async () => {
     const run = fixture();
-    const workItem = emailDeliveryTestWorkItem();
+    const workItem = emailStaffDrillWorkItem();
     const response = await run.handler(
       post({
         operation: 'claim-provider-io',
-        verificationReference: VERIFICATION_REFERENCE,
         attemptId: ATTEMPT_ID,
         requestFingerprint: FINGERPRINT,
         workItem,
@@ -104,7 +101,6 @@ describe('email runtime route', () => {
         method: 'claimProviderIo',
         input: {
           operation: 'claim-provider-io',
-          verificationReference: VERIFICATION_REFERENCE,
           attemptId: ATTEMPT_ID,
           requestFingerprint: FINGERPRINT,
           workItem,
@@ -119,14 +115,12 @@ describe('email runtime route', () => {
       { operation: 'start-event', attemptId: ATTEMPT_ID },
       {
         operation: 'claim-provider-io',
-        verificationReference: VERIFICATION_REFERENCE,
         attemptId: ATTEMPT_ID,
         requestFingerprint: FINGERPRINT,
         email: 'forbidden@example.invalid',
       },
       {
         operation: 'claim-provider-io',
-        verificationReference: VERIFICATION_REFERENCE,
         attemptId: ATTEMPT_ID,
         requestFingerprint: 'not-a-digest',
       },
@@ -136,29 +130,6 @@ describe('email runtime route', () => {
     expect(run.opens()).toBe(0);
   });
 
-  test('rejects a stale task reference before opening durable state', async () => {
-    const run = fixture();
-    const response = await run.handler(
-      post({
-        operation: 'authorize-provider-send',
-        verificationReference: 'deployment:commit-278',
-        workItem: emailDeliveryTestWorkItem(),
-      }),
-    );
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({
-      error: {
-        code: 'STALE_EMAIL_RUNTIME_AUTHORIZATION',
-        message:
-          'The email worker deployment authorization is no longer current.',
-      },
-    });
-    expect(run.opens()).toBe(0);
-    expect(run.calls).toHaveLength(0);
-  });
-});
-
-describe('email runtime worker credential', () => {
   test('accepts only a full whitespace-free bearer value', () => {
     for (const value of [undefined, '', 'short', `${TOKEN} `, 'x'.repeat(31)]) {
       expect(() =>

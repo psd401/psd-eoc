@@ -9,7 +9,7 @@ import {
 
 import {
   attemptFor,
-  deliveryTestBatch,
+  staffDrillBatch,
   IDS,
   TIMES,
 } from '../shared/test-fixtures';
@@ -17,7 +17,7 @@ import type { ProviderSendOutcome } from '../shared/processor';
 import { EmailQueueRuntime, EmailQueueRuntimeError } from './queue-runtime';
 
 function workItem(): EmailWorkerAttemptWorkItem {
-  const source = deliveryTestBatch();
+  const source = staffDrillBatch();
   const batch = DispatchBatchSchema.parse({
     ...source,
     channel: 'email',
@@ -30,10 +30,7 @@ function workItem(): EmailWorkerAttemptWorkItem {
       subject: '[DRILL] Live-pilot email test',
       textBody: '[DRILL] LIVE PILOT TEST — NO EMERGENCY.',
     },
-    integrationStatus: {
-      ...source.integrationStatus,
-      integrationId: 'ses-email',
-    },
+    integrationId: 'ses-email',
   });
   return {
     batch,

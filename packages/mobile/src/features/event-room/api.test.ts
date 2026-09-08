@@ -194,18 +194,6 @@ function journalEntry(kind: 'text' | 'location' | 'photo', sequence: number) {
   }
 }
 
-function mockedIntegration(channel: 'push' | 'email') {
-  return {
-    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: TIMES.created,
-  } as const;
-}
-
 function channelPlan() {
   return [
     {
@@ -220,7 +208,7 @@ function channelPlan() {
         title: '[DRILL] Synthetic drill all clear',
         body: '[DRILL] The synthetic drill is all clear.',
       },
-      integrationStatus: mockedIntegration('push'),
+      integrationId: 'expo-push',
     },
     {
       channel: 'email',
@@ -234,7 +222,7 @@ function channelPlan() {
         subject: '[DRILL] Synthetic drill all clear',
         textBody: '[DRILL] The synthetic drill is all clear.',
       },
-      integrationStatus: mockedIntegration('email'),
+      integrationId: 'ses-email',
     },
   ] as const;
 }

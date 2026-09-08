@@ -25,14 +25,12 @@ describe('shared operator navigation model', () => {
       'Start event',
       'Records',
       'Text alerts',
-      'Delivery tests',
     ]);
     expect(districtAdministrator.map(({ label }) => label)).toEqual([
       'Events',
       'Start event',
       'Records',
       'Text alerts',
-      'Delivery tests',
       'Readiness',
       'Schools',
       'Responses',
@@ -54,7 +52,6 @@ describe('shared operator navigation model', () => {
       'Start event',
       'Records',
       'Text alerts',
-      'Delivery tests',
       'Devices',
       'Audit',
     ]);
@@ -70,7 +67,6 @@ describe('shared operator navigation model', () => {
       '/start',
       '/records',
       '/text-alerts',
-      '/delivery-tests',
       '/admin',
       '/facilities',
       '/event-types',
@@ -103,8 +99,8 @@ describe('shared operator navigation model', () => {
         destination('/event-types'),
       ),
     ).toBe(true);
-    expect(
-      navigationDestinationIsCurrent('/delivery-tests', destination('/')),
-    ).toBe(false);
+    expect(navigationDestinationIsCurrent('/records', destination('/'))).toBe(
+      false,
+    );
   });
 });

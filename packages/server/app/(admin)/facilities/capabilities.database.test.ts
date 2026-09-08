@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { IntegrationChannelChangeAuthorizationSchema } from '@psd-eoc/contracts';
 import {
   afterAll,
   beforeAll,
@@ -22,7 +21,6 @@ import {
   channelConfigurations,
   deviceEnrollments,
   groupSources,
-  integrationStatuses,
   rosterRecipientGroupSources,
   rosterRecipients,
   rosterSourceConfigurationFacilities,
@@ -45,7 +43,6 @@ import {
   createDrizzleInitialWebSessionStore,
   type PersistInitialWebSessionRequest,
 } from '../../../lib/auth/session-cookie';
-import { executeAuditedCapabilityTransaction } from '../../../lib/capabilities/engine';
 import {
   createDrizzleRosterSyncStore,
   createStructuredRosterSyncAlertSink,
@@ -59,15 +56,9 @@ import { resetStaffRosterEmailForTests } from '../../../lib/config/staff-email';
 import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import { executeListUsersCapability } from '../access/capabilities';
 import {
-  ADMINISTRATOR_ENABLEMENT_REFERENCE,
   SMS_INTEGRATION_ID,
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
-  executeVerifyEmailIntegrationCapability,
-  liveChannelChangeAuthorizationCommitment,
-  liveChannelChangeConsequenceDigest,
-  liveChannelChangeRequestDigest,
-  setChannelEnabledRegistration,
 } from '../integrations/capabilities';
 import { executeRosterHealthProjection } from '../integrations/roster-health';
 import {
@@ -361,47 +352,6 @@ function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function liveAuthorizationFor(input: {
-  readonly authenticated: AuthenticatedSession;
-  readonly integrationId: string;
-  readonly integrationStatusId: string;
-  readonly previousConfiguration: Readonly<{
-    enabled: boolean;
-    statusId: string;
-  }> | null;
-  readonly issuedAt: Date;
-  readonly desiredEnabled?: boolean;
-}) {
-  if (input.authenticated.actor.kind !== 'human') {
-    throw new Error('A live authorization requires a synthetic human actor.');
-  }
-  const desiredEnabled = input.desiredEnabled ?? true;
-  const base = {
-    reference: `issue-26-live-race-${randomUUID()}`,
-    integrationStatusId: input.integrationStatusId,
-    integrationId: input.integrationId,
-    desiredEnabled,
-    requestDigest: '0'.repeat(64),
-    consequenceDigest: '0'.repeat(64),
-    authorizedByUserId: input.authenticated.actor.userId,
-    authorizedWithSessionId: input.authenticated.actor.sessionId,
-    issuedAt: input.issuedAt.toISOString(),
-    expiresAt: new Date(
-      input.issuedAt.getTime() + 15 * 60 * 1_000,
-    ).toISOString(),
-  } as const;
-  return IntegrationChannelChangeAuthorizationSchema.parse({
-    ...base,
-    requestDigest: liveChannelChangeRequestDigest(base),
-    consequenceDigest: liveChannelChangeConsequenceDigest({
-      integrationId: input.integrationId,
-      previousConfiguration: input.previousConfiguration,
-      desiredEnabled,
-      integrationStatusId: input.integrationStatusId,
-    }),
-  });
-}
-
 function bootstrapSessionRequest(input: {
   readonly label: string;
   readonly user: PersistInitialWebSessionRequest['user'];
@@ -529,41 +479,6 @@ async function persistCompleteAccessSnapshotGeneration(
 }
 
 /** Adds one more person to the trusted groups that are already active. */
-async function copyLatestAccessSnapshotWithMember(
-  database: PostgresDatabaseConnection['db'],
-  addedMember: AccessSnapshotMemberFixture,
-): Promise<PersistedAccessSnapshotFixture> {
-  const activeGroups = await database
-    .select({ id: groupSources.id })
-    .from(groupSources)
-    .where(
-      and(
-        eq(groupSources.kind, 'google-group'),
-        eq(groupSources.purpose, 'access'),
-        eq(groupSources.active, true),
-      ),
-    );
-  if (activeGroups.length === 0) {
-    throw new Error('An active access group is required to add a member.');
-  }
-  return persistCompleteAccessSnapshotGeneration(database, {
-    groups: activeGroups.map(({ id }) => ({
-      id,
-      kind: 'google-group' as const,
-      purpose: 'access' as const,
-    })),
-    members: [
-      {
-        ...addedMember,
-        accessGroupIds:
-          addedMember.accessGroupIds.length > 0
-            ? addedMember.accessGroupIds
-            : activeGroups.map(({ id }) => id),
-      },
-    ],
-  });
-}
-
 /**
  * A synthetic administrator with a live session: the account, membership in
  * the trusted groups that grant administration, a device, and a session row.
@@ -673,71 +588,6 @@ async function persistAdministratorIdentity(
   }
 }
 
-async function persistLiveAuthorizationActor(
-  database: PostgresDatabaseConnection['db'],
-  authenticated: AuthenticatedSession,
-  label: string,
-): Promise<void> {
-  if (authenticated.actor.kind !== 'human') {
-    throw new Error('A live authorization actor must be human.');
-  }
-  let [membershipSnapshot] = await database
-    .select({ id: accessMembershipSnapshots.id })
-    .from(accessMembershipSnapshots)
-    .orderBy(desc(accessMembershipSnapshots.version))
-    .limit(1);
-  if (membershipSnapshot === undefined) {
-    throw new Error('A membership snapshot is required for a live session.');
-  }
-  const [existingUser] = await database
-    .select({ id: users.id, googleSubject: users.googleSubject })
-    .from(users)
-    .where(eq(users.id, authenticated.actor.userId))
-    .limit(1);
-  if (existingUser === undefined) {
-    const googleSubject = `issue-26-live-${label}-${authenticated.actor.userId}`;
-    await database.insert(users).values({
-      id: authenticated.actor.userId,
-      googleSubject,
-      email: `issue-26-live-${label}-${authenticated.actor.userId}@example.invalid`,
-      displayName: `Issue 26 live authorization ${label}`,
-      facilityScopeKind: 'district',
-    });
-    await database.insert(userRoles).values({
-      userId: authenticated.actor.userId,
-      role: 'admin',
-    });
-    const copiedSnapshot = await copyLatestAccessSnapshotWithMember(database, {
-      userId: authenticated.actor.userId,
-      googleSubject,
-      facilityScopeKind: 'district',
-      accessGroupIds: [],
-    });
-    membershipSnapshot = { id: copiedSnapshot.id };
-  }
-  const now = new Date();
-  const deviceId = randomUUID();
-  await database.insert(deviceEnrollments).values({
-    id: deviceId,
-    userId: authenticated.actor.userId,
-    platform: 'web',
-    unlockMethod: 'secure-session-cookie',
-    installationId: `issue-26-live-${label}-${randomUUID()}`,
-    enrolledAt: now,
-    lastSeenAt: now,
-  });
-  await database.insert(sessions).values({
-    id: authenticated.actor.sessionId,
-    userId: authenticated.actor.userId,
-    deviceEnrollmentId: deviceId,
-    membershipSnapshotId: membershipSnapshot.id,
-    membershipValidUntil: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
-    membershipGraceUntil: new Date(now.getTime() + 48 * 60 * 60 * 1_000),
-    createdAt: now,
-    expiresAt: new Date(now.getTime() + 72 * 60 * 60 * 1_000),
-  });
-}
-
 function withDeadline<Result>(
   operation: Promise<Result>,
   milliseconds = 10_000,
@@ -760,25 +610,25 @@ async function assumeApplicationRole(
   await connectionToScope.db.execute(sql`set role psd_eoc_app`);
   const rows = databaseExecuteRows<{
     current_user: string;
-    can_update_integration_statuses: boolean;
+    can_update_user_roles: boolean;
   }>(
     await connectionToScope.db.execute<{
       current_user: string;
-      can_update_integration_statuses: boolean;
+      can_update_user_roles: boolean;
     }>(sql`
       select
         current_user::text as current_user,
         has_table_privilege(
           current_user,
-          'public.integration_statuses',
+          'public.user_roles',
           'UPDATE'
-        ) as can_update_integration_statuses
+        ) as can_update_user_roles
     `),
   );
   expect(rows).toEqual([
     {
       current_user: 'psd_eoc_app',
-      can_update_integration_statuses: false,
+      can_update_user_roles: false,
     },
   ]);
 }
@@ -1014,13 +864,13 @@ describeWithDatabase('facilities administrator database flow', () => {
         executeIntegrationHealthProjection({
           authenticated,
           store,
-          query: { integrationId: 'expo-push' },
+          query: { integrationId: 'mobile-push' },
           metadata: { requestId, now: new Date() },
         }),
       );
 
-      expect(projection.health.statuses).toHaveLength(1);
-      expect(projection.health.statuses[0]?.integrationId).toBe('expo-push');
+      expect(projection.health.channels).toHaveLength(1);
+      expect(projection.health.channels[0]?.integrationId).toBe('mobile-push');
       expect(
         await dedicated.db
           .select({ requestId: securityAuditEntries.requestId })
@@ -1399,26 +1249,6 @@ describeWithDatabase('facilities administrator database flow', () => {
           throw new Error('The app-role lock proof requires a human actor.');
         }
         const integrationId = `synthetic-app-role-${suffix}`;
-        const integrationStatusId = randomUUID();
-        const issuedAt = new Date(Date.now() - 1_000);
-        const authorization = liveAuthorizationFor({
-          authenticated,
-          integrationId,
-          integrationStatusId,
-          previousConfiguration: null,
-          issuedAt,
-        });
-        await ownerDatabase.insert(integrationStatuses).values({
-          id: integrationStatusId,
-          integrationId,
-          label: 'live-verified',
-          verifiedAt: issuedAt,
-          verifiedByUserId: authenticated.actor.userId,
-          authorizationReference:
-            liveChannelChangeAuthorizationCommitment(authorization),
-          reasonCode: null,
-          observedAt: issuedAt,
-        });
 
         const dedicated = openPostgresConnection(
           isolatedContext.databaseUrl,
@@ -1606,14 +1436,12 @@ describeWithDatabase('facilities administrator database flow', () => {
               command: {
                 integrationId,
                 enabled: true,
-                authorization,
               },
               metadata: metadata('app-role-live-channel', requestIds),
             }),
           ).toMatchObject({
             integrationId,
             enabled: true,
-            status: { integrationId, label: 'live-verified' },
           });
 
           const audits = await dedicated.db
@@ -2432,498 +2260,29 @@ describeWithDatabase('facilities administrator database flow', () => {
     const channelResult = await executeSetChannelEnabledCapability({
       authenticated,
       store,
-      command: {
-        integrationId: 'expo-push',
-        enabled: false,
-        authorization: null,
-      },
+      command: { integrationId: 'mobile-push', enabled: false },
       metadata: metadata('channel-state', requestIds),
     });
     expect(channelResult).toMatchObject({
-      integrationId: 'expo-push',
-      enabled: false,
-      status: { label: 'mocked' },
-    });
-    const directVerificationReference = `issue-43-direct-push-${randomUUID()}`;
-    const directConfiguredAt = new Date();
-    await database.insert(integrationStatuses).values({
-      id: randomUUID(),
       integrationId: 'mobile-push',
-      label: 'configured-unverified',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: directConfiguredAt,
-    });
-    const directChannelResult = await executeSetChannelEnabledCapability({
-      authenticated,
-      store,
-      command: {
-        integrationId: 'mobile-push',
-        enabled: true,
-        authorization: null,
-        verificationReference: directVerificationReference,
-      },
-      directPushVerificationReference: directVerificationReference,
-      metadata: metadata('direct-channel-verification', requestIds),
-    });
-    expect(directChannelResult).toMatchObject({
-      integrationId: 'mobile-push',
-      enabled: true,
-      status: {
-        integrationId: 'mobile-push',
-        label: 'live-verified',
-        verifiedByUserId: authenticated.actor.userId,
-        authorizationReference: ADMINISTRATOR_ENABLEMENT_REFERENCE,
-      },
-    });
-    if (authenticated.actor.kind !== 'human') {
-      throw new Error('The synthetic administrator must be human.');
-    }
-
-    const transitioningIntegrationId = `synthetic-transition-${suffix}`;
-    const mockedTransitionStatusId = randomUUID();
-    const mockedTransitionObservedAt = new Date();
-    await database.insert(integrationStatuses).values({
-      id: mockedTransitionStatusId,
-      integrationId: transitioningIntegrationId,
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: mockedTransitionObservedAt,
-    });
-    await executeSetChannelEnabledCapability({
-      authenticated,
-      store,
-      command: {
-        integrationId: transitioningIntegrationId,
-        enabled: true,
-        authorization: null,
-      },
-      metadata: metadata('mocked-transition-enable', requestIds),
-    });
-    const transitionLiveStatusId = randomUUID();
-    const transitionIssuedAt = new Date(
-      mockedTransitionObservedAt.getTime() + 1_000,
-    );
-    const transitionBase = {
-      reference: `issue-26-transition-${randomUUID()}`,
-      integrationStatusId: transitionLiveStatusId,
-      integrationId: transitioningIntegrationId,
-      desiredEnabled: true,
-      requestDigest: '0'.repeat(64),
-      consequenceDigest: '0'.repeat(64),
-      authorizedByUserId: authenticated.actor.userId,
-      authorizedWithSessionId: authenticated.actor.sessionId,
-      issuedAt: transitionIssuedAt.toISOString(),
-      expiresAt: new Date(
-        transitionIssuedAt.getTime() + 15 * 60 * 1_000,
-      ).toISOString(),
-    } as const;
-    const transitionAuthorization =
-      IntegrationChannelChangeAuthorizationSchema.parse({
-        ...transitionBase,
-        requestDigest: liveChannelChangeRequestDigest(transitionBase),
-        consequenceDigest: liveChannelChangeConsequenceDigest({
-          integrationId: transitioningIntegrationId,
-          previousConfiguration: {
-            enabled: true,
-            statusId: mockedTransitionStatusId,
-          },
-          desiredEnabled: true,
-          integrationStatusId: transitionLiveStatusId,
-        }),
-      });
-    await database.insert(integrationStatuses).values({
-      id: transitionLiveStatusId,
-      integrationId: transitioningIntegrationId,
-      label: 'live-verified',
-      verifiedAt: transitionIssuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference: liveChannelChangeAuthorizationCommitment(
-        transitionAuthorization,
-      ),
-      reasonCode: null,
-      observedAt: transitionIssuedAt,
-    });
-    const [transitionedConfiguration] = await database
-      .select({
-        enabled: channelConfigurations.enabled,
-        statusId: channelConfigurations.statusId,
-        statusLabel: channelConfigurations.statusLabel,
-      })
-      .from(channelConfigurations)
-      .where(
-        eq(channelConfigurations.integrationId, transitioningIntegrationId),
-      )
-      .limit(1);
-    expect(transitionedConfiguration).toEqual({
       enabled: false,
-      statusId: transitionLiveStatusId,
-      statusLabel: 'live-verified',
     });
-
-    const oneTimeRaceIntegrationId = `synthetic-live-once-${suffix}`;
-    const oneTimeRaceStatusId = randomUUID();
-    const oneTimeRaceIssuedAt = new Date(Date.now() - 1_000);
-    const oneTimeRaceAuthorization = liveAuthorizationFor({
-      authenticated,
-      integrationId: oneTimeRaceIntegrationId,
-      integrationStatusId: oneTimeRaceStatusId,
-      previousConfiguration: null,
-      issuedAt: oneTimeRaceIssuedAt,
-    });
-    await database.insert(integrationStatuses).values({
-      id: oneTimeRaceStatusId,
-      integrationId: oneTimeRaceIntegrationId,
-      label: 'live-verified',
-      verifiedAt: oneTimeRaceIssuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference: liveChannelChangeAuthorizationCommitment(
-        oneTimeRaceAuthorization,
-      ),
-      reasonCode: null,
-      observedAt: oneTimeRaceIssuedAt,
-    });
-
-    let releaseOneTimeRaceLock: (() => void) | undefined;
-    const oneTimeRaceLockReleased = new Promise<void>((resolve) => {
-      releaseOneTimeRaceLock = resolve;
-    });
-    let confirmOneTimeRaceLock: ((pid: number) => void) | undefined;
-    const oneTimeRaceLockHeld = new Promise<number>((resolve) => {
-      confirmOneTimeRaceLock = resolve;
-    });
-    const oneTimeRaceBlocker = database.transaction(async (transaction) => {
-      const [lock] = await transaction.execute<{ pid: number }>(
-        sql`
-          select
-            pg_backend_pid()::int as pid,
-            pg_advisory_xact_lock(hashtextextended(${oneTimeRaceIntegrationId}, 0))
-        `,
-      );
-      if (lock === undefined) {
-        throw new Error('The one-time race advisory lock was not acquired.');
-      }
-      confirmOneTimeRaceLock?.(lock.pid);
-      await oneTimeRaceLockReleased;
-    });
-    const oneTimeRaceBlockerPid = await oneTimeRaceLockHeld;
-
-    const oneTimeRaceRequestIds: string[] = [];
-    const oneTimeRaceMetadata = [
-      metadata('live-one-time-race-a', oneTimeRaceRequestIds),
-      metadata('live-one-time-race-b', oneTimeRaceRequestIds),
-    ] as const;
-    const oneTimeRaceResultsPromise = Promise.allSettled(
-      oneTimeRaceMetadata.map((raceMetadata) =>
-        executeSetChannelEnabledCapability({
-          authenticated,
-          store,
-          command: {
-            integrationId: oneTimeRaceIntegrationId,
-            enabled: true,
-            authorization: oneTimeRaceAuthorization,
-          },
-          metadata: raceMetadata,
-        }),
-      ),
-    );
-    await waitForAdvisoryWaiters(database, 2, oneTimeRaceBlockerPid);
-    releaseOneTimeRaceLock?.();
-    await oneTimeRaceBlocker;
-
-    // Enabling is a direct administrator action rather than the consumption of
-    // a single-use artifact, so two concurrent requests for the same desired
-    // state both succeed and converge instead of one losing a race.
-    const oneTimeRaceResults = await oneTimeRaceResultsPromise;
-    const oneTimeRaceSuccesses = oneTimeRaceResults.filter(
-      (result) => result.status === 'fulfilled',
-    );
-    const oneTimeRaceFailures = oneTimeRaceResults.filter(
-      (result) => result.status === 'rejected',
-    );
-    expect(oneTimeRaceSuccesses).toHaveLength(2);
-    expect(oneTimeRaceFailures).toHaveLength(0);
-    for (const raceMetadata of oneTimeRaceMetadata) {
-      requestIds.push(raceMetadata.requestId);
-    }
-    const [oneTimeRaceConfiguration] = await database
-      .select({
-        enabled: channelConfigurations.enabled,
-        statusLabel: channelConfigurations.statusLabel,
-      })
-      .from(channelConfigurations)
-      .where(eq(channelConfigurations.integrationId, oneTimeRaceIntegrationId))
-      .limit(1);
-    expect(oneTimeRaceConfiguration).toEqual({
-      enabled: true,
-      statusLabel: 'live-verified',
-    });
-
-    const statusRaceIntegrationId = `synthetic-live-status-race-${suffix}`;
-    const statusRaceLiveStatusId = randomUUID();
-    const statusRaceIssuedAt = new Date(Date.now() - 1_000);
-    const statusRaceAuthorization = liveAuthorizationFor({
-      authenticated,
-      integrationId: statusRaceIntegrationId,
-      integrationStatusId: statusRaceLiveStatusId,
-      previousConfiguration: null,
-      issuedAt: statusRaceIssuedAt,
-    });
-    await database.insert(integrationStatuses).values({
-      id: statusRaceLiveStatusId,
-      integrationId: statusRaceIntegrationId,
-      label: 'live-verified',
-      verifiedAt: statusRaceIssuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference: liveChannelChangeAuthorizationCommitment(
-        statusRaceAuthorization,
-      ),
-      reasonCode: null,
-      observedAt: statusRaceIssuedAt,
-    });
-
-    let releaseStatusRaceLock: (() => void) | undefined;
-    const statusRaceLockReleased = new Promise<void>((resolve) => {
-      releaseStatusRaceLock = resolve;
-    });
-    let confirmStatusRaceLock: ((pid: number) => void) | undefined;
-    const statusRaceLockHeld = new Promise<number>((resolve) => {
-      confirmStatusRaceLock = resolve;
-    });
-    const statusRaceBlocker = database.transaction(async (transaction) => {
-      const [lock] = await transaction.execute<{ pid: number }>(
-        sql`
-          select
-            pg_backend_pid()::int as pid,
-            pg_advisory_xact_lock(hashtextextended(${statusRaceIntegrationId}, 0))
-        `,
-      );
-      if (lock === undefined) {
-        throw new Error('The status race advisory lock was not acquired.');
-      }
-      confirmStatusRaceLock?.(lock.pid);
-      await statusRaceLockReleased;
-    });
-    const statusRaceBlockerPid = await statusRaceLockHeld;
-
-    const statusRaceMutation = executeSetChannelEnabledCapability({
+    const smsChannel = await executeSetChannelEnabledCapability({
       authenticated,
       store,
-      command: {
-        integrationId: statusRaceIntegrationId,
-        enabled: true,
-        authorization: statusRaceAuthorization,
-      },
-      metadata: metadata('live-status-race-enable', requestIds),
+      command: { integrationId: SMS_INTEGRATION_ID, enabled: true },
+      metadata: metadata('sms-enable', requestIds),
     });
-    await waitForAdvisoryWaiters(database, 1, statusRaceBlockerPid);
-    const statusRaceBlockedStatusId = randomUUID();
-    const statusRaceBlockedObservedAt = new Date(
-      Math.max(Date.now(), statusRaceIssuedAt.getTime() + 1),
-    );
-    const statusRaceStatusInsert = (async () => {
-      await database.insert(integrationStatuses).values({
-        id: statusRaceBlockedStatusId,
-        integrationId: statusRaceIntegrationId,
-        label: 'blocked',
-        verifiedAt: null,
-        verifiedByUserId: null,
-        authorizationReference: null,
-        reasonCode: 'PREREQUISITE_PENDING',
-        observedAt: statusRaceBlockedObservedAt,
-      });
-    })();
-    await waitForAdvisoryWaiters(database, 2, statusRaceBlockerPid);
-    releaseStatusRaceLock?.();
-    await statusRaceBlocker;
-
-    const [statusRaceMutationResult, statusRaceInsertResult] =
-      await Promise.allSettled([statusRaceMutation, statusRaceStatusInsert]);
-    expect(statusRaceMutationResult.status).toBe('fulfilled');
-    expect(statusRaceInsertResult.status).toBe('fulfilled');
-    const [statusRaceConfiguration] = await database
-      .select({
-        enabled: channelConfigurations.enabled,
-        statusId: channelConfigurations.statusId,
-        statusLabel: channelConfigurations.statusLabel,
-      })
-      .from(channelConfigurations)
-      .where(eq(channelConfigurations.integrationId, statusRaceIntegrationId))
-      .limit(1);
-    expect(statusRaceConfiguration).toEqual({
-      enabled: false,
-      statusId: statusRaceBlockedStatusId,
-      statusLabel: 'blocked',
-    });
-
-    const liveIntegrationId = `synthetic-live-${suffix}`;
-    const liveStatusId = randomUUID();
-    const issuedAt = new Date(Date.now() - 1_000);
-    const expiresAt = new Date(issuedAt.getTime() + 15 * 60 * 1_000);
-    const issuedAtWithOffset = `${new Date(
-      issuedAt.getTime() - 7 * 60 * 60 * 1_000,
-    )
-      .toISOString()
-      .slice(0, -1)}-07:00`;
-    const reference = `issue-26-live-${randomUUID()}`;
-    const authorizationBase = {
-      reference,
-      integrationStatusId: liveStatusId,
-      integrationId: liveIntegrationId,
-      desiredEnabled: true,
-      requestDigest: '0'.repeat(64),
-      consequenceDigest: '0'.repeat(64),
-      authorizedByUserId: authenticated.actor.userId,
-      authorizedWithSessionId: authenticated.actor.sessionId,
-      issuedAt: issuedAtWithOffset,
-      expiresAt: expiresAt.toISOString(),
-    } as const;
-    const liveAuthorization = IntegrationChannelChangeAuthorizationSchema.parse(
-      {
-        ...authorizationBase,
-        requestDigest: liveChannelChangeRequestDigest(authorizationBase),
-        consequenceDigest: liveChannelChangeConsequenceDigest({
-          integrationId: liveIntegrationId,
-          previousConfiguration: null,
-          desiredEnabled: true,
-          integrationStatusId: liveStatusId,
-        }),
-      },
-    );
-    const authorizationCommitment =
-      liveChannelChangeAuthorizationCommitment(liveAuthorization);
-    await database.insert(integrationStatuses).values({
-      id: liveStatusId,
-      integrationId: liveIntegrationId,
-      label: 'live-verified',
-      verifiedAt: issuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference: authorizationCommitment,
-      reasonCode: null,
-      observedAt: issuedAt,
-    });
-    const liveMetadata = metadata('live-channel-state', requestIds);
-    const liveChannelResult = await executeSetChannelEnabledCapability({
-      authenticated,
-      store,
-      command: {
-        integrationId: liveIntegrationId,
-        enabled: true,
-        authorization: liveAuthorization,
-      },
-      metadata: liveMetadata,
-    });
-    expect(liveChannelResult).toMatchObject({
-      integrationId: liveIntegrationId,
+    expect(smsChannel).toMatchObject({
+      integrationId: SMS_INTEGRATION_ID,
       enabled: true,
-      status: { label: 'live-verified' },
     });
-    expect(
-      await executeSetChannelEnabledCapability({
-        authenticated,
-        store,
-        command: {
-          integrationId: liveIntegrationId,
-          enabled: true,
-          authorization: liveAuthorization,
-        },
-        metadata: replayMetadata(liveMetadata, requestIds),
-      }),
-    ).toEqual(liveChannelResult);
-    const [persistedLiveConfiguration] = await database
-      .select({
-        enabled: channelConfigurations.enabled,
-        statusId: channelConfigurations.statusId,
-      })
+    const [smsConfiguration] = await database
+      .select({ enabled: channelConfigurations.enabled })
       .from(channelConfigurations)
-      .where(eq(channelConfigurations.integrationId, liveIntegrationId))
+      .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
       .limit(1);
-    expect(persistedLiveConfiguration).toEqual({
-      enabled: true,
-      statusId: liveStatusId,
-    });
-    const blockedStatusId = randomUUID();
-    const blockedObservedAt = new Date(
-      Math.max(Date.now(), issuedAt.getTime() + 1),
-    );
-    await database.insert(integrationStatuses).values({
-      id: blockedStatusId,
-      integrationId: liveIntegrationId,
-      label: 'blocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: 'PREREQUISITE_PENDING',
-      observedAt: blockedObservedAt,
-    });
-    const [blockedConfiguration] = await database
-      .select({
-        enabled: channelConfigurations.enabled,
-        statusId: channelConfigurations.statusId,
-        statusLabel: channelConfigurations.statusLabel,
-      })
-      .from(channelConfigurations)
-      .where(eq(channelConfigurations.integrationId, liveIntegrationId))
-      .limit(1);
-    expect(blockedConfiguration).toEqual({
-      enabled: false,
-      statusId: blockedStatusId,
-      statusLabel: 'blocked',
-    });
-    await expect(
-      database
-        .insert(integrationStatuses)
-        .values({
-          id: randomUUID(),
-          integrationId: liveIntegrationId,
-          label: 'configured-unverified',
-          verifiedAt: null,
-          verifiedByUserId: null,
-          authorizationReference: null,
-          reasonCode: null,
-          observedAt: blockedObservedAt,
-        })
-        .execute(),
-    ).rejects.toThrow();
-
-    const agentActor = {
-      kind: 'agent' as const,
-      agentId: randomUUID(),
-      apiKeyId: randomUUID(),
-    };
-    try {
-      await executeAuditedCapabilityTransaction(
-        setChannelEnabledRegistration,
-        {
-          integrationId: liveIntegrationId,
-          enabled: true,
-          authorization: liveAuthorization,
-        },
-        {
-          actor: agentActor,
-          source: 'agent-rest',
-          scope: { facilityScope: { kind: 'district' } },
-          requestId: randomUUID(),
-          serverTime: new Date(),
-          connectivityEpochId: null,
-          mutation: {
-            idempotencyKey: `issue-26-agent-live-${randomUUID()}`,
-            transport: { kind: 'agent-rest-command', method: 'POST' },
-            humanConfirmationId: null,
-          },
-        },
-        store,
-      );
-      throw new Error('Expected an agent live change to fail closed.');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AdminCapabilityError);
-      expect((error as AdminCapabilityError).status).toBe(403);
-    }
+    expect(smsConfiguration).toEqual({ enabled: true });
 
     await executeUpdateFacilityCapability({
       authenticated,
@@ -3040,77 +2399,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       .where(eq(securityAuditEntries.requestId, missingFacilityRequestId))
       .limit(1);
     expect(missingFacilityAudit?.requestId).toBe(missingFacilityRequestId);
-  });
-
-  test('enables SMS with separate carrier readiness evidence and exact live authorization', async () => {
-    const database = databaseConnection().db;
-    const authenticated = authenticatedAdministrator();
-    await persistLiveAuthorizationActor(database, authenticated, 'sms-live');
-    if (authenticated.actor.kind !== 'human') {
-      throw new Error('The SMS live authorization actor must be human.');
-    }
-    const store = createDrizzleAdminCapabilityStore(database, authenticated);
-    const [previousConfiguration] = await database
-      .select({
-        enabled: channelConfigurations.enabled,
-        statusId: channelConfigurations.statusId,
-      })
-      .from(channelConfigurations)
-      .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
-      .limit(1);
-    const statusId = randomUUID();
-    const issuedAt = new Date(Date.now() - 1_000);
-    const authorization = liveAuthorizationFor({
-      authenticated,
-      integrationId: SMS_INTEGRATION_ID,
-      integrationStatusId: statusId,
-      // The immutable-status trigger advances the existing channel row to this
-      // status before the enable capability locks it.
-      previousConfiguration: {
-        enabled: previousConfiguration?.enabled ?? false,
-        statusId,
-      },
-      issuedAt,
-    });
-    const authorizationCommitment =
-      liveChannelChangeAuthorizationCommitment(authorization);
-    const registrationVerificationReference =
-      'carrier-registration-case-279-database';
-    expect(authorizationCommitment).not.toBe(registrationVerificationReference);
-    await database.insert(integrationStatuses).values({
-      id: statusId,
-      integrationId: SMS_INTEGRATION_ID,
-      label: 'live-verified',
-      verifiedAt: issuedAt,
-      verifiedByUserId: authenticated.actor.userId,
-      authorizationReference: authorizationCommitment,
-      reasonCode: null,
-      observedAt: issuedAt,
-    });
-
-    const result = await executeSetChannelEnabledCapability({
-      authenticated,
-      store,
-      command: {
-        integrationId: SMS_INTEGRATION_ID,
-        enabled: true,
-        authorization,
-      },
-      metadata: metadata('sms-live-enable', []),
-      smsWorkerReadiness: {
-        ready: true,
-        registrationVerificationReference,
-      },
-    });
-
-    expect(result).toMatchObject({
-      integrationId: SMS_INTEGRATION_ID,
-      enabled: true,
-      status: {
-        authorizationReference: authorizationCommitment,
-        label: 'live-verified',
-      },
-    });
   });
 
   test('replaces immutable roster sources with derived versions and rejects stale concurrent replacements', async () => {
@@ -4016,152 +3304,6 @@ describeWithDatabase('facilities administrator database flow', () => {
         outcome: 'success',
         requestId,
       })),
-    );
-  });
-
-  test('binds SES verification to the enabled deployment and never re-enables a disabled channel', async () => {
-    const database = databaseConnection().db;
-    const authenticated = authenticatedAdministrator();
-    await persistAdministratorIdentity(
-      database,
-      authenticated,
-      `email-${randomUUID()}`,
-    );
-    const store = createDrizzleAdminCapabilityStore(database, authenticated);
-    const verificationReference = `ses-deployment-${randomUUID()}`;
-    const rotatedVerificationReference = `ses-deployment-${randomUUID()}`;
-    const refusedVerificationReference = `ses-deployment-${randomUUID()}`;
-    const verificationIdempotencyKey = `verify-email-enabled-${randomUUID()}`;
-    const configuredAt = new Date();
-    await database.insert(integrationStatuses).values({
-      integrationId: 'ses-email',
-      label: 'configured-unverified',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: configuredAt,
-    });
-
-    await expect(
-      executeVerifyEmailIntegrationCapability({
-        authenticated,
-        store,
-        command: { integrationId: 'ses-email' },
-        metadata: {
-          idempotencyKey: `verify-email-disabled-${randomUUID()}`,
-          requestId: randomUUID(),
-          now: new Date(configuredAt.getTime() + 1_000),
-        },
-        verificationReference,
-        emailWorkerEnabled: false,
-      }),
-    ).rejects.toEqual(
-      expect.objectContaining({ status: 403, code: 'FORBIDDEN' }),
-    );
-
-    const verified = await executeVerifyEmailIntegrationCapability({
-      authenticated,
-      store,
-      command: { integrationId: 'ses-email' },
-      metadata: {
-        idempotencyKey: verificationIdempotencyKey,
-        requestId: randomUUID(),
-        now: new Date(configuredAt.getTime() + 2_000),
-      },
-      verificationReference,
-      emailWorkerEnabled: true,
-    });
-    expect(verified).toMatchObject({
-      integrationId: 'ses-email',
-      enabled: true,
-      status: {
-        label: 'live-verified',
-        authorizationReference: verificationReference,
-      },
-    });
-
-    await expect(
-      executeVerifyEmailIntegrationCapability({
-        authenticated,
-        store,
-        command: { integrationId: 'ses-email' },
-        metadata: {
-          idempotencyKey: verificationIdempotencyKey,
-          requestId: randomUUID(),
-          now: new Date(configuredAt.getTime() + 2_500),
-        },
-        verificationReference: rotatedVerificationReference,
-        emailWorkerEnabled: true,
-      }),
-    ).rejects.toMatchObject({
-      code: 'IDEMPOTENCY_CONFLICT',
-      reasonCode: 'IDEMPOTENCY_REQUEST_MISMATCH',
-      status: 409,
-    });
-
-    const rotated = await executeVerifyEmailIntegrationCapability({
-      authenticated,
-      store,
-      command: { integrationId: 'ses-email' },
-      metadata: {
-        idempotencyKey: `verify-email-rotated-${randomUUID()}`,
-        requestId: randomUUID(),
-        now: new Date(configuredAt.getTime() + 3_000),
-      },
-      verificationReference: rotatedVerificationReference,
-      emailWorkerEnabled: true,
-    });
-    expect(rotated).toMatchObject({
-      integrationId: 'ses-email',
-      enabled: true,
-      status: {
-        label: 'live-verified',
-        authorizationReference: rotatedVerificationReference,
-      },
-    });
-    const retainedVerificationReferences = await database
-      .select({
-        authorizationReference: integrationStatuses.authorizationReference,
-      })
-      .from(integrationStatuses)
-      .where(
-        and(
-          eq(integrationStatuses.integrationId, 'ses-email'),
-          inArray(integrationStatuses.authorizationReference, [
-            verificationReference,
-            rotatedVerificationReference,
-          ]),
-        ),
-      );
-    expect(
-      retainedVerificationReferences
-        .map(({ authorizationReference }) => authorizationReference)
-        .sort(),
-    ).toEqual([verificationReference, rotatedVerificationReference].sort());
-
-    await database
-      .update(channelConfigurations)
-      .set({
-        enabled: false,
-        changedAt: new Date(configuredAt.getTime() + 4_000),
-      })
-      .where(eq(channelConfigurations.integrationId, 'ses-email'));
-    await expect(
-      executeVerifyEmailIntegrationCapability({
-        authenticated,
-        store,
-        command: { integrationId: 'ses-email' },
-        metadata: {
-          idempotencyKey: `verify-email-no-reenable-${randomUUID()}`,
-          requestId: randomUUID(),
-          now: new Date(configuredAt.getTime() + 5_000),
-        },
-        verificationReference: refusedVerificationReference,
-        emailWorkerEnabled: true,
-      }),
-    ).rejects.toEqual(
-      expect.objectContaining({ status: 409, code: 'CONFLICT' }),
     );
   });
 
