@@ -417,8 +417,8 @@ function parseLedgerClaim(
 }
 
 /**
- * Live SES adapter. Construction and direct sends both fail closed unless the
- * canonical integration is live-verified and a durable send ledger is present.
+ * Live SES adapter. Construction and direct sends both fail closed unless a
+ * durable send ledger is present.
  */
 export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'email' as const;

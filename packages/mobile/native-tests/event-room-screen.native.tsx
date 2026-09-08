@@ -87,29 +87,6 @@ function contrastRatio(foreground: string, background: string): number {
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 }
 
-function integrationStatus(channel: 'push' | 'email') {
-  return {
-    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-    label: 'live-verified' as const,
-    verifiedAt: createdAt,
-    verifiedByUserId: ids.user,
-    authorizationReference: 'approved-native-test-fixture',
-    reasonCode: null,
-    observedAt: createdAt,
-  };
-}
-
-function mockedIntegrationStatus(channel: 'push' | 'email') {
-  return {
-    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-    label: 'mocked' as const,
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: createdAt,
-  };
-}
 
 function lifecyclePreview(
   mode: TemplateMode,
@@ -140,10 +117,7 @@ function lifecyclePreview(
           title: `[${marker}] ALL CLEAR: Synthetic ${mode === 'real' ? 'incident' : 'drill'}`,
           body: `[${marker}] Synthetic push all-clear instructions.`,
         },
-        integrationStatus:
-          kind === 'test'
-            ? mockedIntegrationStatus('push')
-            : integrationStatus('push'),
+        integrationId: 'expo-push',
       },
       {
         channel: 'email',
@@ -157,10 +131,7 @@ function lifecyclePreview(
           subject: `[${marker}] ALL CLEAR: Synthetic ${mode === 'real' ? 'incident' : 'drill'}`,
           textBody: `[${marker}] Synthetic email all-clear instructions.`,
         },
-        integrationStatus:
-          kind === 'test'
-            ? mockedIntegrationStatus('email')
-            : integrationStatus('email'),
+        integrationId: 'ses-email',
       },
     ],
     sendReadiness: blocked ? 'blocked' : 'ready',
