@@ -27,6 +27,7 @@ import {
   sesEmailProviderIo,
 } from '../../db/schema';
 import { loadRosterSnapshot } from '../capabilities/start';
+import { batchHasCurrentLifecycle } from './batch-lifecycle';
 import {
   createDrizzleEmailEndpointPolicyStore,
   resolveEmailEndpoints,
@@ -371,20 +372,6 @@ async function databaseNow(database: Database): Promise<Date> {
   return value;
 }
 
-async function activeEvent(
-  database: Database,
-  eventId: string,
-  lock: boolean,
-): Promise<boolean> {
-  const [event] = await database
-    .select({ status: events.status })
-    .from(events)
-    .where(eq(events.id, eventId))
-    .limit(1)
-    .for(lock ? 'share' : 'no key update');
-  return event?.status === 'active';
-}
-
 async function expectedWorkItem(
   database: Database,
   supplied: EmailWorkerAttemptWorkItem,
@@ -496,7 +483,11 @@ async function workItemIsEligible(
     !sameJson(batch, supplied.batch) ||
     now.getTime() > Date.parse(batch.createdAt) + sendHorizonMilliseconds ||
     !(await channelIsLive(database, deployment, lock)) ||
-    !(await activeEvent(database, batch.eventId, lock))
+    !(await batchHasCurrentLifecycle(
+      database,
+      batch,
+      lock ? 'share' : 'no key update',
+    ))
   ) {
     return false;
   }
@@ -668,7 +659,7 @@ export function createDrizzleEmailRuntimeStore(
       const now = await databaseNow(database);
       if (
         now.getTime() > Date.parse(batch.createdAt) + sendHorizonMilliseconds ||
-        !(await activeEvent(database, batch.eventId, false)) ||
+        !(await batchHasCurrentLifecycle(database, batch, 'no key update')) ||
         !(await channelIsLive(database, deployment, false))
       ) {
         return EmailBatchResolutionPageSchema.parse({
