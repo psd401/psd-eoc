@@ -342,6 +342,20 @@ export class PsdEocStack extends Stack {
       noEcho: true,
       type: 'String',
     });
+    const deliveryTestProductOwnerUserId = new CfnParameter(
+      this,
+      'DeliveryTestProductOwnerUserId',
+      {
+        allowedPattern:
+          '^(UNCONFIGURED|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$',
+        constraintDescription:
+          'must be UNCONFIGURED or the staff user UUID authorized to configure delivery-test targets',
+        default: 'UNCONFIGURED',
+        description:
+          'Staff user allowed to configure monthly delivery-test canary targets. The live-send confirmation stays a separate human action.',
+        type: 'String',
+      },
+    );
     const smsDestinationCountryCode = new CfnParameter(
       this,
       'SmsDestinationCountryCode',
@@ -3365,6 +3379,10 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_PRIVACY_CONTACT_URL',
                   value: deploymentIdentity.privacyContactUrl,
+                },
+                {
+                  name: 'PSD_EOC_PRODUCT_OWNER_USER_ID',
+                  value: deliveryTestProductOwnerUserId.valueAsString,
                 },
                 {
                   name: 'PSD_EOC_SMS_SUPPORT_EMAIL',
