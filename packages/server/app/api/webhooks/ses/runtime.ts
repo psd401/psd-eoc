@@ -523,16 +523,12 @@ async function executeMappedEvent(
           attemptEvidenceInput(input, attempt.id),
         ),
     );
-    const evidence = await invokeAuthorizedCapabilityHandler(
-      evidenceHandler,
-      evidenceInput,
-      {
-        context,
-        humanActionResolutionContext: null,
-        safetyResolver: null,
-        authorizer,
-      },
-    );
+    await invokeAuthorizedCapabilityHandler(evidenceHandler, evidenceInput, {
+      context,
+      humanActionResolutionContext: null,
+      safetyResolver: null,
+      authorizer,
+    });
   }
 }
 

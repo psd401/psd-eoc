@@ -85,7 +85,6 @@ import {
   securityAuditEntries,
 } from '../../db/schema';
 import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/sign-in-audit';
-import { loadRosterSnapshot } from '../capabilities/start';
 import {
   CapabilityEngineError,
   digestCapabilityValue,
@@ -1646,7 +1645,9 @@ async function assertChannelsEnabled(
     .where(inArray(channelConfigurations.integrationId, integrationIds))
     .for('share');
   for (const integrationId of integrationIds) {
-    const row = rows.find((candidate) => candidate.integrationId === integrationId);
+    const row = rows.find(
+      (candidate) => candidate.integrationId === integrationId,
+    );
     if (row?.enabled !== true) {
       throw conflict(
         `The ${integrationId} channel is no longer enabled; review the preview again.`,

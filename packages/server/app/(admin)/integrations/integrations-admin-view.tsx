@@ -35,9 +35,8 @@ function IntegrationStateSummary({
     <p className="notice integration-state-summary">
       <strong>Current channel state:</strong> {enabledCount} of{' '}
       {configurations.length} notification channels are enabled, observed{' '}
-      <Timestamp value={health.observedAt} />. Enablement is the switch;
-      whether a provider delivers is discovered by sending, and every send is
-      recorded.
+      <Timestamp value={health.observedAt} />. Enablement is the switch; whether
+      a provider delivers is discovered by sending, and every send is recorded.
     </p>
   );
 }

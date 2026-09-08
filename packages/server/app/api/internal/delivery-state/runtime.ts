@@ -518,9 +518,7 @@ export function createDrizzleDeliveryEvidenceStore(
           return appendEvidence(query, request.evidence, null, uuid);
         }
 
-        if (
-          !sameAttempt(attemptFromRow(existingById), request.attempt)
-        ) {
+        if (!sameAttempt(attemptFromRow(existingById), request.attempt)) {
           throw new DeliveryStateError(
             'ATTEMPT_CONFLICT',
             409,

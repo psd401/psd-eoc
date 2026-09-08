@@ -27,12 +27,7 @@ import {
   type RosterPopulation,
 } from './roster';
 import { HumanOnlyActionIdSchema } from './human-only';
-import {
-  isAtOrAfter,
-  TimestampSchema,
-  UuidSchema,
-  VersionSchema,
-} from './shared';
+import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
 
 export { EventKindSchema, type EventKind } from './event-type';
 
@@ -815,8 +810,7 @@ export const ActivationPreviewSchema = z
     if (preview.threat === null) {
       context.addIssue({
         code: 'custom',
-        message:
-          'An activation preview pins the threat the operator chose.',
+        message: 'An activation preview pins the threat the operator chose.',
         path: ['threat'],
       });
     }

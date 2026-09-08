@@ -87,7 +87,6 @@ function contrastRatio(foreground: string, background: string): number {
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 }
 
-
 function lifecyclePreview(
   mode: TemplateMode,
   blocked = false,

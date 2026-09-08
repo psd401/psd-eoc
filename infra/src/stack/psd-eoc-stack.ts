@@ -1,6 +1,5 @@
 import { fileURLToPath } from 'node:url';
 
-
 import {
   Arn,
   ArnFormat,

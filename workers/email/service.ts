@@ -6,9 +6,7 @@ import {
   SQSClient,
   type SQSClientConfig,
 } from '@aws-sdk/client-sqs';
-import {
-  EmailAttemptReferenceMessageSchema,
-} from '@psd-eoc/contracts';
+import { EmailAttemptReferenceMessageSchema } from '@psd-eoc/contracts';
 
 import { failureDetail } from '../shared/failure-detail';
 import { isTerminalFailure, retireMessage } from '../shared/terminal-failure';
