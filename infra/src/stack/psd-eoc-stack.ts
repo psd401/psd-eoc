@@ -2086,6 +2086,23 @@ export class PsdEocStack extends Stack {
     queuePairs.Sms.deadLetterQueue.grantSendMessages(smsWorkerTaskRole);
     queuePairs.SmsReceipt.queue.grantConsumeMessages(smsWorkerTaskRole);
     queuePairs.SmsReceipt.deadLetterQueue.grantSendMessages(smsWorkerTaskRole);
+    // `SendTextMessage` is authorized against every resource the request
+    // names, not only the origination identity: the pool it sends from, the
+    // configuration set, the protect configuration, and the pool's opt-out
+    // list. The first production send (2026-09-08, event 08631cab) was
+    // refused with AccessDenied because only the pool was granted.
+    const unconfiguredSmsResource = (resource: string) =>
+      Arn.format(
+        {
+          account,
+          partition,
+          region,
+          resource,
+          resourceName: 'UNCONFIGURED',
+          service: 'sms-voice',
+        },
+        this,
+      );
     smsWorkerTaskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['sms-voice:SendTextMessage'],
@@ -2093,17 +2110,22 @@ export class PsdEocStack extends Stack {
           Fn.conditionIf(
             shouldRunAwsEumSmsWorker.logicalId,
             smsPool.attrArn,
-            Arn.format(
-              {
-                account,
-                partition,
-                region,
-                resource: 'pool',
-                resourceName: 'UNCONFIGURED',
-                service: 'sms-voice',
-              },
-              this,
-            ),
+            unconfiguredSmsResource('pool'),
+          ).toString(),
+          Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsConfigurationSet.attrArn,
+            unconfiguredSmsResource('configuration-set'),
+          ).toString(),
+          Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsProtectConfiguration.attrArn,
+            unconfiguredSmsResource('protect-configuration'),
+          ).toString(),
+          Fn.conditionIf(
+            shouldRunAwsEumSmsWorker.logicalId,
+            smsOptOutList.attrArn,
+            unconfiguredSmsResource('opt-out-list'),
           ).toString(),
         ],
       }),
