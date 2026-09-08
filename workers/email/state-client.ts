@@ -208,10 +208,16 @@ export class EmailRuntimeClient implements DurableSesSendLedger {
     clearTimeout(timeout);
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
+      // Retryable, because this is deployment skew rather than a verdict on
+      // the message. The runtime answers 403 when the worker presents a
+      // verification reference the deployment has moved past, which every
+      // message gets until the worker is replaced with the matching image.
+      // Treating it as terminal would dead-letter live notifications for the
+      // length of a deploy; the flag is what `isTerminalFailure` reads.
       if (response.status === 401 || response.status === 403) {
         throw new EmailRuntimeClientError(
           'REQUEST_UNAUTHORIZED',
-          false,
+          true,
           response.status,
         );
       }

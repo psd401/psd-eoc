@@ -11,6 +11,7 @@ import {
   readExpoPushServiceConfiguration,
   runExpoPushService,
 } from './service';
+import { ExpoPushRuntimeError } from './runtime';
 
 const TOKEN = 'x'.repeat(48);
 const ENABLED_ENVIRONMENT = Object.freeze({
@@ -26,6 +27,8 @@ const ENABLED_ENVIRONMENT = Object.freeze({
   PSD_EOC_PUSH_PROVIDER_CUTOVER: '{"version":1,"ios":"expo","android":"expo"}',
   PSD_EOC_SERVICE_ORIGIN: 'https://eoc.example.invalid',
   PUSH_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/push',
+  PUSH_DEAD_LETTER_QUEUE_URL:
+    'https://sqs.us-east-1.amazonaws.com/000000000000/push-dlq',
 });
 
 describe('Expo push service configuration', () => {
@@ -52,6 +55,7 @@ describe('Expo push service configuration', () => {
     }
     expect(readExpoPushServiceConfiguration(ENABLED_ENVIRONMENT)).toEqual({
       queueUrl: ENABLED_ENVIRONMENT.PUSH_QUEUE_URL,
+      deadLetterQueueUrl: ENABLED_ENVIRONMENT.PUSH_DEAD_LETTER_QUEUE_URL,
       serviceOrigin: ENABLED_ENVIRONMENT.PSD_EOC_SERVICE_ORIGIN,
       expoAccessToken: TOKEN,
       attemptExecutionToken: TOKEN,
@@ -216,6 +220,130 @@ describe('opaque Expo retry publisher', () => {
 });
 
 describe('Expo push long-poll service', () => {
+  /**
+   * The alarm-storm regression.
+   *
+   * A message the runtime refuses for good used to be logged and left on the
+   * queue, so it went visible-invisible-visible for five receives before the
+   * redrive policy retired it. Each swing moved
+   * `ApproximateAgeOfOldestMessage` across the queue-age threshold, and one
+   * such message produced dozens of alarm-and-recovery notifications.
+   *
+   * Without the terminal-failure branch in `service.ts` this test fails on the
+   * first expectation: no SendMessageCommand is issued, because nothing moves
+   * the message anywhere.
+   */
+  test('retires a message the runtime says cannot be retried', async () => {
+    const now = Date.parse('2026-08-26T12:00:00.000Z');
+    const commands: unknown[] = [];
+    const logs: unknown[] = [];
+    let loopChecks = 0;
+    await runExpoPushService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => now,
+      shouldContinue: () => loopChecks++ === 0,
+      log: (event) => logs.push(event),
+      runtime: {
+        runDueReceipts: () => Promise.resolve([]),
+        readStuckOutboxCount: () => Promise.resolve(0),
+        processQueueMessage: () =>
+          Promise.reject(
+            new ExpoPushRuntimeError(
+              'ATTEMPT_FAILED',
+              'provider-rejected',
+              undefined,
+              false,
+            ),
+          ),
+      },
+      sqs: {
+        send(command) {
+          commands.push(command);
+          if (command instanceof ReceiveMessageCommand) {
+            return Promise.resolve({
+              Messages: [
+                {
+                  Body: JSON.stringify({ safe: true }),
+                  ReceiptHandle: 'synthetic-receipt-handle',
+                  Attributes: { SentTimestamp: String(now) },
+                },
+              ],
+            });
+          }
+          return Promise.resolve({});
+        },
+      },
+    });
+
+    const sent = commands.filter(
+      (command) => command instanceof SendMessageCommand,
+    ) as SendMessageCommand[];
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.input.QueueUrl).toBe(
+      ENABLED_ENVIRONMENT.PUSH_DEAD_LETTER_QUEUE_URL,
+    );
+    // Deleted from the source, so it cannot come back and swing the age metric.
+    expect(
+      commands.some((command) => command instanceof DeleteMessageCommand),
+    ).toBe(true);
+    expect(logs).toContainEqual({
+      event: 'push-worker-message-retired',
+      count: 1,
+      detail:
+        'ExpoPushRuntimeError — code ATTEMPT_FAILED — caused by provider-rejected',
+    });
+  });
+
+  test('leaves a failure with no terminal verdict for the redrive policy', async () => {
+    const now = Date.parse('2026-08-26T12:00:00.000Z');
+    const commands: unknown[] = [];
+    const logs: unknown[] = [];
+    let loopChecks = 0;
+    await runExpoPushService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => now,
+      shouldContinue: () => loopChecks++ === 0,
+      log: (event) => logs.push(event),
+      runtime: {
+        runDueReceipts: () => Promise.resolve([]),
+        readStuckOutboxCount: () => Promise.resolve(0),
+        processQueueMessage: () => Promise.reject(new Error('socket hang up')),
+      },
+      sqs: {
+        send(command) {
+          commands.push(command);
+          if (command instanceof ReceiveMessageCommand) {
+            return Promise.resolve({
+              Messages: [
+                {
+                  Body: JSON.stringify({ safe: true }),
+                  ReceiptHandle: 'synthetic-receipt-handle',
+                  Attributes: { SentTimestamp: String(now) },
+                },
+              ],
+            });
+          }
+          return Promise.resolve({});
+        },
+      },
+    });
+
+    // Neither moved nor deleted: an unclassified failure keeps every retry it
+    // had, because retiring one that would have succeeded loses a notification.
+    expect(
+      commands.some((command) => command instanceof SendMessageCommand),
+    ).toBe(false);
+    expect(
+      commands.some((command) => command instanceof DeleteMessageCommand),
+    ).toBe(false);
+    expect(
+      logs.some(
+        (event) =>
+          (event as { event?: string }).event === 'push-worker-message-failed',
+      ),
+    ).toBe(true);
+  });
+
   test('deletes completed work and emits distinct latency and incomplete facts', async () => {
     const now = Date.parse('2026-08-26T12:00:00.000Z');
     const commands: unknown[] = [];

@@ -1,6 +1,7 @@
 # Alarm runbook: App Runner HTTP 5xx
 
-**Source-defined CloudWatch alarm name:** `psd-eoc-apprunner-5xx`.
+**Source-defined CloudWatch alarm names:** `psd-eoc-apprunner-5xx` and
+`psd-eoc-apprunner-5xx-burst`.
 
 Current deployment and alarm read-back state lives only in the
 [operational readiness register](../INTEGRATIONS.md). A source-defined alarm
@@ -8,11 +9,23 @@ name is not deployment evidence.
 
 ## Meaning
 
-The source-defined alarm fires when at least one server-side HTTP 5xx response
-occurs in a one-minute period for the `psd-eoc` App Runner service. Missing data
-is non-breaching. It may affect sign-in, activation, timeline reads, or admin
-operations. It does not prove that an event was lost or a notification was
-sent.
+Two source-defined alarms read the same metric for the `psd-eoc` App Runner
+service, and missing data is non-breaching for both:
+
+- `psd-eoc-apprunner-5xx` fires when 5xx responses occur in three consecutive
+  one-minute periods -- a service failing, rather than one bad request.
+- `psd-eoc-apprunner-5xx-burst` fires on five or more 5xx responses within a
+  single minute.
+
+Either may affect sign-in, activation, timeline reads, or admin operations.
+Neither proves that an event was lost or a notification was sent.
+
+A single 5xx no longer alarms. At `threshold: 1` over one period the alarm
+mostly caught a browser tab left open across a deployment: Next.js answers a
+server action it no longer recognises with `Failed to find Server Action` and a 500. The image now sets `NEXT_DEPLOYMENT_ID` from the source commit, so a stale
+tab hard-reloads instead of failing, but a client that predates that build can
+still produce one. If the log lines behind an alarm are all
+`Failed to find Server Action`, this is deployment skew and not an outage.
 
 ## Safety posture
 

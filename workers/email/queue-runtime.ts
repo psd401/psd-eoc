@@ -47,8 +47,22 @@ export class EmailQueueRuntimeError extends Error {
      * was to deploy again and add a line.
      */
     public readonly causeName: string | null = null,
+    /**
+     * The thrown value this wraps, so a caller can ask whether retrying it
+     * could ever succeed. Never logged: `causeName` is the loggable part.
+     */
+    cause: unknown = undefined,
+    /**
+     * Whether handing this message back to the queue could ever succeed.
+     *
+     * `undefined` means this class has no opinion, and `isTerminalFailure`
+     * follows `cause` to whatever does. Only a definite `false` retires a
+     * message early; see `workers/shared/terminal-failure.ts` for why the
+     * unknown case has to stay retryable.
+     */
+    public readonly retryable: boolean | undefined = undefined,
   ) {
-    super('The email queue runtime failed safely.');
+    super('The email queue runtime failed safely.', { cause });
     this.name = 'EmailQueueRuntimeError';
   }
 }
@@ -79,7 +93,12 @@ function parseQueueMessage(
   try {
     parsed = JSON.parse(body) as unknown;
   } catch {
-    throw new EmailQueueRuntimeError('INVALID_QUEUE_MESSAGE');
+    throw new EmailQueueRuntimeError(
+      'INVALID_QUEUE_MESSAGE',
+      null,
+      undefined,
+      false,
+    );
   }
   const reference = EmailAttemptReferenceMessageSchema.safeParse(parsed);
   if (reference.success) {
@@ -93,7 +112,12 @@ function parseQueueMessage(
     if (batch.channel !== 'email') throw new TypeError();
     return Object.freeze({ kind: 'batch', batch });
   } catch {
-    throw new EmailQueueRuntimeError('INVALID_QUEUE_MESSAGE');
+    throw new EmailQueueRuntimeError(
+      'INVALID_QUEUE_MESSAGE',
+      null,
+      undefined,
+      false,
+    );
   }
 }
 
@@ -146,7 +170,11 @@ export class EmailQueueRuntime {
         authorization: { kind: 'verified-sqs-source' },
       });
     } catch (error) {
-      throw new EmailQueueRuntimeError('ATTEMPT_FAILED', causeClass(error));
+      throw new EmailQueueRuntimeError(
+        'ATTEMPT_FAILED',
+        causeClass(error),
+        error,
+      );
     }
   }
 
@@ -170,6 +198,8 @@ export class EmailQueueRuntime {
             ? ''
             : `/${result.outcome.reasonCode}`
         }`,
+        undefined,
+        false,
       );
     }
     if (result.kind === 'retry') {

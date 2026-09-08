@@ -14,6 +14,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import { failureDetail } from '../shared/failure-detail';
+import { isTerminalFailure, retireMessage } from '../shared/terminal-failure';
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { LedgeredExpoPushAdapter } from './adapter';
@@ -55,6 +56,7 @@ type SafeLogEvent = Readonly<{
     | 'push-worker-message-completed'
     | 'push-worker-message-incomplete'
     | 'push-worker-message-failed'
+    | 'push-worker-message-retired'
     | 'push-worker-receipts-completed'
     | 'push-worker-receipts-failed'
     | 'push-worker-stuck-outbox-sample'
@@ -67,6 +69,8 @@ type SafeLogEvent = Readonly<{
 
 export interface ExpoPushServiceConfiguration {
   readonly queueUrl: string;
+  /** Where a message that cannot succeed goes, instead of round-tripping. */
+  readonly deadLetterQueueUrl: string;
   readonly serviceOrigin: string;
   readonly expoAccessToken: string;
   readonly attemptExecutionToken: string;
@@ -300,6 +304,9 @@ export function readExpoPushServiceConfiguration(
   }
   return Object.freeze({
     queueUrl: queueUrl(required(environment, 'PUSH_QUEUE_URL', 2_048)),
+    deadLetterQueueUrl: queueUrl(
+      required(environment, 'PUSH_DEAD_LETTER_QUEUE_URL', 2_048),
+    ),
     serviceOrigin: origin(
       required(environment, 'PSD_EOC_SERVICE_ORIGIN', 2_048),
     ),
@@ -641,11 +648,31 @@ export async function runExpoPushService(
         });
       }
     } catch (error) {
-      log({
-        event: 'push-worker-message-failed',
-        count: 1,
-        detail: failureDetail(error),
-      });
+      const detail = failureDetail(error);
+      if (isTerminalFailure(error)) {
+        // Retrying cannot change this answer, so retire it now rather than
+        // let it oscillate on and off the queue for five receives. See
+        // `workers/shared/terminal-failure.ts`.
+        try {
+          await retireMessage({
+            client: sqs,
+            queueUrl: configuration.queueUrl,
+            deadLetterQueueUrl: configuration.deadLetterQueueUrl,
+            receiptHandle: message.receiptHandle,
+            body: message.body,
+          });
+          log({ event: 'push-worker-message-retired', count: 1, detail });
+        } catch (retireError) {
+          // The redrive policy is still behind this.
+          log({
+            event: 'push-worker-message-failed',
+            count: 1,
+            detail: failureDetail(retireError),
+          });
+        }
+      } else {
+        log({ event: 'push-worker-message-failed', count: 1, detail });
+      }
     } finally {
       clearInterval(heartbeat);
     }
