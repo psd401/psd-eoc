@@ -1,3 +1,11 @@
+import {
+  appendSharedCapabilityAuditEntry,
+  claimSharedIdempotency,
+  completeSharedIdempotency,
+  readSharedDatabaseTime,
+} from './persistence';
+
+const PERSISTENCE = Object.freeze({ subject: 'Journal' });
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -17,7 +25,6 @@ import {
   LifecycleConsequencePreviewSchema,
   MessageTemplateSetSchema,
   PaginationCursorSchema,
-  SecurityAuditEntrySchema,
   UuidSchema,
   projectJournalEntryForRead,
   type ActivationPreview,
@@ -57,7 +64,6 @@ import { alias } from 'drizzle-orm/pg-core';
 
 import {
   createDatabaseClient,
-  databaseExecuteRows,
   readDatabaseConfig,
   type Database,
   type DatabaseConnection,
@@ -72,34 +78,20 @@ import {
   facilities,
   humanConfirmationActions,
   humanConfirmationRecords,
-  idempotencyRecords,
   integrationStatuses,
   journalEntries,
   lifecycleConsequencePreviews,
-  securityAuditChainAnchors,
-  securityAuditEntries,
 } from '../../db/schema';
-import {
-  buildSecurityAuditEntry,
-  canonicalSecurityAuditJson,
-  parseSecurityAuditFact,
-  SECURITY_AUDIT_APPEND_LOCK_SQL,
-  securityAuditFactFromEntry,
-  toSecurityAuditInsertValues,
-} from '../audit';
+import {} from '../audit';
 import {
   CapabilityEngineError,
   digestCapabilityValue,
   executeAuditedCapabilityTransaction,
   readCapabilityTime,
-  type CapabilityAuditEvent,
   type CapabilityEngineStore,
   type CapabilityEngineTransaction,
   type CapabilityHandlerContext,
-  type ClaimIdempotencyInput,
-  type CompleteIdempotencyInput,
   type ConsumeHumanConfirmationInput,
-  type IdempotencyClaim,
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
 } from './engine';
@@ -1228,103 +1220,6 @@ function journalQueryDatabase(database: unknown): JournalQueryDatabase {
   return database as JournalQueryDatabase;
 }
 
-async function readDatabaseTime(database: JournalQueryDatabase): Promise<Date> {
-  const [row] = databaseExecuteRows(
-    await database.execute<{ value: Date | string }>(
-      sql`select clock_timestamp() as value`,
-    ),
-  );
-  if (row === undefined) {
-    throw conflict('The authoritative database clock is unavailable.');
-  }
-  return new Date(dateIso(row.value));
-}
-
-async function claimIdempotency(
-  database: JournalQueryDatabase,
-  input: ClaimIdempotencyInput,
-): Promise<IdempotencyClaim> {
-  const [inserted] = await database
-    .insert(idempotencyRecords)
-    .values({
-      capabilityId: input.capabilityId,
-      principal: input.actor,
-      principalDigest: input.principalDigest,
-      key: input.key,
-      requestDigest: input.requestDigest,
-      status: 'in-progress',
-      createdAt: input.createdAt,
-    })
-    .onConflictDoNothing({
-      target: [
-        idempotencyRecords.capabilityId,
-        idempotencyRecords.principalDigest,
-        idempotencyRecords.key,
-      ],
-    })
-    .returning({ id: idempotencyRecords.id });
-  if (inserted !== undefined) {
-    return { kind: 'new', recordId: inserted.id };
-  }
-  const [existing] = await database
-    .select({
-      requestDigest: idempotencyRecords.requestDigest,
-      status: idempotencyRecords.status,
-      resultReference: idempotencyRecords.resultReference,
-    })
-    .from(idempotencyRecords)
-    .where(
-      and(
-        eq(idempotencyRecords.capabilityId, input.capabilityId),
-        eq(idempotencyRecords.principalDigest, input.principalDigest),
-        eq(idempotencyRecords.key, input.key),
-      ),
-    )
-    .for('update')
-    .limit(1);
-  if (existing === undefined) {
-    throw conflict('The idempotency reservation could not be resolved.');
-  }
-  if (existing.status === 'completed' && existing.resultReference !== null) {
-    return {
-      kind: 'completed',
-      requestDigest: existing.requestDigest,
-      resultReference: existing.resultReference,
-    };
-  }
-  if (existing.status === 'failed' && existing.resultReference !== null) {
-    return {
-      kind: 'failed',
-      requestDigest: existing.requestDigest,
-      resultReference: existing.resultReference,
-    };
-  }
-  return { kind: 'in-progress', requestDigest: existing.requestDigest };
-}
-
-async function completeIdempotency(
-  database: JournalQueryDatabase,
-  input: CompleteIdempotencyInput,
-): Promise<void> {
-  const [completed] = await database
-    .update(idempotencyRecords)
-    .set({
-      status: 'completed',
-      completedAt: input.completedAt,
-      resultReference: input.resultReference,
-    })
-    .where(
-      and(
-        eq(idempotencyRecords.id, input.recordId),
-        eq(idempotencyRecords.status, 'in-progress'),
-      ),
-    )
-    .returning({ id: idempotencyRecords.id });
-  if (completed === undefined) {
-    throw conflict('The idempotency result could not be completed.');
-  }
-}
-
 async function getHumanConfirmation(
   database: JournalQueryDatabase,
   confirmationId: string,
@@ -1382,85 +1277,6 @@ async function consumeHumanConfirmation(
     )
     .returning({ id: humanConfirmationRecords.id });
   return consumed !== undefined;
-}
-
-function securityAuditEntryFromRow(
-  row: typeof securityAuditEntries.$inferSelect,
-) {
-  return SecurityAuditEntrySchema.parse({
-    id: row.id,
-    sequence: row.sequence,
-    previousHash: row.previousHash,
-    entryHash: row.entryHash,
-    category: row.category,
-    action: row.action,
-    actionIds: row.actionIds,
-    confirmationId: row.confirmationId,
-    outcome: row.outcome,
-    principal: row.principal,
-    source: row.source,
-    facilityId: row.facilityId,
-    target:
-      row.targetKind === null || row.targetId === null
-        ? null
-        : { kind: row.targetKind, id: row.targetId },
-    requestId: row.requestId,
-    reasonCode: row.reasonCode,
-    occurredAt: dateIso(row.occurredAt),
-  });
-}
-
-async function appendCapabilityAuditEntry(
-  database: JournalQueryDatabase,
-  event: CapabilityAuditEvent,
-): Promise<void> {
-  const fact = parseSecurityAuditFact({
-    category: event.category,
-    action: event.action,
-    actionIds: event.actionIds,
-    confirmationId: event.confirmationId,
-    outcome: event.outcome,
-    principal: event.actor,
-    source: event.source,
-    facilityId: event.facilityId,
-    target: { kind: 'capability', id: event.action },
-    requestId: event.requestId,
-    reasonCode: event.reasonCode,
-    occurredAt: event.occurredAt.toISOString(),
-  });
-  await database.execute(SECURITY_AUDIT_APPEND_LOCK_SQL);
-  const [existingRow] = await database
-    .select()
-    .from(securityAuditEntries)
-    .where(eq(securityAuditEntries.requestId, fact.requestId))
-    .limit(1)
-    .for('share');
-  if (existingRow !== undefined) {
-    const existing = securityAuditEntryFromRow(existingRow);
-    if (
-      canonicalSecurityAuditJson(securityAuditFactFromEntry(existing)) ===
-      canonicalSecurityAuditJson(fact)
-    ) {
-      return;
-    }
-    throw conflict('The audit request is already bound to different evidence.');
-  }
-  const [anchor] = await database
-    .select({
-      sequence: securityAuditChainAnchors.sequence,
-      entryHash: securityAuditChainAnchors.entryHash,
-    })
-    .from(securityAuditChainAnchors)
-    .orderBy(desc(securityAuditChainAnchors.sequence))
-    .limit(1)
-    .for('share');
-  const entry = buildSecurityAuditEntry(
-    fact,
-    anchor === undefined ? null : anchor,
-  );
-  await database
-    .insert(securityAuditEntries)
-    .values(toSecurityAuditInsertValues(entry));
 }
 
 async function resolveEventFacilityIdFromDatabase(
@@ -2163,7 +1979,7 @@ async function createLifecycleConsequencePreviewFromDatabase(
     };
   });
 
-  const createdAt = await readDatabaseTime(database);
+  const createdAt = await readSharedDatabaseTime(database, PERSISTENCE);
   const expiresAt = new Date(
     createdAt.getTime() + ACTIVATION_PREVIEW_MAX_AGE_SECONDS * 1_000,
   );
@@ -2301,14 +2117,16 @@ function createDrizzleJournalTransaction(
   database: JournalQueryDatabase,
 ): JournalCapabilityTransaction {
   return {
-    readCurrentTime: () => readDatabaseTime(database),
-    claimIdempotency: (input) => claimIdempotency(database, input),
-    completeIdempotency: (input) => completeIdempotency(database, input),
+    readCurrentTime: () => readSharedDatabaseTime(database, PERSISTENCE),
+    claimIdempotency: (input) =>
+      claimSharedIdempotency(database, input, PERSISTENCE),
+    completeIdempotency: (input) =>
+      completeSharedIdempotency(database, input, PERSISTENCE),
     getHumanConfirmation: (id) => getHumanConfirmation(database, id),
     consumeHumanConfirmation: (input) =>
       consumeHumanConfirmation(database, input),
     appendCapabilityAudit: (event) =>
-      appendCapabilityAuditEntry(database, event),
+      appendSharedCapabilityAuditEntry(database, event, PERSISTENCE),
     resolveEventFacilityId: (eventId) =>
       resolveEventFacilityIdFromDatabase(database, eventId),
     resolveAuthorDisplayName: (actor) =>
@@ -2364,7 +2182,11 @@ export function createDrizzleJournalCapabilityStore(
     },
     appendCapabilityAudit(event) {
       return database.transaction(async (transaction) =>
-        appendCapabilityAuditEntry(journalQueryDatabase(transaction), event),
+        appendSharedCapabilityAuditEntry(
+          journalQueryDatabase(transaction),
+          event,
+          PERSISTENCE,
+        ),
       );
     },
   };
@@ -2392,7 +2214,11 @@ export function createDrizzleRecordsCapabilityStore(
     },
     appendCapabilityAudit(event) {
       return database.transaction(async (transaction) =>
-        appendCapabilityAuditEntry(journalQueryDatabase(transaction), event),
+        appendSharedCapabilityAuditEntry(
+          journalQueryDatabase(transaction),
+          event,
+          PERSISTENCE,
+        ),
       );
     },
   };
@@ -2620,7 +2446,7 @@ async function issueEventHumanConfirmationWithDatabase(
         'The lifecycle preview does not match the activated audience plan.',
       );
     }
-    const currentTime = await readDatabaseTime(database);
+    const currentTime = await readSharedDatabaseTime(database, PERSISTENCE);
     if (
       preview.sendReadiness !== 'ready' ||
       currentTime.getTime() < Date.parse(preview.createdAt) ||
@@ -2653,7 +2479,7 @@ async function issueEventHumanConfirmationWithDatabase(
     actionIds = ['close-real-event'];
   }
 
-  const issuedAt = await readDatabaseTime(database);
+  const issuedAt = await readSharedDatabaseTime(database, PERSISTENCE);
   const maximumExpiry = new Date(
     issuedAt.getTime() + HUMAN_CONFIRMATION_MAX_AGE_SECONDS * 1_000,
   );
