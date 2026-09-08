@@ -1515,6 +1515,22 @@ describe('App Runner runtime safety boundary', () => {
     const taskRole = roleLogicalIdForDescription('Consumes the SMS queue');
     const actions = allAllowedActions(inlineStatementsForRole(taskRole));
     expect(actions).toContain('sms-voice:SendTextMessage');
+    // The send is authorized against every resource the request names.
+    const sendResources = JSON.stringify(
+      inlineStatementsForRole(taskRole)
+        .filter((statement) =>
+          asStringArray(statement.Action).includes('sms-voice:SendTextMessage'),
+        )
+        .map((statement) => statement.Resource),
+    );
+    for (const resource of [
+      'SmsPool',
+      'SmsConfigurationSet',
+      'SmsProtectConfiguration',
+      'SmsOptOutList',
+    ]) {
+      expect(sendResources).toContain(resource);
+    }
     expect(actions).toContain('sms-voice:DescribeOptedOutNumbers');
     expect(actions).toContain('sqs:ReceiveMessage');
     expect(actions).toContain('sqs:SendMessage');
