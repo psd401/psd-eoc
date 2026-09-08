@@ -4,7 +4,6 @@ import {
   RecordDeliveryEvidenceInputSchema,
   SMS_PROVIDER_MINIMUM_TTL_SECONDS,
   SmsProviderSendAuthorizationSchema,
-  type IntegrationTruthLabel,
   type SmsProviderSendAuthorization,
 } from '@psd-eoc/contracts';
 
@@ -206,23 +205,6 @@ export interface AwsEumSmsSendLedger {
   complete(request: AwsEumSmsLedgerCompleteRequest): Promise<void>;
 }
 
-/** PII-free facts supplied to the mandatory runtime authorization gate. */
-export interface AwsEumSmsLiveAuthorizationContext {
-  readonly attemptId: string;
-  readonly batchId: string;
-  readonly eventId: string;
-  readonly eventKind: 'incident' | 'drill' | 'test';
-  readonly templateMode: 'real' | 'drill';
-  readonly purpose: 'activation' | 'all-clear' | 'reactivation';
-  readonly requestId: string;
-  readonly authorizationKind: string;
-  readonly integrationAuthorizationReference: string;
-}
-
-export type AwsEumSmsLiveAuthorizer = (
-  context: AwsEumSmsLiveAuthorizationContext,
-) => boolean | Promise<boolean>;
-
 export type AwsEumSmsProviderAuthorizer = (
   workItem: WorkerAttemptWorkItem,
 ) => SmsProviderSendAuthorization | Promise<SmsProviderSendAuthorization>;
@@ -237,8 +219,6 @@ export interface AwsEumSmsAdapterOptions {
   readonly timeToLiveSeconds: number;
   /** Omission and false both keep the live provider dark. */
   readonly featureEnabled?: boolean;
-  /** Omission denies every live send even when the feature flag is true. */
-  readonly authorizeLiveSend?: AwsEumSmsLiveAuthorizer;
   /** Fresh full-work-item authorization immediately before provider I/O. */
   readonly authorizeProviderSend?: AwsEumSmsProviderAuthorizer;
   /** Monotonic-enough wall clock used to age the server-issued provider TTL. */
@@ -369,7 +349,6 @@ function hasCanonicalRendererFrame(workItem: WorkerAttemptWorkItem): boolean {
 /** Strict channel request validation shared with the fail-closed CI mock. */
 export function parseSmsProviderSendRequest(
   requestValue: ProviderSendRequest | unknown,
-  expectedTruthLabel: IntegrationTruthLabel,
 ): ParsedSmsProviderRequest {
   if (!isPlainRecord(requestValue)) {
     throw new ProviderDispatchError(
@@ -397,13 +376,7 @@ export function parseSmsProviderSendRequest(
     workItem.batch.channel !== 'sms' ||
     workItem.endpoint.channel !== 'sms' ||
     workItem.batch.renderedMessage.channel !== 'sms' ||
-    workItem.batch.integrationStatus.integrationId !==
-      AWS_EUM_SMS_INTEGRATION_ID ||
-    workItem.batch.integrationStatus.label !== expectedTruthLabel ||
-    (expectedTruthLabel === 'live-verified' &&
-      workItem.batch.rosterPopulation !== 'staff') ||
-    (expectedTruthLabel === 'mocked' &&
-      workItem.batch.rosterPopulation !== 'synthetic') ||
+    workItem.batch.integrationId !== AWS_EUM_SMS_INTEGRATION_ID ||
     !hasCanonicalRendererFrame(workItem) ||
     exceedsSmsSendLengthPolicy(length)
   ) {
@@ -696,29 +669,6 @@ function parseLedgerLookup(
   }
 }
 
-function authorizationContext(
-  workItem: WorkerAttemptWorkItem,
-): AwsEumSmsLiveAuthorizationContext {
-  const reference = workItem.batch.integrationStatus.authorizationReference;
-  if (reference === null) {
-    throw new ProviderDispatchError(
-      'AWS_EUM_SEND_UNAUTHORIZED',
-      'terminal-failure',
-    );
-  }
-  return Object.freeze({
-    attemptId: workItem.attempt.id,
-    batchId: workItem.batch.id,
-    eventId: workItem.batch.eventId,
-    eventKind: workItem.batch.eventKind,
-    templateMode: workItem.batch.templateMode,
-    purpose: workItem.batch.purpose,
-    requestId: workItem.batch.requestId,
-    authorizationKind: workItem.batch.authorization.kind,
-    integrationAuthorizationReference: reference,
-  });
-}
-
 function errorCompletion(
   error: ProviderDispatchError,
 ): AwsEumSmsLedgerErrorCompletion {
@@ -734,14 +684,12 @@ function errorCompletion(
 export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'sms' as const;
   public readonly integrationId = AWS_EUM_SMS_INTEGRATION_ID;
-  public readonly truthLabel = 'live-verified' as const;
   public readonly provider = AWS_EUM_SMS_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
   readonly #client: AwsEumSmsClient;
   readonly #ledger: AwsEumSmsSendLedger;
   readonly #featureEnabled: boolean;
-  readonly #authorizeLiveSend: AwsEumSmsLiveAuthorizer | undefined;
   readonly #authorizeProviderSend: AwsEumSmsProviderAuthorizer | undefined;
   readonly #clock: () => number;
   readonly #ledgerLeaseMilliseconds: number;
@@ -768,7 +716,6 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
     this.#client = options.client;
     this.#ledger = options.ledger;
     this.#featureEnabled = options.featureEnabled === true;
-    this.#authorizeLiveSend = options.authorizeLiveSend;
     this.#authorizeProviderSend = options.authorizeProviderSend;
     this.#clock = options.clock ?? Date.now;
     this.#ledgerLeaseMilliseconds = parseLease(options.ledgerLeaseMilliseconds);
@@ -804,9 +751,7 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
       requestValue.idempotencyKey !== workItem.attempt.id ||
       workItem.batch.channel !== 'sms' ||
       workItem.endpoint.channel !== 'sms' ||
-      workItem.batch.integrationStatus.integrationId !==
-        AWS_EUM_SMS_INTEGRATION_ID ||
-      workItem.batch.integrationStatus.label !== this.truthLabel
+      workItem.batch.integrationId !== AWS_EUM_SMS_INTEGRATION_ID
     ) {
       return Object.freeze({ kind: 'missing' });
     }
@@ -863,7 +808,7 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   public async send(
     requestValue: ProviderSendRequest,
   ): Promise<ProviderSendOutcome> {
-    const request = parseSmsProviderSendRequest(requestValue, this.truthLabel);
+    const request = parseSmsProviderSendRequest(requestValue);
     const fingerprint = workerAttemptFingerprint(request.workItem);
     let recovered: AwsEumSmsLedgerLookup;
     try {
@@ -897,29 +842,10 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
       );
     }
 
-    const authorizeLiveSend = this.#authorizeLiveSend;
     const authorizeProviderSend = this.#authorizeProviderSend;
-    if (
-      !this.#featureEnabled ||
-      authorizeLiveSend === undefined ||
-      authorizeProviderSend === undefined
-    ) {
+    if (!this.#featureEnabled || authorizeProviderSend === undefined) {
       throw new ProviderDispatchError(
         'AWS_EUM_FEATURE_DISABLED',
-        'terminal-failure',
-      );
-    }
-    let authorized = false;
-    try {
-      authorized =
-        (await authorizeLiveSend(authorizationContext(request.workItem))) ===
-        true;
-    } catch {
-      authorized = false;
-    }
-    if (!authorized) {
-      throw new ProviderDispatchError(
-        'AWS_EUM_SEND_UNAUTHORIZED',
         'terminal-failure',
       );
     }

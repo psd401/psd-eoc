@@ -12,7 +12,6 @@ import {
   WorkerAttemptProcessor,
   type AttemptExecutionStore,
   type AttemptIdempotentProviderAdapter,
-  type LiveProviderAuthorizer,
   type WorkerAttemptProcessResult,
 } from '../shared/processor';
 import {
@@ -44,7 +43,6 @@ export interface DirectPushWorkerOptions {
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
-  readonly authorizeLiveProvider?: LiveProviderAuthorizer;
 }
 
 function invalidationInput(
@@ -84,7 +82,6 @@ export class DirectPushWorker {
     if (
       options.adapter.channel !== 'push' ||
       options.adapter.integrationId !== 'mobile-push' ||
-      options.adapter.truthLabel !== 'live-verified' ||
       (options.adapter.provider !== APNS_DIRECT_PROVIDER &&
         options.adapter.provider !== FCM_DIRECT_PROVIDER) ||
       typeof options.endpointEligibility?.isEligible !== 'function' ||
@@ -106,9 +103,6 @@ export class DirectPushWorker {
         ? {}
         : { leaseMilliseconds: options.leaseMilliseconds }),
       ...(options.random === undefined ? {} : { random: options.random }),
-      ...(options.authorizeLiveProvider === undefined
-        ? {}
-        : { authorizeLiveProvider: options.authorizeLiveProvider }),
     });
     this.#invalidator = options.endpointInvalidator;
     this.#provider = options.adapter.provider;
@@ -185,7 +179,7 @@ export class PushProviderRouter implements PushAttemptWorker {
     if (workItem.endpoint.channel !== 'push') {
       throw new TypeError('Push provider route is invalid.');
     }
-    const integrationId = workItem.batch.integrationStatus.integrationId;
+    const integrationId = workItem.batch.integrationId;
     if (integrationId === 'expo-push') {
       if (workItem.endpoint.provider !== 'expo') {
         throw new TypeError('Legacy push provider route is invalid.');

@@ -19,7 +19,6 @@ import {
   FacilitySchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
   HumanConfirmationRecordSchema,
-  IntegrationStatusSchema,
   JournalEntryPageSchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
@@ -78,7 +77,6 @@ import {
   facilities,
   humanConfirmationActions,
   humanConfirmationRecords,
-  integrationStatuses,
   journalEntries,
   lifecycleConsequencePreviews,
 } from '../../db/schema';
@@ -301,20 +299,6 @@ function activationPreviewFromRow(
     consequenceDigest: row.consequenceDigest,
     createdAt: dateIso(row.createdAt),
     expiresAt: dateIso(row.expiresAt),
-  });
-}
-
-function integrationStatusFromRow(
-  row: typeof integrationStatuses.$inferSelect,
-) {
-  return IntegrationStatusSchema.parse({
-    integrationId: row.integrationId,
-    label: row.label,
-    verifiedAt: row.verifiedAt === null ? null : dateIso(row.verifiedAt),
-    verifiedByUserId: row.verifiedByUserId,
-    authorizationReference: row.authorizationReference,
-    reasonCode: row.reasonCode,
-    observedAt: dateIso(row.observedAt),
   });
 }
 
@@ -1926,26 +1910,20 @@ async function createLifecycleConsequencePreviewFromDatabase(
   );
   const configurationRows = await database
     .select({
+      integrationId: channelConfigurations.integrationId,
       enabled: channelConfigurations.enabled,
-      status: integrationStatuses,
     })
     .from(channelConfigurations)
-    .innerJoin(
-      integrationStatuses,
-      eq(channelConfigurations.statusId, integrationStatuses.id),
-    )
     .where(inArray(channelConfigurations.integrationId, integrationIds));
 
   const blockingReasonCodes = new Set<string>();
   if (source.recipientCount === 0) {
     blockingReasonCodes.add('NO_RECIPIENTS');
   }
-  const expectedIntegrationLabel =
-    event.rosterPopulation === 'staff' ? 'live-verified' : 'mocked';
   const channels = source.channels.map((sourceChannel) => {
     const integrationId = INTEGRATION_BY_CHANNEL[sourceChannel.channel];
     const configuration = configurationRows.find(
-      (row) => row.status.integrationId === integrationId,
+      (row) => row.integrationId === integrationId,
     );
     if (configuration === undefined) {
       throw unavailable(
@@ -1955,9 +1933,6 @@ async function createLifecycleConsequencePreviewFromDatabase(
     const channelCode = sourceChannel.channel.toUpperCase();
     if (!configuration.enabled) {
       blockingReasonCodes.add(`${channelCode}_CHANNEL_DISABLED`);
-    }
-    if (configuration.status.label !== expectedIntegrationLabel) {
-      blockingReasonCodes.add(`${channelCode}_INTEGRATION_NOT_READY`);
     }
     if (
       (sourceChannel.channel === 'push' || sourceChannel.channel === 'email') &&
@@ -1975,7 +1950,7 @@ async function createLifecycleConsequencePreviewFromDatabase(
       channel: sourceChannel.channel,
       endpointCount: sourceChannel.endpointCount,
       renderedMessage,
-      integrationStatus: integrationStatusFromRow(configuration.status),
+      integrationId,
     };
   });
 
@@ -2291,33 +2266,23 @@ async function assertLifecycleIntegrationsCurrent(
   preview: LifecycleConsequencePreview,
 ): Promise<void> {
   const integrationIds = preview.channels.map(
-    (channel) => channel.integrationStatus.integrationId,
+    (channel) => channel.integrationId,
   );
   const rows = await database
     .select({
+      integrationId: channelConfigurations.integrationId,
       enabled: channelConfigurations.enabled,
-      status: integrationStatuses,
     })
     .from(channelConfigurations)
-    .innerJoin(
-      integrationStatuses,
-      eq(channelConfigurations.statusId, integrationStatuses.id),
-    )
     .where(inArray(channelConfigurations.integrationId, integrationIds))
     .for('share');
   for (const channel of preview.channels) {
-    const expected = channel.integrationStatus;
-    const matching = rows.find((row) => {
-      const actual = integrationStatusFromRow(row.status);
-      return (
-        row.enabled &&
-        actual.integrationId === expected.integrationId &&
-        digestCapabilityValue(actual) === digestCapabilityValue(expected)
-      );
-    });
-    if (matching === undefined) {
+    const row = rows.find(
+      (candidate) => candidate.integrationId === channel.integrationId,
+    );
+    if (row?.enabled !== true) {
       throw conflict(
-        'The consequence preview no longer matches current integration readiness.',
+        'The consequence preview no longer matches current channel enablement.',
       );
     }
   }

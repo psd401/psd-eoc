@@ -12,8 +12,6 @@ import {
   type ActivationThreat,
   type Actor,
   type ChannelConfiguration,
-  type DeliveryTestNotificationMetadata,
-  type DeliveryTestTargetEndpointRef,
   type EventTypeVersion,
   type Facility,
   type NotificationChannel,
@@ -77,10 +75,7 @@ export class ActivationPreviewBuildError extends Error {
 export interface ActivationPreviewEvidence {
   readonly id: string;
   readonly selection: ActivationSelection;
-  /**
-   * The threat the operator chose, resolved against the catalog by the
-   * caller. Null only for a monthly delivery test, which has no threat.
-   */
+  /** The threat the operator chose, resolved against the catalog by the caller. */
   readonly threat: ActivationThreat | null;
   /** The operator's words for an "Other" response, when one was required. */
   readonly responseDetail: string | null;
@@ -93,14 +88,6 @@ export interface ActivationPreviewEvidence {
   readonly initiatorDisplayName: string;
   readonly createdAt: Date;
   readonly expiresAt?: Date;
-  readonly deliveryTest?: DeliveryTestNotificationMetadata;
-  /** Exact approved opaque refs which narrow the ordinary staff audience. */
-  readonly deliveryTestEndpointReferences?: readonly Pick<
-    DeliveryTestTargetEndpointRef,
-    'recipientId' | 'endpointId' | 'channel'
-  >[];
-  /** Server-owned readiness facts which must be included in confirmation. */
-  readonly additionalBlockingReasonCodes?: readonly string[];
 }
 
 function configurationByChannel(
@@ -117,15 +104,6 @@ function configurationByChannel(
     email: byIntegration.get(CHANNEL_INTEGRATION_IDS.email),
     sms: byIntegration.get(CHANNEL_INTEGRATION_IDS.sms),
   });
-}
-
-function blockingCodeForTruth(
-  channel: NotificationChannel,
-  population: 'staff' | 'synthetic',
-): string {
-  return `${channel.toUpperCase()}_${
-    population === 'staff' ? 'NOT_LIVE_VERIFIED' : 'NOT_MOCKED'
-  }`;
 }
 
 function compareStrings(left: string, right: string): number {
@@ -194,7 +172,7 @@ export function buildActivationPreview(
   if (evidenceValue.rosterSnapshot.population !== selection.rosterPopulation) {
     throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
   }
-  if (threat === null && evidenceValue.deliveryTest === undefined) {
+  if (threat === null) {
     throw new ActivationPreviewBuildError('THREAT_UNAVAILABLE');
   }
   if (
@@ -217,56 +195,9 @@ export function buildActivationPreview(
     facilityId: facility.id,
     rosterSnapshot: evidenceValue.rosterSnapshot,
   });
-  const approvedEndpointKeys =
-    evidenceValue.deliveryTestEndpointReferences === undefined
-      ? null
-      : new Set(
-          evidenceValue.deliveryTestEndpointReferences.map(
-            (reference) =>
-              `${reference.channel}:${reference.recipientId}:${reference.endpointId}`,
-          ),
-        );
-  if (
-    (evidenceValue.deliveryTest === undefined) !==
-      (approvedEndpointKeys === null) ||
-    (approvedEndpointKeys !== null &&
-      approvedEndpointKeys.size !==
-        evidenceValue.deliveryTestEndpointReferences?.length)
-  ) {
-    throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
-  }
-  const controlledCanaryChannel =
-    evidenceValue.deliveryTestEndpointReferences?.length === 1
-      ? evidenceValue.deliveryTestEndpointReferences[0]?.channel
-      : null;
-  if (
-    controlledCanaryChannel !== null &&
-    controlledCanaryChannel !== 'email' &&
-    controlledCanaryChannel !== 'push'
-  ) {
-    throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
-  }
-  const selectedRecipients = resolvedAudience.recipients.flatMap(
-    (recipient) => {
-      const endpoints = recipient.endpoints.filter(
-        (endpoint) =>
-          approvedEndpointKeys === null ||
-          approvedEndpointKeys.has(
-            `${endpoint.channel}:${recipient.recipientId}:${endpoint.id}`,
-          ),
-      );
-      return endpoints.length === 0 ? [] : [{ ...recipient, endpoints }];
-    },
+  const selectedRecipients = resolvedAudience.recipients.filter(
+    (recipient) => recipient.endpoints.length > 0,
   );
-  if (
-    approvedEndpointKeys !== null &&
-    selectedRecipients.reduce(
-      (count, recipient) => count + recipient.endpoints.length,
-      0,
-    ) !== approvedEndpointKeys.size
-  ) {
-    throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
-  }
   const recipientCount = selectedRecipients.length;
   const endpointCounts: Record<NotificationChannel, number> = {
     push: 0,
@@ -282,11 +213,7 @@ export function buildActivationPreview(
   const configurations = configurationByChannel(
     evidenceValue.channelConfigurations,
   );
-  if (
-    controlledCanaryChannel === null
-      ? configurations.email === undefined || configurations.push === undefined
-      : configurations[controlledCanaryChannel] === undefined
-  ) {
+  if (configurations.email === undefined || configurations.push === undefined) {
     throw new ActivationPreviewBuildError('CHANNEL_CONFIGURATION_UNAVAILABLE');
   }
 
@@ -310,13 +237,9 @@ export function buildActivationPreview(
   const renderedByChannel = new Map(
     renderedMessages.map((message) => [message.channel, message]),
   );
-  const selectedChannels =
-    controlledCanaryChannel !== null
-      ? ([controlledCanaryChannel] as const)
-      : ALL_CHANNELS.filter(
-          (channel) =>
-            channel !== 'sms' || configurations.sms?.enabled === true,
-        );
+  const selectedChannels = ALL_CHANNELS.filter(
+    (channel) => channel !== 'sms' || configurations.sms?.enabled === true,
+  );
   const channels = selectedChannels.map((channel) => {
     const configuration = configurations[channel];
     const renderedMessage = renderedByChannel.get(channel);
@@ -329,36 +252,21 @@ export function buildActivationPreview(
       channel,
       endpointCount: endpointCounts[channel],
       renderedMessage,
-      integrationStatus: configuration.status,
+      integrationId: configuration.integrationId,
     });
   });
 
-  const blockingReasonCodes: string[] = [
-    ...(evidenceValue.additionalBlockingReasonCodes ?? []),
-  ];
+  const blockingReasonCodes: string[] = [];
   if (recipientCount === 0) {
     blockingReasonCodes.push('NO_RECIPIENTS');
   }
-  const requiredChannels =
-    controlledCanaryChannel !== null
-      ? ([controlledCanaryChannel] as const)
-      : REQUIRED_CHANNELS;
-  for (const channel of requiredChannels) {
+  for (const channel of REQUIRED_CHANNELS) {
     const configuration = configurations[channel];
     if (configuration?.enabled !== true) {
       blockingReasonCodes.push(`${channel.toUpperCase()}_DISABLED`);
     }
     if (endpointCounts[channel] === 0) {
       blockingReasonCodes.push(`NO_${channel.toUpperCase()}_ENDPOINTS`);
-    }
-  }
-  const expectedTruthLabel =
-    selection.rosterPopulation === 'staff' ? 'live-verified' : 'mocked';
-  for (const channel of channels) {
-    if (channel.integrationStatus.label !== expectedTruthLabel) {
-      blockingReasonCodes.push(
-        blockingCodeForTruth(channel.channel, selection.rosterPopulation),
-      );
     }
   }
 
@@ -388,7 +296,6 @@ export function buildActivationPreview(
         : ('blocked' as const),
     blockingReasonCodes: uniqueBlockingReasonCodes,
     activeEventIds,
-    deliveryTest: evidenceValue.deliveryTest ?? null,
     createdAt: createdAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
   });

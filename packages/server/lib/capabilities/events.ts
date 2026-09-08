@@ -11,7 +11,6 @@ import {
   EventTargetingSchema,
   EventTransitionSchema,
   HumanConfirmationRecordSchema,
-  IntegrationStatusSchema,
   JoinEventResultSchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
@@ -70,16 +69,12 @@ import { activationThreatFromColumns } from './start-preview';
 import {
   activationPreviews,
   channelConfigurations,
-  deliveryTestRuns,
-  deliveryTestTargetEndpoints,
-  deliveryTestTargetSetVersions,
   eventTransitions,
   events,
   facilities,
   humanConfirmationActions,
   humanConfirmationRecords,
   idempotencyRecords,
-  integrationStatuses,
   journalEntries,
   lifecycleConsequencePreviews,
   notificationIntentChannels,
@@ -90,13 +85,7 @@ import {
   securityAuditEntries,
 } from '../../db/schema';
 import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/sign-in-audit';
-import {
-  currentActiveAudienceEndpointReferences,
-  deliveryTestCredentialIsVerified,
-  loadRosterSnapshot,
-  readDeliveryTestCredentialVerificationReferences,
-  requireCurrentDeliveryTestTargetEligibility,
-} from '../capabilities/start';
+import { loadRosterSnapshot } from '../capabilities/start';
 import {
   CapabilityEngineError,
   digestCapabilityValue,
@@ -116,17 +105,11 @@ import {
   type TrustedCapabilityInvocation,
 } from './engine';
 import { transitionEventStatus } from '../events/state-machine';
-import {
-  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
-  deliveryTestEndpointReferenceDigest,
-  deliveryTestTargetLockIdentity,
-} from '../testing/e2e-delivery';
 
 /** Preview plus server-only persistence references required for one send. */
 export interface ResolvedActivationSource {
   readonly preview: ActivationPreview;
   readonly preparedActivation: PreparedActivation | null;
-  readonly integrationStatusIds: Readonly<Record<string, string>>;
   readonly currentActiveEventIds: readonly string[];
 }
 
@@ -137,16 +120,14 @@ export interface ResolvedEventState {
   readonly nextJournalSequence: number;
 }
 
-/** Purpose-specific preview plus its exact persisted integration observations. */
+/** Purpose-specific preview whose channels are all currently enabled. */
 export interface ResolvedLifecyclePreview {
   readonly preview: LifecycleConsequencePreview;
-  readonly integrationStatusIds: Readonly<Record<string, string>>;
 }
 
 export interface LifecyclePersistenceBundle {
   readonly result: EventLifecycleMutationResult;
   readonly outboxRecord: OutboxRecord | null;
-  readonly integrationStatusIds: Readonly<Record<string, string>>;
   /** Exact reviewed preview time; null only for non-notifying lifecycle work. */
   readonly sendPreviewCreatedAt: string | null;
 }
@@ -510,8 +491,6 @@ function buildNotification(
     throw conflict('Activated notification provenance is incomplete.');
   }
   const at = timestamp(input.context.invocation.serverTime);
-  const deliveryTest =
-    'deliveryTest' in input.preview ? input.preview.deliveryTest : null;
   const intent = NotificationIntentSchema.parse({
     id: randomUUID(),
     eventId: input.event.id,
@@ -521,7 +500,6 @@ function buildNotification(
     eventTypeVersion: input.event.eventTypeVersion,
     rosterSnapshotId: input.event.rosterSnapshotId,
     rosterPopulation: input.event.rosterPopulation,
-    deliveryTest,
     createdBy: input.context.invocation.actor,
     source: input.context.invocation.source,
     requestId: input.context.invocation.requestId,
@@ -542,7 +520,6 @@ function buildNotification(
     eventTypeVersion: intent.eventTypeVersion,
     rosterSnapshotId: intent.rosterSnapshotId,
     rosterPopulation: intent.rosterPopulation,
-    deliveryTest: intent.deliveryTest,
     requestId: intent.requestId,
     authorization: intent.authorization,
     channels: intent.channels,
@@ -768,7 +745,6 @@ export const startEventRegistration: ServerCapabilityRegistration<
     await context.transaction.persistLifecycle({
       result,
       outboxRecord: notification.outbox,
-      integrationStatusIds: resolved.integrationStatusIds,
       sendPreviewCreatedAt: preview.createdAt,
     });
     return result;
@@ -932,7 +908,6 @@ async function notifyingLifecycleResult(
   await context.transaction.persistLifecycle({
     result,
     outboxRecord: notification.outbox,
-    integrationStatusIds: resolvedPreview.integrationStatusIds,
     sendPreviewCreatedAt: resolvedPreview.preview.createdAt,
   });
   return result;
@@ -1107,7 +1082,6 @@ export const closeEventRegistration: ServerCapabilityRegistration<
     await context.transaction.persistLifecycle({
       result,
       outboxRecord: null,
-      integrationStatusIds: {},
       sendPreviewCreatedAt: null,
     });
     return result;
@@ -1211,7 +1185,6 @@ export const reopenAsCorrectionRegistration: ServerCapabilityRegistration<
     await context.transaction.persistLifecycle({
       result,
       outboxRecord: null,
-      integrationStatusIds: {},
       sendPreviewCreatedAt: null,
     });
     return result;
@@ -1655,66 +1628,31 @@ function parseJoinReference(value: string): Readonly<{
   }
 }
 
-function integrationStatusFromRow(
-  row: typeof integrationStatuses.$inferSelect,
-) {
-  return IntegrationStatusSchema.parse({
-    integrationId: row.integrationId,
-    label: row.label,
-    verifiedAt: row.verifiedAt === null ? null : dateIso(row.verifiedAt),
-    verifiedByUserId: row.verifiedByUserId,
-    authorizationReference: row.authorizationReference,
-    reasonCode: row.reasonCode,
-    observedAt: dateIso(row.observedAt),
-  });
-}
-
-async function resolveIntegrationStatusIds(
+/**
+ * Every channel the preview planned must still be enabled when the send is
+ * confirmed. Enablement is the whole switch; there is no truth label to match.
+ */
+async function assertChannelsEnabled(
   database: EventQueryDatabase,
-  channels: ActivationPreview['channels'],
-): Promise<Readonly<Record<string, string>>> {
-  const integrationIds = channels.map(
-    (channel) => channel.integrationStatus.integrationId,
-  );
+  channels: readonly Readonly<{ integrationId: string }>[],
+): Promise<void> {
+  const integrationIds = channels.map((channel) => channel.integrationId);
   const rows = await database
     .select({
+      integrationId: channelConfigurations.integrationId,
       enabled: channelConfigurations.enabled,
-      status: integrationStatuses,
     })
     .from(channelConfigurations)
-    .innerJoin(
-      integrationStatuses,
-      eq(channelConfigurations.statusId, integrationStatuses.id),
-    )
     .where(inArray(channelConfigurations.integrationId, integrationIds))
     .for('share');
-  const resolved: Record<string, string> = {};
-  for (const channel of channels) {
-    const expected = channel.integrationStatus;
-    const matching = rows.find((row) => {
-      const actual = integrationStatusFromRow(row.status);
-      return (
-        row.enabled &&
-        actual.integrationId === expected.integrationId &&
-        actual.label === expected.label &&
-        actual.verifiedByUserId === expected.verifiedByUserId &&
-        actual.authorizationReference === expected.authorizationReference &&
-        actual.reasonCode === expected.reasonCode &&
-        Date.parse(actual.observedAt) === Date.parse(expected.observedAt) &&
-        (actual.verifiedAt === null
-          ? expected.verifiedAt === null
-          : expected.verifiedAt !== null &&
-            Date.parse(actual.verifiedAt) === Date.parse(expected.verifiedAt))
-      );
-    });
-    if (matching === undefined) {
+  for (const integrationId of integrationIds) {
+    const row = rows.find((candidate) => candidate.integrationId === integrationId);
+    if (row?.enabled !== true) {
       throw conflict(
-        'The consequence preview no longer matches current integration readiness.',
+        `The ${integrationId} channel is no longer enabled; review the preview again.`,
       );
     }
-    resolved[channel.channel] = matching.status.id;
   }
-  return Object.freeze(resolved);
 }
 
 async function activationPreviewById(
@@ -1747,19 +1685,6 @@ async function activationPreviewById(
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,
     activeEventIds: row.activeEventIds,
-    deliveryTest:
-      row.deliveryTestTargetSetId === null ||
-      row.deliveryTestTargetSetVersion === null ||
-      row.deliveryTestEndpointReferenceDigest === null
-        ? null
-        : {
-            purpose: 'monthly-live-delivery-test',
-            targetSet: {
-              id: row.deliveryTestTargetSetId,
-              version: row.deliveryTestTargetSetVersion,
-            },
-            endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
-          },
     consequenceDigest: row.consequenceDigest,
     createdAt: dateIso(row.createdAt),
     expiresAt: dateIso(row.expiresAt),
@@ -1832,19 +1757,6 @@ async function notificationIntentById(
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
-    deliveryTest:
-      row.deliveryTestTargetSetId === null ||
-      row.deliveryTestTargetSetVersion === null ||
-      row.deliveryTestEndpointReferenceDigest === null
-        ? null
-        : {
-            purpose: 'monthly-live-delivery-test',
-            targetSet: {
-              id: row.deliveryTestTargetSetId,
-              version: row.deliveryTestTargetSetVersion,
-            },
-            endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
-          },
     createdBy: row.createdBy,
     source: row.source,
     requestId: row.requestId,
@@ -2200,7 +2112,6 @@ async function persistNotification(
   database: EventQueryDatabase,
   intent: NotificationIntent,
   outboxRecord: OutboxRecord,
-  integrationStatusIds: Readonly<Record<string, string>>,
 ): Promise<void> {
   // A notification intent is inserted plainly. It used to be bound at insert to
   // a notification control record and its enable epoch, so a deployment that had
@@ -2221,21 +2132,10 @@ async function persistNotification(
     source: intent.source,
     requestId: intent.requestId,
     authorization: intent.authorization,
-    deliveryTestTargetSetId: intent.deliveryTest?.targetSet.id ?? null,
-    deliveryTestTargetSetVersion:
-      intent.deliveryTest?.targetSet.version ?? null,
-    deliveryTestEndpointReferenceDigest:
-      intent.deliveryTest?.endpointReferenceDigest ?? null,
     createdAt: new Date(intent.createdAt),
   });
   await database.insert(notificationIntentChannels).values(
     intent.channels.map((channel, index) => {
-      const integrationStatusId = integrationStatusIds[channel.channel];
-      if (integrationStatusId === undefined) {
-        throw conflict(
-          'The notification channel integration evidence is unavailable.',
-        );
-      }
       return {
         intentId: intent.id,
         sequence: index + 1,
@@ -2247,9 +2147,7 @@ async function persistNotification(
         classificationMarker: channel.renderedMessage.classificationMarker,
         endpointCount: channel.endpointCount,
         renderedMessage: channel.renderedMessage,
-        integrationStatusId,
-        integrationId: channel.integrationStatus.integrationId,
-        integrationLabel: channel.integrationStatus.label,
+        integrationId: channel.integrationId,
       };
     }),
   );
@@ -2366,44 +2264,7 @@ async function persistLifecycleBundle(
       database,
       bundle.result.notificationIntent,
       bundle.outboxRecord,
-      bundle.integrationStatusIds,
     );
-    const intent = bundle.result.notificationIntent;
-    if (intent.deliveryTest != null) {
-      const authorization = intent.authorization;
-      if (
-        bundle.result.transition.transition !== 'activate' ||
-        authorization.kind !== 'human-confirmed' ||
-        intent.createdBy.kind !== 'human' ||
-        (intent.source !== 'web' && intent.source !== 'mobile') ||
-        bundle.result.event.kind !== 'drill' ||
-        bundle.result.event.templateMode !== 'drill' ||
-        bundle.result.event.rosterPopulation !== 'staff' ||
-        bundle.result.event.activatedAt === null ||
-        authorization.preparedActivationId !== null ||
-        bundle.result.transition.confirmationId !== authorization.confirmationId
-      ) {
-        throw conflict(
-          'The monthly delivery-test activation evidence is inconsistent.',
-        );
-      }
-      await database.insert(deliveryTestRuns).values({
-        id: randomUUID(),
-        activationPreviewId: authorization.activationPreviewId,
-        eventId: bundle.result.event.id,
-        notificationIntentId: intent.id,
-        targetSetVersionId: intent.deliveryTest.targetSet.id,
-        targetSetVersion: intent.deliveryTest.targetSet.version,
-        endpointReferenceDigest: intent.deliveryTest.endpointReferenceDigest,
-        consequenceDigest: authorization.consequenceDigest,
-        confirmationId: authorization.confirmationId,
-        confirmationStatus: 'consumed',
-        requestId: intent.requestId,
-        startedByUserId: intent.createdBy.userId,
-        startedWithSessionId: intent.createdBy.sessionId,
-        startedAt: new Date(bundle.result.event.activatedAt),
-      });
-    }
   } else if (
     bundle.outboxRecord !== null ||
     bundle.sendPreviewCreatedAt !== null
@@ -2655,167 +2516,6 @@ async function resolveActivationSourceFromDatabase(
   if (preview === null) {
     return null;
   }
-  if (preview.deliveryTest != null) {
-    if (preparedActivation !== null || input.source !== 'activation-preview') {
-      throw conflict(
-        'A monthly delivery test requires a fresh interactive activation preview.',
-      );
-    }
-    const metadata = preview.deliveryTest;
-    // Coordinate with target-version creation. Without this shared lineage
-    // lock a successor could commit after the stale check but before this
-    // activation transaction commits and queues its outbox.
-    await database.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(preview.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
-    );
-    const [targetSet] = await database
-      .select()
-      .from(deliveryTestTargetSetVersions)
-      .where(
-        and(
-          eq(deliveryTestTargetSetVersions.id, metadata.targetSet.id),
-          eq(deliveryTestTargetSetVersions.version, metadata.targetSet.version),
-        ),
-      )
-      .for('share')
-      .limit(1);
-    if (
-      targetSet === undefined ||
-      targetSet.facilityId !== preview.facilityId ||
-      targetSet.rosterSnapshotId !== preview.rosterSnapshotId ||
-      targetSet.rosterPopulation !== 'staff' ||
-      targetSet.endpointReferenceDigest !== metadata.endpointReferenceDigest
-    ) {
-      throw conflict(
-        'The monthly delivery-test target approval no longer matches its preview.',
-      );
-    }
-    const [successor] = await database
-      .select({ id: deliveryTestTargetSetVersions.id })
-      .from(deliveryTestTargetSetVersions)
-      .where(
-        eq(deliveryTestTargetSetVersions.supersedesVersionId, targetSet.id),
-      )
-      .limit(1);
-    if (successor !== undefined) {
-      throw conflict(
-        'The monthly delivery-test target approval has been superseded.',
-      );
-    }
-    const endpointRows = await database
-      .select({
-        eligibilityFactId: deliveryTestTargetEndpoints.eligibilityFactId,
-        recipientId: deliveryTestTargetEndpoints.recipientId,
-        endpointId: deliveryTestTargetEndpoints.endpointId,
-        channel: deliveryTestTargetEndpoints.channel,
-        attestation: deliveryTestTargetEndpoints.attestation,
-        optedInAt: deliveryTestTargetEndpoints.optedInAt,
-        attestedAt: deliveryTestTargetEndpoints.attestedAt,
-        attestedByUserId: deliveryTestTargetEndpoints.attestedByUserId,
-        authorizationReference:
-          deliveryTestTargetEndpoints.authorizationReference,
-      })
-      .from(deliveryTestTargetEndpoints)
-      .where(eq(deliveryTestTargetEndpoints.targetSetVersionId, targetSet.id))
-      .orderBy(
-        asc(deliveryTestTargetEndpoints.channel),
-        asc(deliveryTestTargetEndpoints.recipientId),
-        asc(deliveryTestTargetEndpoints.endpointId),
-      );
-    if (
-      endpointRows.length === 0 ||
-      deliveryTestEndpointReferenceDigest(endpointRows) !==
-        metadata.endpointReferenceDigest
-    ) {
-      throw conflict(
-        'The monthly delivery-test endpoint approval is inconsistent.',
-      );
-    }
-    await requireCurrentDeliveryTestTargetEligibility(
-      database,
-      {
-        id: targetSet.id,
-        version: targetSet.version,
-        facilityId: targetSet.facilityId,
-        rosterSnapshotId: targetSet.rosterSnapshotId,
-        supersedesVersionId: targetSet.supersedesVersionId,
-        endpoints: endpointRows.map((endpoint) => ({
-          ...endpoint,
-          attestation: 'approved-synthetic-canary' as const,
-          optedInAt: dateIso(endpoint.optedInAt),
-          attestedAt: dateIso(endpoint.attestedAt),
-          attestedByUserId: endpoint.attestedByUserId,
-          authorizationReference: endpoint.authorizationReference,
-        })),
-        endpointReferenceDigest: targetSet.endpointReferenceDigest,
-        approvedByUserId: targetSet.approvedByUserId,
-        approvedWithSessionId: targetSet.approvedWithSessionId,
-        approvedAt: dateIso(targetSet.approvedAt),
-        createdAt: dateIso(targetSet.createdAt),
-      },
-      await readDatabaseTime(database),
-    );
-    const credentialReferences =
-      readDeliveryTestCredentialVerificationReferences();
-    if (
-      preview.channels.some(
-        (channel) =>
-          !deliveryTestCredentialIsVerified(
-            channel.integrationStatus,
-            credentialReferences[channel.channel],
-            channel.channel,
-          ),
-      )
-    ) {
-      throw conflict(
-        'The monthly delivery-test credential evidence no longer matches its preview.',
-      );
-    }
-    const rosterSnapshot = await loadRosterSnapshot(
-      database,
-      'staff',
-      preview.facilityId,
-      targetSet.rosterSnapshotId,
-    );
-    const activeAudienceEndpoints =
-      rosterSnapshot === null
-        ? []
-        : await currentActiveAudienceEndpointReferences(
-            database,
-            rosterSnapshot,
-            targetSet.facilityId,
-          );
-    const activeKeys = new Set(
-      activeAudienceEndpoints.map(
-        (endpoint) =>
-          `${endpoint.channel}:${endpoint.recipientId}:${endpoint.endpointId}`,
-      ),
-    );
-    if (
-      rosterSnapshot === null ||
-      // The preview must still describe the school this target set belongs to.
-      // It used to have to match a pinned audience-configuration version as
-      // well; there is no version to drift now, only the school itself.
-      preview.facilityId !== targetSet.facilityId ||
-      endpointRows.some(
-        (endpoint) =>
-          !activeKeys.has(
-            `${endpoint.channel}:${endpoint.recipientId}:${endpoint.endpointId}`,
-          ),
-      ) ||
-      preview.channels.some(
-        (channel) =>
-          channel.endpointCount !==
-          endpointRows.filter(
-            (endpoint) => endpoint.channel === channel.channel,
-          ).length,
-      )
-    ) {
-      throw conflict(
-        'The monthly delivery-test endpoints are no longer the exact active approved subset.',
-      );
-    }
-  }
   await database
     .select({ id: facilities.id })
     .from(facilities)
@@ -2832,13 +2532,10 @@ async function resolveActivationSourceFromDatabase(
       ),
     )
     .orderBy(asc(events.id));
+  await assertChannelsEnabled(database, preview.channels);
   return {
     preview,
     preparedActivation,
-    integrationStatusIds: await resolveIntegrationStatusIds(
-      database,
-      preview.channels,
-    ),
     currentActiveEventIds: currentActiveRows.map((row) => row.id),
   };
 }
@@ -2906,15 +2603,9 @@ function createDrizzleEventTransaction(
       resolveEventForUpdateFromDatabase(database, eventId),
     async resolveLifecyclePreview(previewId) {
       const preview = await lifecyclePreviewById(database, previewId);
-      return preview === null
-        ? null
-        : {
-            preview,
-            integrationStatusIds: await resolveIntegrationStatusIds(
-              database,
-              preview.channels,
-            ),
-          };
+      if (preview === null) return null;
+      await assertChannelsEnabled(database, preview.channels);
+      return { preview };
     },
     async getEvent(eventId) {
       const [row] = await database

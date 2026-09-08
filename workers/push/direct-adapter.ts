@@ -345,7 +345,6 @@ export class LedgeredDirectPushAdapter
 {
   public readonly channel = 'push' as const;
   public readonly integrationId = DIRECT_PUSH_INTEGRATION_ID;
-  public readonly truthLabel = 'live-verified' as const;
   public readonly provider: DirectPushProvider;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -482,8 +481,7 @@ export class LedgeredDirectPushAdapter
     }
     if (
       request.idempotencyKey !== workItem.attempt.id ||
-      workItem.batch.integrationStatus.integrationId !== this.integrationId ||
-      workItem.batch.integrationStatus.label !== this.truthLabel ||
+      workItem.batch.integrationId !== this.integrationId ||
       workItem.batch.rosterPopulation !== 'staff' ||
       !providerMatchesEndpoint(workItem, this.provider)
     ) {

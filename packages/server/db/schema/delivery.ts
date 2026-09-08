@@ -25,9 +25,7 @@ import {
   invocationSourceEnum,
   deliveryTruthStateEnum,
   deliveryEvidenceSubjectKindEnum,
-  deliveryTestReportStatusEnum,
   outboxStatusEnum,
-  integrationTruthLabelEnum,
   humanConfirmationStatusEnum,
 } from './enums';
 
@@ -35,13 +33,9 @@ import { auditCode, digest, occurredAt } from './shared';
 
 import { sessions, humanConfirmationRecords } from './identity';
 
-import {
-  rosterSnapshots,
-  rosterEndpoints,
-  deliveryTestTargetSetVersions,
-} from './roster';
+import { rosterSnapshots, rosterEndpoints } from './roster';
 
-import { eventTypeVersions, integrationStatuses } from './event-types';
+import { eventTypeVersions } from './event-types';
 
 import { activationPreviews, events } from './events';
 /** Immutable, transactionally recorded notification send intents. */
@@ -60,11 +54,6 @@ export const notificationIntents = pgTable(
     source: invocationSourceEnum('source').notNull(),
     requestId: uuid('request_id').notNull(),
     authorization: jsonb('authorization').notNull(),
-    deliveryTestTargetSetId: uuid('delivery_test_target_set_id'),
-    deliveryTestTargetSetVersion: integer('delivery_test_target_set_version'),
-    deliveryTestEndpointReferenceDigest: digest(
-      'delivery_test_endpoint_reference_digest',
-    ),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [
@@ -91,14 +80,6 @@ export const notificationIntents = pgTable(
       table.eventTypeVersionId,
       table.rosterSnapshotId,
       table.rosterPopulation,
-    ),
-    unique('notification_intents_delivery_test_anchor_uq').on(
-      table.id,
-      table.eventId,
-      table.requestId,
-      table.deliveryTestTargetSetId,
-      table.deliveryTestTargetSetVersion,
-      table.deliveryTestEndpointReferenceDigest,
     ),
     unique('notification_intents_worker_anchor_uq').on(
       table.id,
@@ -141,19 +122,6 @@ export const notificationIntents = pgTable(
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'notification_intents_roster_population_fk',
     }).onDelete('restrict'),
-    foreignKey({
-      columns: [
-        table.deliveryTestTargetSetId,
-        table.deliveryTestTargetSetVersion,
-        table.rosterSnapshotId,
-      ],
-      foreignColumns: [
-        deliveryTestTargetSetVersions.id,
-        deliveryTestTargetSetVersions.version,
-        deliveryTestTargetSetVersions.rosterSnapshotId,
-      ],
-      name: 'notification_intents_delivery_test_target_set_fk',
-    }).onDelete('restrict'),
     check(
       'notification_intents_classification',
       sql`(
@@ -195,30 +163,6 @@ export const notificationIntents = pgTable(
         else false
       end`,
     ),
-    check(
-      'notification_intents_delivery_test_truth',
-      sql`(
-        ${table.deliveryTestTargetSetId} is null
-        and ${table.deliveryTestTargetSetVersion} is null
-        and ${table.deliveryTestEndpointReferenceDigest} is null
-      ) or (
-        ${table.deliveryTestTargetSetId} is not null
-        and ${table.deliveryTestTargetSetVersion} is not null
-        and ${table.deliveryTestEndpointReferenceDigest} is not null
-        and ${table.eventKind} = 'drill'
-        and ${table.templateMode} = 'drill'
-        and ${table.rosterPopulation} = 'staff'
-        and ${table.purpose} = 'activation'
-        and ${table.createdBy} ->> 'kind' is not distinct from 'human'
-        and ${table.source} in ('web', 'mobile')
-        and ${table.authorization} ->> 'kind' is not distinct from 'human-confirmed'
-      )`,
-    ),
-    check(
-      'notification_intents_delivery_test_digest_format',
-      sql`${table.deliveryTestEndpointReferenceDigest} is null
-        or ${table.deliveryTestEndpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
-    ),
   ],
 );
 
@@ -240,9 +184,7 @@ export const notificationIntentChannels = pgTable(
     ).notNull(),
     endpointCount: integer('endpoint_count').notNull(),
     renderedMessage: jsonb('rendered_message').notNull(),
-    integrationStatusId: uuid('integration_status_id').notNull(),
     integrationId: varchar('integration_id', { length: 100 }).notNull(),
-    integrationLabel: integrationTruthLabelEnum('integration_label').notNull(),
   },
   (table) => [
     primaryKey({ columns: [table.intentId, table.channel] }),
@@ -266,19 +208,6 @@ export const notificationIntentChannels = pgTable(
         notificationIntents.rosterPopulation,
       ],
       name: 'notification_intent_channels_intent_truth_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [
-        table.integrationStatusId,
-        table.integrationId,
-        table.integrationLabel,
-      ],
-      foreignColumns: [
-        integrationStatuses.id,
-        integrationStatuses.integrationId,
-        integrationStatuses.label,
-      ],
-      name: 'notification_intent_channels_integration_truth_fk',
     }).onDelete('restrict'),
     check(
       'notification_intent_channels_sequence_positive',
@@ -318,16 +247,6 @@ export const notificationIntentChannels = pgTable(
         ${table.channel} = 'email' and ${table.integrationId} = 'ses-email'
       ) or (
         ${table.channel} = 'sms' and ${table.integrationId} = 'aws-eum-sms'
-      )`,
-    ),
-    check(
-      'notification_intent_channels_integration_population',
-      sql`(
-        ${table.rosterPopulation} = 'staff'
-        and ${table.integrationLabel} = 'live-verified'
-      ) or (
-        ${table.rosterPopulation} = 'synthetic'
-        and ${table.integrationLabel} = 'mocked'
       )`,
     ),
   ],
@@ -477,38 +396,17 @@ export const outbox = pgTable(
       'outbox_channel_plan_shape',
       sql`case
         when jsonb_typeof(${table.channels}) = 'array' then
-          (
-            (
-              jsonb_array_length(${table.channels}) between 2 and 3
-              and jsonb_array_length(jsonb_path_query_array(
-                ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
-              )) = 1
-              and jsonb_array_length(jsonb_path_query_array(
-                ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
-              )) = 1
-              and jsonb_array_length(jsonb_path_query_array(
-                ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-              )) <= 1
-            ) or (
-              ${table.eventKind} = 'drill'
-              and ${table.templateMode} = 'drill'
-              and ${table.purpose} = 'activation'
-              and ${table.rosterPopulation} = 'staff'
-              and jsonb_typeof(${table.message} -> 'deliveryTest') is not distinct from 'object'
-              and jsonb_array_length(${table.channels}) = 1
-              and (
-                jsonb_array_length(jsonb_path_query_array(
-                  ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationStatus.integrationId == "expo-push" || @.integrationStatus.integrationId == "mobile-push"))'
-                ))
-                + jsonb_array_length(jsonb_path_query_array(
-                  ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationStatus.integrationId == "ses-email")'
-                ))
-                + jsonb_array_length(jsonb_path_query_array(
-                  ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationStatus.integrationId == "aws-eum-sms")'
-                ))
-              ) = 1
-            )
-           ) and jsonb_array_length(jsonb_path_query_array(
+          jsonb_array_length(${table.channels}) between 2 and 3
+          and jsonb_array_length(jsonb_path_query_array(
+            ${table.channels}, '$[*] ? (@.channel == "push" && @.renderedMessage.channel == "push" && (@.integrationId == "expo-push" || @.integrationId == "mobile-push"))'
+          )) = 1
+          and jsonb_array_length(jsonb_path_query_array(
+            ${table.channels}, '$[*] ? (@.channel == "email" && @.renderedMessage.channel == "email" && @.integrationId == "ses-email")'
+          )) = 1
+          and jsonb_array_length(jsonb_path_query_array(
+            ${table.channels}, '$[*] ? (@.channel == "sms" && @.renderedMessage.channel == "sms" && @.integrationId == "aws-eum-sms")'
+          )) <= 1
+          and jsonb_array_length(jsonb_path_query_array(
             ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
           )) = jsonb_array_length(${table.channels})
         else false
@@ -546,20 +444,6 @@ export const outbox = pgTable(
         when ${table.purpose} = 'reactivation' then
           jsonb_array_length(jsonb_path_query_array(
             ${table.channels}, '$[*] ? (@.renderedMessage.purpose == "reactivation")'
-          )) = jsonb_array_length(${table.channels})
-        else false
-      end`,
-    ),
-    check(
-      'outbox_channel_plan_integration_truth',
-      sql`case
-        when ${table.rosterPopulation} = 'staff' then
-          jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.integrationStatus.label == "live-verified")'
-          )) = jsonb_array_length(${table.channels})
-        when ${table.rosterPopulation} = 'synthetic' then
-          jsonb_array_length(jsonb_path_query_array(
-            ${table.channels}, '$[*] ? (@.integrationStatus.label == "mocked")'
           )) = jsonb_array_length(${table.channels})
         else false
       end`,
@@ -613,9 +497,7 @@ export const dispatchBatches = pgTable(
     authorization: jsonb('authorization').notNull(),
     channel: notificationChannelEnum('channel').notNull(),
     renderedMessage: jsonb('rendered_message').notNull(),
-    integrationStatusId: uuid('integration_status_id').notNull(),
     integrationId: varchar('integration_id', { length: 100 }).notNull(),
-    integrationLabel: integrationTruthLabelEnum('integration_label').notNull(),
     sequence: integer('sequence').notNull(),
     endpointCount: integer('endpoint_count').notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
@@ -722,19 +604,6 @@ export const dispatchBatches = pgTable(
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'dispatch_batches_roster_population_fk',
     }).onDelete('restrict'),
-    foreignKey({
-      columns: [
-        table.integrationStatusId,
-        table.integrationId,
-        table.integrationLabel,
-      ],
-      foreignColumns: [
-        integrationStatuses.id,
-        integrationStatuses.integrationId,
-        integrationStatuses.label,
-      ],
-      name: 'dispatch_batches_integration_truth_fk',
-    }).onDelete('restrict'),
     check('dispatch_batches_sequence_positive', sql`${table.sequence} > 0`),
     check(
       'dispatch_batches_endpoint_count',
@@ -773,16 +642,6 @@ export const dispatchBatches = pgTable(
         ${table.channel} = 'email' and ${table.integrationId} = 'ses-email'
       ) or (
         ${table.channel} = 'sms' and ${table.integrationId} = 'aws-eum-sms'
-      )`,
-    ),
-    check(
-      'dispatch_batches_integration_population',
-      sql`(
-        ${table.rosterPopulation} = 'staff'
-        and ${table.integrationLabel} = 'live-verified'
-      ) or (
-        ${table.rosterPopulation} = 'synthetic'
-        and ${table.integrationLabel} = 'mocked'
       )`,
     ),
   ],
@@ -1308,207 +1167,6 @@ export const deliveryEvidence = pgTable(
       'delivery_evidence_reason_truth',
       sql`(${table.state} in ('failed', 'expired', 'unknown')) = (${table.reasonCode} is not null)
         and (${table.diagnosticDigest} is null or ${table.reasonCode} is not null)`,
-    ),
-  ],
-);
-
-/**
- * One authenticated-human monthly live delivery-test activation. This is
- * written in the same transaction as the canonical start-event lifecycle.
- */
-export const deliveryTestRuns = pgTable(
-  'delivery_test_runs',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    activationPreviewId: uuid('activation_preview_id').notNull(),
-    eventId: uuid('event_id')
-      .notNull()
-      .references(() => events.id, { onDelete: 'restrict' }),
-    notificationIntentId: uuid('notification_intent_id').notNull(),
-    targetSetVersionId: uuid('target_set_version_id').notNull(),
-    targetSetVersion: integer('target_set_version').notNull(),
-    endpointReferenceDigest: digest('endpoint_reference_digest').notNull(),
-    consequenceDigest: digest('consequence_digest').notNull(),
-    confirmationId: uuid('confirmation_id').notNull(),
-    confirmationStatus: humanConfirmationStatusEnum('confirmation_status')
-      .default('consumed')
-      .notNull(),
-    requestId: uuid('request_id').notNull(),
-    startedByUserId: uuid('started_by_user_id').notNull(),
-    startedWithSessionId: uuid('started_with_session_id').notNull(),
-    startedAt: occurredAt('started_at').notNull(),
-  },
-  (table) => [
-    unique('delivery_test_runs_preview_uq').on(table.activationPreviewId),
-    unique('delivery_test_runs_event_uq').on(table.eventId),
-    unique('delivery_test_runs_intent_uq').on(table.notificationIntentId),
-    unique('delivery_test_runs_confirmation_uq').on(table.confirmationId),
-    unique('delivery_test_runs_request_uq').on(table.requestId),
-    unique('delivery_test_runs_identity_start_uq').on(
-      table.id,
-      table.startedAt,
-    ),
-    foreignKey({
-      columns: [
-        table.activationPreviewId,
-        table.targetSetVersionId,
-        table.targetSetVersion,
-        table.endpointReferenceDigest,
-        table.consequenceDigest,
-      ],
-      foreignColumns: [
-        activationPreviews.id,
-        activationPreviews.deliveryTestTargetSetId,
-        activationPreviews.deliveryTestTargetSetVersion,
-        activationPreviews.deliveryTestEndpointReferenceDigest,
-        activationPreviews.consequenceDigest,
-      ],
-      name: 'delivery_test_runs_activation_preview_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [
-        table.notificationIntentId,
-        table.eventId,
-        table.requestId,
-        table.targetSetVersionId,
-        table.targetSetVersion,
-        table.endpointReferenceDigest,
-      ],
-      foreignColumns: [
-        notificationIntents.id,
-        notificationIntents.eventId,
-        notificationIntents.requestId,
-        notificationIntents.deliveryTestTargetSetId,
-        notificationIntents.deliveryTestTargetSetVersion,
-        notificationIntents.deliveryTestEndpointReferenceDigest,
-      ],
-      name: 'delivery_test_runs_notification_intent_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [
-        table.confirmationId,
-        table.confirmationStatus,
-        table.requestId,
-        table.consequenceDigest,
-      ],
-      foreignColumns: [
-        humanConfirmationRecords.id,
-        humanConfirmationRecords.status,
-        humanConfirmationRecords.consumedForRequestId,
-        humanConfirmationRecords.consequenceDigest,
-      ],
-      name: 'delivery_test_runs_consumed_confirmation_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.startedWithSessionId, table.startedByUserId],
-      foreignColumns: [sessions.id, sessions.userId],
-      name: 'delivery_test_runs_human_session_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.targetSetVersionId, table.targetSetVersion],
-      foreignColumns: [
-        deliveryTestTargetSetVersions.id,
-        deliveryTestTargetSetVersions.version,
-      ],
-      name: 'delivery_test_runs_target_set_fk',
-    }).onDelete('restrict'),
-    index('delivery_test_runs_started_at_idx').on(table.startedAt.desc()),
-    check(
-      'delivery_test_runs_consumed_confirmation',
-      sql`${table.confirmationStatus} = 'consumed'`,
-    ),
-    check(
-      'delivery_test_runs_digest_format',
-      sql`${table.endpointReferenceDigest} ~ '^[a-f0-9]{64}$'
-        and ${table.consequenceDigest} ~ '^[a-f0-9]{64}$'`,
-    ),
-  ],
-);
-
-/**
- * Append-only report revisions. `incomplete` and `unknown` remain first-class
- * truth states; a later correction supersedes rather than rewrites a report.
- */
-export const deliveryTestReports = pgTable(
-  'delivery_test_reports',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    runId: uuid('run_id').notNull(),
-    runStartedAt: occurredAt('run_started_at').notNull(),
-    sequence: integer('sequence').notNull(),
-    supersedesReportId: uuid('supersedes_report_id'),
-    status: deliveryTestReportStatusEnum('status').notNull(),
-    channels: jsonb('channels').notNull(),
-    generatedAt: occurredAt('generated_at').defaultNow().notNull(),
-    finalizedBy: jsonb('finalized_by').notNull(),
-    source: invocationSourceEnum('source').notNull(),
-    reasonCode: auditCode('reason_code'),
-  },
-  (table) => [
-    unique('delivery_test_reports_run_sequence_uq').on(
-      table.runId,
-      table.sequence,
-    ),
-    unique('delivery_test_reports_identity_run_uq').on(table.id, table.runId),
-    foreignKey({
-      columns: [table.runId, table.runStartedAt],
-      foreignColumns: [deliveryTestRuns.id, deliveryTestRuns.startedAt],
-      name: 'delivery_test_reports_run_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.supersedesReportId, table.runId],
-      foreignColumns: [table.id, table.runId],
-      name: 'delivery_test_reports_supersedes_same_run_fk',
-    }).onDelete('restrict'),
-    index('delivery_test_reports_generated_at_idx').on(
-      table.generatedAt.desc(),
-    ),
-    check(
-      'delivery_test_reports_sequence_positive',
-      sql`${table.sequence} > 0`,
-    ),
-    check(
-      'delivery_test_reports_sequence_chain',
-      sql`(${table.sequence} = 1) = (${table.supersedesReportId} is null)`,
-    ),
-    check(
-      'delivery_test_reports_not_self_superseding',
-      sql`${table.supersedesReportId} is null or ${table.supersedesReportId} <> ${table.id}`,
-    ),
-    check(
-      'delivery_test_reports_channels_shape',
-      sql`jsonb_typeof(${table.channels}) is not distinct from 'array'
-        and (
-          jsonb_array_length(${table.channels}) between 2 and 3
-          or (
-            jsonb_array_length(${table.channels}) = 1
-            and jsonb_array_length(jsonb_path_query_array(
-              ${table.channels}, '$[*] ? (@.channel == "push" || @.channel == "email" || @.channel == "sms")'
-            )) = 1
-          )
-        )`,
-    ),
-    check(
-      'delivery_test_reports_status_reason_truth',
-      sql`(
-        ${table.status} = 'succeeded' and ${table.reasonCode} is null
-      ) or (
-        ${table.status} in ('failed', 'incomplete')
-        and ${table.reasonCode} is not null
-      )`,
-    ),
-    check(
-      'delivery_test_reports_reason_code_format',
-      sql`${table.reasonCode} is null or ${table.reasonCode} ~ '^[A-Z0-9_]+$'`,
-    ),
-    check(
-      'delivery_test_reports_system_finalizer',
-      sql`${table.finalizedBy} ->> 'kind' is not distinct from 'system'
-        and ${table.source} = 'worker'`,
-    ),
-    check(
-      'delivery_test_reports_after_run',
-      sql`${table.generatedAt} >= ${table.runStartedAt}`,
     ),
   ],
 );
