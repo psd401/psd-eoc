@@ -15,7 +15,7 @@ import {
   type DispatchBatch,
   type SmsWorkerAttemptWorkItem,
 } from '@psd-eoc/contracts';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -29,6 +29,7 @@ import {
   deliveryEvidence,
   dispatchBatches,
   events,
+  eventTransitions,
   groupSources,
   notificationIntentChannels,
   notificationIntents,
@@ -45,6 +46,7 @@ import {
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
+import { batchHasCurrentLifecycle } from './batch-lifecycle';
 import {
   closeAndDropDisposableDatabase,
   createDisposableDatabase,
@@ -146,6 +148,33 @@ function humanAuthorization(requestId: string) {
     kind: 'human-confirmed' as const,
     activationPreviewId: randomUUID(),
     preparedActivationId: null,
+    confirmationId: randomUUID(),
+    consequenceDigest: 'd'.repeat(64),
+    requestId,
+  });
+}
+
+interface LifecycleFixture {
+  readonly purpose: 'all-clear';
+  readonly status: 'all-clear' | 'closed';
+}
+
+function lifecycleAuthorization(
+  purpose: 'all-clear',
+  requestId: string,
+  transitionId: string,
+) {
+  return Object.freeze({
+    kind: 'human-confirmed-lifecycle' as const,
+    purpose,
+    targeting: Object.freeze({
+      kind: 'drill' as const,
+      templateMode: 'drill' as const,
+      rosterPopulation: 'staff' as const,
+    }),
+    lifecyclePreviewId: randomUUID(),
+    transitionId,
+    actionIds: ['all-clear' as const, 'send-real-notification' as const],
     confirmationId: randomUUID(),
     consequenceDigest: 'd'.repeat(64),
     requestId,
@@ -270,6 +299,7 @@ async function installNotificationBundle(
   database: PostgresDatabase,
   snapshotId: string,
   smsEndpointCount: number,
+  lifecycle: LifecycleFixture | null = null,
 ): Promise<NotificationBundle> {
   const ids = Object.freeze({
     event: randomUUID(),
@@ -277,26 +307,35 @@ async function installNotificationBundle(
     outbox: randomUUID(),
     batch: randomUUID(),
     request: randomUUID(),
+    activationRequest: randomUUID(),
+    transition: randomUUID(),
   });
   const createdAt = new Date(CREATED_AT);
-  const authorization = humanAuthorization(ids.request);
+  const purpose = lifecycle?.purpose ?? 'activation';
+  const activationAuthorization = humanAuthorization(
+    lifecycle === null ? ids.request : ids.activationRequest,
+  );
+  const authorization =
+    lifecycle === null
+      ? activationAuthorization
+      : lifecycleAuthorization(lifecycle.purpose, ids.request, ids.transition);
   const channels = Object.freeze([
     Object.freeze({
       channel: 'push' as const,
       endpointCount: 1,
-      renderedMessage: pushMessage,
+      renderedMessage: { ...pushMessage, purpose },
       integrationId: 'expo-push',
     }),
     Object.freeze({
       channel: 'email' as const,
       endpointCount: 1,
-      renderedMessage: emailMessage,
+      renderedMessage: { ...emailMessage, purpose },
       integrationId: 'ses-email',
     }),
     Object.freeze({
       channel: 'sms' as const,
       endpointCount: smsEndpointCount,
-      renderedMessage: smsMessage,
+      renderedMessage: { ...smsMessage, purpose },
       integrationId: 'aws-eum-sms',
     }),
   ]);
@@ -308,7 +347,7 @@ async function installNotificationBundle(
     eventId: ids.event,
     eventKind: 'drill',
     templateMode: 'drill',
-    purpose: 'activation',
+    purpose,
     eventTypeVersion: {
       id: EVENT_TYPE_VERSION_ID,
       templateMode: 'drill',
@@ -327,7 +366,7 @@ async function installNotificationBundle(
     facilityId: FACILITY_ID,
     eventKind: 'drill',
     templateMode: 'drill',
-    purpose: 'activation',
+    purpose,
     eventTypeVersion: {
       id: EVENT_TYPE_VERSION_ID,
       templateMode: 'drill',
@@ -337,7 +376,7 @@ async function installNotificationBundle(
     requestId: ids.request,
     authorization,
     channel: 'sms',
-    renderedMessage: smsMessage,
+    renderedMessage: { ...smsMessage, purpose },
     integrationId: 'aws-eum-sms',
     sequence: 3,
     endpointCount: smsEndpointCount,
@@ -351,7 +390,7 @@ async function installNotificationBundle(
       kind: 'drill',
       templateMode: 'drill',
       eventTypeVersionId: EVENT_TYPE_VERSION_ID,
-      status: 'active',
+      status: lifecycle?.status ?? 'active',
       rosterSnapshotId: snapshotId,
       rosterPopulation: 'staff',
       createdBy: {
@@ -361,19 +400,22 @@ async function installNotificationBundle(
       },
       createdAt,
       activatedAt: createdAt,
-      allClearAt: null,
+      allClearAt: lifecycle === null ? null : createdAt,
       reactivatedAt: null,
-      closedAt: null,
+      closedAt:
+        lifecycle?.status === 'closed'
+          ? new Date(createdAt.getTime() + 1_000)
+          : null,
       correctionOfEventId: null,
       correctionReason: null,
-      activationAuthorization: authorization,
+      activationAuthorization,
     });
     await transaction.insert(notificationIntents).values({
       id: ids.intent,
       eventId: ids.event,
       eventKind: 'drill',
       templateMode: 'drill',
-      purpose: 'activation',
+      purpose,
       eventTypeVersionId: EVENT_TYPE_VERSION_ID,
       rosterSnapshotId: snapshotId,
       rosterPopulation: 'staff',
@@ -394,11 +436,11 @@ async function installNotificationBundle(
         channel: 'push',
         eventKind: 'drill',
         templateMode: 'drill',
-        purpose: 'activation',
+        purpose,
         rosterPopulation: 'staff',
         classificationMarker: 'DRILL',
         endpointCount: 1,
-        renderedMessage: pushMessage,
+        renderedMessage: { ...pushMessage, purpose },
         integrationId: 'expo-push',
       },
       {
@@ -407,11 +449,11 @@ async function installNotificationBundle(
         channel: 'email',
         eventKind: 'drill',
         templateMode: 'drill',
-        purpose: 'activation',
+        purpose,
         rosterPopulation: 'staff',
         classificationMarker: 'DRILL',
         endpointCount: 1,
-        renderedMessage: emailMessage,
+        renderedMessage: { ...emailMessage, purpose },
         integrationId: 'ses-email',
       },
       {
@@ -420,11 +462,11 @@ async function installNotificationBundle(
         channel: 'sms',
         eventKind: 'drill',
         templateMode: 'drill',
-        purpose: 'activation',
+        purpose,
         rosterPopulation: 'staff',
         classificationMarker: 'DRILL',
         endpointCount: smsEndpointCount,
-        renderedMessage: smsMessage,
+        renderedMessage: { ...smsMessage, purpose },
         integrationId: 'aws-eum-sms',
       },
     ]);
@@ -435,7 +477,7 @@ async function installNotificationBundle(
       eventId: ids.event,
       eventKind: 'drill',
       templateMode: 'drill',
-      purpose: 'activation',
+      purpose,
       eventTypeVersionId: EVENT_TYPE_VERSION_ID,
       rosterSnapshotId: snapshotId,
       rosterPopulation: 'staff',
@@ -459,14 +501,14 @@ async function installNotificationBundle(
       eventId: ids.event,
       eventKind: 'drill',
       templateMode: 'drill',
-      purpose: 'activation',
+      purpose,
       eventTypeVersionId: EVENT_TYPE_VERSION_ID,
       rosterSnapshotId: snapshotId,
       rosterPopulation: 'staff',
       requestId: ids.request,
       authorization,
       channel: 'sms',
-      renderedMessage: smsMessage,
+      renderedMessage: { ...smsMessage, purpose },
       integrationId: 'aws-eum-sms',
       sequence: 3,
       endpointCount: smsEndpointCount,
@@ -474,6 +516,47 @@ async function installNotificationBundle(
     });
   });
 
+  if (lifecycle !== null) {
+    await database.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`set local session_replication_role = replica`,
+      );
+      await transaction.insert(eventTransitions).values({
+        id: ids.transition,
+        sequence: 2,
+        transition: 'all-clear',
+        eventId: ids.event,
+        sourceEventId: null,
+        correctionEventId: null,
+        journalEventId: ids.event,
+        fromStatus: 'active',
+        toStatus: 'all-clear',
+        kind: 'drill',
+        templateMode: 'drill',
+        rosterPopulation: 'staff',
+        actor: {
+          kind: 'human',
+          userId: fixture.userId,
+          sessionId: fixture.sessionId,
+        },
+        source: 'web',
+        occurredAt: createdAt,
+        requestId: ids.request,
+        // A staff all-clear must name a consumed human confirmation. The
+        // confirmation record itself sits behind sessions and connectivity
+        // epochs that nothing here reads, so only its foreign key is skipped
+        // (replica mode disables the key trigger); every CHECK rule on the
+        // transition row still applies.
+        confirmationId: randomUUID(),
+        confirmationStatus: 'consumed',
+        consequenceDigest: 'd'.repeat(64),
+        idempotencyKey: randomUUID(),
+        activationAuthorization: null,
+        notificationAuthorization: authorization,
+        correctionReason: null,
+      });
+    });
+  }
   return Object.freeze({ batch });
 }
 
@@ -1183,5 +1266,38 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     await expect(
       runtimeStore().authorizeProviderSend(workItem),
     ).resolves.toEqual({ authorized: false });
+  });
+
+  test('authorizes an all-clear work item after the event is ended into closed', async () => {
+    // "End event" issues the all-clear and closes the event one second later.
+    // The all-clear text is how staff learn the event ended; the SMS gate
+    // used to require the event to still stand at all-clear, so every text
+    // sent that way was refused before provider I/O (2026-09-08).
+    currentTime = Date.parse(CREATED_AT) + 2_000;
+    const bundle = await installNotificationBundle(
+      databaseConnection().db,
+      fixture.pagedSnapshotId,
+      PAGED_ENDPOINT_COUNT,
+      { purpose: 'all-clear', status: 'closed' },
+    );
+    await expect(
+      batchHasCurrentLifecycle(databaseConnection().db, bundle.batch),
+    ).resolves.toBe(true);
+    const resolution = await runtimeStore().resolveBatch({
+      operation: 'resolve-batch',
+      batch: bundle.batch,
+      enqueuedAt: new Date(currentTime).toISOString(),
+      cursor: 0,
+    });
+    if (resolution.kind !== 'ready' || resolution.items[0] === undefined) {
+      throw new Error(
+        `The closed-event all-clear work item was unavailable: ${JSON.stringify(resolution)}`,
+      );
+    }
+    const workItem = resolution.items[0];
+    await persistAttempt(databaseConnection().db, workItem);
+    await expect(
+      runtimeStore().authorizeProviderSend(workItem),
+    ).resolves.toEqual(expect.objectContaining({ authorized: true }));
   });
 });

@@ -109,7 +109,7 @@ describe('SMS long-poll service', () => {
       runtime: {
         processDeliveryEvent() {
           invocations += 1;
-          return Promise.resolve(undefined as never);
+          return Promise.resolve({ kind: 'recorded' } as never);
         },
         processQueueAttempt: () => Promise.reject(new Error('unused')),
         reconcileOptOuts: () => Promise.reject(new Error('unused')),
@@ -163,7 +163,7 @@ describe('SMS long-poll service', () => {
       runtime: {
         processDeliveryEvent(value, context) {
           invocations.push({ value, context });
-          return Promise.resolve(undefined as never);
+          return Promise.resolve({ kind: 'recorded' } as never);
         },
         processQueueAttempt: () => Promise.reject(new Error('unused')),
         reconcileOptOuts: () => Promise.reject(new Error('unused')),
@@ -201,6 +201,85 @@ describe('SMS long-poll service', () => {
     });
     expect(JSON.stringify(logs)).not.toContain('+12025550123');
     expect(JSON.stringify(logs)).not.toContain('synthetic-receipt-handle');
+  });
+
+  test('retries a receipt that names no retained send, then deletes it and logs it as ignored', async () => {
+    // The send's provider reference lands after AWS already holds the
+    // MessageId, so an early receipt looks foreign for a moment. It is read
+    // again after the visibility timeout; only a receipt still unmatched on
+    // its third read is given up as foreign.
+    for (const [receiveCount, expectation] of [
+      ['1', 'deferred'],
+      ['2', 'deferred'],
+      ['3', 'ignored'],
+    ] as const) {
+      const commands: unknown[] = [];
+      const logs: unknown[] = [];
+      let loopChecks = 0;
+      await runSmsService({
+        environment: ENABLED_ENVIRONMENT,
+        now: () => NOW,
+        shouldContinue: () => loopChecks++ < 2,
+        log: (value) => logs.push(value),
+        runtime: {
+          processDeliveryEvent: () =>
+            Promise.resolve({ kind: 'unmatched' } as never),
+          processQueueAttempt: () => Promise.reject(new Error('unused')),
+          reconcileOptOuts: () => Promise.reject(new Error('unused')),
+        },
+        state: {} as SmsRuntimeClient,
+        sqs: {
+          send(command) {
+            commands.push(command);
+            return command instanceof ReceiveMessageCommand &&
+              command.input.QueueUrl ===
+                ENABLED_ENVIRONMENT.SMS_RECEIPT_QUEUE_URL
+              ? Promise.resolve({
+                  Messages: [
+                    {
+                      Body: JSON.stringify({
+                        source: 'aws.sms-voice',
+                        'detail-type': 'Text Message Delivery Status Updated',
+                        detail: { destinationPhoneNumber: '+12025550123' },
+                      }),
+                      ReceiptHandle: 'synthetic-receipt-handle',
+                      Attributes: {
+                        SentTimestamp: String(NOW - 1_000),
+                        ApproximateReceiveCount: receiveCount,
+                      },
+                    },
+                  ],
+                })
+              : Promise.resolve({});
+          },
+        },
+      });
+      const deleted = commands.some(
+        (command) => command instanceof DeleteMessageCommand,
+      );
+      const madeVisible = commands.some(
+        (command) => command instanceof ChangeMessageVisibilityCommand,
+      );
+      if (expectation === 'deferred') {
+        expect(deleted).toBe(false);
+        expect(madeVisible).toBe(true);
+        expect(logs).toContainEqual({
+          event: 'sms-worker-message-deferred',
+          count: 0,
+          code: 'UNMATCHED_RECEIPT',
+          receiveCount: Number(receiveCount),
+        });
+      } else {
+        expect(deleted).toBe(true);
+        expect(logs).toContainEqual({
+          event: 'sms-worker-delivery-event-ignored',
+          count: 0,
+          code: 'UNMATCHED_RECEIPT',
+        });
+      }
+      expect(JSON.stringify(logs)).not.toContain('+12025550123');
+      expect(JSON.stringify(logs)).not.toContain('synthetic-receipt-handle');
+    }
   });
 
   test('acknowledges an authenticated account event that has no local attempt', async () => {
@@ -244,6 +323,7 @@ describe('SMS long-poll service', () => {
     expect(logs).toContainEqual({
       event: 'sms-worker-delivery-event-ignored',
       count: 0,
+      code: 'ATTEMPT_NOT_FOUND',
     });
   });
 

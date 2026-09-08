@@ -29,13 +29,13 @@ import {
   deliveryEvidence,
   dispatchBatches,
   events,
-  eventTransitions,
   outbox,
   rosterSnapshots,
   smsProviderIo,
   smsRetrySchedules,
 } from '../../db/schema';
 import { loadRosterSnapshot } from '../capabilities/start';
+import { batchHasCurrentLifecycle } from './batch-lifecycle';
 import {
   createDrizzleSmsPolicyStore,
   executeRecordSmsOptOutCapability,
@@ -430,64 +430,6 @@ export function createDrizzleSmsRuntimeStore(
       ? deniedProviderSend
       : Object.freeze({ authorized: true as const, timeToLiveSeconds });
   };
-  const batchHasCurrentLifecycle = async (
-    batch: DispatchBatch,
-  ): Promise<boolean> => {
-    const [event] = await database
-      .select({
-        status: events.status,
-        allClearAt: events.allClearAt,
-        reactivatedAt: events.reactivatedAt,
-        activationAuthorization: events.activationAuthorization,
-      })
-      .from(events)
-      .where(eq(events.id, batch.eventId))
-      .limit(1);
-    if (event === undefined) return false;
-    if (batch.purpose === 'activation') {
-      return (
-        event.status === 'active' &&
-        event.allClearAt === null &&
-        event.reactivatedAt === null &&
-        sameJson(event.activationAuthorization, batch.authorization)
-      );
-    }
-    const authorization = batch.authorization;
-    if (
-      !('transitionId' in authorization) ||
-      authorization.purpose !== batch.purpose
-    ) {
-      return false;
-    }
-    const [transition] = await database
-      .select({
-        transition: eventTransitions.transition,
-        occurredAt: eventTransitions.occurredAt,
-        requestId: eventTransitions.requestId,
-        notificationAuthorization: eventTransitions.notificationAuthorization,
-      })
-      .from(eventTransitions)
-      .where(
-        and(
-          eq(eventTransitions.id, authorization.transitionId),
-          eq(eventTransitions.eventId, batch.eventId),
-        ),
-      )
-      .limit(1);
-    const expectedTransition =
-      batch.purpose === 'all-clear' ? 'all-clear' : 'reactivate';
-    const currentOccurredAt =
-      batch.purpose === 'all-clear' ? event.allClearAt : event.reactivatedAt;
-    const expectedStatus =
-      batch.purpose === 'all-clear' ? 'all-clear' : 'active';
-    return (
-      event.status === expectedStatus &&
-      transition?.transition === expectedTransition &&
-      currentOccurredAt?.getTime() === transition.occurredAt.getTime() &&
-      transition.requestId === batch.requestId &&
-      sameJson(transition.notificationAuthorization, authorization)
-    );
-  };
   const store: SmsRuntimeStore = {
     async lookupProviderIo(input) {
       await assertSmsAttempt(database, input.attemptId, true);
@@ -792,7 +734,7 @@ export function createDrizzleSmsRuntimeStore(
             candidate.endpoint.id === workItem.endpoint.id &&
             candidate.endpoint.phoneNumber === workItem.endpoint.phoneNumber,
         ) ||
-        !(await batchHasCurrentLifecycle(batch))
+        !(await batchHasCurrentLifecycle(database, batch))
       ) {
         return deniedProviderSend;
       }

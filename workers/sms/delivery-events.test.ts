@@ -399,6 +399,80 @@ describe('SMS delivery event processor', () => {
     );
   });
 
+  test('correlates a receipt that carries no context by MessageId alone', async () => {
+    // AWS End User Messaging publishes EventBridge delivery events without
+    // the send's Context, so a live receipt names only its MessageId. The
+    // first production delivery (2026-09-08) was refused for that.
+    const writer = new MemoryWriter();
+    const lookup = new MemoryLookup(attempt());
+    const processor = new SmsDeliveryEventProcessor({
+      configuration: CONFIGURATION,
+      attempts: lookup,
+      evidenceWriter: writer,
+      authorizeEventBridgeInvocation: authorizeInvocation,
+    });
+
+    await expect(
+      processor.process(
+        deliveryEvent('DELIVERED', { attemptId: null }),
+        INVOCATION,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ kind: 'recorded' }));
+    expect(lookup.providerReferenceCalls).toBe(1);
+    expect(lookup.unknownAttemptCalls).toBe(0);
+    expect(writer.requests).toHaveLength(1);
+    expect(writer.requests[0]).toEqual(
+      expect.objectContaining({
+        attempt: expect.objectContaining({ id: IDS.attempt, channel: 'sms' }),
+        evidence: expect.objectContaining({
+          subject: { kind: 'attempt', attemptId: IDS.attempt },
+          state: 'delivered',
+          providerReference: 'synthetic-provider-message-1',
+        }),
+      }),
+    );
+  });
+
+  test('reports a context-free receipt that names no retained send as unmatched instead of failing', async () => {
+    // A text this system never sent (an account verification message, for
+    // example) produces the same receipt shape. Retrying cannot make it match.
+    const writer = new MemoryWriter();
+    const lookup = new MemoryLookup(null, attempt());
+    const processor = new SmsDeliveryEventProcessor({
+      configuration: CONFIGURATION,
+      attempts: lookup,
+      evidenceWriter: writer,
+      authorizeEventBridgeInvocation: authorizeInvocation,
+    });
+
+    await expect(
+      processor.process(
+        deliveryEvent('DELIVERED', { attemptId: null }),
+        INVOCATION,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ kind: 'unmatched' }));
+    expect(lookup.providerReferenceCalls).toBe(1);
+    expect(lookup.unknownAttemptCalls).toBe(0);
+    expect(writer.requests).toHaveLength(0);
+  });
+
+  test('still refuses a receipt whose context names a different attempt than its MessageId', async () => {
+    const lookup = new MemoryLookup(attempt());
+    const processor = new SmsDeliveryEventProcessor({
+      configuration: CONFIGURATION,
+      attempts: lookup,
+      evidenceWriter: new MemoryWriter(),
+      authorizeEventBridgeInvocation: authorizeInvocation,
+    });
+
+    await expect(
+      processor.process(
+        deliveryEvent('DELIVERED', { attemptId: IDS.evidence }),
+        INVOCATION,
+      ),
+    ).rejects.toMatchObject({ code: 'ATTEMPT_MISMATCH' });
+  });
+
   test('fails closed for uncorrelated provider events', async () => {
     const processor = new SmsDeliveryEventProcessor({
       configuration: CONFIGURATION,

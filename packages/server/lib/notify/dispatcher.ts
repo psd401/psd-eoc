@@ -24,7 +24,17 @@ import {
   type RegisteredCapabilityHandler,
   type RegisteredCapabilityId,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableName,
+  inArray,
+  lte,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   databaseExecuteRows,
@@ -1697,6 +1707,11 @@ async function loadDrizzleEmailEndpointPolicy(
       endpointId: rosterEndpoints.id,
       recipientId: rosterEndpoints.recipientId,
       status: rosterEndpoints.status,
+      // The outer address must be named with its table. Inside this raw
+      // fragment the ORM renders the column reference bare, and the aliased
+      // join below has an `email` column of its own that captured it, so the
+      // comparison held for every address as soon as any email endpoint
+      // anywhere was recorded invalid or disabled.
       permanentlySuppressed: sql<boolean>`exists (
         select 1
         from endpoint_status_records as historical_status
@@ -1708,7 +1723,7 @@ async function loadDrizzleEmailEndpointPolicy(
           and historical_endpoint.channel = historical_status.channel
         where historical_status.channel = 'email'
           and historical_status.status in ('invalid', 'disabled')
-          and lower(historical_endpoint.email) = lower(${rosterEndpoints.email})
+          and lower(historical_endpoint.email) = lower(${sql.raw(`"${getTableName(rosterEndpoints)}"."email"`)})
       )`,
     })
     .from(rosterEndpoints)
