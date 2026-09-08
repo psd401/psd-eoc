@@ -112,11 +112,14 @@ BEGIN
 	SELECT count(*)::integer INTO stale_before
 	FROM public."outbox"
 	WHERE "message" ? 'deliveryTest'
-		OR jsonb_path_exists("message", '$.channels[*].integrationStatus');
+		OR jsonb_path_exists("message", '$.channels[*].integrationStatus')
+		OR jsonb_path_exists("channels", '$[*].integrationStatus');
 
-	-- Everything except the rewritten message must survive byte for byte.
+	-- `outbox_message_truth` requires message.channels to equal the channels
+	-- column, so both copies are rewritten together; everything else must
+	-- survive byte for byte.
 	SELECT pg_catalog.md5(coalesce(pg_catalog.jsonb_agg(
-			(to_jsonb(outbox_row) - 'message') ORDER BY outbox_row."id")::text, 'null'))
+			(to_jsonb(outbox_row) - 'message' - 'channels') ORDER BY outbox_row."id")::text, 'null'))
 	INTO digest_before FROM public."outbox" AS outbox_row;
 
 	DROP TRIGGER outbox_payload_guard ON public."outbox";
@@ -136,9 +139,22 @@ BEGIN
 			), '[]'::jsonb)
 			FROM jsonb_array_elements("message" -> 'channels') WITH ORDINALITY AS plan(channel, ordinality)
 		)
+	),
+	"channels" = (
+		SELECT coalesce(jsonb_agg(
+			CASE
+				WHEN channel ? 'integrationStatus' THEN
+					(channel - 'integrationStatus')
+						|| jsonb_build_object('integrationId', channel -> 'integrationStatus' -> 'integrationId')
+				ELSE channel
+			END
+			ORDER BY ordinality
+		), '[]'::jsonb)
+		FROM jsonb_array_elements("channels") WITH ORDINALITY AS plan(channel, ordinality)
 	)
 	WHERE "message" ? 'deliveryTest'
-		OR jsonb_path_exists("message", '$.channels[*].integrationStatus');
+		OR jsonb_path_exists("message", '$.channels[*].integrationStatus')
+		OR jsonb_path_exists("channels", '$[*].integrationStatus');
 	GET DIAGNOSTICS rewritten = ROW_COUNT;
 
 	CREATE TRIGGER outbox_payload_guard BEFORE UPDATE ON public."outbox"
@@ -167,17 +183,18 @@ BEGIN
 	SELECT count(*)::integer INTO stale_after
 	FROM public."outbox"
 	WHERE "message" ? 'deliveryTest'
-		OR jsonb_path_exists("message", '$.channels[*].integrationStatus');
+		OR jsonb_path_exists("message", '$.channels[*].integrationStatus')
+		OR jsonb_path_exists("channels", '$[*].integrationStatus');
 	IF stale_after <> 0 THEN
 		RAISE EXCEPTION '% outbox message(s) still carry retired keys', stale_after
 			USING ERRCODE = '55000';
 	END IF;
 
 	SELECT pg_catalog.md5(coalesce(pg_catalog.jsonb_agg(
-			(to_jsonb(outbox_row) - 'message') ORDER BY outbox_row."id")::text, 'null'))
+			(to_jsonb(outbox_row) - 'message' - 'channels') ORDER BY outbox_row."id")::text, 'null'))
 	INTO digest_after FROM public."outbox" AS outbox_row;
 	IF digest_after IS DISTINCT FROM digest_before THEN
-		RAISE EXCEPTION 'Outbox rows changed beyond the message rewrite'
+		RAISE EXCEPTION 'Outbox rows changed beyond the channel plan rewrite'
 			USING ERRCODE = '55000';
 	END IF;
 
