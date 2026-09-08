@@ -34,7 +34,7 @@ function work(
   const base = realBatch();
   const batch = DispatchBatchSchema.parse({
     ...base,
-    integrationStatus: { ...base.integrationStatus, integrationId },
+    integrationId,
   });
   const endpoint: Endpoint = EndpointSchema.parse({
     id: '00000000-0000-4000-8000-000000000012',
@@ -113,7 +113,6 @@ function adapter(
   return {
     channel: 'push',
     integrationId: 'mobile-push',
-    truthLabel: 'live-verified',
     provider: APNS_DIRECT_PROVIDER,
     deliverySemantics: 'attempt-id-idempotent',
     send: () =>
@@ -147,7 +146,6 @@ describe('direct push worker', () => {
           return Promise.resolve();
         },
       },
-      authorizeLiveProvider: () => true,
     });
 
     await expect(worker.process(work())).resolves.toMatchObject({
@@ -180,7 +178,6 @@ describe('direct push worker', () => {
           return Promise.resolve();
         },
       },
-      authorizeLiveProvider: () => true,
     });
     await expect(worker.process(work())).resolves.toMatchObject({
       kind: 'dlq',
@@ -194,7 +191,6 @@ describe('direct push worker', () => {
     const directAdapter: AttemptIdempotentProviderAdapter = {
       channel: 'push',
       integrationId: 'mobile-push',
-      truthLabel: 'live-verified',
       provider: APNS_DIRECT_PROVIDER,
       deliverySemantics: 'attempt-id-idempotent',
       send: () =>
@@ -219,7 +215,6 @@ describe('direct push worker', () => {
           return Promise.resolve();
         },
       },
-      authorizeLiveProvider: () => true,
     });
     await worker.process(work());
     expect(invalidations).toEqual([

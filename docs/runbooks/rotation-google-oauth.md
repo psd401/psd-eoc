@@ -71,5 +71,5 @@ most `configured-unverified`; only the separately approved exercised district
 sign-in can justify `live-verified`. If new sign-in fails and the old secret is
 still safe, redeploy the exact previous secret version and image/configuration
 under the approved rollback. Do not re-enable a compromised secret. Append all
-results and keep the integration truth label unchanged until separately
+results and keep the readiness register entry unchanged until separately
 reviewed evidence justifies a change.

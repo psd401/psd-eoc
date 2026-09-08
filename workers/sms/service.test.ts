@@ -35,7 +35,6 @@ const ENABLED_ENVIRONMENT = Object.freeze({
     'arn:aws:sms-voice:us-east-1:000000000000:pool/synthetic',
   PSD_EOC_SMS_PROTECT_CONFIGURATION_ID: 'protect-synthetic',
   PSD_EOC_SMS_PROVIDER_AUTHORIZED: 'true',
-  PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE: 'carrier:case:279',
   PSD_EOC_SMS_RUNTIME_MODE: 'enabled',
   PSD_EOC_SMS_RUNTIME_WORKER_TOKEN: TOKEN,
   PSD_EOC_SMS_TTL_SECONDS: '300',
@@ -61,14 +60,6 @@ describe('SMS service configuration', () => {
         ...ENABLED_ENVIRONMENT,
         PSD_EOC_SMS_CONFIGURATION_STATUS: 'UNCONFIGURED',
       },
-      {
-        ...ENABLED_ENVIRONMENT,
-        PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE: 'UNVERIFIED',
-      },
-      {
-        ...ENABLED_ENVIRONMENT,
-        PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE: 'UNCONFIGURED',
-      },
     ]) {
       expect(() => readSmsServiceConfiguration(environment)).toThrow(
         expect.objectContaining({ code: 'FEATURE_DISABLED' }),
@@ -77,7 +68,6 @@ describe('SMS service configuration', () => {
     expect(readSmsServiceConfiguration(ENABLED_ENVIRONMENT)).toMatchObject({
       accountId: '000000000000',
       region: 'us-east-1',
-      registrationVerificationReference: 'carrier:case:279',
       optOutListName: 'synthetic-sms',
       timeToLiveSeconds: 300,
     });

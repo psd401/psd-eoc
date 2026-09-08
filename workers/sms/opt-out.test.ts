@@ -84,15 +84,7 @@ function workItem(): WorkerAttemptWorkItem {
       channel: 'sms',
       body: '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic test. [DRILL]',
     },
-    integrationStatus: {
-      integrationId: 'aws-eum-sms',
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: '2026-08-11T18:00:00.000Z',
-    },
+    integrationId: 'aws-eum-sms',
     sequence: 3,
     endpointCount: 1,
     createdAt: '2026-08-11T18:00:00.000Z',
@@ -249,10 +241,7 @@ describe('AWS-managed SMS opt-out capture', () => {
         title: '[DRILL] TRAINING ONLY',
         body: '[DRILL] TRAINING ONLY - Synthetic test. [DRILL]',
       },
-      integrationStatus: {
-        ...sms.batch.integrationStatus,
-        integrationId: 'expo-push',
-      },
+      integrationId: 'expo-push',
     });
     const recorder = new MemoryRecorder();
 

@@ -17,7 +17,7 @@ import {
   IDS,
   TIMES,
   attemptFor,
-  deliveryTestBatch,
+  staffDrillBatch,
 } from '../shared/test-fixtures';
 import {
   SesEmailRuntime,
@@ -44,7 +44,7 @@ const INVOCATION = Object.freeze({
 });
 
 function emailWorkItem() {
-  const source = deliveryTestBatch();
+  const source = staffDrillBatch();
   const batch = DispatchBatchSchema.parse({
     ...source,
     channel: 'email',
@@ -57,10 +57,7 @@ function emailWorkItem() {
       subject: '[DRILL] Live-pilot email test',
       textBody: '[DRILL] LIVE PILOT TEST — NO EMERGENCY.',
     },
-    integrationStatus: {
-      ...source.integrationStatus,
-      integrationId: 'ses-email',
-    },
+    integrationId: 'ses-email',
   });
   const attempt = ChannelAttemptSchema.parse({
     ...attemptFor(batch),
@@ -165,7 +162,6 @@ function enabledMode(
     sendLedger,
     executionStore,
     evidenceWriter,
-    authorizeLiveProvider: () => true,
     authorizeProviderSend,
   };
   return { mode, executionStore, evidenceWriter, sendLedger };

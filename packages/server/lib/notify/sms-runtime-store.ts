@@ -27,11 +27,9 @@ import {
   channelAttempts,
   channelConfigurations,
   deliveryEvidence,
-  deliveryTestTargetEndpoints,
   dispatchBatches,
   events,
   eventTransitions,
-  integrationStatuses,
   outbox,
   rosterSnapshots,
   smsProviderIo,
@@ -122,12 +120,6 @@ export interface SmsRuntimeStore {
   authorizeProviderSend(
     workItem: SmsWorkerAttemptWorkItem,
   ): Promise<SmsProviderSendAuthorization>;
-  authorizeLiveSend(
-    context: Extract<
-      SmsRuntimeRequest,
-      { operation: 'authorize-live-send' }
-    >['context'],
-  ): Promise<boolean>;
   executeLifecycle(
     input: Extract<SmsRuntimeRequest, { operation: 'record-sms-opt-out' }>,
   ): Promise<unknown>;
@@ -150,7 +142,6 @@ export interface SmsRuntimeStore {
 }
 
 export interface SmsRuntimeStoreConfiguration {
-  readonly registrationVerificationReference: string;
   readonly destinationCountryCode: CountryCode;
   readonly now?: () => number;
 }
@@ -158,19 +149,9 @@ export interface SmsRuntimeStoreConfiguration {
 export function readSmsRuntimeStoreConfiguration(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): SmsRuntimeStoreConfiguration {
-  const registrationVerificationReference =
-    environment.PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE;
   const destinationCountryCode =
     environment.PSD_EOC_SMS_DESTINATION_COUNTRY_CODE;
   if (
-    registrationVerificationReference === undefined ||
-    registrationVerificationReference.trim() !==
-      registrationVerificationReference ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(
-      registrationVerificationReference,
-    ) ||
-    registrationVerificationReference === 'UNVERIFIED' ||
-    registrationVerificationReference === 'UNCONFIGURED' ||
     destinationCountryCode === undefined ||
     !/^[A-Z]{2}$/u.test(destinationCountryCode)
   ) {
@@ -182,7 +163,6 @@ export function readSmsRuntimeStoreConfiguration(
     throw new Error('The SMS destination country is unsupported.');
   }
   return Object.freeze({
-    registrationVerificationReference,
     destinationCountryCode: destinationCountryCode as CountryCode,
   });
 }
@@ -260,12 +240,11 @@ async function persistedBatch(
     },
     rosterSnapshotId: record.batch.rosterSnapshotId,
     rosterPopulation: record.batch.rosterPopulation,
-    deliveryTest: message.deliveryTest,
     requestId: record.batch.requestId,
     authorization: record.batch.authorization,
     channel: record.batch.channel,
     renderedMessage: record.batch.renderedMessage,
-    integrationStatus: planned.integrationStatus,
+    integrationId: planned.integrationId,
     sequence: record.batch.sequence,
     endpointCount: record.batch.endpointCount,
     createdAt: iso(record.batch.createdAt),
@@ -301,41 +280,6 @@ async function stableSmsCandidateReferences(
   roster: Awaited<ReturnType<typeof loadRosterSnapshot>>,
 ): Promise<readonly SmsCandidateReference[]> {
   if (roster === null) throw new SmsRuntimeStoreError('BATCH_CONFLICT');
-  if (batch.deliveryTest !== null && batch.deliveryTest !== undefined) {
-    const references = await database
-      .select({
-        recipientId: deliveryTestTargetEndpoints.recipientId,
-        endpointId: deliveryTestTargetEndpoints.endpointId,
-      })
-      .from(deliveryTestTargetEndpoints)
-      .where(
-        and(
-          eq(
-            deliveryTestTargetEndpoints.targetSetVersionId,
-            batch.deliveryTest.targetSet.id,
-          ),
-          eq(
-            deliveryTestTargetEndpoints.targetSetVersion,
-            batch.deliveryTest.targetSet.version,
-          ),
-          eq(
-            deliveryTestTargetEndpoints.rosterSnapshotId,
-            batch.rosterSnapshotId,
-          ),
-          eq(deliveryTestTargetEndpoints.channel, 'sms'),
-        ),
-      )
-      .orderBy(
-        asc(deliveryTestTargetEndpoints.recipientId),
-        asc(deliveryTestTargetEndpoints.endpointId),
-      );
-    if (references.length !== batch.endpointCount) {
-      throw new SmsRuntimeStoreError('BATCH_CONFLICT');
-    }
-    return Object.freeze(
-      references.map((reference) => Object.freeze(reference)),
-    );
-  }
   const references = roster.recipients.flatMap((recipient) =>
     recipient.endpoints.flatMap((endpoint) =>
       endpoint.channel === 'sms' && endpoint.status === 'active'
@@ -373,7 +317,6 @@ function attemptFor(
     eventTypeVersion: batch.eventTypeVersion,
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
-    ...(batch.deliveryTest == null ? {} : { deliveryTest: batch.deliveryTest }),
     recipientId,
     endpointId,
     channel: 'sms',
@@ -830,15 +773,8 @@ export function createDrizzleSmsRuntimeStore(
       ) {
         return deniedProviderSend;
       }
-      // Enablement decides whether this channel sends.
-      //
-      // This used to also require the truth label to read 'live-verified' and
-      // the whole integration-status record -- verifiedAt, verifiedByUserId,
-      // authorizationReference, reasonCode, observedAt -- to match the copy
-      // captured in the batch. Any drift refused the send and returned a bare
-      // LIVE_PROVIDER_DISABLED, with nothing recorded about which field
-      // disagreed. A drill delivered push and email while SMS failed exactly
-      // that way, and reading the worker log could not tell you why.
+      // Enablement decides whether this channel sends. There is no other
+      // switch: whether the provider delivers is discovered by sending.
       const [configuration] = await database
         .select({ enabled: channelConfigurations.enabled })
         .from(channelConfigurations)
@@ -861,50 +797,6 @@ export function createDrizzleSmsRuntimeStore(
         return deniedProviderSend;
       }
       return authorizeRemainingLifetime(batch);
-    },
-
-    async authorizeLiveSend(context) {
-      const attempt = await attemptFromId(database, context.attemptId);
-      if (
-        attempt === null ||
-        attempt.batchId !== context.batchId ||
-        attempt.eventId !== context.eventId ||
-        attempt.eventKind !== context.eventKind ||
-        attempt.templateMode !== context.templateMode ||
-        attempt.purpose !== context.purpose
-      ) {
-        return false;
-      }
-      const batch = await persistedBatch(database, attempt.batchId);
-      if (
-        batchIsExpired(batch) ||
-        !(await batchHasCurrentLifecycle(batch)) ||
-        batch.requestId !== context.requestId ||
-        batch.authorization.kind !== context.authorizationKind ||
-        batch.integrationStatus.authorizationReference !==
-          context.integrationAuthorizationReference
-      ) {
-        return false;
-      }
-      const [configuration] = await database
-        .select({
-          enabled: channelConfigurations.enabled,
-          statusLabel: channelConfigurations.statusLabel,
-          authorizationReference: integrationStatuses.authorizationReference,
-        })
-        .from(channelConfigurations)
-        .innerJoin(
-          integrationStatuses,
-          eq(integrationStatuses.id, channelConfigurations.statusId),
-        )
-        .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
-        .limit(1);
-      return (
-        configuration?.enabled === true &&
-        configuration.statusLabel === 'live-verified' &&
-        configuration.authorizationReference ===
-          context.integrationAuthorizationReference
-      );
     },
 
     async executeLifecycle(input) {

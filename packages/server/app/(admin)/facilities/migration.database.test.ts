@@ -29,6 +29,7 @@ import {
 } from '../../../db/client';
 import { seedDatabase } from '../../../db/seed';
 import { insertEventTypesBeforeDetailRule } from '../../../lib/testing/held-back-event-types';
+import { insertChannelConfigurationsBeforeTruthRetirement } from '../../../lib/testing/held-back-channel-configurations';
 import { migrateDatabase, migrationsFolder } from '../../../drizzle/migrate';
 import migrationJournal from '../../../drizzle/migrations/meta/_journal.json';
 import { createDrizzleSecurityAuditRepository } from '../../../lib/audit/drizzle-repository';
@@ -119,19 +120,9 @@ interface CanonicalRemovalRow extends Record<string, unknown> {
   readonly facility_count: number;
 }
 
-interface ChannelProjectionRow extends Record<string, unknown> {
+interface ChannelRow extends Record<string, unknown> {
   readonly integration_id: string;
   readonly enabled: boolean;
-  readonly status_id: string;
-  readonly latest_status_id: string;
-  readonly status_label: string;
-  readonly latest_status_label: string;
-}
-
-interface ChannelStateRow extends Record<string, unknown> {
-  readonly enabled: boolean;
-  readonly status_id: string;
-  readonly status_label: string;
 }
 
 interface ProcessRow extends Record<string, unknown> {
@@ -173,7 +164,6 @@ interface LineageCountRow extends Record<string, unknown> {
 }
 
 interface MigrationArtifactRow extends Record<string, unknown> {
-  readonly authorization_table: string | null;
   readonly role_change_table: string | null;
 }
 
@@ -199,9 +189,6 @@ let context: MigrationTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
 let partialMigrationsDirectory: string | undefined;
 let databaseCreated = false;
-let statusRowsBeforeUpgrade: readonly string[] = [];
-let statusRowsAfterFirstMigration: readonly string[] = [];
-let statusRowsAfterSecondMigration: readonly string[] = [];
 let channelRowsAfterFirstMigration: readonly string[] = [];
 let channelRowsAfterSecondMigration: readonly string[] = [];
 let canonicalRemovalRows: readonly CanonicalRemovalRow[] = [];
@@ -411,27 +398,6 @@ async function removePartialMigrationsDirectory(
   await rm(directory, { recursive: true, force: true });
 }
 
-async function statusSnapshot(
-  database: PostgresDatabase,
-): Promise<readonly string[]> {
-  return databaseExecuteRows<TextSnapshotRow>(
-    await database.execute<TextSnapshotRow>(sql`
-      select jsonb_build_object(
-        'id', id::text,
-        'integrationId', integration_id,
-        'label', label::text,
-        'verifiedAt', verified_at,
-        'verifiedByUserId', verified_by_user_id::text,
-        'authorizationReference', authorization_reference,
-        'reasonCode', reason_code,
-        'observedAt', observed_at
-      )::text as snapshot
-      from integration_statuses
-      order by id
-    `),
-  ).map((row) => row.snapshot);
-}
-
 async function channelSnapshot(
   database: PostgresDatabase,
 ): Promise<readonly string[]> {
@@ -440,8 +406,6 @@ async function channelSnapshot(
       select jsonb_build_object(
         'integrationId', integration_id,
         'enabled', enabled,
-        'statusId', status_id::text,
-        'statusLabel', status_label::text,
         'changedAt', changed_at
       )::text as snapshot
       from channel_configurations
@@ -452,6 +416,10 @@ async function channelSnapshot(
 
 async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
   await seedDatabase(database, {
+    // Truth labels left in migration 0049; this fixture is held before it, so
+    // the seed's channel rows are written with the columns it still has.
+    insertChannelConfigurations:
+      insertChannelConfigurationsBeforeTruthRetirement,
     // Threats arrived in migration 0046; this fixture is held before it, so
     // the seed must not touch a relation that does not exist yet.
     insertThreats: () => Promise.resolve(),
@@ -874,40 +842,6 @@ async function expectPostgresCodeRejection(
   throw new Error(`Expected PostgreSQL to reject with ${expectedCode}.`);
 }
 
-async function insertMockedStatus(
-  database: PostgresDatabase,
-  input: Readonly<{
-    id: string;
-    integrationId: string;
-    observedAt: string;
-    label?: 'mocked' | 'configured-unverified';
-  }>,
-): Promise<void> {
-  await database.execute(sql`
-    insert into integration_statuses (
-      id,
-      integration_id,
-      label,
-      verified_at,
-      verified_by_user_id,
-      authorization_reference,
-      reason_code,
-      observed_at
-    )
-    values (
-      ${input.id}::uuid,
-      ${input.integrationId},
-      ${input.label ?? 'mocked'}::integration_truth_label,
-      null,
-      null,
-      null,
-      null,
-      ${input.observedAt}::timestamptz
-    )
-    on conflict do nothing
-  `);
-}
-
 async function insertRosterConfiguration(
   database: PostgresDatabase,
   input: Readonly<{
@@ -1076,15 +1010,12 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         migrationsFolder: partialMigrationsDirectory,
       });
       await seedUpgradeFixture(connection.db);
-      statusRowsBeforeUpgrade = await statusSnapshot(connection.db);
 
       await migrateHistoricalFixture(connection);
       await seedPostRemovalFacilityFixture(connection.db);
-      statusRowsAfterFirstMigration = await statusSnapshot(connection.db);
       channelRowsAfterFirstMigration = await channelSnapshot(connection.db);
 
       await migrateHistoricalFixture(connection);
-      statusRowsAfterSecondMigration = await statusSnapshot(connection.db);
       channelRowsAfterSecondMigration = await channelSnapshot(connection.db);
     } catch (error) {
       try {
@@ -1209,52 +1140,24 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     }
   });
 
-  test('upgrades 0000-0004 without rewriting truth and reconciles stale channels idempotently', async () => {
+  test('upgrades 0000-0004 idempotently and leaves every reconciled channel disabled', async () => {
     const db = databaseConnection().db;
-    expect(statusRowsAfterFirstMigration).toEqual(statusRowsBeforeUpgrade);
-    expect(statusRowsAfterSecondMigration).toEqual(statusRowsBeforeUpgrade);
     expect(channelRowsAfterSecondMigration).toEqual(
       channelRowsAfterFirstMigration,
     );
 
-    const projections = databaseExecuteRows<ChannelProjectionRow>(
-      await db.execute<ChannelProjectionRow>(sql`
-        select
-          configuration.integration_id,
-          configuration.enabled,
-          configuration.status_id::text as status_id,
-          latest.id::text as latest_status_id,
-          configuration.status_label::text as status_label,
-          latest.label::text as latest_status_label
-        from channel_configurations as configuration
-        cross join lateral (
-          select status.id, status.label
-          from integration_statuses as status
-          where status.integration_id = configuration.integration_id
-          order by status.observed_at desc, status.id desc
-          limit 1
-        ) as latest
-        order by configuration.integration_id
+    const configurations = databaseExecuteRows<ChannelRow>(
+      await db.execute<ChannelRow>(sql`
+        select integration_id, enabled
+        from channel_configurations
+        order by integration_id
       `),
     );
-    expect(projections.length).toBeGreaterThan(0);
+    expect(configurations.length).toBeGreaterThan(0);
+    expect(configurations.every((row) => !row.enabled)).toBe(true);
     expect(
-      projections.every(
-        (row) =>
-          !row.enabled &&
-          row.status_id === row.latest_status_id &&
-          row.status_label === row.latest_status_label,
-      ),
-    ).toBe(true);
-    expect(
-      projections.find((row) => row.integration_id === 'upgrade-channel'),
-    ).toMatchObject({
-      enabled: false,
-      status_id: ids.upgradeStatusLatest,
-      latest_status_id: ids.upgradeStatusLatest,
-      status_label: 'mocked',
-      latest_status_label: 'mocked',
-    });
+      configurations.find((row) => row.integration_id === 'upgrade-channel'),
+    ).toMatchObject({ enabled: false });
   });
 
   test('physically removes the canonical synthetic facilities during the historical upgrade', () => {
@@ -1341,7 +1244,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       const newTable = databaseExecuteRows<NullableSnapshotRow>(
         await createdConnection.db.execute<NullableSnapshotRow>(sql`
           select to_regclass(
-            'public.integration_channel_change_authorizations'
+            'public.user_role_changes'
           )::text as snapshot
         `),
       );
@@ -1442,17 +1345,12 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           sql`
               select
                 to_regclass(
-                  'public.integration_channel_change_authorizations'
-                )::text as authorization_table,
-                to_regclass(
                   'public.user_role_changes'
                 )::text as role_change_table
             `,
         ),
       );
-      expect(rolledBackArtifacts).toEqual([
-        { authorization_table: null, role_change_table: null },
-      ]);
+      expect(rolledBackArtifacts).toEqual([{ role_change_table: null }]);
       const migrationCountBeforeRetry = databaseExecuteRows<CountRow>(
         await createdMigrationConnection.db.execute<CountRow>(sql`
           select count(*)::integer as count
@@ -1469,17 +1367,11 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       const appliedArtifacts = databaseExecuteRows<MigrationArtifactRow>(
         await createdMigrationConnection.db.execute<MigrationArtifactRow>(sql`
           select
-            to_regclass(
-              'public.integration_channel_change_authorizations'
-            )::text as authorization_table,
             to_regclass('public.user_role_changes')::text as role_change_table
         `),
       );
       expect(appliedArtifacts).toEqual([
-        {
-          authorization_table: 'integration_channel_change_authorizations',
-          role_change_table: 'user_role_changes',
-        },
+        { role_change_table: 'user_role_changes' },
       ]);
       const migrationCountAfterRetry = databaseExecuteRows<CountRow>(
         await createdMigrationConnection.db.execute<CountRow>(sql`
@@ -1522,8 +1414,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
             'access_membership_snapshots_immutable_guard',
             'group_sources_identity_guard',
             'group_sources_admin_availability_lock',
-            'integration_statuses_monotonic_insert_guard',
-            'integration_statuses_channel_configuration_sync',
             'roster_source_configurations_monotonic_insert_guard',
             'roster_snapshots_monotonic_insert_guard',
             'neighborhood_versions_monotonic_insert_guard',
@@ -1540,8 +1430,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       'access_membership_snapshots_immutable_guard',
       'group_sources_admin_availability_lock',
       'group_sources_identity_guard',
-      'integration_statuses_channel_configuration_sync',
-      'integration_statuses_monotonic_insert_guard',
       'neighborhood_facilities_construction_guard',
       'neighborhood_versions_monotonic_insert_guard',
       'roster_snapshots_monotonic_insert_guard',
@@ -2147,7 +2035,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     const db = databaseConnection().db;
     const expectedPrivileges = [
       ['access_membership_snapshots', 'id'],
-      ['integration_statuses', 'id'],
       ['neighborhood_versions', 'id'],
       ['roster_source_configuration_facilities', 'configuration_id'],
       ['roster_source_configuration_groups', 'configuration_id'],
@@ -2171,7 +2058,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
             'UPDATE'
           ) as can_update_column
         from (values
-          ('integration_statuses', 'id'),
           ('access_membership_snapshots', 'id'),
           ('roster_source_configurations', 'id'),
           ('roster_source_configuration_facilities', 'configuration_id'),
@@ -2204,15 +2090,11 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         for share
       `);
 
-      // Activation and lifecycle checks lock both the mutable channel row and
-      // its exact immutable truth observation with one unqualified FOR SHARE.
+      // Activation and lifecycle checks lock the channel row with one
+      // unqualified FOR SHARE.
       await transaction.execute(sql`
         select configuration.integration_id
         from channel_configurations as configuration
-        inner join integration_statuses as status
-          on status.id = configuration.status_id
-          and status.integration_id = configuration.integration_id
-          and status.label = configuration.status_label
         limit 1
         for share
       `);
@@ -2376,7 +2258,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         await db.execute<ImmutableTargetPresenceRow>(sql`
           select target.table_name, target.row_present
           from (values
-            ('integration_statuses', exists(select 1 from integration_statuses)),
             ('access_membership_snapshots', exists(select 1 from access_membership_snapshots)),
             ('roster_source_configurations', exists(select 1 from roster_source_configurations)),
             ('roster_source_configuration_facilities', exists(select 1 from roster_source_configuration_facilities)),
@@ -2395,7 +2276,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     );
 
     const immutableColumnUpdates = [
-      sql`update integration_statuses set id = id`,
       sql`update access_membership_snapshots set id = id`,
       sql`update roster_source_configurations set id = id`,
       sql`update roster_source_configuration_facilities set configuration_id = configuration_id`,
@@ -2414,172 +2294,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         /immutable/u,
       );
     }
-  });
-
-  test('accepts exact status retries but rejects older, equal, and mismatched observations', async () => {
-    const db = databaseConnection().db;
-    const integrationId = 'guarded-status';
-    const initial = {
-      id: ids.statusInitial,
-      integrationId,
-      observedAt: times.statusInitial,
-    } as const;
-    await insertMockedStatus(db, initial);
-    await insertMockedStatus(db, initial);
-    await db.execute(sql`
-      insert into channel_configurations (
-        integration_id,
-        enabled,
-        status_id,
-        status_label,
-        changed_at
-      )
-      values (
-        ${integrationId},
-        true,
-        ${ids.statusInitial}::uuid,
-        'mocked'::integration_truth_label,
-        ${times.statusInitial}::timestamptz
-      )
-    `);
-    await insertMockedStatus(db, {
-      id: ids.statusLatest,
-      integrationId,
-      observedAt: times.statusLatest,
-    });
-    await insertMockedStatus(db, initial);
-
-    await expectOperationalRejection(() =>
-      insertMockedStatus(db, {
-        id: ids.statusOlder,
-        integrationId,
-        observedAt: times.statusOlder,
-      }),
-    );
-    await expectOperationalRejection(() =>
-      insertMockedStatus(db, {
-        id: ids.statusEqual,
-        integrationId,
-        observedAt: times.statusLatest,
-      }),
-    );
-    await expectOperationalRejection(() =>
-      insertMockedStatus(db, {
-        ...initial,
-        label: 'configured-unverified',
-      }),
-    );
-
-    const rows = databaseExecuteRows<CountRow>(
-      await db.execute<CountRow>(sql`
-        select count(*)::integer as count
-        from integration_statuses
-        where integration_id = ${integrationId}
-      `),
-    );
-    expect(rows[0]?.count).toBe(2);
-    const channel = databaseExecuteRows<ChannelStateRow>(
-      await db.execute<ChannelStateRow>(sql`
-        select
-          configuration.enabled,
-          configuration.status_id::text as status_id,
-          configuration.status_label::text as status_label
-        from channel_configurations as configuration
-        where configuration.integration_id = ${integrationId}
-      `),
-    );
-    expect(channel).toHaveLength(1);
-    expect(channel[0]).toMatchObject({
-      enabled: false,
-      status_id: ids.statusLatest,
-      status_label: 'mocked',
-    });
-  });
-
-  test('serializes racing equal-time status observations by integration', async () => {
-    if (context === undefined) throw new Error('Migration context is absent.');
-    const observer = databaseConnection().db;
-    const firstWriter = openPostgresConnection(context.databaseUrl, 1);
-    const secondWriter = openPostgresConnection(context.databaseUrl, 1);
-    let releaseFirst: (() => void) | undefined;
-    const releaseGate = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let firstInserted: (() => void) | undefined;
-    const firstInsertGate = new Promise<void>((resolve) => {
-      firstInserted = resolve;
-    });
-    const integrationId = 'racing-status';
-
-    const firstWrite = firstWriter.db.transaction(async (transaction) => {
-      await transaction.execute(sql`
-        insert into integration_statuses (
-          id,
-          integration_id,
-          label,
-          observed_at
-        )
-        values (
-          ${ids.statusRaceFirst}::uuid,
-          ${integrationId},
-          'mocked'::integration_truth_label,
-          ${times.statusRace}::timestamptz
-        )
-      `);
-      firstInserted?.();
-      await releaseGate;
-    });
-
-    try {
-      await firstInsertGate;
-      const processRows = databaseExecuteRows<ProcessRow>(
-        await secondWriter.db.execute<ProcessRow>(sql`
-          select pg_backend_pid()::integer as pid
-        `),
-      );
-      const pid = processRows[0]?.pid;
-      if (pid === undefined)
-        throw new Error('The second writer PID is absent.');
-
-      const secondOutcome = Promise.resolve(
-        secondWriter.db.execute(sql`
-          insert into integration_statuses (
-            id,
-            integration_id,
-            label,
-            observed_at
-          )
-          values (
-            ${ids.statusRaceSecond}::uuid,
-            ${integrationId},
-            'mocked'::integration_truth_label,
-            ${times.statusRace}::timestamptz
-          )
-        `),
-      ).then(
-        () => ({ error: undefined }),
-        (error: unknown) => ({ error }),
-      );
-
-      await waitForAdvisoryLock(observer, pid);
-      releaseFirst?.();
-      await firstWrite;
-      const outcome = await secondOutcome;
-      expectOperationalError(outcome.error);
-    } finally {
-      releaseFirst?.();
-      await Promise.allSettled([firstWrite]);
-      await Promise.all([firstWriter.close(), secondWriter.close()]);
-    }
-
-    const rows = databaseExecuteRows<CountRow>(
-      await observer.execute<CountRow>(sql`
-        select count(*)::integer as count
-        from integration_statuses
-        where integration_id = ${integrationId}
-      `),
-    );
-    expect(rows[0]?.count).toBe(1);
   });
 
   test('enforces one strict roster lineage and current configuration even for the first snapshot', async () => {

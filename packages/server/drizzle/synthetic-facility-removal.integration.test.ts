@@ -38,6 +38,7 @@ import {
   type SeedDatabaseOptions,
 } from '../db/seed';
 import { insertEventTypesBeforeDetailRule } from '../lib/testing/held-back-event-types';
+import { insertChannelConfigurationsBeforeTruthRetirement } from '../lib/testing/held-back-channel-configurations';
 import { migrateDatabase, migrationsFolder } from './migrate';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -370,6 +371,10 @@ async function stageReviewedLiveShape(
 ): Promise<void> {
   await seedDatabase(database, {
     insertRosterEndpoints: insertLegacyRosterEndpoints,
+    // Truth labels left in migration 0049; this schema is held before it, so
+    // the seed's channel rows are written with the columns it still has.
+    insertChannelConfigurations:
+      insertChannelConfigurationsBeforeTruthRetirement,
     // Threats arrived in migration 0046; this schema is held before it, so
     // the seed must not touch a relation that does not exist yet.
     insertThreats: () => Promise.resolve(),

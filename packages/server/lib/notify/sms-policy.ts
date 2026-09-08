@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 
 import {
   DispatchBatchSchema,
-  DeliveryTestNotificationMetadataSchema,
   EndpointIdSchema,
   EndpointStatusRecordSchema,
   EndpointStatusSchema,
@@ -45,19 +44,11 @@ import {
   type DatabaseQuery,
 } from '../../db/client';
 import {
-  deliveryTestCanaryEligibilityFacts,
-  deliveryTestTargetEndpoints,
-  deliveryTestTargetSetVersions,
   endpointStatusRecords,
   rosterEndpoints,
   smsOptOutRecords,
 } from '../../db/schema';
 import { resolveAudience, type ResolveAudienceInput } from '../roster/resolve';
-import {
-  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
-  deliveryTestEndpointReferenceDigest,
-  deliveryTestTargetLockIdentity,
-} from '../testing/e2e-delivery';
 import {
   measureSmsLength,
   renderMessageTemplate,
@@ -161,7 +152,7 @@ export function validateSmsDispatchBatch(value: unknown): SmsDispatchBatch {
     !result.success ||
     result.data.channel !== 'sms' ||
     result.data.renderedMessage.channel !== 'sms' ||
-    result.data.integrationStatus.integrationId !== SMS_INTEGRATION_ID
+    result.data.integrationId !== SMS_INTEGRATION_ID
   ) {
     throw new SmsPolicyError(
       'INVALID_SMS_BATCH',
@@ -192,7 +183,6 @@ const SmsEndpointPolicyQuerySchema = z
       .nonnegative()
       .max(MAX_SMS_ENDPOINTS)
       .optional(),
-    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     candidates: z
       .array(SmsEndpointPolicyCandidateSchema)
       .max(MAX_SMS_ENDPOINTS)
@@ -208,13 +198,6 @@ const SmsEndpointPolicyQuerySchema = z
         path: ['candidates'],
       });
     }
-    if (query.deliveryTest != null && query.endpointCount === undefined) {
-      context.addIssue({
-        code: 'custom',
-        message: 'SMS delivery-test policy requires an exact endpoint count.',
-        path: ['endpointCount'],
-      });
-    }
   })
   .readonly();
 
@@ -224,7 +207,6 @@ const SmsEndpointPolicyEvidenceSchema = z
     endpointId: EndpointIdSchema,
     status: EndpointStatusSchema,
     optedOut: z.boolean(),
-    approvedForDeliveryTest: z.boolean().optional(),
   })
   .strict()
   .readonly();
@@ -333,15 +315,6 @@ function parseEndpointPolicyEvidence(
         'SMS endpoint policy evidence did not match the pinned candidates.',
       );
     }
-    if (
-      query.deliveryTest != null &&
-      item.approvedForDeliveryTest === undefined
-    ) {
-      throw new SmsPolicyError(
-        'INVALID_SMS_ENDPOINT_POLICY',
-        'SMS canary approval evidence was incomplete.',
-      );
-    }
     evidence.set(key, item);
   }
   if (evidence.size !== expected.size) {
@@ -402,7 +375,7 @@ export async function resolveSmsEndpoints(
         : [],
     ),
   );
-  if (batch.deliveryTest == null && candidates.length !== batch.endpointCount) {
+  if (candidates.length !== batch.endpointCount) {
     throw new SmsPolicyError(
       'SMS_ENDPOINT_COUNT_MISMATCH',
       'The pinned SMS endpoint count no longer matches the dispatch batch.',
@@ -413,7 +386,6 @@ export async function resolveSmsEndpoints(
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
     endpointCount: batch.endpointCount,
-    deliveryTest: batch.deliveryTest ?? null,
     candidates: candidates.map(({ recipientId, endpoint }) => ({
       recipientId,
       endpointId: endpoint.id,
@@ -423,16 +395,6 @@ export async function resolveSmsEndpoints(
     await store.loadEndpointPolicy(query),
     query,
   );
-  const approvedCount = [...policy.values()].filter(
-    ({ approvedForDeliveryTest }) =>
-      approvedForDeliveryTest ?? batch.deliveryTest == null,
-  ).length;
-  if (batch.deliveryTest != null && approvedCount !== batch.endpointCount) {
-    throw new SmsPolicyError(
-      'SMS_ENDPOINT_COUNT_MISMATCH',
-      'The approved SMS canary count does not match the dispatch batch.',
-    );
-  }
   return Object.freeze(
     candidates.flatMap(({ recipientId, endpoint }) => {
       const evidence = policy.get(
@@ -441,8 +403,7 @@ export async function resolveSmsEndpoints(
       if (
         evidence === undefined ||
         evidence.status !== 'active' ||
-        evidence.optedOut ||
-        !(evidence.approvedForDeliveryTest ?? batch.deliveryTest == null)
+        evidence.optedOut
       ) {
         return [];
       }
@@ -458,195 +419,6 @@ export async function resolveSmsEndpoints(
   );
 }
 
-async function loadSmsDeliveryTestTargets(
-  database: SmsPolicyQueryDatabase,
-  query: SmsEndpointPolicyQuery,
-): Promise<ReadonlySet<string> | null> {
-  if (query.deliveryTest == null) return null;
-  if (query.endpointCount === undefined) {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'Delivery-test SMS targets require an exact endpoint count.',
-    );
-  }
-  if (query.rosterPopulation !== 'staff') {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'Delivery-test SMS targets require the staff roster.',
-    );
-  }
-
-  // Read only the facility before taking the shared lineage lock. Reload the
-  // complete target afterward so a successor or revocation that committed
-  // first cannot release a phone number from this trusted boundary.
-  const [unlockedTarget] = await database
-    .select({ facilityId: deliveryTestTargetSetVersions.facilityId })
-    .from(deliveryTestTargetSetVersions)
-    .where(
-      and(
-        eq(deliveryTestTargetSetVersions.id, query.deliveryTest.targetSet.id),
-        eq(
-          deliveryTestTargetSetVersions.version,
-          query.deliveryTest.targetSet.version,
-        ),
-      ),
-    )
-    .limit(1);
-  if (unlockedTarget === undefined) {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'The immutable SMS canary target set was unavailable.',
-    );
-  }
-  await database.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(unlockedTarget.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
-  );
-
-  const [target] = await database
-    .select({
-      id: deliveryTestTargetSetVersions.id,
-      version: deliveryTestTargetSetVersions.version,
-      facilityId: deliveryTestTargetSetVersions.facilityId,
-      rosterSnapshotId: deliveryTestTargetSetVersions.rosterSnapshotId,
-      rosterPopulation: deliveryTestTargetSetVersions.rosterPopulation,
-      endpointReferenceDigest:
-        deliveryTestTargetSetVersions.endpointReferenceDigest,
-    })
-    .from(deliveryTestTargetSetVersions)
-    .where(
-      and(
-        eq(deliveryTestTargetSetVersions.id, query.deliveryTest.targetSet.id),
-        eq(
-          deliveryTestTargetSetVersions.version,
-          query.deliveryTest.targetSet.version,
-        ),
-      ),
-    )
-    .limit(1);
-  const [successor] = await database
-    .select({ id: deliveryTestTargetSetVersions.id })
-    .from(deliveryTestTargetSetVersions)
-    .where(
-      eq(
-        deliveryTestTargetSetVersions.supersedesVersionId,
-        query.deliveryTest.targetSet.id,
-      ),
-    )
-    .limit(1);
-  if (
-    target === undefined ||
-    target.facilityId !== unlockedTarget.facilityId ||
-    target.rosterSnapshotId !== query.rosterSnapshotId ||
-    target.rosterPopulation !== 'staff' ||
-    target.endpointReferenceDigest !==
-      query.deliveryTest.endpointReferenceDigest ||
-    successor !== undefined
-  ) {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'The immutable SMS canary target set is no longer current.',
-    );
-  }
-
-  const targetRows = await database
-    .select({
-      rosterSnapshotId: deliveryTestTargetEndpoints.rosterSnapshotId,
-      rosterPopulation: deliveryTestTargetEndpoints.rosterPopulation,
-      recipientId: deliveryTestTargetEndpoints.recipientId,
-      endpointId: deliveryTestTargetEndpoints.endpointId,
-      channel: deliveryTestTargetEndpoints.channel,
-      attestation: deliveryTestTargetEndpoints.attestation,
-      eligibilityFacilityId: deliveryTestCanaryEligibilityFacts.facilityId,
-      eligibilityRosterSnapshotId:
-        deliveryTestCanaryEligibilityFacts.rosterSnapshotId,
-      eligibilityRosterPopulation:
-        deliveryTestCanaryEligibilityFacts.rosterPopulation,
-      eligibilityRecipientId: deliveryTestCanaryEligibilityFacts.recipientId,
-      eligibilityEndpointId: deliveryTestCanaryEligibilityFacts.endpointId,
-      eligibilityChannel: deliveryTestCanaryEligibilityFacts.channel,
-      eligibilityCurrent: sql<boolean>`
-        ${deliveryTestCanaryEligibilityFacts.decision} = 'approved-synthetic-canary'
-        and not exists (
-          select 1
-          from delivery_test_canary_eligibility_facts successor
-          where successor.supersedes_fact_id = ${deliveryTestCanaryEligibilityFacts.id}
-        )
-      `,
-    })
-    .from(deliveryTestTargetEndpoints)
-    .innerJoin(
-      deliveryTestCanaryEligibilityFacts,
-      eq(
-        deliveryTestTargetEndpoints.eligibilityFactId,
-        deliveryTestCanaryEligibilityFacts.id,
-      ),
-    )
-    .where(
-      and(
-        eq(deliveryTestTargetEndpoints.targetSetVersionId, target.id),
-        eq(deliveryTestTargetEndpoints.targetSetVersion, target.version),
-      ),
-    )
-    .orderBy(
-      asc(deliveryTestTargetEndpoints.channel),
-      asc(deliveryTestTargetEndpoints.recipientId),
-      asc(deliveryTestTargetEndpoints.endpointId),
-    );
-  if (
-    targetRows.length === 0 ||
-    targetRows.length > MAX_SMS_ENDPOINTS ||
-    targetRows.some(
-      (target) =>
-        target.rosterSnapshotId !== query.rosterSnapshotId ||
-        target.rosterPopulation !== 'staff' ||
-        target.attestation !== 'approved-synthetic-canary' ||
-        target.eligibilityFacilityId !== unlockedTarget.facilityId ||
-        target.eligibilityRosterSnapshotId !== target.rosterSnapshotId ||
-        target.eligibilityRosterPopulation !== target.rosterPopulation ||
-        target.eligibilityRecipientId !== target.recipientId ||
-        target.eligibilityEndpointId !== target.endpointId ||
-        target.eligibilityChannel !== target.channel ||
-        !target.eligibilityCurrent,
-    )
-  ) {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'The immutable SMS canary target set was unavailable.',
-    );
-  }
-  let targetDigest: string;
-  try {
-    targetDigest = deliveryTestEndpointReferenceDigest(targetRows);
-  } catch {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'The immutable SMS canary target set was invalid.',
-    );
-  }
-  if (
-    targetDigest !== target.endpointReferenceDigest ||
-    targetDigest !== query.deliveryTest.endpointReferenceDigest
-  ) {
-    throw new SmsPolicyError(
-      'INVALID_SMS_ENDPOINT_POLICY',
-      'The immutable SMS canary target digest did not match.',
-    );
-  }
-  const smsTargets = targetRows.filter(({ channel }) => channel === 'sms');
-  const candidateKeys = new Set(query.candidates.map(candidateKey));
-  if (
-    smsTargets.length !== query.endpointCount ||
-    smsTargets.some((target) => !candidateKeys.has(candidateKey(target)))
-  ) {
-    throw new SmsPolicyError(
-      'SMS_ENDPOINT_COUNT_MISMATCH',
-      'The approved SMS canary targets do not match the dispatch batch.',
-    );
-  }
-  return new Set(smsTargets.map(candidateKey));
-}
-
-/** Parses an opt-out request and requires an exact contract-shaped result. */
 export async function recordSmsOptOut(
   inputValue: unknown,
   store: SmsOptOutStore,
@@ -1037,7 +809,6 @@ async function loadDrizzleEndpointPolicy(
   database: SmsPolicyQueryDatabase,
   query: SmsEndpointPolicyQuery,
 ): Promise<readonly SmsEndpointPolicyEvidence[]> {
-  const approvedTargets = await loadSmsDeliveryTestTargets(database, query);
   if (query.candidates.length === 0) return Object.freeze([]);
   const endpointIds = query.candidates.map(({ endpointId }) => endpointId);
   const endpointRows = await database
@@ -1219,13 +990,6 @@ async function loadDrizzleEndpointPolicy(
         optedOut:
           endpoint.phoneNumber !== null &&
           (effectivePhoneOptOut.get(endpoint.phoneNumber) ?? false),
-        ...(approvedTargets === null
-          ? {}
-          : {
-              approvedForDeliveryTest: approvedTargets.has(
-                candidateKey(endpoint),
-              ),
-            }),
       }))
       .sort(
         (left, right) =>

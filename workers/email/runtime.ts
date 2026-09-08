@@ -2,7 +2,6 @@ import {
   WorkerAttemptProcessor,
   type AttemptEvidenceWriter,
   type AttemptExecutionStore,
-  type LiveProviderAuthorizer,
   type ProviderSendAuthorizer,
   type WorkerAttemptProcessResult,
 } from '../shared';
@@ -37,7 +36,6 @@ export type SesEmailRuntimeMode =
       sendLedger: DurableSesSendLedger;
       executionStore: AttemptExecutionStore;
       evidenceWriter: AttemptEvidenceWriter;
-      authorizeLiveProvider: LiveProviderAuthorizer;
       authorizeProviderSend: ProviderSendAuthorizer;
     }>;
 
@@ -81,7 +79,6 @@ function enabledModeIsComplete(
     mode.evidenceWriter !== null &&
     typeof mode.evidenceWriter === 'object' &&
     typeof mode.evidenceWriter.recordAttemptEvidence === 'function' &&
-    typeof mode.authorizeLiveProvider === 'function' &&
     typeof mode.authorizeProviderSend === 'function'
   );
 }
@@ -157,11 +154,9 @@ export class SesEmailRuntime {
               client: mode.client,
               sendLedger: mode.sendLedger,
               fromEmailAddress: options.fromEmailAddress,
-              truthLabel: 'live-verified',
             }),
             executionStore: mode.executionStore,
             evidenceWriter: mode.evidenceWriter,
-            authorizeLiveProvider: mode.authorizeLiveProvider,
             authorizeProviderSend: mode.authorizeProviderSend,
           });
   }

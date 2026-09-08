@@ -562,9 +562,6 @@ interface MonitoringMetrics {
   readonly canaryLatency: cloudwatch.Metric;
   readonly canarySuccess: cloudwatch.Metric;
   readonly collectorSuccess: cloudwatch.Metric;
-  readonly monthlyDeliveryTestDue: cloudwatch.Metric;
-  readonly monthlyDeliveryTestFailedRuns: cloudwatch.Metric;
-  readonly monthlyDeliveryTestMissed: cloudwatch.Metric;
   readonly replicaLag: cloudwatch.Metric;
   readonly serverlessCapacity: cloudwatch.Metric;
   readonly rosterFailureAge: cloudwatch.Metric;
@@ -1544,44 +1541,6 @@ function configureAlarms(
   });
   emit({
     tier: 'application',
-    evaluationPeriods: 1,
-    id: 'MonthlyDeliveryTestDueReminderAlarm',
-    metric: metrics.monthlyDeliveryTestDue,
-    name: 'psd-eoc-monthly-live-delivery-test-due',
-    runbookAnchor: 'runbook-monthly-live-delivery-test',
-    summary:
-      'The targetless monthly reminder is due; automation did not start a test or invoke a provider.',
-    threshold: 1,
-    topic: props.operationsAlarmTopic,
-    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  emit({
-    tier: 'application',
-    evaluationPeriods: 1,
-    id: 'MonthlyDeliveryTestFailedRunAlarm',
-    metric: metrics.monthlyDeliveryTestFailedRuns,
-    name: 'psd-eoc-monthly-live-delivery-test-failed',
-    runbookAnchor: 'runbook-monthly-live-delivery-test',
-    summary:
-      'One or more append-only monthly live delivery-test reports recorded a failed terminal run in the closed minute.',
-    threshold: 1,
-    topic: props.criticalAlarmTopic,
-    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  emit({
-    tier: 'application',
-    evaluationPeriods: 1,
-    id: 'MonthlyDeliveryTestMissedAlarm',
-    metric: metrics.monthlyDeliveryTestMissed,
-    name: 'psd-eoc-monthly-live-delivery-test-missed',
-    runbookAnchor: 'runbook-monthly-live-delivery-test',
-    summary: `The immediately preceding ${props.displayTimeZone} calendar month has no successful terminal live delivery-test report.`,
-    threshold: 1,
-    topic: props.criticalAlarmTopic,
-    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  emit({
-    tier: 'application',
     datapointsToAlarm: 3,
     evaluationPeriods: 5,
     id: 'AuroraReplicaLagAlarm',
@@ -1777,7 +1736,6 @@ function configureAlarms(
 function assembleMetrics(
   props: MonitoringProps,
   failoverBridgeErrors: cloudwatch.IMetric,
-  monthlyDeliveryTestDue: events.Rule,
 ): MonitoringMetrics {
   return {
     activationAcceptLatency: exactPercentileMetrics('ActivationAcceptLatency'),
@@ -1807,20 +1765,6 @@ function assembleMetrics(
     canarySuccess: customMetric('CanarySuccess', { statistic: 'Minimum' }),
     collectorSuccess: customMetric('MetricsCollectorSuccess', {
       statistic: 'Minimum',
-    }),
-    monthlyDeliveryTestDue: new cloudwatch.Metric({
-      dimensionsMap: { RuleName: monthlyDeliveryTestDue.ruleName },
-      metricName: 'TriggeredRules',
-      namespace: 'AWS/Events',
-      period: ONE_MINUTE,
-      statistic: 'Sum',
-    }),
-    monthlyDeliveryTestFailedRuns: customMetric(
-      'MonthlyLiveDeliveryTestFailedRunCount',
-      { statistic: 'Maximum' },
-    ),
-    monthlyDeliveryTestMissed: customMetric('MonthlyLiveDeliveryTestMissed', {
-      statistic: 'Maximum',
     }),
     replicaLag: databaseMetric(
       props.database,
@@ -1891,17 +1835,6 @@ function createFailoverBridge(
         statistic: 'Sum',
       }),
     },
-  });
-}
-
-/** Targetless monthly reminder; it invokes no app, queue, or provider. */
-function createMonthlyDeliveryTestReminder(scope: Construct): events.Rule {
-  return new events.Rule(scope, 'MonthlyDeliveryTestDueReminder', {
-    description:
-      'Targetless reminder only: a human may review the monthly live delivery test; this invokes no app, queue, or provider.',
-    enabled: true,
-    ruleName: 'psd-eoc-monthly-live-delivery-test-due-reminder',
-    schedule: events.Schedule.expression('cron(0 17 1 * ? *)'),
   });
 }
 
@@ -2077,12 +2010,7 @@ export function configureInfrastructureMonitoring(
     props,
     createFailoverMetricFunction(scope, props),
   );
-  const monthlyDeliveryTestDue = createMonthlyDeliveryTestReminder(scope);
-  const metrics = assembleMetrics(
-    props,
-    failoverBridgeErrors,
-    monthlyDeliveryTestDue,
-  );
+  const metrics = assembleMetrics(props, failoverBridgeErrors);
   configureAlarms(scope, props, metrics, false);
   configurePushWorkerMonitoring(scope, props);
   configureEmailWorkerMonitoring(scope, props);
@@ -2148,18 +2076,13 @@ export function configureMonitoring(
       retryAttempts: 1,
     }),
   );
-  const monthlyDeliveryTestDue = createMonthlyDeliveryTestReminder(scope);
   const failoverBridgeErrors = createFailoverBridge(
     scope,
     props,
     failoverMetricFunction,
   );
 
-  const metrics = assembleMetrics(
-    props,
-    failoverBridgeErrors,
-    monthlyDeliveryTestDue,
-  );
+  const metrics = assembleMetrics(props, failoverBridgeErrors);
   configureAlarms(scope, props, metrics, true);
   const dashboard = configureDashboard(scope, props, metrics);
   publishDashboardOutputs(scope, dashboard, props.applicationCondition);

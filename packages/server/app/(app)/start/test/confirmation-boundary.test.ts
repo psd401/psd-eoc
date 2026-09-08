@@ -93,8 +93,6 @@ function preview(
   overrides: Partial<ActivationPreview> = {},
 ): ActivationPreview {
   const templateMode = kind === 'incident' ? 'real' : 'drill';
-  const integrationLabel =
-    rosterPopulation === 'synthetic' ? 'mocked' : 'live-verified';
   return ActivationPreviewSchema.parse({
     id: IDS.preview,
     facilityId: IDS.facility,
@@ -114,26 +112,7 @@ function preview(
       channel,
       endpointCount: 2,
       renderedMessage: renderedMessage(channel, kind, templateMode),
-      integrationStatus:
-        integrationLabel === 'mocked'
-          ? {
-              integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-              label: integrationLabel,
-              verifiedAt: null,
-              verifiedByUserId: null,
-              authorizationReference: null,
-              reasonCode: null,
-              observedAt: '2026-08-10T17:59:00.000Z',
-            }
-          : {
-              integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-              label: integrationLabel,
-              verifiedAt: '2026-08-10T17:55:00.000Z',
-              verifiedByUserId: IDS.user,
-              authorizationReference: 'synthetic-test-authorization',
-              reasonCode: null,
-              observedAt: '2026-08-10T17:59:00.000Z',
-            },
+      integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
     })),
     sendReadiness: 'ready',
     blockingReasonCodes: [],

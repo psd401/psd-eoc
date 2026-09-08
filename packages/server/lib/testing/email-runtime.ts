@@ -20,7 +20,6 @@ const IDS = Object.freeze({
   endpoint: '00000000-0000-4000-8000-000000000012',
   attempt: '00000000-0000-4000-8000-000000000013',
   facility: '00000000-0000-4000-8000-000000000015',
-  targetSet: '00000000-0000-4000-8000-000000000016',
   request: '00000000-0000-4000-8000-000000000017',
 });
 
@@ -28,7 +27,7 @@ const CREATED_AT = '2026-08-10T16:00:00.000Z';
 const ATTEMPTED_AT = '2026-08-10T16:00:01.000Z';
 
 /** Address-safe controlled-email fixture for server boundary tests. */
-export function emailDeliveryTestBatch(): DispatchBatch {
+export function emailStaffDrillBatch(): DispatchBatch {
   return DispatchBatchSchema.parse({
     id: IDS.batch,
     intentId: IDS.intent,
@@ -43,11 +42,6 @@ export function emailDeliveryTestBatch(): DispatchBatch {
     },
     rosterSnapshotId: IDS.roster,
     rosterPopulation: 'staff',
-    deliveryTest: {
-      purpose: 'monthly-live-delivery-test',
-      targetSet: { id: IDS.targetSet, version: 1 },
-      endpointReferenceDigest: 'd'.repeat(64),
-    },
     requestId: IDS.request,
     authorization: {
       kind: 'human-confirmed',
@@ -67,23 +61,15 @@ export function emailDeliveryTestBatch(): DispatchBatch {
       subject: '[DRILL] Live canary email test',
       textBody: '[DRILL] LIVE CANARY — TRAINING ONLY.',
     },
-    integrationStatus: {
-      integrationId: 'ses-email',
-      label: 'live-verified',
-      verifiedAt: CREATED_AT,
-      verifiedByUserId: IDS.actor,
-      authorizationReference: 'synthetic-live-verification-reference',
-      reasonCode: null,
-      observedAt: CREATED_AT,
-    },
+    integrationId: 'ses-email',
     sequence: 1,
     endpointCount: 1,
     createdAt: CREATED_AT,
   });
 }
 
-export function emailDeliveryTestWorkItem(): EmailWorkerAttemptWorkItem {
-  const batch = emailDeliveryTestBatch();
+export function emailStaffDrillWorkItem(): EmailWorkerAttemptWorkItem {
+  const batch = emailStaffDrillBatch();
   return EmailWorkerAttemptWorkItemSchema.parse({
     batch,
     attempt: ChannelAttemptSchema.parse({
@@ -97,7 +83,6 @@ export function emailDeliveryTestWorkItem(): EmailWorkerAttemptWorkItem {
       eventTypeVersion: batch.eventTypeVersion,
       rosterSnapshotId: batch.rosterSnapshotId,
       rosterPopulation: batch.rosterPopulation,
-      deliveryTest: batch.deliveryTest,
       recipientId: IDS.recipient,
       endpointId: IDS.endpoint,
       channel: 'email',

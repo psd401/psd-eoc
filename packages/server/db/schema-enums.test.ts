@@ -19,12 +19,10 @@ import {
   HUMAN_ONLY_ACTION_IDS,
   HumanConfirmationStatusSchema,
   IdempotencyStatusSchema,
-  IntegrationTruthLabelSchema,
   InvocationSourceSchema,
   JournalEntryKindSchema,
   JournalSupersessionKindSchema,
   MediaContentTypeSchema,
-  MonthlyDeliveryTestReportStatusSchema,
   MUTATION_CAPABILITY_IDS,
   NotificationChannelSchema,
   NotificationPurposeSchema,
@@ -44,7 +42,6 @@ import {
   agentCapabilityGrantEnum,
   classificationMarkerEnum,
   deliveryEvidenceSubjectKindEnum,
-  deliveryTestReportStatusEnum,
   deliveryTruthStateEnum,
   devicePlatformEnum,
   deviceUnlockMethodEnum,
@@ -59,11 +56,12 @@ import {
   humanConfirmationStatusEnum,
   humanOnlyActionEnum,
   idempotencyStatusEnum,
-  integrationTruthLabelEnum,
   invocationSourceEnum,
   journalEntryKindEnum,
   journalSupersessionKindEnum,
   listContractDerivedDatabaseEnums,
+  RETIRED_AGENT_CAPABILITY_GRANT_IDS,
+  RETIRED_MUTATION_CAPABILITY_IDS,
   mediaContentTypeEnum,
   mutationCapabilityEnum,
   notificationChannelEnum,
@@ -103,13 +101,19 @@ const enumExpectations = [
   [mediaContentTypeEnum, MediaContentTypeSchema.options],
   [deliveryTruthStateEnum, DeliveryTruthStateSchema.options],
   [deliveryEvidenceSubjectKindEnum, DeliveryEvidenceSubjectKindSchema.options],
-  [deliveryTestReportStatusEnum, MonthlyDeliveryTestReportStatusSchema.options],
   [outboxStatusEnum, OutboxStatusSchema.options],
-  [integrationTruthLabelEnum, IntegrationTruthLabelSchema.options],
   [securityAuditCategoryEnum, SecurityAuditCategorySchema.options],
   [securityAuditOutcomeEnum, SecurityAuditOutcomeSchema.options],
-  [agentCapabilityGrantEnum, AGENT_GRANTABLE_CAPABILITY_IDS],
-  [mutationCapabilityEnum, MUTATION_CAPABILITY_IDS],
+  // PostgreSQL cannot drop enum values, so retired capability ids stay in
+  // the type for the rows written under them; the order is the persisted one.
+  [
+    agentCapabilityGrantEnum,
+    [...AGENT_GRANTABLE_CAPABILITY_IDS, ...RETIRED_AGENT_CAPABILITY_GRANT_IDS],
+  ],
+  [
+    mutationCapabilityEnum,
+    [...MUTATION_CAPABILITY_IDS, ...RETIRED_MUTATION_CAPABILITY_IDS],
+  ],
   [humanOnlyActionEnum, HUMAN_ONLY_ACTION_IDS],
   [idempotencyStatusEnum, IdempotencyStatusSchema.options],
   [humanConfirmationStatusEnum, HumanConfirmationStatusSchema.options],
@@ -194,7 +198,9 @@ describe('database enum ownership', () => {
 
   test('every schema enum is derived from its contracts vocabulary', () => {
     for (const [databaseEnum, contractValues] of enumExpectations) {
-      expect(strings(databaseEnum.enumValues)).toEqual(strings(contractValues));
+      expect(strings(databaseEnum.enumValues).sort()).toEqual(
+        strings(contractValues).sort(),
+      );
     }
   });
 

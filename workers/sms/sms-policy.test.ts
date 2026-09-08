@@ -15,7 +15,6 @@ import {
 
 import {
   SmsPolicyError,
-  createDrizzleSmsPolicyStore,
   executeRecordEndpointStatusCapability,
   executeRecordSmsOptOutCapability,
   renderSmsMessage,
@@ -24,7 +23,6 @@ import {
   type SmsEndpointPolicyQuery,
   type SmsEndpointPolicyStore,
 } from '../../packages/server/lib/notify/sms-policy';
-import type { Database } from '../../packages/server/db/client';
 import { parseSmsProviderSendRequest } from './aws-eum-adapter';
 
 const TIMESTAMP = '2026-08-11T18:00:00.000Z';
@@ -114,15 +112,7 @@ function batch(): DispatchBatch {
       channel: 'sms',
       body: '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic test. [DRILL]',
     },
-    integrationStatus: {
-      integrationId: 'aws-eum-sms',
-      label: 'mocked',
-      verifiedAt: null,
-      verifiedByUserId: null,
-      authorizationReference: null,
-      reasonCode: null,
-      observedAt: TIMESTAMP,
-    },
+    integrationId: 'aws-eum-sms',
     sequence: 3,
     endpointCount: 1,
     createdAt: TIMESTAMP,
@@ -136,153 +126,10 @@ function audienceInput() {
   };
 }
 
-function deliveryTestSmsResolutionInput() {
-  const staffGroup = Object.freeze({
-    ...GROUP,
-    kind: 'google-group' as const,
-  });
-  const roster = RosterSnapshotSchema.parse({
-    ...rosterSnapshot,
-    population: 'staff',
-    expectedSourceGroupRefs: [staffGroup],
-    sourceGroupRefs: [staffGroup],
-    recipients: [
-      {
-        id: IDS.recipient,
-        population: 'staff',
-        googleSubject: 'synthetic-approved-sms-canary-subject',
-        displayName: 'Approved synthetic SMS canary fixture',
-        groupSourceRefs: [staffGroup],
-        endpoints: [
-          {
-            id: IDS.endpoint,
-            channel: 'sms',
-            status: 'active',
-            capturedAt: TIMESTAMP,
-            phoneNumber: '+12025550123',
-          },
-        ],
-      },
-      {
-        id: IDS.ordinaryRecipient,
-        population: 'staff',
-        googleSubject: 'synthetic-ordinary-sms-staff-subject',
-        displayName: 'Ordinary synthetic SMS staff fixture',
-        groupSourceRefs: [staffGroup],
-        endpoints: [
-          {
-            id: IDS.ordinaryEndpoint,
-            channel: 'sms',
-            status: 'active',
-            capturedAt: TIMESTAMP,
-            phoneNumber: '+12025550124',
-          },
-        ],
-      },
-    ],
-  });
-  const deliveryTest = Object.freeze({
-    purpose: 'monthly-live-delivery-test' as const,
-    targetSet: { id: IDS.targetSet, version: 1 },
-    endpointReferenceDigest: 'd'.repeat(64),
-  });
-  const deliveryBatch = DispatchBatchSchema.parse({
-    ...batch(),
-    eventKind: 'drill',
-    rosterPopulation: 'staff',
-    deliveryTest,
-    authorization: {
-      kind: 'human-confirmed',
-      activationPreviewId: IDS.preview,
-      preparedActivationId: null,
-      confirmationId: IDS.confirmation,
-      consequenceDigest: 'b'.repeat(64),
-      requestId: IDS.request,
-    },
-    renderedMessage: {
-      eventKind: 'drill',
-      templateMode: 'drill',
-      purpose: 'activation',
-      classificationMarker: 'DRILL',
-      channel: 'sms',
-      body: '[DRILL] LIVE CANARY — TRAINING ONLY.',
-    },
-    integrationStatus: {
-      integrationId: 'aws-eum-sms',
-      label: 'live-verified',
-      verifiedAt: TIMESTAMP,
-      verifiedByUserId: IDS.actor,
-      authorizationReference: 'synthetic-live-verification-reference',
-      reasonCode: null,
-      observedAt: TIMESTAMP,
-    },
-    endpointCount: 1,
-  });
-  return Object.freeze({
-    deliveryTest,
-    input: Object.freeze({
-      batch: deliveryBatch,
-      audience: Object.freeze({
-        facilityId: IDS.facility,
-        rosterSnapshot: roster,
-      }),
-    }),
-  });
-}
-
-function supersededTargetDatabase(target: Readonly<Record<string, unknown>>) {
-  const queuedRows: readonly (readonly unknown[])[] = [
-    [{ facilityId: IDS.facility }],
-    [target],
-    [{ id: '00000000-0000-4000-8000-000000000019' }],
-  ];
-  let selectCalls = 0;
-  let executeCalls = 0;
-  let transactionCalls = 0;
-  const queryDatabase = {
-    select() {
-      const rows = queuedRows[selectCalls] ?? [];
-      selectCalls += 1;
-      const builder = {
-        from() {
-          return builder;
-        },
-        where() {
-          return builder;
-        },
-        limit() {
-          return Promise.resolve(rows);
-        },
-      };
-      return builder;
-    },
-    execute() {
-      executeCalls += 1;
-      return Promise.resolve([]);
-    },
-  };
-  const database = {
-    ...queryDatabase,
-    transaction<Result>(
-      operation: (transaction: typeof queryDatabase) => Promise<Result>,
-    ) {
-      transactionCalls += 1;
-      return operation(queryDatabase);
-    },
-  } as unknown as Database;
-  return Object.freeze({
-    database,
-    executeCalls: () => executeCalls,
-    selectCalls: () => selectCalls,
-    transactionCalls: () => transactionCalls,
-  });
-}
-
 class PolicyStore implements SmsEndpointPolicyStore {
   public constructor(
     private readonly status: 'active' | 'disabled' | 'invalid' = 'active',
     private readonly optedOut = false,
-    private readonly approvedEndpointIds: ReadonlySet<string> | null = null,
   ) {}
 
   public loadEndpointPolicy(query: SmsEndpointPolicyQuery): Promise<unknown> {
@@ -291,10 +138,6 @@ class PolicyStore implements SmsEndpointPolicyStore {
         ...candidate,
         status: this.status,
         optedOut: this.optedOut,
-        approvedForDeliveryTest:
-          query.deliveryTest == null ||
-          this.approvedEndpointIds === null ||
-          this.approvedEndpointIds.has(candidate.endpointId),
       })),
     );
   }
@@ -393,51 +236,7 @@ describe('SMS endpoint policy', () => {
     ).resolves.toEqual([]);
   });
 
-  test('excludes ordinary staff from an approved live canary batch', async () => {
-    const { input } = deliveryTestSmsResolutionInput();
-
-    const resolved = await resolveSmsEndpoints(
-      input,
-      new PolicyStore('active', false, new Set([IDS.endpoint])),
-    );
-
-    expect(resolved).toHaveLength(1);
-    expect(resolved[0]?.recipientId).toBe(IDS.recipient);
-    expect(resolved[0]?.endpoint.id).toBe(IDS.endpoint);
-    expect(JSON.stringify(resolved)).not.toContain('+12025550124');
-  });
-
-  test('rejects a superseded target under the facility lock before exposing a phone number', async () => {
-    const { deliveryTest, input } = deliveryTestSmsResolutionInput();
-    const fixture = supersededTargetDatabase({
-      id: deliveryTest.targetSet.id,
-      version: deliveryTest.targetSet.version,
-      facilityId: IDS.facility,
-      rosterSnapshotId: IDS.roster,
-      rosterPopulation: 'staff',
-      endpointReferenceDigest: deliveryTest.endpointReferenceDigest,
-    });
-    const store = createDrizzleSmsPolicyStore(fixture.database);
-    let releasedPhoneNumbers: readonly string[] | undefined;
-    let providerCalls = 0;
-
-    await expect(
-      resolveSmsEndpoints(input, store).then((resolved) => {
-        releasedPhoneNumbers = resolved.map(
-          ({ endpoint }) => endpoint.phoneNumber,
-        );
-        providerCalls += resolved.length;
-      }),
-    ).rejects.toMatchObject({ code: 'INVALID_SMS_ENDPOINT_POLICY' });
-
-    expect(releasedPhoneNumbers).toBeUndefined();
-    expect(providerCalls).toBe(0);
-    expect(fixture.transactionCalls()).toBe(1);
-    expect(fixture.executeCalls()).toBe(2);
-    expect(fixture.selectCalls()).toBe(3);
-  });
-
-  test('allows +999 fixtures only through the mocked provider preflight', () => {
+  test('accepts a reserved +999 synthetic fixture request', () => {
     const syntheticBatch = batch();
     const attempt = ChannelAttemptSchema.parse({
       id: IDS.actor,
@@ -471,12 +270,9 @@ describe('SMS endpoint policy', () => {
       idempotencyKey: attempt.id,
     };
 
-    expect(parseSmsProviderSendRequest(request, 'mocked')).toMatchObject({
+    expect(parseSmsProviderSendRequest(request)).toMatchObject({
       idempotencyKey: attempt.id,
     });
-    expect(() => parseSmsProviderSendRequest(request, 'live-verified')).toThrow(
-      expect.objectContaining({ code: 'AWS_EUM_WORK_ITEM_INVALID' }),
-    );
   });
 
   test('canonicalizes provider timestamps before persistence and replay comparison', async () => {

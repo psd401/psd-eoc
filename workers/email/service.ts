@@ -6,10 +6,7 @@ import {
   SQSClient,
   type SQSClientConfig,
 } from '@aws-sdk/client-sqs';
-import {
-  EmailAttemptReferenceMessageSchema,
-  SesVerificationReferenceSchema,
-} from '@psd-eoc/contracts';
+import { EmailAttemptReferenceMessageSchema } from '@psd-eoc/contracts';
 
 import { failureDetail } from '../shared/failure-detail';
 import { isTerminalFailure, retireMessage } from '../shared/terminal-failure';
@@ -49,7 +46,6 @@ export interface EmailServiceConfiguration {
   readonly attemptExecutionToken: string;
   readonly deliveryStateToken: string;
   readonly emailRuntimeToken: string;
-  readonly verificationReference: string;
 }
 
 export class EmailServiceError extends Error {
@@ -123,12 +119,6 @@ export function readEmailServiceConfiguration(
   ) {
     throw new EmailServiceError('FEATURE_DISABLED');
   }
-  const verificationReference = SesVerificationReferenceSchema.safeParse(
-    environment.PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE,
-  );
-  if (!verificationReference.success) {
-    throw new EmailServiceError('FEATURE_DISABLED');
-  }
   const queueArn = required(environment, 'EMAIL_QUEUE_ARN', 2_048);
   let queueUrl: string;
   let deadLetterQueueUrl: string;
@@ -161,7 +151,6 @@ export function readEmailServiceConfiguration(
       'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
     ),
     emailRuntimeToken: token(environment, 'PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN'),
-    verificationReference: verificationReference.data,
   });
 }
 
@@ -207,7 +196,6 @@ function buildRuntime(
   const state = new EmailRuntimeClient({
     serviceOrigin: configuration.serviceOrigin,
     bearerToken: configuration.emailRuntimeToken,
-    verificationReference: configuration.verificationReference,
   });
   const worker = new SesEmailRuntime({
     queueArn: configuration.queueArn,
@@ -228,7 +216,6 @@ function buildRuntime(
         serviceOrigin: configuration.serviceOrigin,
         bearerToken: configuration.deliveryStateToken,
       }),
-      authorizeLiveProvider: () => true,
       authorizeProviderSend: (workItem) =>
         state.authorizeProviderSend(workItem),
     },

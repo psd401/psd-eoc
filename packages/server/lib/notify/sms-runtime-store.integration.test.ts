@@ -10,11 +10,9 @@ import {
 } from 'bun:test';
 import {
   DispatchBatchSchema,
-  IntegrationStatusSchema,
   NotificationOutboxMessageSchema,
   SMS_TOTAL_LIFETIME_SECONDS,
   type DispatchBatch,
-  type IntegrationStatus,
   type SmsWorkerAttemptWorkItem,
 } from '@psd-eoc/contracts';
 import { eq } from 'drizzle-orm';
@@ -32,7 +30,6 @@ import {
   dispatchBatches,
   events,
   groupSources,
-  integrationStatuses,
   notificationIntentChannels,
   notificationIntents,
   outbox,
@@ -76,7 +73,6 @@ const EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const CREATED_AT = '2026-08-26T12:00:00.000Z';
 const BATCH_CREATED_AT = '2026-08-26T12:00:00.500Z';
 const VERIFIED_AT = '2026-08-26T11:59:00.000Z';
-const SMS_AUTHORIZATION_REFERENCE = 'carrier:case:279';
 const SMALL_ENDPOINT_COUNT = 1;
 const PAGED_ENDPOINT_COUNT = 51;
 
@@ -89,9 +85,6 @@ const fixture = Object.freeze({
   pagedSnapshotId: randomUUID(),
   smallRecipientId: randomUUID(),
   smallEndpointId: randomUUID(),
-  pushStatusId: randomUUID(),
-  emailStatusId: randomUUID(),
-  smsStatusId: randomUUID(),
 });
 
 const pagedRecipients = Object.freeze(
@@ -138,42 +131,15 @@ function installedPagedBundle(): NotificationBundle {
 
 function runtimeStore(
   overrides: Readonly<{
-    registrationVerificationReference?: string;
     destinationCountryCode?: 'US' | 'CA';
     now?: () => number;
   }> = {},
 ): SmsRuntimeStore {
   return createDrizzleSmsRuntimeStore(databaseConnection().db, {
-    registrationVerificationReference:
-      overrides.registrationVerificationReference ?? 'carrier:case:279',
     destinationCountryCode: overrides.destinationCountryCode ?? 'US',
     now: overrides.now ?? (() => currentTime),
   });
 }
-
-function liveIntegrationStatus(
-  integrationId: 'expo-push' | 'ses-email' | 'aws-eum-sms',
-): IntegrationStatus {
-  const authorizationReference =
-    integrationId === 'aws-eum-sms'
-      ? SMS_AUTHORIZATION_REFERENCE
-      : `synthetic:${integrationId}`;
-  return IntegrationStatusSchema.parse({
-    integrationId,
-    label: 'live-verified',
-    verifiedAt: VERIFIED_AT,
-    verifiedByUserId: fixture.userId,
-    authorizationReference,
-    reasonCode: null,
-    observedAt: VERIFIED_AT,
-  });
-}
-
-const integrationTruth = Object.freeze({
-  push: liveIntegrationStatus('expo-push'),
-  email: liveIntegrationStatus('ses-email'),
-  sms: liveIntegrationStatus('aws-eum-sms'),
-});
 
 function humanAuthorization(requestId: string) {
   return Object.freeze({
@@ -319,19 +285,19 @@ async function installNotificationBundle(
       channel: 'push' as const,
       endpointCount: 1,
       renderedMessage: pushMessage,
-      integrationStatus: integrationTruth.push,
+      integrationId: 'expo-push',
     }),
     Object.freeze({
       channel: 'email' as const,
       endpointCount: 1,
       renderedMessage: emailMessage,
-      integrationStatus: integrationTruth.email,
+      integrationId: 'ses-email',
     }),
     Object.freeze({
       channel: 'sms' as const,
       endpointCount: smsEndpointCount,
       renderedMessage: smsMessage,
-      integrationStatus: integrationTruth.sms,
+      integrationId: 'aws-eum-sms',
     }),
   ]);
   const message = NotificationOutboxMessageSchema.parse({
@@ -372,7 +338,7 @@ async function installNotificationBundle(
     authorization,
     channel: 'sms',
     renderedMessage: smsMessage,
-    integrationStatus: integrationTruth.sms,
+    integrationId: 'aws-eum-sms',
     sequence: 3,
     endpointCount: smsEndpointCount,
     createdAt: BATCH_CREATED_AT,
@@ -433,9 +399,7 @@ async function installNotificationBundle(
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: pushMessage,
-        integrationStatusId: fixture.pushStatusId,
         integrationId: 'expo-push',
-        integrationLabel: 'live-verified',
       },
       {
         intentId: ids.intent,
@@ -448,9 +412,7 @@ async function installNotificationBundle(
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: emailMessage,
-        integrationStatusId: fixture.emailStatusId,
         integrationId: 'ses-email',
-        integrationLabel: 'live-verified',
       },
       {
         intentId: ids.intent,
@@ -463,9 +425,7 @@ async function installNotificationBundle(
         classificationMarker: 'DRILL',
         endpointCount: smsEndpointCount,
         renderedMessage: smsMessage,
-        integrationStatusId: fixture.smsStatusId,
         integrationId: 'aws-eum-sms',
-        integrationLabel: 'live-verified',
       },
     ]);
     await transaction.insert(outbox).values({
@@ -507,9 +467,7 @@ async function installNotificationBundle(
       authorization,
       channel: 'sms',
       renderedMessage: smsMessage,
-      integrationStatusId: fixture.smsStatusId,
       integrationId: 'aws-eum-sms',
-      integrationLabel: 'live-verified',
       sequence: 3,
       endpointCount: smsEndpointCount,
       createdAt: new Date(BATCH_CREATED_AT),
@@ -602,16 +560,12 @@ function optOutInput(workItem: SmsWorkerAttemptWorkItem, suffix: string) {
 }
 
 describe('SMS runtime store configuration', () => {
-  test('treats carrier registration evidence as readiness configuration only', () => {
+  test('reads only the destination country', () => {
     expect(
       readSmsRuntimeStoreConfiguration({
-        PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE: 'carrier:case:279',
         PSD_EOC_SMS_DESTINATION_COUNTRY_CODE: 'US',
       }),
-    ).toEqual({
-      registrationVerificationReference: 'carrier:case:279',
-      destinationCountryCode: 'US',
-    });
+    ).toEqual({ destinationCountryCode: 'US' });
   });
 });
 
@@ -647,32 +601,10 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
           createdAt: new Date(VERIFIED_AT),
           disabledAt: null,
         });
-        await transaction.insert(integrationStatuses).values([
-          {
-            id: fixture.pushStatusId,
-            ...integrationTruth.push,
-            verifiedAt: new Date(integrationTruth.push.verifiedAt!),
-            observedAt: new Date(integrationTruth.push.observedAt),
-          },
-          {
-            id: fixture.emailStatusId,
-            ...integrationTruth.email,
-            verifiedAt: new Date(integrationTruth.email.verifiedAt!),
-            observedAt: new Date(integrationTruth.email.observedAt),
-          },
-          {
-            id: fixture.smsStatusId,
-            ...integrationTruth.sms,
-            verifiedAt: new Date(integrationTruth.sms.verifiedAt!),
-            observedAt: new Date(integrationTruth.sms.observedAt),
-          },
-        ]);
         await transaction
           .update(channelConfigurations)
           .set({
             enabled: true,
-            statusId: fixture.smsStatusId,
-            statusLabel: 'live-verified',
             changedAt: new Date(VERIFIED_AT),
           })
           .where(eq(channelConfigurations.integrationId, 'aws-eum-sms'));
@@ -1155,44 +1087,18 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     ).resolves.toEqual({ kind: 'expired' });
   });
 
-  test('authorizes only the exact provider reference, destination country, and currently eligible endpoint', async () => {
+  test('authorizes only the exact destination country and currently eligible endpoint', async () => {
     currentTime = Date.parse(CREATED_AT) + 1_000;
     const workItem = await resolvedSmallWorkItem();
     await persistAttempt(databaseConnection().db, workItem);
-    const liveContext = {
-      attemptId: workItem.attempt.id,
-      batchId: workItem.batch.id,
-      eventId: workItem.batch.eventId,
-      eventKind: workItem.batch.eventKind,
-      templateMode: workItem.batch.templateMode,
-      purpose: workItem.batch.purpose,
-      requestId: workItem.batch.requestId,
-      authorizationKind: workItem.batch.authorization.kind,
-      integrationAuthorizationReference: SMS_AUTHORIZATION_REFERENCE,
-    };
-
     await expect(
       runtimeStore().authorizeProviderSend(workItem),
-    ).resolves.toEqual({ authorized: true, timeToLiveSeconds: 299 });
-    await expect(
-      runtimeStore({
-        registrationVerificationReference: 'carrier:case:different',
-      }).authorizeProviderSend(workItem),
     ).resolves.toEqual({ authorized: true, timeToLiveSeconds: 299 });
     await expect(
       runtimeStore({ destinationCountryCode: 'CA' }).authorizeProviderSend(
         workItem,
       ),
     ).resolves.toEqual({ authorized: false });
-    await expect(runtimeStore().authorizeLiveSend(liveContext)).resolves.toBe(
-      true,
-    );
-    await expect(
-      runtimeStore().authorizeLiveSend({
-        ...liveContext,
-        integrationAuthorizationReference: 'carrier:case:different',
-      }),
-    ).resolves.toBe(false);
 
     currentTime =
       Date.parse(BATCH_CREATED_AT) + (SMS_TOTAL_LIFETIME_SECONDS - 5) * 1_000;
@@ -1277,18 +1183,5 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     await expect(
       runtimeStore().authorizeProviderSend(workItem),
     ).resolves.toEqual({ authorized: false });
-    await expect(
-      runtimeStore().authorizeLiveSend({
-        attemptId: workItem.attempt.id,
-        batchId: workItem.batch.id,
-        eventId: workItem.batch.eventId,
-        eventKind: workItem.batch.eventKind,
-        templateMode: workItem.batch.templateMode,
-        purpose: workItem.batch.purpose,
-        requestId: workItem.batch.requestId,
-        authorizationKind: workItem.batch.authorization.kind,
-        integrationAuthorizationReference: SMS_AUTHORIZATION_REFERENCE,
-      }),
-    ).resolves.toBe(false);
   });
 });

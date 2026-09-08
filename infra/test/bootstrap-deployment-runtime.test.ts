@@ -580,14 +580,11 @@ describe('rollback image provenance validation', () => {
 
 const QUIESCENCE_SERVICE_NAMES = ['push-worker', 'sms-worker', 'email-worker'];
 const DARK_PROVIDER_PROPERTIES = Object.freeze({
-  DirectPushCredentialVerificationReference: 'UNVERIFIED',
   EnableAwsEumSmsWorker: 'false',
   EnableDirectPush: 'false',
   EnableEmailWorker: 'false',
   EnableExpoPushWorker: 'false',
-  ExpoCredentialVerificationReference: 'UNVERIFIED',
   PushProviderCutover: '{"version":1,"ios":"expo","android":"expo"}',
-  SesCredentialVerificationReference: 'UNVERIFIED',
 });
 
 function quiescenceEvent(rollbackSelected: 'false' | 'true') {

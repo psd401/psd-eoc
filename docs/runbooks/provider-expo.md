@@ -32,9 +32,9 @@ successful synthesis do not prove deployment or authorize provider I/O.
 
 ## Respond
 
-1. Confirm the environment, push integration
-   truth label, and `psd-eoc-push` queue/DLQ state. If the label is not
-   `live-verified`, provider I/O must remain disabled.
+1. Confirm the environment, whether the push channel is enabled, and
+   `psd-eoc-push` queue/DLQ state. If the channel is disabled, provider I/O
+   must remain off.
 2. In CloudWatch, inspect `/psd-eoc/workers/push` by UTC interval, sanitized
    attempt ID, and bounded reason code. Do not inspect or copy destinations or
    raw Expo responses.
@@ -51,7 +51,7 @@ successful synthesis do not prove deployment or authorize provider I/O.
    heartbeats or receipt polling fail.
    Use [alarm-outbox-stuck.md](alarm-outbox-stuck.md) when the conditional
    push stuck-outbox alarm fires.
-6. Determine independently whether email is `live-verified` and healthy. The
+6. Determine independently whether email is enabled and healthy. The
    application may continue an already approved channel according to its
    canonical policy; operators must not manually copy recipients or message
    content to another channel.

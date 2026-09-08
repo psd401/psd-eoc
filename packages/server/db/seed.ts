@@ -4,7 +4,6 @@ import {
   EventTypeVersionSchema,
   FacilitySchema,
   GroupSourceSchema,
-  IntegrationStatusSchema,
   MessageTemplateCatalogSchema,
   NeighborhoodSchema,
   RosterSnapshotSchema,
@@ -16,7 +15,7 @@ import {
   type Recipient,
   type RosterGroupSourceRef,
 } from '@psd-eoc/contracts';
-import { desc, inArray, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -30,7 +29,6 @@ import {
   eventTypes,
   facilities,
   groupSources,
-  integrationStatuses,
   neighborhoodFacilities,
   neighborhoodVersions,
   rosterEndpoints,
@@ -100,11 +98,6 @@ const ids = {
   eventTypeVersionShelterInPlaceDrill: '00000000-0000-4000-8000-00000000020d',
   eventTypeVersionOtherReal: '00000000-0000-4000-8000-00000000020e',
   eventTypeVersionOtherDrill: '00000000-0000-4000-8000-00000000020f',
-  integrationGoogleGroups: '00000000-0000-4000-8000-000000000300',
-  integrationExpoPush: '00000000-0000-4000-8000-000000000301',
-  integrationMobilePush: '00000000-0000-4000-8000-000000000305',
-  integrationSesEmail: '00000000-0000-4000-8000-000000000302',
-  integrationAwsEumSms: '00000000-0000-4000-8000-000000000303',
   integrationS3Media: '00000000-0000-4000-8000-000000000304',
 } as const;
 
@@ -593,89 +586,20 @@ const templateRows = eventTypeVersionRows.flatMap((version) =>
   ),
 );
 
-const integrationStatusRows = [
-  IntegrationStatusSchema.parse({
-    integrationId: 'google-groups',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEED_TIMESTAMP,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 'expo-push',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEED_TIMESTAMP,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 'mobile-push',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEED_TIMESTAMP,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 'ses-email',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEED_TIMESTAMP,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 'aws-eum-sms',
-    label: 'blocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: 'CARRIER_REGISTRATION_PENDING',
-    observedAt: SEED_TIMESTAMP,
-  }),
-  IntegrationStatusSchema.parse({
-    integrationId: 's3-media',
-    label: 'mocked',
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: SEED_TIMESTAMP,
-  }),
-];
-
-const integrationStatusIds = [
-  ids.integrationGoogleGroups,
-  ids.integrationExpoPush,
-  ids.integrationMobilePush,
-  ids.integrationSesEmail,
-  ids.integrationAwsEumSms,
-  ids.integrationS3Media,
-] as const;
-
 const channelConfigurationRows = [
   ChannelConfigurationSchema.parse({
     integrationId: 'mobile-push',
     enabled: false,
-    status: integrationStatusRows[2],
     changedAt: SEED_TIMESTAMP,
   }),
   ChannelConfigurationSchema.parse({
     integrationId: 'ses-email',
     enabled: false,
-    status: integrationStatusRows[3],
     changedAt: SEED_TIMESTAMP,
   }),
   ChannelConfigurationSchema.parse({
     integrationId: 'aws-eum-sms',
     enabled: false,
-    status: integrationStatusRows[4],
     changedAt: SEED_TIMESTAMP,
   }),
 ];
@@ -688,7 +612,6 @@ export interface ReferenceSeedSummary {
   readonly eventTypes: 12;
   readonly eventTypeVersions: 12;
   readonly eventTypeTemplates: 108;
-  readonly integrationStatuses: 6;
   readonly channelConfigurations: 3;
   readonly events: 0;
   readonly outboxMessages: 0;
@@ -710,7 +633,6 @@ const referenceSeedSummary: ReferenceSeedSummary = {
   eventTypes: 12,
   eventTypeVersions: 12,
   eventTypeTemplates: 108,
-  integrationStatuses: 6,
   channelConfigurations: 3,
   events: 0,
   outboxMessages: 0,
@@ -775,122 +697,20 @@ export async function seedReferenceData(
       .values(templateRows)
       .onConflictDoNothing();
 
-    // The insert guard uses this same per-integration lock to serialize truth
-    // observations. Take every seed-owned lock in lexical order before reading
-    // history so a concurrent live verification cannot appear between the read
-    // and a deterministic initial insert.
-    const seededIntegrationIds = integrationStatusRows
-      .map((status) => status.integrationId)
-      .sort();
-    for (const integrationId of seededIntegrationIds) {
-      await transaction.execute(sql`
-        select pg_advisory_xact_lock(
-          hashtextextended(${integrationId}, 0)
-        )
-      `);
-    }
-
-    const integrationsWithHistory = new Set(
-      (
-        await transaction
-          .select({ integrationId: integrationStatuses.integrationId })
-          .from(integrationStatuses)
-          .where(
-            inArray(
-              integrationStatuses.integrationId,
-              integrationStatusRows.map((status) => status.integrationId),
-            ),
-          )
-      ).map((status) => status.integrationId),
-    );
-    const initialStatuses = integrationStatusRows.flatMap((status, index) =>
-      integrationsWithHistory.has(status.integrationId)
-        ? []
-        : [
-            {
-              id: integrationStatusIds[index],
-              integrationId: status.integrationId,
-              label: status.label,
-              verifiedAt: null,
-              verifiedByUserId: null,
-              authorizationReference: null,
-              reasonCode: status.reasonCode,
-              observedAt: SEED_TIME,
-            },
-          ],
-    );
-    if (initialStatuses.length > 0) {
+    if (options.insertChannelConfigurations !== undefined) {
+      await options.insertChannelConfigurations(transaction);
+    } else {
       await transaction
-        .insert(integrationStatuses)
-        .values(initialStatuses)
-        .onConflictDoNothing();
-    }
-    const initiallySeededIntegrations = new Set(
-      initialStatuses.map((status) => status.integrationId),
-    );
-
-    // A live database can predate the deterministic initial observations. Its
-    // append-only guard correctly rejects inserting those old observations
-    // after newer truth exists, so missing channel rows must point at the
-    // latest retained observation instead of assuming the seed ID exists.
-    const latestStatuses = await transaction
-      .select({
-        id: integrationStatuses.id,
-        integrationId: integrationStatuses.integrationId,
-        label: integrationStatuses.label,
-        observedAt: integrationStatuses.observedAt,
-      })
-      .from(integrationStatuses)
-      .where(
-        inArray(
-          integrationStatuses.integrationId,
-          channelConfigurationRows.map(
-            (configuration) => configuration.integrationId,
-          ),
-        ),
-      )
-      .orderBy(
-        desc(integrationStatuses.observedAt),
-        desc(integrationStatuses.id),
-      );
-    const latestStatusByIntegration = new Map<
-      string,
-      (typeof latestStatuses)[number]
-    >();
-    for (const status of latestStatuses) {
-      if (!latestStatusByIntegration.has(status.integrationId)) {
-        latestStatusByIntegration.set(status.integrationId, status);
-      }
-    }
-    await transaction
-      .insert(channelConfigurations)
-      .values(
-        channelConfigurationRows.map((configuration) => {
-          const status = latestStatusByIntegration.get(
-            configuration.integrationId,
-          );
-          if (status === undefined) {
-            throw new Error(
-              `Reference status is unavailable for ${configuration.integrationId}.`,
-            );
-          }
-          return {
+        .insert(channelConfigurations)
+        .values(
+          channelConfigurationRows.map((configuration) => ({
             integrationId: configuration.integrationId,
             enabled: configuration.enabled,
-            statusId: status.id,
-            statusLabel: status.label,
-            changedAt: initiallySeededIntegrations.has(
-              configuration.integrationId,
-            )
-              ? SEED_TIME
-              : sql`greatest(
-                  statement_timestamp(),
-                  ${status.observedAt.toISOString()}::timestamptz
-                )`,
-          };
-        }),
-      )
-      .onConflictDoNothing();
+            changedAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
   });
 
   return referenceSeedSummary;
@@ -946,12 +766,21 @@ export interface SeedDatabaseOptions {
   readonly insertEventTypes?: (
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
+  /**
+   * Writes the channel configurations in place of the seed. A fixture held at
+   * a migration before `0049_gut_delivery_tests_and_truth_labels` still has
+   * the retired `status_id` and `status_label` columns, which the seed no
+   * longer writes, so the fixture writes the rows its schema actually needs.
+   */
+  readonly insertChannelConfigurations?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
 }
 
-/** The reference seed only ever needs the event type override. */
+/** The reference seed only ever needs the held-back schema overrides. */
 export type ReferenceSeedOptions = Pick<
   SeedDatabaseOptions,
-  'insertEventTypes'
+  'insertEventTypes' | 'insertChannelConfigurations'
 >;
 
 export async function seedDatabase(

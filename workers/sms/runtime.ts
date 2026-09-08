@@ -13,13 +13,11 @@ import {
   WorkerAttemptProcessor,
   type AttemptEvidenceWriter,
   type AttemptExecutionStore,
-  type LiveProviderAuthorizer,
   type WorkerAttemptProcessResult,
 } from '../shared';
 import {
   AwsEumSmsAdapter,
   type AwsEumSmsAdapterOptions,
-  type AwsEumSmsLiveAuthorizer,
   type AwsEumSmsProviderAuthorizer,
 } from './aws-eum-adapter';
 import {
@@ -102,9 +100,7 @@ export type SmsRuntimeMode =
   | Readonly<{ state: 'dark' }>
   | Readonly<{
       state: 'enabled';
-      authorizeLiveProvider: LiveProviderAuthorizer;
-      authorizeLiveSend: AwsEumSmsLiveAuthorizer;
-      /** Fresh endpoint/integration truth checked immediately before AWS I/O. */
+      /** Fresh endpoint and enablement truth checked immediately before AWS I/O. */
       authorizeProviderSend: AwsEumSmsProviderAuthorizer;
     }>;
 
@@ -113,7 +109,7 @@ export interface AwsEumSmsRuntimeOptions {
   readonly awsClient: AwsEumSingleAttemptClientConfig;
   readonly adapter: Omit<
     AwsEumSmsAdapterOptions,
-    'client' | 'featureEnabled' | 'authorizeLiveSend' | 'authorizeProviderSend'
+    'client' | 'featureEnabled' | 'authorizeProviderSend'
   >;
   readonly executionStore: AttemptExecutionStore;
   readonly evidenceWriter: AttemptEvidenceWriter;
@@ -297,9 +293,7 @@ export class AwsEumSmsRuntime {
     }
     if (
       configuredMode.state === 'enabled' &&
-      (typeof configuredMode.authorizeLiveProvider !== 'function' ||
-        typeof configuredMode.authorizeLiveSend !== 'function' ||
-        typeof configuredMode.authorizeProviderSend !== 'function')
+      typeof configuredMode.authorizeProviderSend !== 'function'
     ) {
       throw new AwsEumSmsRuntimeError('INVALID_CONFIGURATION');
     }
@@ -308,8 +302,6 @@ export class AwsEumSmsRuntime {
         ? Object.freeze({ state: 'dark' })
         : Object.freeze({
             state: 'enabled',
-            authorizeLiveProvider: configuredMode.authorizeLiveProvider,
-            authorizeLiveSend: configuredMode.authorizeLiveSend,
             authorizeProviderSend: configuredMode.authorizeProviderSend,
           });
     let optOutList: Readonly<AwsEumOptOutListIdentity>;
@@ -327,19 +319,16 @@ export class AwsEumSmsRuntime {
       client,
       featureEnabled: mode.state === 'enabled',
       ...(mode.state === 'enabled'
-        ? {
-            authorizeLiveSend: mode.authorizeLiveSend,
-            authorizeProviderSend: mode.authorizeProviderSend,
-          }
+        ? { authorizeProviderSend: mode.authorizeProviderSend }
         : {}),
     });
     this.#attemptProcessor = new WorkerAttemptProcessor({
+      providerSendEnabled: mode.state === 'enabled',
       adapter,
       executionStore: options.executionStore,
       evidenceWriter: options.evidenceWriter,
       ...(mode.state === 'enabled'
         ? {
-            authorizeLiveProvider: mode.authorizeLiveProvider,
             authorizeProviderSend: async (workItem) =>
               (await mode.authorizeProviderSend(workItem)).authorized,
           }

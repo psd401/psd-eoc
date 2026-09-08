@@ -43,21 +43,6 @@ function channelName(channel: PreviewChannel['channel']): string {
   }
 }
 
-function integrationLabel(
-  label: PreviewChannel['integrationStatus']['label'],
-): string {
-  switch (label) {
-    case 'live-verified':
-      return 'Live integration verified';
-    case 'mocked':
-      return 'Mocked — training data only';
-    case 'configured-unverified':
-      return 'Configured, not verified';
-    case 'blocked':
-      return 'Blocked';
-  }
-}
-
 export function activationAudienceLabel(
   recipientCount: number,
   rosterPopulation: RosterPopulation,
@@ -204,10 +189,6 @@ export function ActivationConfirmation({
               <Text style={styles.fact}>
                 <Text style={styles.factLabel}>Reaches: </Text>
                 {channel.endpointCount}
-              </Text>
-              <Text style={styles.fact}>
-                <Text style={styles.factLabel}>Integration: </Text>
-                {integrationLabel(channel.integrationStatus.label)}
               </Text>
             </View>
           );

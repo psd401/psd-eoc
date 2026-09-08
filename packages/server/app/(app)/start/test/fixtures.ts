@@ -220,30 +220,6 @@ function channelConsequences(
 ): ActivationPreview['channels'] {
   const marker = input.mode === 'real' ? 'INCIDENT' : 'DRILL';
   const prefix = `[${marker}]`;
-  const integrationStatus = (
-    integrationId: 'expo-push' | 'ses-email' | 'aws-eum-sms',
-  ) =>
-    input.simulatedReadyStaff
-      ? {
-          integrationId,
-          label: 'live-verified' as const,
-          verifiedAt: input.observedAt,
-          verifiedByUserId: PLAYWRIGHT_IDS.user,
-          authorizationReference:
-            'synthetic-playwright-interception-not-provider-evidence',
-          reasonCode: null,
-          observedAt: input.observedAt,
-        }
-      : {
-          integrationId,
-          label: 'configured-unverified' as const,
-          verifiedAt: null,
-          verifiedByUserId: null,
-          authorizationReference: null,
-          reasonCode: null,
-          observedAt: input.observedAt,
-        };
-
   const consequences: ActivationPreview['channels'] = [
     {
       channel: 'push',
@@ -257,7 +233,7 @@ function channelConsequences(
         title: `${prefix} Synthetic browser preview`,
         body: `${prefix} No provider can receive this browser fixture.`,
       },
-      integrationStatus: integrationStatus('expo-push'),
+      integrationId: 'expo-push',
     },
     {
       channel: 'email',
@@ -271,7 +247,7 @@ function channelConsequences(
         subject: `${prefix} Synthetic browser preview`,
         textBody: `${prefix} No provider can receive this browser fixture.`,
       },
-      integrationStatus: integrationStatus('ses-email'),
+      integrationId: 'ses-email',
     },
     {
       channel: 'sms',
@@ -284,7 +260,7 @@ function channelConsequences(
         classificationMarker: marker,
         body: `${prefix} Synthetic browser preview only.`,
       },
-      integrationStatus: integrationStatus('aws-eum-sms'),
+      integrationId: 'aws-eum-sms',
     },
   ];
   return input.includeSms

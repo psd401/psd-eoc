@@ -178,9 +178,6 @@ function createHarness(store = new MemoryDeliveryEvidenceStore()) {
             await canonicalAuthorizer.authorize(request);
           },
         },
-        async finalizeDeliveryTestReportByIntent(): Promise<null> {
-          return null;
-        },
         async close(): Promise<void> {
           closes += 1;
         },

@@ -27,12 +27,7 @@ import {
   type RosterPopulation,
 } from './roster';
 import { HumanOnlyActionIdSchema } from './human-only';
-import {
-  isAtOrAfter,
-  TimestampSchema,
-  UuidSchema,
-  VersionSchema,
-} from './shared';
+import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
 
 export { EventKindSchema, type EventKind } from './event-type';
 
@@ -240,38 +235,6 @@ export const ActivationPreviewIdSchema = UuidSchema;
 
 /** Stable activation-preview identifier inferred from its schema. */
 export type ActivationPreviewId = z.infer<typeof ActivationPreviewIdSchema>;
-
-/** Stable reference to one immutable, approved canary target-set version. */
-export const DeliveryTestTargetSetRefSchema = z
-  .object({
-    id: UuidSchema,
-    version: VersionSchema,
-  })
-  .strict()
-  .readonly();
-
-/** Delivery-test target-set reference inferred from its schema. */
-export type DeliveryTestTargetSetRef = z.infer<
-  typeof DeliveryTestTargetSetRefSchema
->;
-
-/**
- * Owns the destination-free canary-selection provenance repeated from the
- * activation preview through notification, outbox, batch, and attempt truth.
- */
-export const DeliveryTestNotificationMetadataSchema = z
-  .object({
-    purpose: z.literal('monthly-live-delivery-test'),
-    targetSet: DeliveryTestTargetSetRefSchema,
-    endpointReferenceDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-  })
-  .strict()
-  .readonly();
-
-/** Delivery-test notification provenance inferred from its schema. */
-export type DeliveryTestNotificationMetadata = z.infer<
-  typeof DeliveryTestNotificationMetadataSchema
->;
 
 /** Stable identifier for an agent- or human-prepared activation. */
 export const PreparedActivationIdSchema = UuidSchema;
@@ -798,48 +761,6 @@ const MultiChannelActivationPreviewPlanSchema = z
   .max(3)
   .readonly();
 
-const ControlledEmailCanaryActivationPlanSchema = z
-  .tuple([ChannelConsequencePreviewSchema])
-  .superRefine(([channel], context) => {
-    if (channel.channel !== 'email' || channel.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled email canary consequence must contain exactly one email endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const ControlledPushCanaryActivationPlanSchema = z
-  .tuple([ChannelConsequencePreviewSchema])
-  .superRefine(([channel], context) => {
-    if (channel.channel !== 'push' || channel.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled push canary consequence must contain exactly one push endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
-const ControlledSmsCanaryActivationPlanSchema = z
-  .tuple([ChannelConsequencePreviewSchema])
-  .superRefine(([channel], context) => {
-    if (channel.channel !== 'sms' || channel.endpointCount !== 1) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A controlled SMS canary consequence must contain exactly one SMS endpoint.',
-        path: [0],
-      });
-    }
-  })
-  .readonly();
-
 export const ActivationPreviewSchema = z
   .object({
     id: ActivationPreviewIdSchema,
@@ -852,12 +773,7 @@ export const ActivationPreviewSchema = z
     threat: ActivationThreatSchema.nullable(),
     responseDetail: OperatorDetailSchema.nullable(),
     recipientCount: z.number().int().nonnegative().max(1_200),
-    channels: z.union([
-      MultiChannelActivationPreviewPlanSchema,
-      ControlledEmailCanaryActivationPlanSchema,
-      ControlledPushCanaryActivationPlanSchema,
-      ControlledSmsCanaryActivationPlanSchema,
-    ]),
+    channels: MultiChannelActivationPreviewPlanSchema,
     sendReadiness: z.enum(['ready', 'blocked']),
     blockingReasonCodes: z
       .array(
@@ -877,7 +793,6 @@ export const ActivationPreviewSchema = z
         message: 'Preview active-event IDs must be unique.',
       })
       .readonly(),
-    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     consequenceDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     createdAt: TimestampSchema,
     expiresAt: TimestampSchema,
@@ -892,25 +807,11 @@ export const ActivationPreviewSchema = z
         path: ['eventTypeVersion', 'templateMode'],
       });
     }
-    if (preview.threat === null && preview.deliveryTest == null) {
+    if (preview.threat === null) {
       context.addIssue({
         code: 'custom',
-        message:
-          'An activation preview pins the threat the operator chose; only a monthly delivery test has none.',
+        message: 'An activation preview pins the threat the operator chose.',
         path: ['threat'],
-      });
-    }
-    if (
-      preview.deliveryTest != null &&
-      (preview.kind !== 'drill' ||
-        preview.templateMode !== 'drill' ||
-        preview.rosterPopulation !== 'staff')
-    ) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'Monthly live delivery tests must remain drill-classified and target the approved staff routing class.',
-        path: ['deliveryTest'],
       });
     }
     if (!isAtOrAfter(preview.expiresAt, preview.createdAt)) {
@@ -938,31 +839,7 @@ export const ActivationPreviewSchema = z
         path: ['channels'],
       });
     }
-    const controlledSingleCanary =
-      channelNames.length === 1 &&
-      (channelNames[0] === 'email' ||
-        channelNames[0] === 'push' ||
-        channelNames[0] === 'sms') &&
-      preview.channels[0]?.endpointCount === 1;
-    if (
-      controlledSingleCanary &&
-      (preview.deliveryTest == null ||
-        preview.kind !== 'drill' ||
-        preview.templateMode !== 'drill' ||
-        preview.rosterPopulation !== 'staff' ||
-        preview.recipientCount !== 1)
-    ) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A single-channel consequence is limited to one delivery-test staff recipient and DRILL classification.',
-        path: ['channels'],
-      });
-    }
-    if (
-      !controlledSingleCanary &&
-      (!channelNames.includes('push') || !channelNames.includes('email'))
-    ) {
+    if (!channelNames.includes('push') || !channelNames.includes('email')) {
       context.addIssue({
         code: 'custom',
         message:
@@ -991,27 +868,17 @@ export const ActivationPreviewSchema = z
         });
       }
     });
-    const integrationsReady = preview.channels.every((channel) =>
-      preview.rosterPopulation === 'synthetic'
-        ? channel.integrationStatus.label === 'mocked'
-        : channel.integrationStatus.label === 'live-verified',
-    );
     const isReady = preview.sendReadiness === 'ready';
-    const requiredChannelsHaveEndpoints = controlledSingleCanary
-      ? preview.channels[0]?.endpointCount === 1
-      : preview.channels
-          .filter((channel) => ['push', 'email'].includes(channel.channel))
-          .every((channel) => channel.endpointCount > 0);
+    const requiredChannelsHaveEndpoints = preview.channels
+      .filter((channel) => ['push', 'email'].includes(channel.channel))
+      .every((channel) => channel.endpointCount > 0);
     if (
       isReady &&
-      (!integrationsReady ||
-        preview.recipientCount === 0 ||
-        !requiredChannelsHaveEndpoints)
+      (preview.recipientCount === 0 || !requiredChannelsHaveEndpoints)
     ) {
       context.addIssue({
         code: 'custom',
-        message:
-          'Ready sends require recipients, required endpoints, and ready integrations.',
+        message: 'Ready sends require recipients and required endpoints.',
         path: ['sendReadiness'],
       });
     }
@@ -1117,20 +984,13 @@ export const LifecycleConsequencePreviewSchema = z
         });
       }
     });
-    const integrationsReady = preview.channels.every((channel) =>
-      preview.rosterPopulation === 'synthetic'
-        ? channel.integrationStatus.label === 'mocked'
-        : channel.integrationStatus.label === 'live-verified',
-    );
     const requiredChannelsHaveEndpoints = preview.channels
       .filter((channel) => ['push', 'email'].includes(channel.channel))
       .every((channel) => channel.endpointCount > 0);
     const isReady = preview.sendReadiness === 'ready';
     if (
       isReady &&
-      (!integrationsReady ||
-        preview.recipientCount === 0 ||
-        !requiredChannelsHaveEndpoints)
+      (preview.recipientCount === 0 || !requiredChannelsHaveEndpoints)
     ) {
       context.addIssue({
         code: 'custom',
@@ -1180,14 +1040,6 @@ export const PreparedActivationSchema = z
         code: 'custom',
         message: 'Prepared activations are reserved for staff-targeting flows.',
         path: ['preview', 'rosterPopulation'],
-      });
-    }
-    if (prepared.preview.deliveryTest != null) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'Monthly live delivery-test previews cannot enter a prepared activation workflow.',
-        path: ['preview', 'deliveryTest'],
       });
     }
     if (!isAtOrAfter(prepared.preparedAt, prepared.preview.createdAt)) {

@@ -19,7 +19,6 @@ const ENABLED_ENVIRONMENT = Object.freeze({
   PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN: TOKEN,
   PSD_EOC_DELIVERY_STATE_WORKER_TOKEN: TOKEN,
   PSD_EOC_EXPO_CREDENTIAL_STATUS: 'verified',
-  PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE: 'eas:build:proof-278',
   PSD_EOC_EXPO_PUSH_PROVIDER_AUTHORIZED: 'true',
   PSD_EOC_EXPO_PUSH_RUNTIME_MODE: 'enabled',
   PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN: TOKEN,
@@ -42,10 +41,6 @@ describe('Expo push service configuration', () => {
       },
       {
         ...ENABLED_ENVIRONMENT,
-        PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE: 'UNVERIFIED',
-      },
-      {
-        ...ENABLED_ENVIRONMENT,
         PSD_EOC_EXPO_CREDENTIAL_STATUS: 'UNCONFIGURED',
       },
     ]) {
@@ -62,16 +57,9 @@ describe('Expo push service configuration', () => {
       deliveryStateToken: TOKEN,
       endpointWorkerToken: TOKEN,
       pushRuntimeToken: TOKEN,
-      verificationReference: 'eas:build:proof-278',
       cutover: { version: 1, ios: 'expo', android: 'expo' },
       direct: null,
     });
-    expect(
-      readExpoPushServiceConfiguration({
-        ...ENABLED_ENVIRONMENT,
-        PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE: 'v1',
-      }).verificationReference,
-    ).toBe('v1');
   });
 
   test('requires exact direct credentials before a direct platform cutover', () => {
@@ -96,8 +84,6 @@ describe('Expo push service configuration', () => {
       FCM_ENVIRONMENT: 'production',
       FCM_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${'B'.repeat(128)}\n-----END PRIVATE KEY-----\n`,
       FCM_PROJECT_ID: 'example-project',
-      PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE:
-        'direct:credential-proof-43',
       PSD_EOC_DIRECT_PUSH_PROVIDER_AUTHORIZED: 'true',
       PSD_EOC_IOS_BUNDLE_ID: 'org.example.eoc',
       PSD_EOC_PUSH_PROVIDER_CUTOVER:
@@ -106,7 +92,6 @@ describe('Expo push service configuration', () => {
     expect(readExpoPushServiceConfiguration(directEnvironment)).toMatchObject({
       cutover: { version: 1, ios: 'direct', android: 'direct' },
       direct: {
-        verificationReference: 'direct:credential-proof-43',
         apns: { topic: 'org.example.eoc', environment: 'production' },
         fcm: { projectId: 'example-project', environment: 'production' },
       },
@@ -121,12 +106,6 @@ describe('Expo push service configuration', () => {
         privateKey: directEnvironment.FCM_PRIVATE_KEY.slice(0, -1),
       },
     });
-    expect(() =>
-      readExpoPushServiceConfiguration({
-        ...directEnvironment,
-        PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE: 'short',
-      }),
-    ).toThrow(expect.objectContaining({ code: 'FEATURE_DISABLED' }));
     expect(() =>
       readExpoPushServiceConfiguration({
         ...directEnvironment,

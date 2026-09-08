@@ -196,15 +196,6 @@ function activeEvent(
 }
 
 function mockedChannelConsequences() {
-  const integrationStatus = (channel: 'push' | 'email') => ({
-    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-    label: 'mocked' as const,
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: FIXTURE_CREATED_AT,
-  });
   return [
     {
       channel: 'push' as const,
@@ -218,7 +209,7 @@ function mockedChannelConsequences() {
         title: '[DRILL] Synthetic earthquake drill',
         body: '[DRILL] Synthetic recipients only.',
       },
-      integrationStatus: integrationStatus('push'),
+      integrationId: 'expo-push',
     },
     {
       channel: 'email' as const,
@@ -232,21 +223,12 @@ function mockedChannelConsequences() {
         subject: '[DRILL] Synthetic earthquake drill',
         textBody: '[DRILL] Synthetic recipients only.',
       },
-      integrationStatus: integrationStatus('email'),
+      integrationId: 'ses-email',
     },
   ] as const;
 }
 
-function mockedAllClearChannels(createdAt: string) {
-  const integrationStatus = (channel: 'push' | 'email') => ({
-    integrationId: channel === 'push' ? 'expo-push' : 'ses-email',
-    label: 'mocked' as const,
-    verifiedAt: null,
-    verifiedByUserId: null,
-    authorizationReference: null,
-    reasonCode: null,
-    observedAt: createdAt,
-  });
+function mockedAllClearChannels() {
   return [
     {
       channel: 'push' as const,
@@ -260,7 +242,7 @@ function mockedAllClearChannels(createdAt: string) {
         title: '[DRILL] Synthetic earthquake drill all-clear',
         body: '[DRILL] Synthetic exercise all-clear.',
       },
-      integrationStatus: integrationStatus('push'),
+      integrationId: 'expo-push',
     },
     {
       channel: 'email' as const,
@@ -274,7 +256,7 @@ function mockedAllClearChannels(createdAt: string) {
         subject: '[DRILL] Synthetic earthquake drill all-clear',
         textBody: '[DRILL] Synthetic exercise all-clear.',
       },
-      integrationStatus: integrationStatus('email'),
+      integrationId: 'ses-email',
     },
   ] as const;
 }
@@ -312,7 +294,7 @@ function lifecyclePreview(event: Event, now: Date) {
     rosterSnapshotId: event.rosterSnapshotId,
     rosterPopulation: event.rosterPopulation,
     recipientCount: 2,
-    channels: mockedAllClearChannels(now.toISOString()),
+    channels: mockedAllClearChannels(),
     sendReadiness: 'ready',
     blockingReasonCodes: [],
     consequenceDigest: 'b'.repeat(64),

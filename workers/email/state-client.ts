@@ -2,7 +2,6 @@ import {
   EmailBatchResolutionPageSchema,
   EmailRetryResolutionSchema,
   EmailRuntimeRequestSchema,
-  SesVerificationReferenceSchema,
   SesSendLedgerClaimSchema,
   type DispatchBatch,
   type EmailWorkerAttemptWorkItem,
@@ -41,7 +40,6 @@ export class EmailRuntimeClientError extends Error {
 export interface EmailRuntimeClientOptions {
   readonly serviceOrigin: string;
   readonly bearerToken: string;
-  readonly verificationReference: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly timeoutMilliseconds?: number;
 }
@@ -148,19 +146,11 @@ export class EmailRuntimeClient implements DurableSesSendLedger {
   readonly #endpoint: string;
   readonly #token: string;
   readonly #fetch: typeof globalThis.fetch;
-  readonly #verificationReference: string;
   readonly #timeoutMilliseconds: number;
 
   public constructor(options: EmailRuntimeClientOptions) {
     this.#endpoint = `${parseOrigin(options.serviceOrigin)}${EMAIL_RUNTIME_PATH}`;
     this.#token = parseToken(options.bearerToken);
-    const verificationReference = SesVerificationReferenceSchema.safeParse(
-      options.verificationReference,
-    );
-    if (!verificationReference.success) {
-      throw new EmailRuntimeClientError('INVALID_CONFIGURATION', false);
-    }
-    this.#verificationReference = verificationReference.data;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#timeoutMilliseconds = options.timeoutMilliseconds ?? 15_000;
     if (
@@ -178,7 +168,6 @@ export class EmailRuntimeClient implements DurableSesSendLedger {
     }
     const request = {
       ...(body as Readonly<Record<string, unknown>>),
-      verificationReference: this.#verificationReference,
     };
     if (!EmailRuntimeRequestSchema.safeParse(request).success) {
       throw new EmailRuntimeClientError('INVALID_REQUEST', false);

@@ -88,13 +88,6 @@ procedure.
 Use the [metrics collector](../docs/runbooks/alarm-metrics-collector.md)
 procedure.
 
-### Runbook: Monthly live delivery test
-
-Use the
-[monthly delivery-test alarm](../docs/runbooks/alarm-monthly-delivery-test.md)
-procedure. A schedule may remind a human that a test is due; it may never send
-one.
-
 ### Runbook: Shallow canary
 
 Use the [shallow canary](../docs/runbooks/alarm-canary-failure.md) procedure.

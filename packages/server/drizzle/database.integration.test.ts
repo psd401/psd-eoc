@@ -6,15 +6,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { randomUUID } from 'node:crypto';
-import {
-  DeliveryEvidenceSchema,
-  DispatchBatchSchema,
-  EmailBatchResolutionPageSchema,
-  EmailRetryResolutionSchema,
-  NotificationOutboxMessageSchema,
-  SesSendLedgerClaimSchema,
-} from '@psd-eoc/contracts';
+import {} from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
@@ -30,7 +22,10 @@ import {
   type SeedSummary,
 } from '../db/seed';
 import { insertEventTypesBeforeDetailRule } from '../lib/testing/held-back-event-types';
-import { notificationIntentChannels } from '../db/schema';
+import {
+  HELD_BACK_INTEGRATION_STATUS_IDS,
+  insertChannelConfigurationsBeforeTruthRetirement,
+} from '../lib/testing/held-back-channel-configurations';
 import { migrateDatabase } from './migrate';
 import {
   closeAndDropDisposableDatabase,
@@ -38,10 +33,6 @@ import {
   type DisposableDatabase,
 } from '../lib/testing/database';
 import { createDrizzleSesWebhookStore } from '../app/api/webhooks/ses/runtime';
-import { createDrizzleDeliveryEvidenceStore } from '../app/api/internal/delivery-state/runtime';
-import { createDrizzleAttemptExecutionStore } from '../lib/notify/attempt-execution-store';
-import { createDrizzleEmailRuntimeStore } from '../lib/notify/email-runtime-store';
-import { deliveryTestEndpointReferenceDigest } from '../lib/testing/e2e-delivery';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -52,24 +43,6 @@ setDefaultTimeout(30_000);
 let connection: PostgresDatabaseConnection | undefined;
 let firstSeedSummary: SeedSummary | undefined;
 let ownedDatabase: DisposableDatabase | undefined;
-
-const metricsCollectorSource = await Bun.file(
-  new URL('../../../infra/lambda/metrics-collector/index.mjs', import.meta.url),
-).text();
-const deliveryTestHealthQueryMatches = [
-  ...metricsCollectorSource.matchAll(
-    /\n\s*deliveryTestHealth:\s*`([\s\S]*?)`,\n\s*outboxToProvider:/gu,
-  ),
-];
-if (
-  deliveryTestHealthQueryMatches.length !== 1 ||
-  deliveryTestHealthQueryMatches[0]?.[1] === undefined
-) {
-  throw new Error(
-    'The deployed delivery-test health monitoring query could not be extracted exactly once.',
-  );
-}
-const deliveryTestHealthMonitoringQuery = deliveryTestHealthQueryMatches[0][1];
 
 const ISSUE_14_PRE_LIFECYCLE_MIGRATIONS = [
   '0000_youthful_captain_stacy.sql',
@@ -223,7 +196,7 @@ describeWithDatabase('direct push migration upgrade', () => {
         }),
       }),
     ]);
-    const message = NotificationOutboxMessageSchema.parse({
+    const message = Object.freeze({
       version: 1,
       outboxId: ids.outbox,
       intentId: ids.intent,
@@ -539,8 +512,6 @@ const ISSUE_23_OUTBOX_IDS = Object.freeze({
   facility: '00000000-0000-4000-8000-000000000001',
   eventTypeVersion: '00000000-0000-4000-8000-000000000201',
   roster: '00000000-0000-4000-8000-000000000041',
-  pushIntegrationStatus: '00000000-0000-4000-8000-000000000301',
-  emailIntegrationStatus: '00000000-0000-4000-8000-000000000302',
 });
 
 const ISSUE_23_PUSH_UPGRADE_IDS = Object.freeze({
@@ -777,27 +748,6 @@ const syntheticAdminEvidencePrerequisites = [
       '2026-08-10T19:00:00.000Z'::timestamptz
     )
   `,
-  sql`
-    insert into integration_statuses (
-      id,
-      integration_id,
-      label,
-      verified_at,
-      verified_by_user_id,
-      authorization_reference,
-      reason_code,
-      observed_at
-    ) values (
-      '00000000-0000-4000-8000-000000026005'::uuid,
-      'synthetic-database-evidence',
-      'live-verified'::integration_truth_label,
-      '2026-08-10T16:01:00.000Z'::timestamptz,
-      '00000000-0000-4000-8000-000000026001'::uuid,
-      repeat('a', 64),
-      null,
-      '2026-08-10T16:01:00.000Z'::timestamptz
-    )
-  `,
 ] as const;
 
 const insertSyntheticRoleChange = sql`
@@ -820,59 +770,18 @@ const insertSyntheticRoleChange = sql`
   )
 `;
 
-const insertSyntheticChannelChangeAuthorization = sql`
-  insert into integration_channel_change_authorizations (
-    id,
-    reference,
-    authorization_commitment,
-    integration_status_id,
-    integration_id,
-    status_label,
-    desired_enabled,
-    request_digest,
-    consequence_digest,
-    authorized_by_user_id,
-    authorized_with_session_id,
-    issued_at,
-    expires_at,
-    consumed_by_user_id,
-    consumed_with_session_id,
-    consumed_request_id,
-    consumed_at
-  ) values (
-    '00000000-0000-4000-8000-000000026006'::uuid,
-    'synthetic-product-owner-evidence-26',
-    repeat('a', 64),
-    '00000000-0000-4000-8000-000000026005'::uuid,
-    'synthetic-database-evidence',
-    'live-verified'::integration_truth_label,
-    false,
-    repeat('b', 64),
-    repeat('c', 64),
-    '00000000-0000-4000-8000-000000026001'::uuid,
-    '00000000-0000-4000-8000-000000026004'::uuid,
-    '2026-08-10T16:01:00.000Z'::timestamptz,
-    '2026-08-10T16:16:00.000Z'::timestamptz,
-    '00000000-0000-4000-8000-000000026001'::uuid,
-    '00000000-0000-4000-8000-000000026004'::uuid,
-    '00000000-0000-4000-8000-000000026009'::uuid,
-    '2026-08-10T16:02:00.000Z'::timestamptz
-  )
-`;
-
 type PostgresTransaction = Parameters<
   Parameters<PostgresDatabaseConnection['db']['transaction']>[0]
 >[0];
 
 /**
- * Builds a fully synthetic staff/canary graph for database-only delivery-test
- * safety proofs. `.invalid` addresses and unroutable tokens ensure this
+ * Builds a fully synthetic staff dispatch graph for database-only safety
+ * proofs. `.invalid` addresses and unroutable tokens ensure this
  * fixture cannot reach a recipient or provider.
  */
-async function insertDeliveryTestStructuralFixture(
+async function insertStaffDispatchFixture(
   transaction: PostgresTransaction,
   dispatchCreatedAt: Date | string = '2026-08-10T16:06:30.000Z',
-  endpointReferenceDigest: string = 'e'.repeat(64),
 ): Promise<void> {
   for (const statement of syntheticAdminEvidencePrerequisites) {
     await transaction.execute(statement);
@@ -1067,134 +976,6 @@ async function insertDeliveryTestStructuralFixture(
       )
     `,
     sql`
-      insert into delivery_test_canary_eligibility_facts (
-        id, supersedes_fact_id, facility_id, roster_snapshot_id,
-        roster_population, recipient_id, endpoint_id, channel, decision,
-        opted_in_at, decided_at, decided_by_user_id,
-        decided_with_session_id, authorization_reference
-      ) values
-      (
-        '00000000-0000-4000-8000-000000030012'::uuid,
-        null,
-        '00000000-0000-4000-8000-000000000001'::uuid,
-        '00000000-0000-4000-8000-000000030003'::uuid,
-        'staff'::roster_population,
-        '00000000-0000-4000-8000-000000030004'::uuid,
-        '00000000-0000-4000-8000-000000030006'::uuid,
-        'push'::notification_channel,
-        'approved-synthetic-canary',
-        '2026-08-10T15:00:00.000Z'::timestamptz,
-        '2026-08-10T16:03:00.000Z'::timestamptz,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        '00000000-0000-4000-8000-000000026004'::uuid,
-        'synthetic-product-owner-delivery-test-approval'
-      ),
-      (
-        '00000000-0000-4000-8000-000000030013'::uuid,
-        null,
-        '00000000-0000-4000-8000-000000000001'::uuid,
-        '00000000-0000-4000-8000-000000030003'::uuid,
-        'staff'::roster_population,
-        '00000000-0000-4000-8000-000000030005'::uuid,
-        '00000000-0000-4000-8000-000000030007'::uuid,
-        'email'::notification_channel,
-        'approved-synthetic-canary',
-        '2026-08-10T15:00:00.000Z'::timestamptz,
-        '2026-08-10T16:03:00.000Z'::timestamptz,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        '00000000-0000-4000-8000-000000026004'::uuid,
-        'synthetic-product-owner-delivery-test-approval'
-      )
-    `,
-    sql`
-      insert into delivery_test_target_set_versions (
-        id, version, facility_id, roster_snapshot_id, roster_population,
-        supersedes_version_id, endpoint_reference_digest,
-        idempotency_request_id, approved_by_user_id,
-        approved_with_session_id, approved_at, created_at
-      ) values (
-        '00000000-0000-4000-8000-000000030010'::uuid,
-        1,
-        '00000000-0000-4000-8000-000000000001'::uuid,
-        '00000000-0000-4000-8000-000000030003'::uuid,
-        'staff'::roster_population,
-        null,
-        ${endpointReferenceDigest},
-        '00000000-0000-4000-8000-000000030011'::uuid,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        '00000000-0000-4000-8000-000000026004'::uuid,
-        '2026-08-10T16:04:00.000Z'::timestamptz,
-        '2026-08-10T16:03:00.000Z'::timestamptz
-      )
-    `,
-    sql`
-      insert into delivery_test_target_endpoints (
-        target_set_version_id, target_set_version, eligibility_fact_id,
-        roster_snapshot_id,
-        roster_population, recipient_id, endpoint_id, channel, attestation,
-        opted_in_at, attested_at, attested_by_user_id,
-        authorization_reference
-      ) values
-      (
-        '00000000-0000-4000-8000-000000030010'::uuid,
-        1,
-        '00000000-0000-4000-8000-000000030012'::uuid,
-        '00000000-0000-4000-8000-000000030003'::uuid,
-        'staff'::roster_population,
-        '00000000-0000-4000-8000-000000030004'::uuid,
-        '00000000-0000-4000-8000-000000030006'::uuid,
-        'push'::notification_channel,
-        'approved-synthetic-canary',
-        '2026-08-10T15:00:00.000Z'::timestamptz,
-        '2026-08-10T16:03:00.000Z'::timestamptz,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        'synthetic-product-owner-delivery-test-approval'
-      ),
-      (
-        '00000000-0000-4000-8000-000000030010'::uuid,
-        1,
-        '00000000-0000-4000-8000-000000030013'::uuid,
-        '00000000-0000-4000-8000-000000030003'::uuid,
-        'staff'::roster_population,
-        '00000000-0000-4000-8000-000000030005'::uuid,
-        '00000000-0000-4000-8000-000000030007'::uuid,
-        'email'::notification_channel,
-        'approved-synthetic-canary',
-        '2026-08-10T15:00:00.000Z'::timestamptz,
-        '2026-08-10T16:03:00.000Z'::timestamptz,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        'synthetic-product-owner-delivery-test-approval'
-      )
-    `,
-    sql`set constraints "delivery_test_target_sets_complete_guard" immediate`,
-    sql`set constraints "delivery_test_target_sets_complete_guard" deferred`,
-    sql`
-      insert into integration_statuses (
-        id, integration_id, label, verified_at, verified_by_user_id,
-        authorization_reference, reason_code, observed_at
-      ) values
-      (
-        '00000000-0000-4000-8000-000000030050'::uuid,
-        'expo-push',
-        'live-verified'::integration_truth_label,
-        '2026-08-10T16:02:00.000Z'::timestamptz,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        'synthetic-product-owner-push-live-verification',
-        null,
-        '2026-08-10T16:02:00.000Z'::timestamptz
-      ),
-      (
-        '00000000-0000-4000-8000-000000030051'::uuid,
-        'ses-email',
-        'live-verified'::integration_truth_label,
-        '2026-08-10T16:02:00.000Z'::timestamptz,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        'synthetic-product-owner-email-live-verification',
-        null,
-        '2026-08-10T16:02:00.000Z'::timestamptz
-      )
-    `,
-    sql`
       insert into connectivity_epochs (id, session_id, established_at)
       values (
         '00000000-0000-4000-8000-000000030040'::uuid,
@@ -1234,8 +1015,7 @@ async function insertDeliveryTestStructuralFixture(
         id, facility_id, kind, template_mode, event_type_version_id,
         roster_snapshot_id, roster_population, recipient_count, channels, send_readiness,
         blocking_reason_codes, active_event_ids, consequence_digest,
-        delivery_test_target_set_id, delivery_test_target_set_version,
-        delivery_test_endpoint_reference_digest, created_at, expires_at
+        created_at, expires_at
       ) values (
         '00000000-0000-4000-8000-000000030020'::uuid,
         '00000000-0000-4000-8000-000000000001'::uuid,
@@ -1250,9 +1030,6 @@ async function insertDeliveryTestStructuralFixture(
         '[]'::jsonb,
         '[]'::jsonb,
         repeat('d', 64),
-        '00000000-0000-4000-8000-000000030010'::uuid,
-        1,
-        ${endpointReferenceDigest},
         '2026-08-10T16:05:00.000Z'::timestamptz,
         '2026-08-10T16:10:00.000Z'::timestamptz
       )
@@ -1298,9 +1075,7 @@ async function insertDeliveryTestStructuralFixture(
       insert into notification_intents (
         id, event_id, event_kind, template_mode, purpose,
         event_type_version_id, roster_snapshot_id, roster_population,
-        created_by, source, request_id, "authorization", delivery_test_target_set_id,
-        delivery_test_target_set_version,
-        delivery_test_endpoint_reference_digest, created_at
+        created_by, source, request_id, "authorization", created_at
       ) values (
         '00000000-0000-4000-8000-000000030032'::uuid,
         '00000000-0000-4000-8000-000000030030'::uuid,
@@ -1325,9 +1100,6 @@ async function insertDeliveryTestStructuralFixture(
           'consequenceDigest', repeat('d', 64),
           'requestId', '00000000-0000-4000-8000-000000030031'
         ),
-        '00000000-0000-4000-8000-000000030010'::uuid,
-        1,
-        ${endpointReferenceDigest},
         '2026-08-10T16:06:00.000Z'::timestamptz
       )
     `,
@@ -1335,8 +1107,7 @@ async function insertDeliveryTestStructuralFixture(
       insert into notification_intent_channels (
         intent_id, sequence, channel, event_kind, template_mode, purpose,
         roster_population, classification_marker, endpoint_count,
-        rendered_message, integration_status_id, integration_id,
-        integration_label
+        rendered_message, integration_id
       ) values
       (
         '00000000-0000-4000-8000-000000030032'::uuid,
@@ -1349,9 +1120,7 @@ async function insertDeliveryTestStructuralFixture(
         'DRILL'::classification_marker,
         1,
         '{"channel":"push","eventKind":"drill","templateMode":"drill","purpose":"activation","classificationMarker":"DRILL","title":"[DRILL] Monthly delivery test","body":"[DRILL] Synthetic canary only."}'::jsonb,
-        '00000000-0000-4000-8000-000000030050'::uuid,
-        'expo-push',
-        'live-verified'::integration_truth_label
+        'expo-push'
       ),
       (
         '00000000-0000-4000-8000-000000030032'::uuid,
@@ -1364,9 +1133,7 @@ async function insertDeliveryTestStructuralFixture(
         'DRILL'::classification_marker,
         1,
         '{"channel":"email","eventKind":"drill","templateMode":"drill","purpose":"activation","classificationMarker":"DRILL","subject":"[DRILL] Monthly delivery test","textBody":"[DRILL] Synthetic canary only."}'::jsonb,
-        '00000000-0000-4000-8000-000000030051'::uuid,
-        'ses-email',
-        'live-verified'::integration_truth_label
+        'ses-email'
       )
     `,
     sql`
@@ -1407,15 +1174,6 @@ async function insertDeliveryTestStructuralFixture(
           'rosterPopulation', intent.roster_population::text,
           'requestId', intent.request_id::text,
           'authorization', intent."authorization",
-          'deliveryTest', jsonb_build_object(
-            'purpose', 'monthly-live-delivery-test',
-            'targetSet', jsonb_build_object(
-              'id', intent.delivery_test_target_set_id::text,
-              'version', intent.delivery_test_target_set_version
-            ),
-            'endpointReferenceDigest',
-              intent.delivery_test_endpoint_reference_digest
-          ),
           'channels', planned.channels,
           'createdAt', intent.created_at
         ),
@@ -1434,21 +1192,7 @@ async function insertDeliveryTestStructuralFixture(
             'channel', channel.channel::text,
             'endpointCount', channel.endpoint_count,
             'renderedMessage', channel.rendered_message,
-            'integrationStatus', jsonb_build_object(
-              'integrationId', channel.integration_id,
-              'label', channel.integration_label::text,
-              'verifiedAt', '2026-08-10T16:02:00.000Z',
-              'verifiedByUserId',
-                '00000000-0000-4000-8000-000000026001',
-              'authorizationReference', case channel.channel
-                when 'push' then
-                  'synthetic-product-owner-push-live-verification'
-                when 'email' then
-                  'synthetic-product-owner-email-live-verification'
-              end,
-              'reasonCode', null,
-              'observedAt', '2026-08-10T16:02:00.000Z'
-            )
+            'integrationId', channel.integration_id
           ) order by channel.sequence
         ) as channels
         from notification_intent_channels as channel
@@ -1461,8 +1205,7 @@ async function insertDeliveryTestStructuralFixture(
         id, outbox_id, intent_id, event_id, event_kind, template_mode,
         purpose, event_type_version_id, roster_snapshot_id,
         roster_population, request_id, "authorization", channel, rendered_message,
-        integration_status_id, integration_id, integration_label,
-        sequence, endpoint_count, created_at
+        integration_id, sequence, endpoint_count, created_at
       )
       select
         case channel.channel
@@ -1482,9 +1225,7 @@ async function insertDeliveryTestStructuralFixture(
         outbox."authorization",
         channel.channel,
         channel.rendered_message,
-        channel.integration_status_id,
         channel.integration_id,
-        channel.integration_label,
         channel.sequence,
         channel.endpoint_count,
         ${dispatchCreatedAt}::timestamptz
@@ -1493,30 +1234,6 @@ async function insertDeliveryTestStructuralFixture(
         on channel.intent_id = outbox.intent_id
       where outbox.id = '00000000-0000-4000-8000-000000030033'::uuid
     `,
-    sql`
-      insert into delivery_test_runs (
-        id, activation_preview_id, event_id, notification_intent_id,
-        target_set_version_id, target_set_version,
-        endpoint_reference_digest, consequence_digest, confirmation_id,
-        confirmation_status, request_id, started_by_user_id,
-        started_with_session_id, started_at
-      ) values (
-        '00000000-0000-4000-8000-000000030042'::uuid,
-        '00000000-0000-4000-8000-000000030020'::uuid,
-        '00000000-0000-4000-8000-000000030030'::uuid,
-        '00000000-0000-4000-8000-000000030032'::uuid,
-        '00000000-0000-4000-8000-000000030010'::uuid,
-        1,
-        ${endpointReferenceDigest},
-        repeat('d', 64),
-        '00000000-0000-4000-8000-000000030041'::uuid,
-        'consumed'::human_confirmation_status,
-        '00000000-0000-4000-8000-000000030031'::uuid,
-        '00000000-0000-4000-8000-000000026001'::uuid,
-        '00000000-0000-4000-8000-000000026004'::uuid,
-        '2026-08-10T16:06:00.000Z'::timestamptz
-      )
-    `,
   ] as const;
 
   for (const statement of fixtureStatements) {
@@ -1524,7 +1241,7 @@ async function insertDeliveryTestStructuralFixture(
   }
 }
 
-async function insertInitialDeliveryTestEvidence(
+async function insertInitialAttemptEvidence(
   transaction: PostgresTransaction,
   pushTerminalState: 'failed' | 'unknown',
 ): Promise<void> {
@@ -1647,290 +1364,8 @@ async function insertInitialDeliveryTestEvidence(
   `);
 }
 
-async function insertSucceededDeliveryTestEvidence(
-  transaction: PostgresTransaction,
-): Promise<void> {
-  await transaction.execute(sql`
-    insert into channel_attempts (
-      id, batch_id, intent_id, event_id, event_kind, template_mode,
-      purpose, event_type_version_id, roster_snapshot_id,
-      roster_population, recipient_id, endpoint_id, channel,
-      attempt_number, attempted_at
-    ) values (
-      '00000000-0000-4000-8000-000000030092'::uuid,
-      '00000000-0000-4000-8000-000000030034'::uuid,
-      '00000000-0000-4000-8000-000000030032'::uuid,
-      '00000000-0000-4000-8000-000000030030'::uuid,
-      'drill'::event_kind,
-      'drill'::template_mode,
-      'activation'::notification_purpose,
-      '00000000-0000-4000-8000-000000000201'::uuid,
-      '00000000-0000-4000-8000-000000030003'::uuid,
-      'staff'::roster_population,
-      '00000000-0000-4000-8000-000000030004'::uuid,
-      '00000000-0000-4000-8000-000000030006'::uuid,
-      'push'::notification_channel,
-      2,
-      '2026-08-10T16:07:10.000Z'::timestamptz
-    )
-  `);
-  await transaction.execute(sql`
-    insert into delivery_evidence (
-      id, subject_kind, subject_id, intent_id, attempt_id, sequence,
-      previous_evidence_id, state, recorded_at, provider,
-      provider_reference, proof, reason_code, diagnostic_digest
-    ) values
-    (
-      '00000000-0000-4000-8000-000000030097'::uuid,
-      'attempt'::delivery_evidence_subject_kind,
-      '00000000-0000-4000-8000-000000030092'::uuid,
-      null,
-      '00000000-0000-4000-8000-000000030092'::uuid,
-      1,
-      null,
-      'attempted'::delivery_truth_state,
-      '2026-08-10T16:07:10.100Z'::timestamptz,
-      null,
-      null,
-      null,
-      null,
-      null
-    ),
-    (
-      '00000000-0000-4000-8000-000000030098'::uuid,
-      'attempt'::delivery_evidence_subject_kind,
-      '00000000-0000-4000-8000-000000030092'::uuid,
-      null,
-      '00000000-0000-4000-8000-000000030092'::uuid,
-      2,
-      '00000000-0000-4000-8000-000000030097'::uuid,
-      'provider-accepted'::delivery_truth_state,
-      '2026-08-10T16:07:10.500Z'::timestamptz,
-      'expo-push',
-      'synthetic-provider-reference:push:2',
-      null,
-      null,
-      null
-    )
-  `);
-}
-
-async function insertCrossFacilityDeliveryTestEligibility(
-  transaction: PostgresTransaction,
-): Promise<void> {
-  await transaction.execute(sql`
-    insert into roster_snapshot_facilities (roster_snapshot_id, facility_id)
-    values (
-      '00000000-0000-4000-8000-000000030003'::uuid,
-      '00000000-0000-4000-8000-000000000002'::uuid
-    )
-  `);
-  await transaction.execute(sql`
-    insert into delivery_test_canary_eligibility_facts (
-      id, supersedes_fact_id, facility_id, roster_snapshot_id,
-      roster_population, recipient_id, endpoint_id, channel, decision,
-      opted_in_at, decided_at, decided_by_user_id,
-      decided_with_session_id, authorization_reference
-    ) values (
-      '00000000-0000-4000-8000-000000030085'::uuid,
-      null,
-      '00000000-0000-4000-8000-000000000002'::uuid,
-      '00000000-0000-4000-8000-000000030003'::uuid,
-      'staff'::roster_population,
-      '00000000-0000-4000-8000-000000030004'::uuid,
-      '00000000-0000-4000-8000-000000030006'::uuid,
-      'push'::notification_channel,
-      'approved-synthetic-canary',
-      '2026-08-10T15:00:00.000Z'::timestamptz,
-      '2026-08-10T16:08:00.000Z'::timestamptz,
-      '00000000-0000-4000-8000-000000026001'::uuid,
-      '00000000-0000-4000-8000-000000026004'::uuid,
-      'synthetic-cross-facility-canary-proof'
-    )
-  `);
-}
-
-const insertIncompleteDeliveryTestReport = sql`
-  insert into delivery_test_reports (
-    id, run_id, run_started_at, sequence, supersedes_report_id, status,
-    channels, generated_at, finalized_by, source, reason_code
-  ) values (
-    '00000000-0000-4000-8000-000000030043'::uuid,
-    '00000000-0000-4000-8000-000000030042'::uuid,
-    '2026-08-10T16:06:00.000Z'::timestamptz,
-    1,
-    null,
-    'incomplete'::delivery_test_report_status,
-    jsonb_build_array(
-      jsonb_build_object(
-        'channel', 'push',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', null,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'unknown', 'count', 1)
-        ),
-        'completedAt', null
-      ),
-      jsonb_build_object(
-        'channel', 'email',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', 31700,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'provider-accepted', 'count', 1)
-        ),
-        'completedAt', '2026-08-10T16:06:31.700Z'
-      )
-    ),
-    '2026-08-10T16:07:00.000Z'::timestamptz,
-    jsonb_build_object(
-      'kind', 'system',
-      'serviceId', 'delivery-test-reporter'
-    ),
-    'worker'::invocation_source,
-    'PROVIDER_TRUTH_PENDING'
-  )
-`;
-
-const insertFailedDeliveryTestReport = sql`
-  insert into delivery_test_reports (
-    id, run_id, run_started_at, sequence, supersedes_report_id, status,
-    channels, generated_at, finalized_by, source, reason_code
-  ) values (
-    '00000000-0000-4000-8000-000000030043'::uuid,
-    '00000000-0000-4000-8000-000000030042'::uuid,
-    '2026-08-10T16:06:00.000Z'::timestamptz,
-    1,
-    null,
-    'failed'::delivery_test_report_status,
-    jsonb_build_array(
-      jsonb_build_object(
-        'channel', 'push',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', null,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'failed', 'count', 1)
-        ),
-        'completedAt', null
-      ),
-      jsonb_build_object(
-        'channel', 'email',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', 31700,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'provider-accepted', 'count', 1)
-        ),
-        'completedAt', '2026-08-10T16:06:31.700Z'
-      )
-    ),
-    '2026-08-10T16:07:00.000Z'::timestamptz,
-    jsonb_build_object(
-      'kind', 'system',
-      'serviceId', 'delivery-test-reporter'
-    ),
-    'worker'::invocation_source,
-    'DELIVERY_TEST_PROVIDER_FAILURE'
-  )
-`;
-
-const insertSucceededDeliveryTestReport = sql`
-  insert into delivery_test_reports (
-    id, run_id, run_started_at, sequence, supersedes_report_id, status,
-    channels, generated_at, finalized_by, source, reason_code
-  ) values (
-    '00000000-0000-4000-8000-000000030044'::uuid,
-    '00000000-0000-4000-8000-000000030042'::uuid,
-    '2026-08-10T16:06:00.000Z'::timestamptz,
-    2,
-    '00000000-0000-4000-8000-000000030043'::uuid,
-    'succeeded'::delivery_test_report_status,
-    jsonb_build_array(
-      jsonb_build_object(
-        'channel', 'push',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', 70500,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'provider-accepted', 'count', 1)
-        ),
-        'completedAt', '2026-08-10T16:07:10.500Z'
-      ),
-      jsonb_build_object(
-        'channel', 'email',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', 31700,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'provider-accepted', 'count', 1)
-        ),
-        'completedAt', '2026-08-10T16:06:31.700Z'
-      )
-    ),
-    '2026-08-10T16:08:00.000Z'::timestamptz,
-    jsonb_build_object(
-      'kind', 'system',
-      'serviceId', 'delivery-test-reporter'
-    ),
-    'worker'::invocation_source,
-    null
-  )
-`;
-
-const insertFabricatedSucceededDeliveryTestReport = sql`
-  insert into delivery_test_reports (
-    id, run_id, run_started_at, sequence, supersedes_report_id, status,
-    channels, generated_at, finalized_by, source, reason_code
-  ) values (
-    '00000000-0000-4000-8000-000000030075'::uuid,
-    '00000000-0000-4000-8000-000000030042'::uuid,
-    '2026-08-10T16:06:00.000Z'::timestamptz,
-    1,
-    null,
-    'succeeded'::delivery_test_report_status,
-    jsonb_build_array(
-      jsonb_build_object(
-        'channel', 'push',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', 500,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'provider-accepted', 'count', 1)
-        ),
-        'completedAt', '2026-08-10T16:06:00.500Z'
-      ),
-      jsonb_build_object(
-        'channel', 'email',
-        'endpointCount', 1,
-        'activationToProviderAcceptMs', 700,
-        'latestStateCounts', jsonb_build_array(
-          jsonb_build_object('state', 'provider-accepted', 'count', 1)
-        ),
-        'completedAt', '2026-08-10T16:06:00.700Z'
-      )
-    ),
-    '2026-08-10T16:08:00.000Z'::timestamptz,
-    jsonb_build_object(
-      'kind', 'system',
-      'serviceId', 'delivery-test-reporter'
-    ),
-    'worker'::invocation_source,
-    null
-  )
-`;
-
-function monitoringQueryWithBucket(
-  query: string,
-  bucketStart: string,
-  bucketEnd: string,
-  displayTimeZone = 'America/Los_Angeles',
-): string {
-  if (!/^[A-Za-z0-9_+\-/]+$/u.test(displayTimeZone)) {
-    throw new Error('Synthetic monitoring time zone is invalid.');
-  }
-  return query
-    .replaceAll(':bucket_start', `'${bucketStart}'`)
-    .replaceAll(':bucket_end', `'${bucketEnd}'`)
-    .replaceAll(':display_time_zone', `'${displayTimeZone}'`);
-}
-
 describeWithDatabase('production-safe reference seed', () => {
-  test('does not backfill stale initial truth over newer integration history', async () => {
+  test('seeds channel configurations once and leaves every channel disabled', async () => {
     if (testDatabaseUrl === undefined) {
       throw new Error(
         'TEST_DATABASE_URL is required for database integration tests.',
@@ -1954,203 +1389,22 @@ describeWithDatabase('production-safe reference seed', () => {
 
     try {
       await migrateDatabase(opened);
-      await opened.db.execute(sql`
-        insert into integration_statuses (
-          id, integration_id, label, reason_code, observed_at
-        ) values
-          (
-            '10000000-0000-4000-8000-000000000300'::uuid,
-            'google-groups', 'mocked', null,
-            '2026-08-26T12:00:00.000Z'::timestamptz
-          ),
-          (
-            '10000000-0000-4000-8000-000000000301'::uuid,
-            'expo-push', 'configured-unverified', null,
-            '2026-08-26T12:00:00.000Z'::timestamptz
-          ),
-          (
-            '10000000-0000-4000-8000-000000000302'::uuid,
-            'mobile-push', 'configured-unverified', null,
-            '2026-08-26T12:00:00.000Z'::timestamptz
-          ),
-          (
-            '10000000-0000-4000-8000-000000000303'::uuid,
-            'ses-email', 'configured-unverified', null,
-            '2026-08-26T12:00:00.000Z'::timestamptz
-          ),
-          (
-            '10000000-0000-4000-8000-000000000304'::uuid,
-            'aws-eum-sms', 'blocked', 'CARRIER_REGISTRATION_PENDING',
-            '2026-08-27T12:00:00.000Z'::timestamptz
-          ),
-          (
-            '10000000-0000-4000-8000-000000000305'::uuid,
-            's3-media', 'mocked', null,
-            '2026-08-26T12:00:00.000Z'::timestamptz
-          )
-      `);
-
       await seedReferenceData(opened.db);
       await seedReferenceData(opened.db);
 
       const [proof] = await opened.db.execute<{
         configuration_count: number;
-        retained_status_count: number;
-        stale_configuration_time_count: number;
-        stale_status_count: number;
-        truth_mismatch_count: number;
+        enabled_count: number;
       }>(sql`
         select
           (select count(*)::integer from channel_configurations)
             as configuration_count,
-          (select count(*)::integer from integration_statuses
-            where observed_at >= '2026-08-26T12:00:00.000Z'::timestamptz)
-            as retained_status_count,
-          (select count(*)::integer from integration_statuses
-            where observed_at = '2026-08-06T12:00:00.000Z'::timestamptz)
-            as stale_status_count,
-          (select count(*)::integer
-            from channel_configurations as configuration
-            join integration_statuses as status
-              on status.id = configuration.status_id
-            where configuration.changed_at < status.observed_at)
-            as stale_configuration_time_count,
-          (select count(*)::integer
-            from channel_configurations as configuration
-            join integration_statuses as status
-              on status.id = configuration.status_id
-            where status.integration_id <> configuration.integration_id
-              or status.label <> configuration.status_label
-              or exists (
-                select 1
-                from integration_statuses as newer
-                where newer.integration_id = status.integration_id
-                  and (newer.observed_at, newer.id)
-                    > (status.observed_at, status.id)
-              ))
-            as truth_mismatch_count
+          (select count(*)::integer from channel_configurations where enabled)
+            as enabled_count
       `);
-      expect(proof).toEqual({
-        configuration_count: 3,
-        retained_status_count: 6,
-        stale_configuration_time_count: 0,
-        stale_status_count: 0,
-        truth_mismatch_count: 0,
-      });
+      expect(proof).toEqual({ configuration_count: 3, enabled_count: 0 });
     } finally {
       await closeAndDropDisposableDatabase(() => opened.close(), owned);
-    }
-  });
-
-  test('serializes its history read with a concurrent live observation', async () => {
-    if (testDatabaseUrl === undefined) {
-      throw new Error(
-        'TEST_DATABASE_URL is required for database integration tests.',
-      );
-    }
-
-    const owned = await createDisposableDatabase(
-      'psd_eoc_reference_seed_race',
-      testDatabaseUrl,
-    );
-    const holder = createDatabaseClient({
-      driver: 'postgres',
-      url: owned.url,
-      maxConnections: 1,
-    });
-    const seederUrl = new URL(owned.url);
-    seederUrl.searchParams.set(
-      'application_name',
-      'psd_eoc_reference_seed_race',
-    );
-    const seeder = createDatabaseClient({
-      driver: 'postgres',
-      url: seederUrl.toString(),
-      maxConnections: 1,
-    });
-    if (holder.driver !== 'postgres' || seeder.driver !== 'postgres') {
-      throw new Error(
-        'Integration tests require the direct PostgreSQL driver.',
-      );
-    }
-
-    let seedRun: ReturnType<typeof seedReferenceData> | undefined;
-    let waitingForLock = false;
-    try {
-      await migrateDatabase(holder);
-      await holder.db.transaction(async (lockOwner) => {
-        await lockOwner.execute(sql`
-          select pg_advisory_xact_lock(
-            hashtextextended('aws-eum-sms', 0)
-          )
-        `);
-        seedRun = seedReferenceData(seeder.db);
-
-        for (let attempt = 0; attempt < 100; attempt += 1) {
-          const [activity] = await lockOwner.execute<{ waiting: boolean }>(sql`
-            select exists (
-              select 1
-              from pg_locks
-              where locktype = 'advisory'
-                and database = (
-                  select oid from pg_database where datname = current_database()
-                )
-                and not granted
-            ) as waiting
-          `);
-          if (activity?.waiting === true) {
-            waitingForLock = true;
-            break;
-          }
-          await Bun.sleep(10);
-        }
-
-        await lockOwner.execute(sql`
-          insert into integration_statuses (
-            id, integration_id, label, reason_code, observed_at
-          ) values (
-            '20000000-0000-4000-8000-000000000304'::uuid,
-            'aws-eum-sms', 'blocked', 'CARRIER_REGISTRATION_PENDING',
-            '2026-08-26T13:00:00.000Z'::timestamptz
-          )
-        `);
-      });
-      if (seedRun === undefined) {
-        throw new Error('Concurrent reference seed did not start.');
-      }
-      await seedRun;
-      expect(waitingForLock).toBe(true);
-
-      const [proof] = await holder.db.execute<{
-        configuration_status_id: string;
-        current_status_count: number;
-        stale_status_count: number;
-      }>(sql`
-        select
-          (select count(*)::integer
-            from integration_statuses
-            where integration_id = 'aws-eum-sms'
-              and observed_at = '2026-08-26T13:00:00.000Z'::timestamptz)
-            as current_status_count,
-          (select count(*)::integer
-            from integration_statuses
-            where integration_id = 'aws-eum-sms'
-              and observed_at = '2026-08-06T12:00:00.000Z'::timestamptz)
-            as stale_status_count,
-          (select status_id::text
-            from channel_configurations
-            where integration_id = 'aws-eum-sms')
-            as configuration_status_id
-      `);
-      expect(proof).toEqual({
-        configuration_status_id: '20000000-0000-4000-8000-000000000304',
-        current_status_count: 1,
-        stale_status_count: 0,
-      });
-    } finally {
-      await closeAndDropDisposableDatabase(async () => {
-        await Promise.all([holder.close(), seeder.close()]);
-      }, owned);
     }
   });
 });
@@ -2432,7 +1686,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     }
   });
 
-  test('defers retained channel-history scans while enforcing replacement checks', async () => {
+  test('validates the rewritten outbox channel plan shape', async () => {
     const db = databaseConnection().db;
     const constraints = await db.execute<{
       constraint_name: string;
@@ -2449,22 +1703,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       join pg_catalog.pg_namespace as namespace
         on namespace.oid = relation.relnamespace
       where namespace.nspname = 'public'
-        and constraint_record.conname in (
-          'outbox_channel_plan_shape',
-          'delivery_test_reports_channels_shape'
-        )
+        and constraint_record.conname = 'outbox_channel_plan_shape'
       order by relation.relname
     `);
     expect([...constraints]).toEqual([
       {
-        table_name: 'delivery_test_reports',
-        constraint_name: 'delivery_test_reports_channels_shape',
-        validated: false,
-      },
-      {
         table_name: 'outbox',
         constraint_name: 'outbox_channel_plan_shape',
-        validated: false,
+        validated: true,
       },
     ]);
   });
@@ -3077,6 +2323,10 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       }
       await seedDatabase(createdConnection.db, {
         insertRosterEndpoints: insertLegacyRosterEndpoints,
+        // Truth labels left in migration 0049; this schema is held before it, so
+        // the seed's channel rows are written with the columns it still has.
+        insertChannelConfigurations:
+          insertChannelConfigurationsBeforeTruthRetirement,
         // Threats arrived in migration 0046; this schema is held before it, so
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
@@ -3585,6 +2835,10 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       }
       await seedDatabase(createdConnection.db, {
         insertRosterEndpoints: insertLegacyRosterEndpoints,
+        // Truth labels left in migration 0049; this schema is held before it, so
+        // the seed's channel rows are written with the columns it still has.
+        insertChannelConfigurations:
+          insertChannelConfigurationsBeforeTruthRetirement,
         // Threats arrived in migration 0046; this schema is held before it, so
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
@@ -3976,7 +3230,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           }),
         }),
       ]);
-      const legacyMessage = NotificationOutboxMessageSchema.parse({
+      const legacyMessage = Object.freeze({
         version: 1,
         outboxId: ISSUE_23_OUTBOX_IDS.outbox,
         intentId: ISSUE_23_OUTBOX_IDS.intent,
@@ -4048,26 +3302,32 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             ${createdAt.toISOString()}::timestamptz
           )
         `);
-        await transaction.insert(notificationIntentChannels).values(
-          legacyMessage.channels.map((channel, index) => ({
-            intentId: ISSUE_23_OUTBOX_IDS.intent,
-            sequence: index + 1,
-            channel: channel.channel,
-            eventKind: 'test' as const,
-            templateMode: 'drill' as const,
-            purpose: 'activation' as const,
-            rosterPopulation: 'synthetic' as const,
-            classificationMarker: 'DRILL' as const,
-            endpointCount: channel.endpointCount,
-            renderedMessage: channel.renderedMessage,
-            integrationStatusId:
-              channel.channel === 'push'
-                ? ISSUE_23_OUTBOX_IDS.pushIntegrationStatus
-                : ISSUE_23_OUTBOX_IDS.emailIntegrationStatus,
-            integrationId: channel.integrationStatus.integrationId,
-            integrationLabel: channel.integrationStatus.label,
-          })),
-        );
+        // Raw SQL, not the Drizzle model: this pre-0049 schema still carries
+        // the truth-label columns the current model no longer declares.
+        for (const [index, channel] of legacyMessage.channels.entries()) {
+          await transaction.execute(sql`
+          insert into notification_intent_channels (
+            intent_id, sequence, channel, event_kind, template_mode, purpose,
+            roster_population, classification_marker, endpoint_count,
+            rendered_message, integration_status_id, integration_id,
+            integration_label
+          ) values (
+            ${ISSUE_23_OUTBOX_IDS.intent}::uuid,
+            ${index + 1},
+            ${channel.channel}::notification_channel,
+            'test'::event_kind,
+            'drill'::template_mode,
+            'activation'::notification_purpose,
+            'synthetic'::roster_population,
+            'DRILL'::classification_marker,
+            ${channel.endpointCount},
+            ${JSON.stringify(channel.renderedMessage)}::jsonb,
+            ${HELD_BACK_INTEGRATION_STATUS_IDS[channel.integrationStatus.integrationId]}::uuid,
+            ${channel.integrationStatus.integrationId},
+            'mocked'::integration_truth_label
+          )
+        `);
+        }
         // Raw SQL, not the Drizzle model: this schema still has the audience
         // columns and `outbox_message_truth` still requires the message to
         // repeat them, and the current model has neither.
@@ -4561,9 +3821,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       const survivingMessage = { ...(afterMigration?.message as object) };
       expect(survivingMessage).toHaveProperty('audienceConfig');
       delete (survivingMessage as { audienceConfig?: unknown }).audienceConfig;
-      expect(NotificationOutboxMessageSchema.parse(survivingMessage)).toEqual(
-        legacyMessage,
-      );
+      expect(survivingMessage).toEqual(legacyMessage);
 
       const constraints = await createdConnection.db.execute<{
         constraint_name: string;
@@ -4607,7 +3865,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       expect(version2Probe?.message_version).toBe(2);
       const version2Message = { ...(version2Probe?.message as object) };
       delete (version2Message as { audienceConfig?: unknown }).audienceConfig;
-      expect(NotificationOutboxMessageSchema.parse(version2Message)).toEqual(
+      expect(version2Message).toEqual(
         expect.objectContaining({
           version: 2,
           facilityId: ISSUE_23_OUTBOX_IDS.facility,
@@ -5014,22 +4272,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     await expectMediaMutationRejected('delete');
   });
 
-  test('creates the append-only role-change and live-channel authorization schema', async () => {
+  test('creates the append-only role-change schema', async () => {
     const db = databaseConnection().db;
-    const [consumedAtColumn] = await db.execute<{
-      column_default: string | null;
-      is_nullable: 'NO' | 'YES';
-    }>(sql`
-      select column_default, is_nullable
-      from information_schema.columns
-      where table_schema = 'public'
-        and table_name = 'integration_channel_change_authorizations'
-        and column_name = 'consumed_at'
-    `);
-    expect(consumedAtColumn).toEqual({
-      column_default: null,
-      is_nullable: 'NO',
-    });
 
     const constraints = await db.execute<{
       constraint_name: string;
@@ -5048,10 +4292,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       join pg_catalog.pg_namespace as namespace
         on namespace.oid = relation.relnamespace
       where namespace.nspname = 'public'
-        and relation.relname in (
-          'user_role_changes',
-          'integration_channel_change_authorizations'
-        )
+        and relation.relname = 'user_role_changes'
     `);
     expect(constraints.every((constraint) => constraint.validated)).toBe(true);
     expect(
@@ -5063,22 +4304,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         .sort(),
     ).toEqual(
       [
-        'integration_channel_change_authorizations:channel_change_authorizations_authorizer_session_fk:f',
-        'integration_channel_change_authorizations:channel_change_authorizations_commitment_uq:u',
-        'integration_channel_change_authorizations:channel_change_authorizations_consumer_session_fk:f',
-        'integration_channel_change_authorizations:channel_change_authorizations_consumption_time:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_digest_format:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_expiry_bound:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_integration_id_format:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_live_status:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_reference_format:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_reference_uq:u',
-        'integration_channel_change_authorizations:channel_change_authorizations_request_uq:u',
-        'integration_channel_change_authorizations:channel_change_authorizations_same_human_session:c',
-        'integration_channel_change_authorizations:channel_change_authorizations_status_truth_fk:f',
-        'integration_channel_change_authorizations:channel_change_authorizations_status_uq:u',
-        'integration_channel_change_authorizations:channel_change_authorizations_timestamp_precision:c',
-        'integration_channel_change_authorizations:integration_channel_change_authorizations_pkey:p',
         'user_role_changes:user_role_changes_changer_session_fk:f',
         'user_role_changes:user_role_changes_pkey:p',
         'user_role_changes:user_role_changes_request_user_role_uq:u',
@@ -5139,10 +4364,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       left join pg_catalog.pg_class as referenced_relation
         on referenced_relation.oid = constraint_record.confrelid
       where namespace.nspname = 'public'
-        and relation.relname in (
-          'user_role_changes',
-          'integration_channel_change_authorizations'
-        )
+        and relation.relname = 'user_role_changes'
         and constraint_record.contype in ('p', 'u', 'f')
     `);
     expect(
@@ -5161,14 +4383,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         .sort(),
     ).toEqual(
       [
-        'integration_channel_change_authorizations:channel_change_authorizations_authorizer_session_fk:f:authorized_with_session_id,authorized_by_user_id:sessions:id,user_id:r',
-        'integration_channel_change_authorizations:channel_change_authorizations_commitment_uq:u:authorization_commitment:::',
-        'integration_channel_change_authorizations:channel_change_authorizations_consumer_session_fk:f:consumed_with_session_id,consumed_by_user_id:sessions:id,user_id:r',
-        'integration_channel_change_authorizations:channel_change_authorizations_reference_uq:u:reference:::',
-        'integration_channel_change_authorizations:channel_change_authorizations_request_uq:u:consumed_request_id:::',
-        'integration_channel_change_authorizations:channel_change_authorizations_status_truth_fk:f:integration_status_id,integration_id,status_label,authorized_by_user_id,authorization_commitment,issued_at:integration_statuses:id,integration_id,label,verified_by_user_id,authorization_reference,verified_at:r',
-        'integration_channel_change_authorizations:channel_change_authorizations_status_uq:u:integration_status_id:::',
-        'integration_channel_change_authorizations:integration_channel_change_authorizations_pkey:p:id:::',
         'user_role_changes:user_role_changes_changer_session_fk:f:changed_with_session_id,changed_by_user_id:sessions:id,user_id:r',
         'user_role_changes:user_role_changes_pkey:p:sequence:::',
         'user_role_changes:user_role_changes_request_user_role_uq:u:request_id,user_id,role:::',
@@ -5205,10 +4419,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         on attribute.attrelid = table_relation.oid
         and attribute.attnum = key_column.attribute_number
       where namespace.nspname = 'public'
-        and table_relation.relname in (
-          'user_role_changes',
-          'integration_channel_change_authorizations'
-        )
+        and table_relation.relname = 'user_role_changes'
       group by
         table_relation.relname,
         index_relation.relname,
@@ -5228,12 +4439,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         .sort(),
     ).toEqual(
       [
-        'integration_channel_change_authorizations:channel_change_authorizations_commitment_uq:true:authorization_commitment',
-        'integration_channel_change_authorizations:channel_change_authorizations_integration_idx:false:integration_id,consumed_at',
-        'integration_channel_change_authorizations:channel_change_authorizations_reference_uq:true:reference',
-        'integration_channel_change_authorizations:channel_change_authorizations_request_uq:true:consumed_request_id',
-        'integration_channel_change_authorizations:channel_change_authorizations_status_uq:true:integration_status_id',
-        'integration_channel_change_authorizations:integration_channel_change_authorizations_pkey:true:id',
         'user_role_changes:user_role_changes_changer_idx:false:changed_by_user_id,sequence',
         'user_role_changes:user_role_changes_effective_idx:false:user_id,role,sequence',
         'user_role_changes:user_role_changes_pkey:true:sequence',
@@ -5299,23 +4504,11 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             and public_privilege.grantee = 0
         ) as public_has_any_privilege
       from unnest(array[
-        'integration_channel_change_authorizations',
         'user_role_changes'
       ]::text[]) as new_tables(table_name)
       order by table_name
     `);
     expect([...tablePrivileges]).toEqual([
-      {
-        table_name: 'integration_channel_change_authorizations',
-        can_select: true,
-        can_insert: true,
-        can_update: false,
-        can_delete: false,
-        can_truncate: false,
-        can_references: false,
-        can_trigger: false,
-        public_has_any_privilege: false,
-      },
       {
         table_name: 'user_role_changes',
         can_select: true,
@@ -5390,10 +4583,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         action_statement
       from information_schema.triggers
       where trigger_schema = 'public'
-        and event_object_table in (
-          'user_role_changes',
-          'integration_channel_change_authorizations'
-        )
+        and event_object_table = 'user_role_changes'
       order by event_object_table, trigger_name, event_manipulation
     `);
     expect(
@@ -5404,12 +4594,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         event: trigger.event_manipulation,
       })),
     ).toEqual([
-      {
-        table: 'integration_channel_change_authorizations',
-        name: 'integration_channel_change_authorizations_immutable_guard',
-        timing: 'BEFORE',
-        event: 'UPDATE',
-      },
       // The two *_retain_guard rows that used to sit here are gone: they were
       // instances of the blanket DELETE ban migration 0029 removed. The
       // *_immutable_guard triggers below are targeted and stay, so these rows
@@ -5820,26 +5004,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         `);
         expect(sequenceState?.last_value).toBeGreaterThan(0);
 
-        await transaction.execute(insertSyntheticChannelChangeAuthorization);
-        const [authorization] = await transaction.execute<{
-          consumed_at_matches: boolean;
-          integration_id: string;
-          status_label: string;
-        }>(sql`
-          select
-            integration_id,
-            status_label,
-            consumed_at = '2026-08-10T16:02:00.000Z'::timestamptz
-              as consumed_at_matches
-          from integration_channel_change_authorizations
-          where id = '00000000-0000-4000-8000-000000026006'::uuid
-        `);
-        expect(authorization).toEqual({
-          integration_id: 'synthetic-database-evidence',
-          status_label: 'live-verified',
-          consumed_at_matches: true,
-        });
-
         throw rollbackProbe;
       });
     } catch (error) {
@@ -5847,62 +5011,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         throw error;
       }
     }
-  });
-
-  test('rejects live-channel evidence without an authoritative consumed-at time', async () => {
-    const db = databaseConnection().db;
-    const unexpectedAcceptance = new Error(
-      'rollback unexpected missing consumed-at acceptance',
-    );
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          for (const statement of syntheticAdminEvidencePrerequisites) {
-            await transaction.execute(statement);
-          }
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(sql`
-            insert into integration_channel_change_authorizations (
-              id,
-              reference,
-              authorization_commitment,
-              integration_status_id,
-              integration_id,
-              status_label,
-              desired_enabled,
-              request_digest,
-              consequence_digest,
-              authorized_by_user_id,
-              authorized_with_session_id,
-              issued_at,
-              expires_at,
-              consumed_by_user_id,
-              consumed_with_session_id,
-              consumed_request_id
-            ) values (
-              '00000000-0000-4000-8000-000000026006'::uuid,
-              'synthetic-product-owner-evidence-26',
-              repeat('a', 64),
-              '00000000-0000-4000-8000-000000026005'::uuid,
-              'synthetic-database-evidence',
-              'live-verified'::integration_truth_label,
-              false,
-              repeat('b', 64),
-              repeat('c', 64),
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '2026-08-10T16:01:00.000Z'::timestamptz,
-              '2026-08-10T16:16:00.000Z'::timestamptz,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '00000000-0000-4000-8000-000000026009'::uuid
-            )
-          `);
-          throw unexpectedAcceptance;
-        }),
-      /null value in column "consumed_at".*not-null constraint/iu,
-    );
   });
 
   test('rejects an app-role role change with a non-issued sequence', async () => {
@@ -5959,103 +5067,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         }),
       'user_role_changes_request_user_role_uq',
     );
-    await expectConstraintViolation(
-      () =>
-        db.transaction(async (transaction) => {
-          for (const statement of syntheticAdminEvidencePrerequisites) {
-            await transaction.execute(statement);
-          }
-          await transaction.execute(sql`
-            insert into integration_channel_change_authorizations (
-              id,
-              reference,
-              authorization_commitment,
-              integration_status_id,
-              integration_id,
-              status_label,
-              desired_enabled,
-              request_digest,
-              consequence_digest,
-              authorized_by_user_id,
-              authorized_with_session_id,
-              issued_at,
-              expires_at,
-              consumed_by_user_id,
-              consumed_with_session_id,
-              consumed_request_id,
-              consumed_at
-            ) values (
-              '00000000-0000-4000-8000-000000026006'::uuid,
-              'synthetic-product-owner-evidence-26',
-              repeat('d', 64),
-              '00000000-0000-4000-8000-000000026005'::uuid,
-              'synthetic-database-evidence',
-              'live-verified'::integration_truth_label,
-              false,
-              repeat('b', 64),
-              repeat('c', 64),
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '2026-08-10T16:01:00.000Z'::timestamptz,
-              '2026-08-10T16:16:00.000Z'::timestamptz,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '00000000-0000-4000-8000-000000026009'::uuid,
-              '2026-08-10T16:02:00.000Z'::timestamptz
-            )
-          `);
-        }),
-      'channel_change_authorizations_status_truth_fk',
-    );
-    await expectConstraintViolation(
-      () =>
-        db.transaction(async (transaction) => {
-          for (const statement of syntheticAdminEvidencePrerequisites) {
-            await transaction.execute(statement);
-          }
-          await transaction.execute(sql`
-            insert into integration_channel_change_authorizations (
-              id,
-              reference,
-              authorization_commitment,
-              integration_status_id,
-              integration_id,
-              status_label,
-              desired_enabled,
-              request_digest,
-              consequence_digest,
-              authorized_by_user_id,
-              authorized_with_session_id,
-              issued_at,
-              expires_at,
-              consumed_by_user_id,
-              consumed_with_session_id,
-              consumed_request_id,
-              consumed_at
-            ) values (
-              '00000000-0000-4000-8000-000000026006'::uuid,
-              'synthetic-product-owner-evidence-26',
-              repeat('a', 64),
-              '00000000-0000-4000-8000-000000026005'::uuid,
-              'synthetic-database-evidence',
-              'live-verified'::integration_truth_label,
-              false,
-              repeat('b', 64),
-              repeat('c', 64),
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '2026-08-10T16:01:00.000Z'::timestamptz,
-              '2026-08-10T16:01:00.000Z'::timestamptz,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '00000000-0000-4000-8000-000000026009'::uuid,
-              '2026-08-10T16:01:00.000Z'::timestamptz
-            )
-          `);
-        }),
-      'channel_change_authorizations_expiry_bound',
-    );
-
     await expectPostgresRejection(
       () =>
         db.transaction(async (transaction) => {
@@ -6081,29 +5092,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     // What still stops the application deleting a role change is the grant,
     // asserted in 'limits app-role privileges': psd_eoc_app has never held
     // DELETE on user_role_changes. The UPDATE guard above is unchanged.
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          for (const statement of syntheticAdminEvidencePrerequisites) {
-            await transaction.execute(statement);
-          }
-          await transaction.execute(insertSyntheticChannelChangeAuthorization);
-          await transaction.execute(sql`
-            update integration_channel_change_authorizations
-            set desired_enabled = true
-            where id = '00000000-0000-4000-8000-000000026006'::uuid
-          `);
-        }),
-      /immutable truth cannot be changed/u,
-    );
-    // The delete assertion that stood here is gone with the blanket retain
-    // guard migration 0029 removed. Leaving it would have been worse than
-    // useless: the delete shares a transaction with the synthetic
-    // prerequisites, so once it stopped raising, the transaction committed and
-    // every later fixture insert in this file collided on users_pkey.
-    //
-    // DELETE on this table remains impossible for the application because the
-    // grant was never made; the immutability assertion above is unchanged.
   });
 
   test('database constraints reject real and drill substitution', async () => {
@@ -6210,9 +5198,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             classification_marker,
             endpoint_count,
             rendered_message,
-            integration_status_id,
-            integration_id,
-            integration_label
+            integration_id
           )
           select
             intent.id,
@@ -6225,12 +5211,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             'DRILL'::classification_marker,
             4,
             '{"channel":"push","eventKind":"test","purpose":"activation"}'::jsonb,
-            integration.id,
-            integration.integration_id,
-            integration.label
+            'expo-push'
           from notification_intents as intent
-          join integration_statuses as integration
-            on integration.integration_id = 'expo-push'
           where intent.id = '00000000-0000-4000-8000-000000009981'::uuid
         `);
         }),
@@ -6342,138 +5324,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     );
   });
 
-  test('makes every delivery-test approval, run, and report table append-only', async () => {
-    const db = databaseConnection().db;
-    const immutableTableNames = [
-      'delivery_test_canary_eligibility_facts',
-      'delivery_test_target_set_versions',
-      'delivery_test_target_endpoints',
-      'delivery_test_runs',
-      'delivery_test_reports',
-    ] as const;
-    const privileges = await db.execute<{
-      table_name: string;
-      can_update: boolean;
-      can_delete: boolean;
-    }>(sql`
-      select
-        immutable_table.table_name,
-        has_table_privilege(
-          'psd_eoc_app',
-          'public.' || immutable_table.table_name,
-          'UPDATE'
-        ) as can_update,
-        has_table_privilege(
-          'psd_eoc_app',
-          'public.' || immutable_table.table_name,
-          'DELETE'
-        ) as can_delete
-      from (
-        values
-          ('delivery_test_canary_eligibility_facts'),
-          ('delivery_test_target_set_versions'),
-          ('delivery_test_target_endpoints'),
-          ('delivery_test_runs'),
-          ('delivery_test_reports')
-      ) as immutable_table(table_name)
-      order by immutable_table.table_name
-    `);
-    expect(privileges.map((row) => row.table_name)).toEqual(
-      [...immutableTableNames].sort(),
-    );
-    expect(privileges.every((row) => !row.can_update && !row.can_delete)).toBe(
-      true,
-    );
-
-    const triggerEvents = await db.execute<{
-      event_object_table: string;
-      event_manipulation: string;
-    }>(sql`
-      select event_object_table, event_manipulation
-      from information_schema.triggers
-      where trigger_schema = 'public'
-        and event_object_table in (
-          'delivery_test_canary_eligibility_facts',
-          'delivery_test_target_set_versions',
-          'delivery_test_target_endpoints',
-          'delivery_test_runs',
-          'delivery_test_reports'
-        )
-        and event_manipulation in ('UPDATE', 'DELETE')
-    `);
-    for (const tableName of immutableTableNames) {
-      const events = triggerEvents
-        .filter((row) => row.event_object_table === tableName)
-        .map((row) => row.event_manipulation);
-      expect(events).toContain('UPDATE');
-      // The delivery-test tables had no targeted DELETE guard of their own —
-      // only the blanket retain guard migration 0029 removed. DELETE stays
-      // impossible for the application because the grant was never made.
-      expect(events).not.toContain('DELETE');
-    }
-
-    const mutationProbes = [
-      {
-        tableName: 'delivery_test_canary_eligibility_facts',
-        updateStatement:
-          'update delivery_test_canary_eligibility_facts set decided_at = decided_at',
-      },
-      {
-        tableName: 'delivery_test_target_set_versions',
-        updateStatement:
-          'update delivery_test_target_set_versions set version = version',
-      },
-      {
-        tableName: 'delivery_test_target_endpoints',
-        updateStatement:
-          'update delivery_test_target_endpoints set opted_in_at = opted_in_at',
-      },
-      {
-        tableName: 'delivery_test_runs',
-        updateStatement:
-          'update delivery_test_runs set started_at = started_at',
-      },
-      {
-        tableName: 'delivery_test_reports',
-        updateStatement:
-          'update delivery_test_reports set generated_at = generated_at',
-      },
-    ] as const;
-    for (const probe of mutationProbes) {
-      await expectPostgresRejection(
-        () =>
-          db.transaction(async (transaction) => {
-            await insertDeliveryTestStructuralFixture(transaction);
-            if (probe.tableName === 'delivery_test_reports') {
-              await insertInitialDeliveryTestEvidence(transaction, 'unknown');
-              await transaction.execute(insertIncompleteDeliveryTestReport);
-            }
-            await transaction.execute(sql.raw(probe.updateStatement));
-          }),
-        /immutable truth cannot be changed/u,
-      );
-      // Same as the sites above: the blanket retain guard is gone with
-      // migration 0029, and this delete shared a transaction with the
-      // structural fixture, so keeping the assertion would have committed it.
-      // The delivery-test tables stay append-only for the application through
-      // the grant, and their UPDATE guards are asserted directly above.
-    }
-  });
-
-  /**
-   * INSERT is whole-row by necessity, not by oversight.
-   *
-   * PostgreSQL checks INSERT against every column NAMED in a statement, and the
-   * query builder names all of them, writing DEFAULT for the ones the caller
-   * omits. The narrow column grants this test used to assert refused those
-   * inserts outright, which meant no worker could record provider I/O or claim
-   * a lease -- the first write of every send, on every channel.
-   *
-   * UPDATE stays column-scoped, and that is where the confinement now lives: an
-   * UPDATE names only the columns it sets, so the application can complete a
-   * record but not rewrite one. The append-only triggers on the provider I/O
-   * tables enforce the same rule in the database regardless of privileges.
-   */
   test('grants provider runtimes only the durable state access they execute', async () => {
     const db = databaseConnection().db;
     const privileges = await db.execute<{
@@ -6743,8 +5593,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     );
     try {
       await db.transaction(async (transaction) => {
-        await insertDeliveryTestStructuralFixture(transaction);
-        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+        await insertStaffDispatchFixture(transaction);
+        await insertInitialAttemptEvidence(transaction, 'unknown');
         await transaction.execute(sql`set local role "psd_eoc_app"`);
         await transaction.execute(sql`
           insert into expo_push_provider_io (attempt_id, work_fingerprint)
@@ -6891,8 +5741,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     const rollbackProbe = new Error('rollback SES provider-I/O proof');
     try {
       await db.transaction(async (transaction) => {
-        await insertDeliveryTestStructuralFixture(transaction);
-        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+        await insertStaffDispatchFixture(transaction);
+        await insertInitialAttemptEvidence(transaction, 'unknown');
         await transaction.execute(sql`
           insert into ses_email_provider_io (
             attempt_id, request_fingerprint, claim_token
@@ -6954,8 +5804,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     await expectPostgresRejection(
       () =>
         db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+          await insertStaffDispatchFixture(transaction);
+          await insertInitialAttemptEvidence(transaction, 'unknown');
           await transaction.execute(sql`
             insert into ses_email_provider_io (
               attempt_id, request_fingerprint
@@ -6979,7 +5829,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     await expectConstraintViolation(
       () =>
         db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
+          await insertStaffDispatchFixture(transaction);
           await transaction.execute(sql`
             insert into roster_endpoints (
               id, roster_snapshot_id, recipient_id, population, channel,
@@ -7053,1507 +5903,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           `,
         );
         expect(inserted[0]?.phone_number).toBe('+999000000000000');
-        throw rollbackProbe;
-      });
-    } catch (error) {
-      if (error !== rollbackProbe) throw error;
-    }
-  });
-
-  test.each([
-    {
-      authorizationReference:
-        'synthetic-product-owner-controlled-canary-approval',
-      channel: 'sms',
-      eligibilityFactId: '00000000-0000-4000-8000-000000279002',
-      endpointId: '00000000-0000-4000-8000-000000279001',
-      integrationId: 'aws-eum-sms',
-      integrationStatusId: '00000000-0000-4000-8000-000000279005',
-      providerId: 'aws-eum-sms',
-      recipientId: '00000000-0000-4000-8000-000000030004',
-    },
-    {
-      authorizationReference: 'synthetic-product-owner-delivery-test-approval',
-      channel: 'email',
-      eligibilityFactId: '00000000-0000-4000-8000-000000030013',
-      endpointId: '00000000-0000-4000-8000-000000030007',
-      integrationId: 'ses-email',
-      integrationStatusId: '00000000-0000-4000-8000-000000030051',
-      providerId: 'aws-ses-v2',
-      recipientId: '00000000-0000-4000-8000-000000030005',
-    },
-  ] as const)(
-    'persists one controlled $channel canary from approved target through outbox and report truth',
-    async ({
-      authorizationReference,
-      channel,
-      eligibilityFactId,
-      endpointId,
-      integrationId,
-      integrationStatusId,
-      providerId,
-      recipientId,
-    }) => {
-      const db = databaseConnection().db;
-      const endpointReferenceDigest = deliveryTestEndpointReferenceDigest([
-        { recipientId, endpointId, channel },
-      ]);
-      const rollbackProbe = new Error(
-        `rollback controlled ${channel} canary proof`,
-      );
-      try {
-        await db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          if (channel === 'sms') {
-            await transaction.execute(sql`
-          insert into roster_endpoints (
-            id, roster_snapshot_id, recipient_id, population, channel,
-            status, captured_at, platform, token, email, phone_number
-          ) values (
-            ${endpointId}::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            ${recipientId}::uuid,
-            'staff'::roster_population,
-            ${channel}::notification_channel,
-            'active'::endpoint_status,
-            '2026-08-10T16:01:00.000Z'::timestamptz,
-            null,
-            null,
-            null,
-            '+12025550199'
-          )
-        `);
-            await transaction.execute(sql`
-          insert into delivery_test_canary_eligibility_facts (
-            id, supersedes_fact_id, facility_id, roster_snapshot_id,
-            roster_population, recipient_id, endpoint_id, channel, decision,
-            opted_in_at, decided_at, decided_by_user_id,
-            decided_with_session_id, authorization_reference
-          ) values (
-            ${eligibilityFactId}::uuid,
-            null,
-            '00000000-0000-4000-8000-000000000001'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            ${recipientId}::uuid,
-            ${endpointId}::uuid,
-            ${channel}::notification_channel,
-            'approved-synthetic-canary',
-            '2026-08-10T15:00:00.000Z'::timestamptz,
-            '2026-08-10T16:03:00.000Z'::timestamptz,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            '00000000-0000-4000-8000-000000026004'::uuid,
-            ${authorizationReference}
-          )
-        `);
-          }
-          await transaction.execute(sql`
-          insert into delivery_test_target_set_versions (
-            id, version, facility_id, roster_snapshot_id, roster_population,
-            supersedes_version_id, endpoint_reference_digest,
-            idempotency_request_id, approved_by_user_id,
-            approved_with_session_id, approved_at, created_at
-          ) values (
-            '00000000-0000-4000-8000-000000279003'::uuid,
-            2,
-            '00000000-0000-4000-8000-000000000001'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            '00000000-0000-4000-8000-000000030010'::uuid,
-            ${endpointReferenceDigest},
-            '00000000-0000-4000-8000-000000279004'::uuid,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            '00000000-0000-4000-8000-000000026004'::uuid,
-            '2026-08-10T16:04:00.000Z'::timestamptz,
-            '2026-08-10T16:03:00.000Z'::timestamptz
-          )
-        `);
-          await transaction.execute(sql`
-          insert into delivery_test_target_endpoints (
-            target_set_version_id, target_set_version, eligibility_fact_id,
-            roster_snapshot_id, roster_population, recipient_id, endpoint_id,
-            channel, attestation, opted_in_at, attested_at,
-            attested_by_user_id, authorization_reference
-          ) values (
-            '00000000-0000-4000-8000-000000279003'::uuid,
-            2,
-            ${eligibilityFactId}::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            ${recipientId}::uuid,
-            ${endpointId}::uuid,
-            ${channel}::notification_channel,
-            'approved-synthetic-canary',
-            '2026-08-10T15:00:00.000Z'::timestamptz,
-            '2026-08-10T16:03:00.000Z'::timestamptz,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            ${authorizationReference}
-          )
-        `);
-          await transaction.execute(
-            sql`set constraints "delivery_test_target_sets_complete_guard" immediate`,
-          );
-          await transaction.execute(
-            sql`set constraints "delivery_test_target_sets_complete_guard" deferred`,
-          );
-          if (channel === 'sms') {
-            await transaction.execute(sql`
-          insert into integration_statuses (
-            id, integration_id, label, verified_at, verified_by_user_id,
-            authorization_reference, reason_code, observed_at
-          ) values (
-            ${integrationStatusId}::uuid,
-            ${integrationId},
-            'live-verified'::integration_truth_label,
-            '2026-08-10T16:02:00.000Z'::timestamptz,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            'synthetic-product-owner-controlled-canary-live-verification',
-            null,
-            '2026-08-10T16:02:00.000Z'::timestamptz
-          )
-        `);
-          }
-          await transaction.execute(sql`
-          insert into human_confirmation_records (
-            id, capability_id, connectivity_epoch_id, confirmed_by_user_id,
-            confirmed_with_session_id, consequence_digest, issued_at,
-            expires_at, status, consumed_at, consumed_for_request_id,
-            expired_at
-          ) values (
-            '00000000-0000-4000-8000-000000279006'::uuid,
-            'start-event'::mutation_capability,
-            '00000000-0000-4000-8000-000000030040'::uuid,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            '00000000-0000-4000-8000-000000026004'::uuid,
-            repeat('a', 64),
-            '2026-08-10T16:04:00.000Z'::timestamptz,
-            '2026-08-10T16:09:00.000Z'::timestamptz,
-            'consumed'::human_confirmation_status,
-            '2026-08-10T16:06:00.000Z'::timestamptz,
-            '00000000-0000-4000-8000-000000279007'::uuid,
-            null
-          )
-        `);
-          await transaction.execute(sql`
-          insert into human_confirmation_actions (confirmation_id, action_id)
-          values (
-            '00000000-0000-4000-8000-000000279006'::uuid,
-            'send-real-notification'::human_only_action
-          )
-        `);
-          await transaction.execute(sql`
-          insert into activation_previews (
-            id, facility_id, kind, template_mode, event_type_version_id,
-            roster_snapshot_id, roster_population, recipient_count, channels,
-            send_readiness, blocking_reason_codes, active_event_ids,
-            consequence_digest, delivery_test_target_set_id,
-            delivery_test_target_set_version,
-            delivery_test_endpoint_reference_digest, created_at, expires_at
-          ) values (
-            '00000000-0000-4000-8000-000000279008'::uuid,
-            '00000000-0000-4000-8000-000000000001'::uuid,
-            'drill'::event_kind,
-            'drill'::template_mode,
-            '00000000-0000-4000-8000-000000000201'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            1,
-            '[]'::jsonb,
-            'ready',
-            '[]'::jsonb,
-            '[]'::jsonb,
-            repeat('a', 64),
-            '00000000-0000-4000-8000-000000279003'::uuid,
-            2,
-            ${endpointReferenceDigest},
-            '2026-08-10T16:05:00.000Z'::timestamptz,
-            '2026-08-10T16:10:00.000Z'::timestamptz
-          )
-        `);
-          await transaction.execute(sql`
-          insert into events (
-            id, facility_id, kind, template_mode, event_type_version_id,
-            status, roster_snapshot_id, roster_population, created_by,
-            created_at, activated_at, all_clear_at, reactivated_at, closed_at,
-            correction_of_event_id, correction_reason,
-            activation_authorization
-          ) values (
-            '00000000-0000-4000-8000-000000279009'::uuid,
-            '00000000-0000-4000-8000-000000000001'::uuid,
-            'drill'::event_kind,
-            'drill'::template_mode,
-            '00000000-0000-4000-8000-000000000201'::uuid,
-            'active'::event_status,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            jsonb_build_object(
-              'kind', 'human',
-              'userId', '00000000-0000-4000-8000-000000026001',
-              'sessionId', '00000000-0000-4000-8000-000000026004'
-            ),
-            '2026-08-10T16:05:00.000Z'::timestamptz,
-            '2026-08-10T16:06:00.000Z'::timestamptz,
-            null,
-            null,
-            null,
-            null,
-            null,
-            jsonb_build_object(
-              'kind', 'human-confirmed',
-              'activationPreviewId',
-                '00000000-0000-4000-8000-000000279008',
-              'preparedActivationId', null,
-              'confirmationId', '00000000-0000-4000-8000-000000279006',
-              'consequenceDigest', repeat('a', 64),
-              'requestId', '00000000-0000-4000-8000-000000279007'
-            )
-          )
-        `);
-          await transaction.execute(sql`
-          insert into notification_intents (
-            id, event_id, event_kind, template_mode, purpose,
-            event_type_version_id, roster_snapshot_id, roster_population,
-            created_by, source, request_id, "authorization",
-            delivery_test_target_set_id, delivery_test_target_set_version,
-            delivery_test_endpoint_reference_digest, created_at
-          ) values (
-            '00000000-0000-4000-8000-000000279010'::uuid,
-            '00000000-0000-4000-8000-000000279009'::uuid,
-            'drill'::event_kind,
-            'drill'::template_mode,
-            'activation'::notification_purpose,
-            '00000000-0000-4000-8000-000000000201'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            jsonb_build_object(
-              'kind', 'human',
-              'userId', '00000000-0000-4000-8000-000000026001',
-              'sessionId', '00000000-0000-4000-8000-000000026004'
-            ),
-            'web'::invocation_source,
-            '00000000-0000-4000-8000-000000279007'::uuid,
-            jsonb_build_object(
-              'kind', 'human-confirmed',
-              'activationPreviewId',
-                '00000000-0000-4000-8000-000000279008',
-              'preparedActivationId', null,
-              'confirmationId', '00000000-0000-4000-8000-000000279006',
-              'consequenceDigest', repeat('a', 64),
-              'requestId', '00000000-0000-4000-8000-000000279007'
-            ),
-            '00000000-0000-4000-8000-000000279003'::uuid,
-            2,
-            ${endpointReferenceDigest},
-            '2026-08-10T16:06:00.000Z'::timestamptz
-          )
-        `);
-          await transaction.execute(sql`
-          insert into notification_intent_channels (
-            intent_id, sequence, channel, event_kind, template_mode, purpose,
-            roster_population, classification_marker, endpoint_count,
-            rendered_message, integration_status_id, integration_id,
-            integration_label
-          ) values (
-            '00000000-0000-4000-8000-000000279010'::uuid,
-            1,
-            ${channel}::notification_channel,
-            'drill'::event_kind,
-            'drill'::template_mode,
-            'activation'::notification_purpose,
-            'staff'::roster_population,
-            'DRILL'::classification_marker,
-            1,
-            jsonb_build_object(
-              'channel', ${channel}::text,
-              'eventKind', 'drill',
-              'templateMode', 'drill',
-              'purpose', 'activation',
-              'classificationMarker', 'DRILL',
-              'body', '[DRILL] One approved controlled canary endpoint.'
-            ),
-            ${integrationStatusId}::uuid,
-            ${integrationId},
-            'live-verified'::integration_truth_label
-          )
-        `);
-          await transaction.execute(sql`
-          insert into outbox (
-            id, message_version, intent_id, event_id, event_kind,
-            template_mode, purpose, event_type_version_id,
-            roster_snapshot_id, roster_population, request_id,
-            "authorization", channels, message, status, attempts,
-            available_at, locked_until, published_at, failed_at,
-            last_error_code, created_at
-          )
-          select
-            '00000000-0000-4000-8000-000000279011'::uuid,
-            1,
-            intent.id,
-            intent.event_id,
-            intent.event_kind,
-            intent.template_mode,
-            intent.purpose,
-            intent.event_type_version_id,
-            intent.roster_snapshot_id,
-            intent.roster_population,
-            intent.request_id,
-            intent."authorization",
-            planned.channels,
-            jsonb_build_object(
-              'version', 1,
-              'outboxId', '00000000-0000-4000-8000-000000279011',
-              'intentId', intent.id::text,
-              'eventId', intent.event_id::text,
-              'eventKind', intent.event_kind::text,
-              'templateMode', intent.template_mode::text,
-              'purpose', intent.purpose::text,
-              'eventTypeVersion', jsonb_build_object(
-                'id', intent.event_type_version_id::text,
-                'templateMode', intent.template_mode::text
-              ),
-              'rosterSnapshotId', intent.roster_snapshot_id::text,
-              'rosterPopulation', intent.roster_population::text,
-              'requestId', intent.request_id::text,
-              'authorization', intent."authorization",
-              'deliveryTest', jsonb_build_object(
-                'purpose', 'monthly-live-delivery-test',
-                'targetSet', jsonb_build_object(
-                  'id', intent.delivery_test_target_set_id::text,
-                  'version', intent.delivery_test_target_set_version
-                ),
-                'endpointReferenceDigest',
-                  intent.delivery_test_endpoint_reference_digest
-              ),
-              'channels', planned.channels,
-              'createdAt', intent.created_at
-            ),
-            'pending'::outbox_status,
-            0,
-            intent.created_at,
-            null,
-            null,
-            null,
-            null,
-            intent.created_at
-          from notification_intents as intent
-          cross join lateral (
-            select jsonb_agg(
-              jsonb_build_object(
-                'channel', channel.channel::text,
-                'endpointCount', channel.endpoint_count,
-                'renderedMessage', channel.rendered_message,
-                'integrationStatus', jsonb_build_object(
-                  'integrationId', channel.integration_id,
-                  'label', channel.integration_label::text
-                )
-              ) order by channel.sequence
-            ) as channels
-            from notification_intent_channels as channel
-            where channel.intent_id = intent.id
-          ) as planned
-          where intent.id = '00000000-0000-4000-8000-000000279010'::uuid
-        `);
-          await expectConstraintViolation(
-            () =>
-              transaction.transaction(async (probe) => {
-                await probe.execute(sql`
-                insert into outbox (
-                  id, message_version, intent_id, event_id, event_kind,
-                  template_mode, purpose, event_type_version_id,
-                  roster_snapshot_id, roster_population, request_id,
-                  "authorization", channels, message, status, attempts,
-                  available_at, locked_until, published_at, failed_at,
-                  last_error_code, created_at
-                )
-                select
-                  id,
-                  message_version,
-                  intent_id,
-                  event_id,
-                  event_kind,
-                  template_mode,
-                  purpose,
-                  event_type_version_id,
-                  roster_snapshot_id,
-                  roster_population,
-                  request_id,
-                  "authorization",
-                  '[]'::jsonb,
-                  jsonb_set(message, '{channels}', '[]'::jsonb),
-                  status,
-                  attempts,
-                  available_at,
-                  locked_until,
-                  published_at,
-                  failed_at,
-                  last_error_code,
-                  created_at
-                from outbox
-                where id = '00000000-0000-4000-8000-000000279011'::uuid
-              `);
-              }),
-            'outbox_channel_plan_shape',
-          );
-          await transaction.execute(sql`
-          insert into dispatch_batches (
-            id, outbox_id, intent_id, event_id, event_kind, template_mode,
-            purpose, event_type_version_id, roster_snapshot_id,
-            roster_population, request_id, "authorization", channel,
-            rendered_message, integration_status_id, integration_id,
-            integration_label, sequence, endpoint_count, created_at
-          )
-          select
-            '00000000-0000-4000-8000-000000279012'::uuid,
-            outbox.id,
-            outbox.intent_id,
-            outbox.event_id,
-            outbox.event_kind,
-            outbox.template_mode,
-            outbox.purpose,
-            outbox.event_type_version_id,
-            outbox.roster_snapshot_id,
-            outbox.roster_population,
-            outbox.request_id,
-            outbox."authorization",
-            channel.channel,
-            channel.rendered_message,
-            channel.integration_status_id,
-            channel.integration_id,
-            channel.integration_label,
-            channel.sequence,
-            channel.endpoint_count,
-            '2026-08-10T16:06:30.000Z'::timestamptz
-          from outbox
-          join notification_intent_channels as channel
-            on channel.intent_id = outbox.intent_id
-          where outbox.id = '00000000-0000-4000-8000-000000279011'::uuid
-        `);
-          await transaction.execute(sql`
-          insert into delivery_test_runs (
-            id, activation_preview_id, event_id, notification_intent_id,
-            target_set_version_id, target_set_version,
-            endpoint_reference_digest, consequence_digest, confirmation_id,
-            confirmation_status, request_id, started_by_user_id,
-            started_with_session_id, started_at
-          ) values (
-            '00000000-0000-4000-8000-000000279013'::uuid,
-            '00000000-0000-4000-8000-000000279008'::uuid,
-            '00000000-0000-4000-8000-000000279009'::uuid,
-            '00000000-0000-4000-8000-000000279010'::uuid,
-            '00000000-0000-4000-8000-000000279003'::uuid,
-            2,
-            ${endpointReferenceDigest},
-            repeat('a', 64),
-            '00000000-0000-4000-8000-000000279006'::uuid,
-            'consumed'::human_confirmation_status,
-            '00000000-0000-4000-8000-000000279007'::uuid,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            '00000000-0000-4000-8000-000000026004'::uuid,
-            '2026-08-10T16:06:00.000Z'::timestamptz
-          )
-        `);
-          await transaction.execute(sql`
-          insert into channel_attempts (
-            id, batch_id, intent_id, event_id, event_kind, template_mode,
-            purpose, event_type_version_id, roster_snapshot_id,
-            roster_population, recipient_id, endpoint_id, channel,
-            attempt_number, attempted_at
-          ) values (
-            '00000000-0000-4000-8000-000000279014'::uuid,
-            '00000000-0000-4000-8000-000000279012'::uuid,
-            '00000000-0000-4000-8000-000000279010'::uuid,
-            '00000000-0000-4000-8000-000000279009'::uuid,
-            'drill'::event_kind,
-            'drill'::template_mode,
-            'activation'::notification_purpose,
-            '00000000-0000-4000-8000-000000000201'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            ${recipientId}::uuid,
-            ${endpointId}::uuid,
-            ${channel}::notification_channel,
-            1,
-            '2026-08-10T16:06:31.000Z'::timestamptz
-          )
-        `);
-          await transaction.execute(sql`
-          insert into delivery_evidence (
-            id, subject_kind, subject_id, intent_id, attempt_id, sequence,
-            previous_evidence_id, state, recorded_at, provider,
-            provider_reference, proof, reason_code, diagnostic_digest
-          ) values
-          (
-            '00000000-0000-4000-8000-000000279015'::uuid,
-            'attempt'::delivery_evidence_subject_kind,
-            '00000000-0000-4000-8000-000000279014'::uuid,
-            null,
-            '00000000-0000-4000-8000-000000279014'::uuid,
-            1,
-            null,
-            'attempted'::delivery_truth_state,
-            '2026-08-10T16:06:31.100Z'::timestamptz,
-            null,
-            null,
-            null,
-            null,
-            null
-          ),
-          (
-            '00000000-0000-4000-8000-000000279016'::uuid,
-            'attempt'::delivery_evidence_subject_kind,
-            '00000000-0000-4000-8000-000000279014'::uuid,
-            null,
-            '00000000-0000-4000-8000-000000279014'::uuid,
-            2,
-            '00000000-0000-4000-8000-000000279015'::uuid,
-            'provider-accepted'::delivery_truth_state,
-            '2026-08-10T16:06:31.700Z'::timestamptz,
-            ${providerId},
-            ${`synthetic-provider-reference:${channel}:1`},
-            null,
-            null,
-            null
-          )
-        `);
-          if (channel === 'email') {
-            const webhookStore = createDrizzleSesWebhookStore(
-              transaction as unknown as Database,
-            );
-            const attempt = await webhookStore.loadAttempt(
-              '00000000-0000-4000-8000-000000279014',
-            );
-            if (attempt === null) {
-              throw new Error('The controlled email attempt was not retained.');
-            }
-            const accepted = DeliveryEvidenceSchema.parse({
-              id: '00000000-0000-4000-8000-000000279016',
-              subject: { kind: 'attempt', attemptId: attempt.id },
-              sequence: 2,
-              previousEvidenceId: '00000000-0000-4000-8000-000000279015',
-              state: 'provider-accepted',
-              recordedAt: '2026-08-10T16:06:31.700Z',
-              provider: providerId,
-              providerReference: `synthetic-provider-reference:${channel}:1`,
-              proof: null,
-              reasonCode: null,
-              diagnosticDigest: null,
-            });
-            await webhookStore.reprojectDeliveryTestReport(attempt, accepted);
-
-            const deliveredInput = {
-              subject: { kind: 'attempt' as const, attemptId: attempt.id },
-              state: 'delivered' as const,
-              provider: providerId,
-              providerReference: accepted.providerReference,
-              proof: {
-                kind: 'provider-delivery-receipt' as const,
-                provider: providerId,
-                receiptId: 'synthetic-controlled-email-delivery-receipt',
-                deliveredAt: new Date().toISOString(),
-              },
-              reasonCode: null,
-              diagnosticDigest: null,
-            };
-            const delivered = await webhookStore.recordAttemptEvidence(
-              attempt,
-              deliveredInput,
-            );
-            await webhookStore.reprojectDeliveryTestReport(attempt, delivered);
-            const replayed = await webhookStore.recordAttemptEvidence(
-              attempt,
-              deliveredInput,
-            );
-            expect(replayed.id).toBe(delivered.id);
-            await webhookStore.reprojectDeliveryTestReport(attempt, replayed);
-          } else {
-            await transaction.execute(sql`
-          insert into delivery_test_reports (
-            id, run_id, run_started_at, sequence, supersedes_report_id,
-            status, channels, generated_at, finalized_by, source, reason_code
-          ) values (
-            '00000000-0000-4000-8000-000000279017'::uuid,
-            '00000000-0000-4000-8000-000000279013'::uuid,
-            '2026-08-10T16:06:00.000Z'::timestamptz,
-            1,
-            null,
-            'succeeded'::delivery_test_report_status,
-            jsonb_build_array(
-              jsonb_build_object(
-                'channel', ${channel}::text,
-                'endpointCount', 1,
-                'activationToProviderAcceptMs', 31700,
-                'latestStateCounts', jsonb_build_array(
-                  jsonb_build_object(
-                    'state', 'provider-accepted',
-                    'count', 1
-                  )
-                ),
-                'completedAt', '2026-08-10T16:06:31.700Z'
-              )
-            ),
-            '2026-08-10T16:08:00.000Z'::timestamptz,
-            jsonb_build_object(
-              'kind', 'system',
-              'serviceId', 'delivery-test-reporter'
-            ),
-            'worker'::invocation_source,
-            null
-          )
-        `);
-          }
-          const invalidReportId = randomUUID();
-          await transaction.execute(sql`
-          alter table delivery_test_reports
-            disable trigger delivery_test_reports_monotonic_insert_guard
-        `);
-          await expectConstraintViolation(
-            () =>
-              transaction.transaction(async (probe) => {
-                await probe.execute(sql`
-                insert into delivery_test_reports (
-                  id, run_id, run_started_at, sequence,
-                  supersedes_report_id, status, channels, generated_at,
-                  finalized_by, source, reason_code
-                )
-                select
-                  ${invalidReportId}::uuid,
-                  run_id,
-                  run_started_at,
-                  sequence,
-                  supersedes_report_id,
-                  status,
-                  '[]'::jsonb,
-                  generated_at,
-                  finalized_by,
-                  source,
-                  reason_code
-                from delivery_test_reports
-                where run_id =
-                  '00000000-0000-4000-8000-000000279013'::uuid
-                order by sequence desc
-                limit 1
-              `);
-              }),
-            'delivery_test_reports_channels_shape',
-          );
-          await transaction.execute(sql`
-          alter table delivery_test_reports
-            enable trigger delivery_test_reports_monotonic_insert_guard
-        `);
-          const retained = await transaction.execute<{
-            channel_count: number;
-            endpoint_count: number;
-            report_sequences: number[];
-            report_states: string[];
-          }>(sql`
-          select
-            max(jsonb_array_length(report.channels))::integer as channel_count,
-            max(jsonb_array_length(outbox.channels))::integer as endpoint_count,
-            jsonb_agg(report.sequence order by report.sequence) as report_sequences,
-            jsonb_agg(
-              report.channels -> 0 -> 'latestStateCounts' -> 0 ->> 'state'
-              order by report.sequence
-            ) as report_states
-          from delivery_test_reports as report
-          join delivery_test_runs as run on run.id = report.run_id
-          join outbox on outbox.intent_id = run.notification_intent_id
-          where report.run_id =
-            '00000000-0000-4000-8000-000000279013'::uuid
-        `);
-          expect([...retained]).toEqual([
-            {
-              channel_count: 1,
-              endpoint_count: 1,
-              report_sequences: channel === 'email' ? [1, 2] : [1],
-              report_states:
-                channel === 'email'
-                  ? ['provider-accepted', 'delivered']
-                  : ['provider-accepted'],
-            },
-          ]);
-          throw rollbackProbe;
-        });
-      } catch (error) {
-        if (error !== rollbackProbe) throw error;
-      }
-    },
-  );
-
-  test('accepts a rotation-safe revoke and fresh re-approval eligibility chain', async () => {
-    const db = databaseConnection().db;
-    const rollbackProbe = new Error('rollback eligibility chain proof');
-    try {
-      await db.transaction(async (transaction) => {
-        await insertDeliveryTestStructuralFixture(transaction);
-        await transaction.execute(sql`
-          insert into delivery_test_canary_eligibility_facts (
-            id, supersedes_fact_id, facility_id, roster_snapshot_id,
-            roster_population, recipient_id, endpoint_id, channel, decision,
-            opted_in_at, decided_at, decided_by_user_id,
-            decided_with_session_id, authorization_reference
-          ) values (
-            '00000000-0000-4000-8000-000000030082'::uuid,
-            '00000000-0000-4000-8000-000000030012'::uuid,
-            '00000000-0000-4000-8000-000000000001'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            '00000000-0000-4000-8000-000000030004'::uuid,
-            '00000000-0000-4000-8000-000000030006'::uuid,
-            'push'::notification_channel,
-            'revoked',
-            '2026-08-10T15:00:00.000Z'::timestamptz,
-            '2026-08-10T16:07:00.000Z'::timestamptz,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            '00000000-0000-4000-8000-000000026004'::uuid,
-            'synthetic-product-owner-delivery-test-revocation'
-          )
-        `);
-        await transaction.execute(sql`
-          insert into delivery_test_canary_eligibility_facts (
-            id, supersedes_fact_id, facility_id, roster_snapshot_id,
-            roster_population, recipient_id, endpoint_id, channel, decision,
-            opted_in_at, decided_at, decided_by_user_id,
-            decided_with_session_id, authorization_reference
-          ) values (
-            '00000000-0000-4000-8000-000000030083'::uuid,
-            '00000000-0000-4000-8000-000000030082'::uuid,
-            '00000000-0000-4000-8000-000000000001'::uuid,
-            '00000000-0000-4000-8000-000000030003'::uuid,
-            'staff'::roster_population,
-            '00000000-0000-4000-8000-000000030004'::uuid,
-            '00000000-0000-4000-8000-000000030006'::uuid,
-            'push'::notification_channel,
-            'approved-synthetic-canary',
-            '2026-08-10T16:08:00.000Z'::timestamptz,
-            '2026-08-10T16:09:00.000Z'::timestamptz,
-            '00000000-0000-4000-8000-000000026001'::uuid,
-            '00000000-0000-4000-8000-000000026004'::uuid,
-            'synthetic-product-owner-delivery-test-reapproval'
-          )
-        `);
-        const chain = await transaction.execute<{
-          decision: string;
-          id: string;
-        }>(sql`
-          select id::text as id, decision
-          from delivery_test_canary_eligibility_facts
-          where endpoint_id = '00000000-0000-4000-8000-000000030006'::uuid
-          order by decided_at
-        `);
-        expect([...chain]).toEqual([
-          {
-            id: '00000000-0000-4000-8000-000000030012',
-            decision: 'approved-synthetic-canary',
-          },
-          {
-            id: '00000000-0000-4000-8000-000000030082',
-            decision: 'revoked',
-          },
-          {
-            id: '00000000-0000-4000-8000-000000030083',
-            decision: 'approved-synthetic-canary',
-          },
-        ]);
-        throw rollbackProbe;
-      });
-    } catch (error) {
-      if (error !== rollbackProbe) throw error;
-    }
-  });
-
-  test('rejects every prepared activation that references a delivery-test preview', async () => {
-    const db = databaseConnection().db;
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`
-            insert into prepared_activations (
-              id, activation_preview_id, facility_id, kind, template_mode,
-              event_type_version_id, roster_snapshot_id, roster_population,
-              consequence_digest, prepared_by, prepared_at
-            ) values (
-              '00000000-0000-4000-8000-000000030060'::uuid,
-              '00000000-0000-4000-8000-000000030020'::uuid,
-              '00000000-0000-4000-8000-000000000001'::uuid,
-              'drill'::event_kind,
-              'drill'::template_mode,
-              '00000000-0000-4000-8000-000000000201'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              repeat('d', 64),
-              jsonb_build_object(
-                'kind', 'agent',
-                'agentId', '00000000-0000-4000-8000-000000030061',
-                'apiKeyId', '00000000-0000-4000-8000-000000030062'
-              ),
-              '2026-08-10T16:05:30.000Z'::timestamptz
-            )
-          `);
-        }),
-      /Delivery-test previews cannot be prepared/u,
-    );
-  });
-
-  test('rejects a delivery-test attempt for an endpoint outside its pinned target set before evidence exists', async () => {
-    const db = databaseConnection().db;
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`
-            insert into channel_attempts (
-              id, batch_id, intent_id, event_id, event_kind, template_mode,
-              purpose, event_type_version_id, roster_snapshot_id,
-              roster_population, recipient_id, endpoint_id, channel,
-              attempt_number, attempted_at
-            ) values (
-              '00000000-0000-4000-8000-000000030063'::uuid,
-              '00000000-0000-4000-8000-000000030034'::uuid,
-              '00000000-0000-4000-8000-000000030032'::uuid,
-              '00000000-0000-4000-8000-000000030030'::uuid,
-              'drill'::event_kind,
-              'drill'::template_mode,
-              'activation'::notification_purpose,
-              '00000000-0000-4000-8000-000000000201'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030005'::uuid,
-              '00000000-0000-4000-8000-000000030008'::uuid,
-              'push'::notification_channel,
-              1,
-              '2026-08-10T16:06:31.000Z'::timestamptz
-            )
-          `);
-        }),
-      /not in the pinned approved target set/u,
-    );
-
-    const persistedEvidence = await db.execute<{ count: number }>(sql`
-      select count(*)::integer as count
-      from delivery_evidence
-      where attempt_id = '00000000-0000-4000-8000-000000030063'::uuid
-    `);
-    expect(persistedEvidence[0]?.count).toBe(0);
-  });
-
-  test('rejects an attempt after the run-pinned target set is superseded', async () => {
-    const db = databaseConnection().db;
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`
-            insert into delivery_test_target_set_versions (
-              id, version, facility_id, roster_snapshot_id,
-              roster_population, supersedes_version_id,
-              endpoint_reference_digest, idempotency_request_id,
-              approved_by_user_id, approved_with_session_id,
-              approved_at, created_at
-            ) values (
-              '00000000-0000-4000-8000-000000030100'::uuid,
-              2,
-              '00000000-0000-4000-8000-000000000001'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030010'::uuid,
-              repeat('e', 64),
-              '00000000-0000-4000-8000-000000030101'::uuid,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '2026-08-10T16:09:00.000Z'::timestamptz,
-              '2026-08-10T16:08:30.000Z'::timestamptz
-            )
-          `);
-          await transaction.execute(sql`
-            insert into delivery_test_target_endpoints (
-              target_set_version_id, target_set_version,
-              eligibility_fact_id, roster_snapshot_id, roster_population,
-              recipient_id, endpoint_id, channel, attestation, opted_in_at,
-              attested_at, attested_by_user_id, authorization_reference
-            )
-            select
-              '00000000-0000-4000-8000-000000030100'::uuid,
-              2,
-              endpoint.eligibility_fact_id,
-              endpoint.roster_snapshot_id,
-              endpoint.roster_population,
-              endpoint.recipient_id,
-              endpoint.endpoint_id,
-              endpoint.channel,
-              endpoint.attestation,
-              endpoint.opted_in_at,
-              endpoint.attested_at,
-              endpoint.attested_by_user_id,
-              endpoint.authorization_reference
-            from delivery_test_target_endpoints as endpoint
-            where endpoint.target_set_version_id =
-              '00000000-0000-4000-8000-000000030010'::uuid
-          `);
-          await transaction.execute(
-            sql`set constraints "delivery_test_target_sets_complete_guard" immediate`,
-          );
-          await transaction.execute(
-            sql`set constraints "delivery_test_target_sets_complete_guard" deferred`,
-          );
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(sql`
-            insert into channel_attempts (
-              id, batch_id, intent_id, event_id, event_kind, template_mode,
-              purpose, event_type_version_id, roster_snapshot_id,
-              roster_population, recipient_id, endpoint_id, channel,
-              attempt_number, attempted_at
-            ) values (
-              '00000000-0000-4000-8000-000000030102'::uuid,
-              '00000000-0000-4000-8000-000000030034'::uuid,
-              '00000000-0000-4000-8000-000000030032'::uuid,
-              '00000000-0000-4000-8000-000000030030'::uuid,
-              'drill'::event_kind,
-              'drill'::template_mode,
-              'activation'::notification_purpose,
-              '00000000-0000-4000-8000-000000000201'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030004'::uuid,
-              '00000000-0000-4000-8000-000000030006'::uuid,
-              'push'::notification_channel,
-              1,
-              '2026-08-10T16:09:30.000Z'::timestamptz
-            )
-          `);
-        }),
-      /target set has been superseded/u,
-    );
-  });
-
-  test('binds eligibility facts to the target-set facility during construction and attempt admission', async () => {
-    const db = databaseConnection().db;
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await insertCrossFacilityDeliveryTestEligibility(transaction);
-          await transaction.execute(sql`
-            insert into delivery_test_target_set_versions (
-              id, version, facility_id, roster_snapshot_id,
-              roster_population, supersedes_version_id,
-              endpoint_reference_digest, idempotency_request_id,
-              approved_by_user_id, approved_with_session_id,
-              approved_at, created_at
-            ) values (
-              '00000000-0000-4000-8000-000000030084'::uuid,
-              2,
-              '00000000-0000-4000-8000-000000000001'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030010'::uuid,
-              repeat('f', 64),
-              '00000000-0000-4000-8000-000000030088'::uuid,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '2026-08-10T16:09:00.000Z'::timestamptz,
-              '2026-08-10T16:08:30.000Z'::timestamptz
-            )
-          `);
-          await transaction.execute(sql`
-            insert into delivery_test_target_endpoints (
-              target_set_version_id, target_set_version,
-              eligibility_fact_id, roster_snapshot_id, roster_population,
-              recipient_id, endpoint_id, channel, attestation, opted_in_at,
-              attested_at, attested_by_user_id, authorization_reference
-            ) values (
-              '00000000-0000-4000-8000-000000030084'::uuid,
-              2,
-              '00000000-0000-4000-8000-000000030085'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030004'::uuid,
-              '00000000-0000-4000-8000-000000030006'::uuid,
-              'push'::notification_channel,
-              'approved-synthetic-canary',
-              '2026-08-10T15:00:00.000Z'::timestamptz,
-              '2026-08-10T16:08:00.000Z'::timestamptz,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              'synthetic-cross-facility-canary-proof'
-            )
-          `);
-        }),
-      /exact current approved eligibility fact/u,
-    );
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await insertCrossFacilityDeliveryTestEligibility(transaction);
-          // Simulate legacy/corrupt stored membership under the database owner;
-          // the worker-facing admission guard must still fail closed.
-          await transaction.execute(
-            sql.raw(`
-            alter table delivery_test_target_endpoints
-            disable trigger delivery_test_target_endpoints_immutable_guard
-          `),
-          );
-          await transaction.execute(sql`
-            update delivery_test_target_endpoints
-            set eligibility_fact_id =
-              '00000000-0000-4000-8000-000000030085'::uuid
-            where target_set_version_id =
-              '00000000-0000-4000-8000-000000030010'::uuid
-              and endpoint_id =
-                '00000000-0000-4000-8000-000000030006'::uuid
-          `);
-          await transaction.execute(
-            sql.raw(`
-            alter table delivery_test_target_endpoints
-            enable trigger delivery_test_target_endpoints_immutable_guard
-          `),
-          );
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(sql`
-            insert into channel_attempts (
-              id, batch_id, intent_id, event_id, event_kind, template_mode,
-              purpose, event_type_version_id, roster_snapshot_id,
-              roster_population, recipient_id, endpoint_id, channel,
-              attempt_number, attempted_at
-            ) values (
-              '00000000-0000-4000-8000-000000030089'::uuid,
-              '00000000-0000-4000-8000-000000030034'::uuid,
-              '00000000-0000-4000-8000-000000030032'::uuid,
-              '00000000-0000-4000-8000-000000030030'::uuid,
-              'drill'::event_kind,
-              'drill'::template_mode,
-              'activation'::notification_purpose,
-              '00000000-0000-4000-8000-000000000201'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030004'::uuid,
-              '00000000-0000-4000-8000-000000030006'::uuid,
-              'push'::notification_channel,
-              1,
-              '2026-08-10T16:06:31.000Z'::timestamptz
-            )
-          `);
-        }),
-      /not in the pinned approved target set/u,
-    );
-  });
-
-  test('derives report truth at insert so the app role cannot fabricate provider outcomes', async () => {
-    const db = databaseConnection().db;
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(
-            insertFabricatedSucceededDeliveryTestReport,
-          );
-        }),
-      /must exactly match persisted attempt and evidence truth/u,
-    );
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(insertIncompleteDeliveryTestReport);
-          await transaction.execute(sql`
-            insert into delivery_test_reports (
-              id, run_id, run_started_at, sequence, supersedes_report_id,
-              status, channels, generated_at, finalized_by, source,
-              reason_code
-            )
-            select
-              '00000000-0000-4000-8000-000000030076'::uuid,
-              run_id,
-              run_started_at,
-              sequence + 1,
-              id,
-              status,
-              channels,
-              generated_at + interval '1 second',
-              finalized_by,
-              'scheduled-job'::invocation_source,
-              reason_code
-            from delivery_test_reports
-            where id = '00000000-0000-4000-8000-000000030043'::uuid
-          `);
-        }),
-      /explicit worker service|delivery_test_reports_system_finalizer/u,
-    );
-  });
-
-  test('requires contiguous target-set and destination-free report truth chains', async () => {
-    const db = databaseConnection().db;
-    const rollbackProbe = new Error(
-      'rollback synthetic delivery-test report chain probe',
-    );
-    try {
-      await db.transaction(async (transaction) => {
-        await insertDeliveryTestStructuralFixture(transaction);
-        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
-        await transaction.execute(insertIncompleteDeliveryTestReport);
-        await insertSucceededDeliveryTestEvidence(transaction);
-        await transaction.execute(insertSucceededDeliveryTestReport);
-        const reports = await transaction.execute<{
-          sequence: number;
-          status: string;
-          supersedes_report_id: string | null;
-        }>(sql`
-          select sequence, status, supersedes_report_id::text
-          from delivery_test_reports
-          where run_id = '00000000-0000-4000-8000-000000030042'::uuid
-          order by sequence
-        `);
-        expect([...reports]).toEqual([
-          {
-            sequence: 1,
-            status: 'incomplete',
-            supersedes_report_id: null,
-          },
-          {
-            sequence: 2,
-            status: 'succeeded',
-            supersedes_report_id: '00000000-0000-4000-8000-000000030043',
-          },
-        ]);
-        throw rollbackProbe;
-      });
-    } catch (error) {
-      if (error !== rollbackProbe) throw error;
-    }
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`
-            insert into delivery_test_target_set_versions (
-              id, version, facility_id, roster_snapshot_id,
-              roster_population, supersedes_version_id,
-              endpoint_reference_digest, idempotency_request_id,
-              approved_by_user_id, approved_with_session_id,
-              approved_at, created_at
-            ) values (
-              '00000000-0000-4000-8000-000000030070'::uuid,
-              3,
-              '00000000-0000-4000-8000-000000000001'::uuid,
-              '00000000-0000-4000-8000-000000030003'::uuid,
-              'staff'::roster_population,
-              '00000000-0000-4000-8000-000000030010'::uuid,
-              repeat('f', 64),
-              '00000000-0000-4000-8000-000000030071'::uuid,
-              '00000000-0000-4000-8000-000000026001'::uuid,
-              '00000000-0000-4000-8000-000000026004'::uuid,
-              '2026-08-10T16:06:00.000Z'::timestamptz,
-              '2026-08-10T16:05:00.000Z'::timestamptz
-            )
-          `);
-        }),
-      /must advance exactly once from the latest facility version/u,
-    );
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
-          await transaction.execute(insertIncompleteDeliveryTestReport);
-          await transaction.execute(sql`
-            insert into delivery_test_reports (
-              id, run_id, run_started_at, sequence, supersedes_report_id,
-              status, channels, generated_at, finalized_by, source,
-              reason_code
-            )
-            select
-              '00000000-0000-4000-8000-000000030072'::uuid,
-              run_id,
-              run_started_at,
-              3,
-              id,
-              'succeeded'::delivery_test_report_status,
-              jsonb_build_array(
-                jsonb_build_object(
-                  'channel', 'push',
-                  'endpointCount', 1,
-                  'activationToProviderAcceptMs', 500,
-                  'latestStateCounts', jsonb_build_array(
-                    jsonb_build_object('state', 'delivered', 'count', 1)
-                  ),
-                  'completedAt', '2026-08-10T16:06:01.000Z'
-                ),
-                jsonb_build_object(
-                  'channel', 'email',
-                  'endpointCount', 1,
-                  'activationToProviderAcceptMs', 700,
-                  'latestStateCounts', jsonb_build_array(
-                    jsonb_build_object(
-                      'state', 'provider-accepted', 'count', 1
-                    )
-                  ),
-                  'completedAt', '2026-08-10T16:06:01.000Z'
-                )
-              ),
-              '2026-08-10T16:08:00.000Z'::timestamptz,
-              jsonb_build_object(
-                'kind', 'system',
-                'serviceId', 'delivery-test-reporter'
-              ),
-              'worker'::invocation_source,
-              null
-            from delivery_test_reports
-            where id = '00000000-0000-4000-8000-000000030043'::uuid
-          `);
-        }),
-      /must supersede the latest report with the next sequence/u,
-    );
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`
-            insert into delivery_test_reports (
-              id, run_id, run_started_at, sequence, supersedes_report_id,
-              status, channels, generated_at, finalized_by, source,
-              reason_code
-            ) values (
-              '00000000-0000-4000-8000-000000030073'::uuid,
-              '00000000-0000-4000-8000-000000030042'::uuid,
-              '2026-08-10T16:06:00.000Z'::timestamptz,
-              1,
-              null,
-              'succeeded'::delivery_test_report_status,
-              jsonb_build_array(
-                jsonb_build_object(
-                  'channel', 'push',
-                  'endpointCount', 1,
-                  'activationToProviderAcceptMs', 500,
-                  'latestStateCounts', jsonb_build_array(
-                    jsonb_build_object('state', 'unknown', 'count', 1)
-                  ),
-                  'completedAt', '2026-08-10T16:06:01.000Z'
-                ),
-                jsonb_build_object(
-                  'channel', 'email',
-                  'endpointCount', 1,
-                  'activationToProviderAcceptMs', 700,
-                  'latestStateCounts', jsonb_build_array(
-                    jsonb_build_object(
-                      'state', 'provider-accepted', 'count', 1
-                    )
-                  ),
-                  'completedAt', '2026-08-10T16:06:01.000Z'
-                )
-              ),
-              '2026-08-10T16:08:00.000Z'::timestamptz,
-              jsonb_build_object(
-                'kind', 'system',
-                'serviceId', 'delivery-test-reporter'
-              ),
-              'worker'::invocation_source,
-              null
-            )
-          `);
-        }),
-      /require complete accepted or delivered truth/u,
-    );
-
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await insertDeliveryTestStructuralFixture(transaction);
-          await transaction.execute(sql`
-            insert into delivery_test_reports (
-              id, run_id, run_started_at, sequence, supersedes_report_id,
-              status, channels, generated_at, finalized_by, source,
-              reason_code
-            ) values (
-              '00000000-0000-4000-8000-000000030074'::uuid,
-              '00000000-0000-4000-8000-000000030042'::uuid,
-              '2026-08-10T16:06:00.000Z'::timestamptz,
-              1,
-              null,
-              'failed'::delivery_test_report_status,
-              jsonb_build_array(
-                jsonb_build_object(
-                  'channel', 'push',
-                  'endpointCount', 1,
-                  'activationToProviderAcceptMs', 500,
-                  'latestStateCounts', jsonb_build_array(
-                    jsonb_build_object(
-                      'state', 'provider-accepted', 'count', 1
-                    )
-                  ),
-                  'completedAt', '2026-08-10T16:06:01.000Z'
-                ),
-                jsonb_build_object(
-                  'channel', 'email',
-                  'endpointCount', 1,
-                  'activationToProviderAcceptMs', 700,
-                  'latestStateCounts', jsonb_build_array(
-                    jsonb_build_object('state', 'delivered', 'count', 1)
-                  ),
-                  'completedAt', '2026-08-10T16:06:01.000Z'
-                )
-              ),
-              '2026-08-10T16:08:00.000Z'::timestamptz,
-              jsonb_build_object(
-                'kind', 'system',
-                'serviceId', 'delivery-test-reporter'
-              ),
-              'worker'::invocation_source,
-              'PROVIDER_REJECTED'
-            )
-          `);
-        }),
-      /must retain failed or expired truth/u,
-    );
-  });
-
-  test('monthly health persists the preceding configured-month outcome at every observation', async () => {
-    const db = databaseConnection().db;
-    const rollbackProbe = new Error(
-      'rollback synthetic delivery-test report-head probe',
-    );
-    try {
-      await db.transaction(async (transaction) => {
-        await insertDeliveryTestStructuralFixture(transaction);
-        await insertInitialDeliveryTestEvidence(transaction, 'failed');
-        await transaction.execute(insertFailedDeliveryTestReport);
-        await insertSucceededDeliveryTestEvidence(transaction);
-        await transaction.execute(insertSucceededDeliveryTestReport);
-        const failedMinuteRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-08-10T16:07:00.000Z',
-              '2026-08-10T16:08:00.000Z',
-            ),
-          ),
-        );
-        expect([...failedMinuteRows]).toEqual([
-          { failed_run_count: 1, missed_count: 1 },
-        ]);
-
-        const monthCloseRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-09-01T06:58:00.000Z',
-              '2026-09-01T06:59:00.000Z',
-            ),
-          ),
-        );
-        expect([...monthCloseRows]).toEqual([
-          { failed_run_count: 0, missed_count: 0 },
-        ]);
-
-        const easternMonthCloseRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-09-01T04:03:00.000Z',
-              '2026-09-01T04:04:00.000Z',
-              'America/New_York',
-            ),
-          ),
-        );
-        expect([...easternMonthCloseRows]).toEqual([
-          { failed_run_count: 0, missed_count: 0 },
-        ]);
-
-        const afterSuccessfulPdtMonthRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-09-01T07:03:00.000Z',
-              '2026-09-01T07:04:00.000Z',
-            ),
-          ),
-        );
-        expect([...afterSuccessfulPdtMonthRows]).toEqual([
-          { failed_run_count: 0, missed_count: 0 },
-        ]);
-
-        const missedPdtBoundaryRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-10-01T06:58:00.000Z',
-              '2026-10-01T06:59:00.000Z',
-            ),
-          ),
-        );
-        expect([...missedPdtBoundaryRows]).toEqual([
-          { failed_run_count: 0, missed_count: 1 },
-        ]);
-
-        const afterPdtBoundaryRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-10-01T07:03:00.000Z',
-              '2026-10-01T07:04:00.000Z',
-            ),
-          ),
-        );
-        expect([...afterPdtBoundaryRows]).toEqual([
-          { failed_run_count: 0, missed_count: 1 },
-        ]);
-
-        const missedPstBoundaryRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-12-01T07:58:00.000Z',
-              '2026-12-01T07:59:00.000Z',
-            ),
-          ),
-        );
-        expect([...missedPstBoundaryRows]).toEqual([
-          { failed_run_count: 0, missed_count: 1 },
-        ]);
-
-        const afterPstBoundaryRows = await transaction.execute<{
-          failed_run_count: number;
-          missed_count: number;
-        }>(
-          sql.raw(
-            monitoringQueryWithBucket(
-              deliveryTestHealthMonitoringQuery,
-              '2026-12-01T08:03:00.000Z',
-              '2026-12-01T08:04:00.000Z',
-            ),
-          ),
-        );
-        expect([...afterPstBoundaryRows]).toEqual([
-          { failed_run_count: 0, missed_count: 1 },
-        ]);
         throw rollbackProbe;
       });
     } catch (error) {
@@ -8699,7 +6048,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       eventTypes: 12,
       eventTypeVersions: 12,
       eventTypeTemplates: 108,
-      integrationStatuses: 6,
       channelConfigurations: 3,
       events: 0,
       outboxMessages: 0,
@@ -8757,8 +6105,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
 
     const unsafeIntegrationState = await db.execute<{ count: number }>(sql`
       select (
-        (select count(*) from integration_statuses where label = 'live-verified')
-        +
         (select count(*) from channel_configurations where enabled = true)
       )::integer as count
     `);
@@ -8790,272 +6136,5 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect(
       northFacility?.neighborhoodMemberships[0]?.neighborhoodVersion.name,
     ).toBe('Synthetic Twin Campuses');
-  });
-
-  test('expands and retries one synthetic email attempt with durable provider fencing', async () => {
-    const db = databaseConnection().db;
-    const verificationReference =
-      'synthetic-product-owner-email-live-verification';
-    const dispatchCreatedAt = new Date(Date.now() - 5_000);
-    const endpointReferenceDigest = deliveryTestEndpointReferenceDigest([
-      {
-        recipientId: '00000000-0000-4000-8000-000000030004',
-        endpointId: '00000000-0000-4000-8000-000000030006',
-        channel: 'push',
-      },
-      {
-        recipientId: '00000000-0000-4000-8000-000000030005',
-        endpointId: '00000000-0000-4000-8000-000000030007',
-        channel: 'email',
-      },
-    ]);
-    await db.transaction(async (transaction) => {
-      await insertDeliveryTestStructuralFixture(
-        transaction,
-        dispatchCreatedAt.toISOString(),
-        endpointReferenceDigest,
-      );
-      await transaction.execute(sql`
-        update channel_configurations
-        set
-          enabled = true,
-          status_id = '00000000-0000-4000-8000-000000030051'::uuid,
-          status_label = 'live-verified'::integration_truth_label,
-          changed_at = clock_timestamp()
-        where integration_id = 'ses-email'
-      `);
-    });
-
-    const batch = DispatchBatchSchema.parse({
-      id: '00000000-0000-4000-8000-000000030035',
-      intentId: '00000000-0000-4000-8000-000000030032',
-      eventId: '00000000-0000-4000-8000-000000030030',
-      facilityId: '00000000-0000-4000-8000-000000000001',
-      eventKind: 'drill',
-      templateMode: 'drill',
-      purpose: 'activation',
-      eventTypeVersion: {
-        id: '00000000-0000-4000-8000-000000000201',
-        templateMode: 'drill',
-      },
-      rosterSnapshotId: '00000000-0000-4000-8000-000000030003',
-      rosterPopulation: 'staff',
-      deliveryTest: {
-        purpose: 'monthly-live-delivery-test',
-        targetSet: {
-          id: '00000000-0000-4000-8000-000000030010',
-          version: 1,
-        },
-        endpointReferenceDigest,
-      },
-      requestId: '00000000-0000-4000-8000-000000030031',
-      authorization: {
-        kind: 'human-confirmed',
-        activationPreviewId: '00000000-0000-4000-8000-000000030020',
-        preparedActivationId: null,
-        confirmationId: '00000000-0000-4000-8000-000000030041',
-        consequenceDigest: 'd'.repeat(64),
-        requestId: '00000000-0000-4000-8000-000000030031',
-      },
-      channel: 'email',
-      renderedMessage: {
-        channel: 'email',
-        eventKind: 'drill',
-        templateMode: 'drill',
-        purpose: 'activation',
-        classificationMarker: 'DRILL',
-        subject: '[DRILL] Monthly delivery test',
-        textBody: '[DRILL] Synthetic canary only.',
-      },
-      integrationStatus: {
-        integrationId: 'ses-email',
-        label: 'live-verified',
-        verifiedAt: '2026-08-10T16:02:00.000Z',
-        verifiedByUserId: '00000000-0000-4000-8000-000000026001',
-        authorizationReference: verificationReference,
-        reasonCode: null,
-        observedAt: '2026-08-10T16:02:00.000Z',
-      },
-      sequence: 2,
-      endpointCount: 1,
-      createdAt: dispatchCreatedAt.toISOString(),
-    });
-    const deploymentAuthorization = {
-      workerEnabled: true,
-      verificationReference,
-    } as const;
-    const store = createDrizzleEmailRuntimeStore(db, {
-      deploymentAuthorization,
-    });
-    const resolutionRequest = {
-      operation: 'resolve-batch',
-      verificationReference,
-      batch,
-      enqueuedAt: new Date(dispatchCreatedAt.getTime() + 1_000).toISOString(),
-      cursor: 0,
-    } as const;
-    const firstResolution = EmailBatchResolutionPageSchema.parse(
-      await store.resolveBatch(resolutionRequest),
-    );
-    expect(firstResolution).toMatchObject({
-      nextCursor: null,
-      suppressedCount: 0,
-      items: [
-        {
-          attempt: {
-            batchId: batch.id,
-            attemptNumber: 1,
-            attemptedAt: batch.createdAt,
-            recipientId: '00000000-0000-4000-8000-000000030005',
-            endpointId: '00000000-0000-4000-8000-000000030007',
-          },
-          endpoint: {
-            id: '00000000-0000-4000-8000-000000030007',
-            channel: 'email',
-            email: 'synthetic-delivery-test-listed@example.invalid',
-          },
-        },
-      ],
-    });
-    expect(
-      EmailBatchResolutionPageSchema.parse(
-        await store.resolveBatch(resolutionRequest),
-      ),
-    ).toEqual(firstResolution);
-    const workItem = firstResolution.items[0];
-    if (workItem === undefined) {
-      throw new Error('The synthetic email attempt was not resolved.');
-    }
-
-    const evidenceStore = createDrizzleDeliveryEvidenceStore(db);
-    await evidenceStore.recordAttemptEvidence({
-      attempt: workItem.attempt,
-      evidence: {
-        subject: { kind: 'attempt', attemptId: workItem.attempt.id },
-        state: 'attempted',
-        provider: null,
-        providerReference: null,
-        proof: null,
-        reasonCode: null,
-        diagnosticDigest: null,
-      },
-    });
-    await db.execute(sql`
-      update channel_configurations
-      set enabled = false, changed_at = clock_timestamp()
-      where integration_id = 'ses-email'
-    `);
-    expect(await store.authorizeProviderSend(workItem)).toBe(false);
-    const claimRequest = {
-      operation: 'claim-provider-io',
-      verificationReference,
-      attemptId: workItem.attempt.id,
-      requestFingerprint: 'a'.repeat(64),
-      workItem,
-    } as const;
-    expect(
-      SesSendLedgerClaimSchema.parse(await store.claimProviderIo(claimRequest)),
-    ).toEqual({ kind: 'denied' });
-
-    await db.execute(sql`
-      update channel_configurations
-      set enabled = true, changed_at = clock_timestamp()
-      where integration_id = 'ses-email'
-    `);
-    expect(await store.authorizeProviderSend(workItem)).toBe(true);
-    const concurrentClaims = await Promise.all([
-      store.claimProviderIo(claimRequest),
-      createDrizzleEmailRuntimeStore(db, {
-        deploymentAuthorization,
-      }).claimProviderIo(claimRequest),
-    ]);
-    const parsedClaims = concurrentClaims.map((claim) =>
-      SesSendLedgerClaimSchema.parse(claim),
-    );
-    expect(parsedClaims.map(({ kind }) => kind).sort()).toEqual([
-      'acquired',
-      'in-progress',
-    ]);
-    const acquired = parsedClaims.find((claim) => claim.kind === 'acquired');
-    if (acquired?.kind !== 'acquired') {
-      throw new Error('The synthetic provider claim was not acquired.');
-    }
-
-    const failedOutcome = {
-      state: 'failed',
-      provider: 'aws-ses-v2',
-      providerReference: null,
-      proof: null,
-      reasonCode: 'SES_PROVIDER_RETRYABLE',
-      diagnosticDigest: null,
-    } as const;
-    const completionRequest = {
-      operation: 'complete-provider-io',
-      verificationReference,
-      attemptId: workItem.attempt.id,
-      requestFingerprint: claimRequest.requestFingerprint,
-      leaseToken: acquired.leaseToken,
-      outcome: failedOutcome,
-    } as const;
-    await store.completeProviderIo(completionRequest);
-    await store.completeProviderIo(completionRequest);
-    expect(
-      SesSendLedgerClaimSchema.parse(await store.claimProviderIo(claimRequest)),
-    ).toEqual({ kind: 'completed', outcome: failedOutcome });
-
-    const attemptExecutionStore = createDrizzleAttemptExecutionStore(db);
-    const executionFingerprint = 'synthetic-email-runtime-attempt-fingerprint';
-    const executionClaim = await attemptExecutionStore.claim({
-      attemptId: workItem.attempt.id,
-      fingerprint: executionFingerprint,
-      leaseMilliseconds: 60_000,
-    });
-    if (executionClaim.kind !== 'acquired') {
-      throw new Error('The synthetic attempt execution was not acquired.');
-    }
-    await attemptExecutionStore.complete({
-      attemptId: workItem.attempt.id,
-      fingerprint: executionFingerprint,
-      leaseToken: executionClaim.leaseToken,
-      completion: {
-        kind: 'retry',
-        outcome: failedOutcome,
-        delayMilliseconds: 1,
-        nextAttemptNumber: 2,
-        reasonCode: 'SES_PROVIDER_RETRYABLE',
-      },
-    });
-    const retry = EmailRetryResolutionSchema.parse(
-      await store.resolveRetry(workItem.attempt.id),
-    );
-    expect(retry).toMatchObject({
-      kind: 'ready',
-      workItem: {
-        batch,
-        attempt: {
-          batchId: batch.id,
-          attemptNumber: 2,
-          attemptedAt: new Date(dispatchCreatedAt.getTime() + 1).toISOString(),
-          recipientId: workItem.attempt.recipientId,
-          endpointId: workItem.attempt.endpointId,
-        },
-        endpoint: workItem.endpoint,
-      },
-    });
-    if (retry.kind !== 'ready') {
-      throw new Error('The synthetic email retry was not ready.');
-    }
-    expect(retry.workItem.attempt.id).not.toBe(workItem.attempt.id);
-
-    await db.execute(sql`
-      update channel_configurations
-      set enabled = false, changed_at = clock_timestamp()
-      where integration_id = 'ses-email'
-    `);
-    expect(
-      EmailRetryResolutionSchema.parse(
-        await store.resolveRetry(workItem.attempt.id),
-      ),
-    ).toEqual({ kind: 'ineligible' });
   });
 });
