@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import {
   ChannelAttemptSchema,
   DispatchBatchSchema,
-  IntegrationStatusSchema,
   NotificationOutboxMessageSchema,
   SMS_PROVIDER_MINIMUM_TTL_SECONDS,
   SMS_TOTAL_LIFETIME_SECONDS,
@@ -831,35 +830,21 @@ export function createDrizzleSmsRuntimeStore(
       ) {
         return deniedProviderSend;
       }
+      // Enablement decides whether this channel sends.
+      //
+      // This used to also require the truth label to read 'live-verified' and
+      // the whole integration-status record -- verifiedAt, verifiedByUserId,
+      // authorizationReference, reasonCode, observedAt -- to match the copy
+      // captured in the batch. Any drift refused the send and returned a bare
+      // LIVE_PROVIDER_DISABLED, with nothing recorded about which field
+      // disagreed. A drill delivered push and email while SMS failed exactly
+      // that way, and reading the worker log could not tell you why.
       const [configuration] = await database
-        .select({
-          enabled: channelConfigurations.enabled,
-          status: integrationStatuses,
-        })
+        .select({ enabled: channelConfigurations.enabled })
         .from(channelConfigurations)
-        .innerJoin(
-          integrationStatuses,
-          eq(integrationStatuses.id, channelConfigurations.statusId),
-        )
         .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
         .limit(1);
-      if (
-        configuration?.enabled !== true ||
-        configuration.status.integrationId !== SMS_INTEGRATION_ID ||
-        configuration.status.label !== 'live-verified' ||
-        !sameJson(
-          IntegrationStatusSchema.parse({
-            integrationId: configuration.status.integrationId,
-            label: configuration.status.label,
-            verifiedAt: configuration.status.verifiedAt?.toISOString() ?? null,
-            verifiedByUserId: configuration.status.verifiedByUserId,
-            authorizationReference: configuration.status.authorizationReference,
-            reasonCode: configuration.status.reasonCode,
-            observedAt: configuration.status.observedAt.toISOString(),
-          }),
-          batch.integrationStatus,
-        )
-      ) {
+      if (configuration?.enabled !== true) {
         return deniedProviderSend;
       }
       const resolution = await resolvedSmsEndpoints(database, batch);
