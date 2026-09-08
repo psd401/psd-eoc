@@ -42,14 +42,8 @@ queued for replay. Provider acceptance is not device delivery.
    select Expo. Confirm startup and sanitized heartbeat evidence without a
    provider send.
 2. In the authenticated integration settings, choose **Enabled** for
-   `mobile-push` and enter the retained, non-secret direct-push verification
-   reference that the protected deployment supplied to the running server. The
-   audited `set-channel-enabled` capability requires that exact match, then
-   atomically appends the new `mobile-push` `live-verified` status and enables
-   its channel; it refuses an unverified deployment, a different reference,
-   any other integration, or any other prior truth state. Never reuse the
-   legacy `expo-push` reference. Confirm the readback shows the exact new status
-   and enabled configuration before continuing.
+   `mobile-push`. The audited `set-channel-enabled` capability records the
+   change. Confirm the readback shows the channel enabled before continuing.
 3. After at least 100 classified attempts for the candidate provider/platform
    meet the five-second handoff p95 and have no duplicate or unclassified
    outcomes, and the Expo baseline and direct cohorts contain distinct cohort,

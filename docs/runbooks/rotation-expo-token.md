@@ -36,7 +36,8 @@ independently verified.
    worker path, stop before the provider write.
 4. Verify in isolated non-production that the worker authenticates only at the
    push provider boundary, rejects staff/routable targets, preserves
-   real/drill markers, and sends zero provider requests under mocked truth.
+   real/drill markers, and sends zero provider requests while the channel is
+   disabled.
 5. If a provider-connected synthetic check is separately authorized, it still
    requires verified credentials, the exact approved unroutable/synthetic
    target, a consequence preview, and fresh authenticated-human confirmation.

@@ -61,10 +61,10 @@ an event.
 1. Start an append-only change/incident record. Confirm the configured
    environment, protected AWS account/region, current application/worker image
    digests, mobile build/runtime versions, infrastructure revision, database
-   migration, secret version IDs, integration truth labels, emergency-stop
+   migration, secret version IDs, channel enablement, emergency-stop
    start/quiescence fences, and paused runtime state.
 2. If the regression can misclassify real/drill, release unapproved work,
-   expose a human-only action, or send through a blocked/unverified provider,
+   expose a human-only action, or send through a disabled provider,
    follow the emergency notification stop before rolling back.
 3. Prove the last known-good artifact by immutable digest/version and evidence.
    A branch name, `latest` tag, mutable channel, or operator memory is not a
@@ -121,8 +121,8 @@ an event.
 - Establish a persistently dark baseline from the same current reviewed
   infrastructure commit. If the deployed stack is not already dark at that
   revision, phase 1 leaves both rollback parameters at `CURRENT_CDK_ASSET`,
-  persists every provider-send enable as false, resets the Expo, direct-push,
-  and SES verification references, resets push cutover to all-Expo, and waits
+  persists every provider-send enable as false, resets push cutover to
+  all-Expo, and waits
   for CloudFormation plus all three send services to reach zero. Phase 2 keeps
   those values unchanged and supplies only the selected rollback repository and
   digest. The preflight proves the previous stack state was already dark and

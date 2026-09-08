@@ -44,12 +44,12 @@ side effects unless the exact attempt is safely fenced.
 
 ## Identify the affected stage
 
-| Queue              | Stage                                             | Initial severity and next check                                                                                                  |
-| ------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `psd-eoc-delivery` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                                  |
-| `psd-eoc-push`     | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)                   |
-| `psd-eoc-email`    | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                                     |
-| `psd-eoc-sms`      | SMS worker before AWS End User Messaging boundary | Consult the readiness register; keep SMS dark while blocked or unverified, and treat unexpected routable staff work as **SEV-0** |
+| Queue              | Stage                                             | Initial severity and next check                                                                                     |
+| ------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `psd-eoc-delivery` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                     |
+| `psd-eoc-push`     | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)      |
+| `psd-eoc-email`    | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                        |
+| `psd-eoc-sms`      | SMS worker before AWS End User Messaging boundary | Consult the readiness register; keep SMS dark while disabled, and treat unexpected routable staff work as **SEV-0** |
 
 ## Respond
 
@@ -74,8 +74,8 @@ side effects unless the exact attempt is safely fenced.
 
 - Fix or roll back the proven failing runtime/configuration. Use
   [rollback.md](rollback.md); do not work around the queue.
-- Keep provider calls fail closed until the integration is `live-verified`,
-  credentials and targets are verified, and the human live-action gates pass.
+- Keep provider calls fail closed until the channel is enabled and the human
+  activation action passes.
 - Confirm oldest age and visible/in-flight counts decline through normal
   consumers, paired DLQ depth does not rise, and append-only attempt evidence
   remains truthful.
@@ -83,8 +83,7 @@ side effects unless the exact attempt is safely fenced.
   Confirm retries use new attempts only after a proven safe-to-retry failure;
   ambiguous provider outcomes stay `unknown` and are not retried.
 - Do not clear an alarm by purging or redriving. Do not send a live test. Any
-  delivery test remains an authenticated-human action under the current
-  readiness and human-only boundaries.
+  drill remains an authenticated-human action.
 
 Close only after all four queue metrics have been reviewed for collateral
 backlog, each exact alarm has a complete healthy evaluation period, and a
