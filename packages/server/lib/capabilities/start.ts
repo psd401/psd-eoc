@@ -3,12 +3,9 @@ import { randomUUID } from 'node:crypto';
 import {
   ActivationPreviewSchema,
   ChannelConfigurationSchema,
-  DeliveryTestPreviewSchema,
-  DeliveryTestTargetSetVersionSchema,
   EndpointSchema,
   FacilityPageSchema,
   FacilitySchema,
-  IntegrationStatusSchema,
   RecipientSchema,
   RosterGroupSourceRefSchema,
   RosterSnapshotSchema,
@@ -22,9 +19,6 @@ import {
   type CapabilityOutput,
   type CapabilityScope,
   type ChannelConfiguration,
-  type DeliveryTestNotificationMetadata,
-  type DeliveryTestPreview,
-  type DeliveryTestTargetSetVersion,
   type FacilityPage,
   type GroupSourceKind,
   type NotificationChannel,
@@ -48,15 +42,11 @@ import {
   activationPreviews,
   agents,
   channelConfigurations,
-  deliveryTestCanaryEligibilityFacts,
-  deliveryTestTargetEndpoints,
-  deliveryTestTargetSetVersions,
   events,
   eventTypes,
   eventTypeVersions,
   facilities,
   groupSources,
-  integrationStatuses,
   rosterEndpoints,
   rosterRecipientGroupSources,
   rosterRecipients,
@@ -86,12 +76,6 @@ import {
 import { DrizzleEventTypeStore, EventTypeCapabilityError } from './event-types';
 import { AudienceResolutionError, resolveAudience } from '../roster/resolve';
 import {
-  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
-  deliveryTestEndpointReferenceDigest,
-  deliveryTestTargetLockIdentity,
-  isDeliveryTestEndpointReferenceSubset,
-} from '../testing/e2e-delivery';
-import {
   BoundedDatabaseQueryError,
   START_FLOW_DATABASE_PAGE_SIZE,
   collectBoundedDatabaseRows,
@@ -106,7 +90,6 @@ import {
 type StartFlowCapabilityId = Extract<
   RegisteredCapabilityId,
   | 'create-activation-preview'
-  | 'create-delivery-test-preview'
   | 'list-facilities'
   | 'list-threats'
 >;
@@ -123,73 +106,6 @@ const ROSTER_QUERY_LIMITS = Object.freeze({
   sources: 500 * 2,
 });
 
-export const DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV =
-  Object.freeze({
-    push: 'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
-    email: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
-    sms: 'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
-  } as const satisfies Readonly<Record<NotificationChannel, string>>);
-
-export type DeliveryTestCredentialVerificationReferences = Readonly<
-  Record<NotificationChannel, string | null>
->;
-
-function isDeliveryTestVerificationReference(
-  value: string | null | undefined,
-): value is string {
-  return (
-    value !== null &&
-    value !== undefined &&
-    value !== 'UNVERIFIED' &&
-    value !== 'UNCONFIGURED' &&
-    value === value.trim() &&
-    value.length >= 16 &&
-    value.length <= 255 &&
-    /^[A-Za-z0-9._:-]+$/u.test(value)
-  );
-}
-
-/**
- * Loads non-secret, deploy-time provider verification references. Push and
- * email bind the running deployment to the exact append-only integration row;
- * SMS independently binds the deployment to retained carrier-registration
- * evidence.
- */
-export function readDeliveryTestCredentialVerificationReferences(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
-): DeliveryTestCredentialVerificationReferences {
-  const read = (channel: NotificationChannel): string | null => {
-    const value =
-      environment[DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV[channel]];
-    return isDeliveryTestVerificationReference(value) ? value : null;
-  };
-  return Object.freeze({
-    push: read('push'),
-    email: read('email'),
-    sms: read('sms'),
-  });
-}
-
-export function deliveryTestCredentialIsVerified(
-  status: Readonly<{
-    label: string;
-    verifiedAt: string | null;
-    authorizationReference: string | null;
-  }>,
-  verificationReference: string | null,
-  channel: NotificationChannel,
-): boolean {
-  const verified =
-    status.label === 'live-verified' &&
-    status.verifiedAt !== null &&
-    verificationReference !== null;
-  if (!verified) return false;
-  if (channel === 'sms') {
-    return isDeliveryTestVerificationReference(verificationReference);
-  }
-  return status.authorizationReference === verificationReference;
-}
-
 /** Persistence boundary for the two query capabilities owned by start flow. */
 export interface StartFlowCapabilityTransaction
   extends CapabilityEngineTransaction {
@@ -203,14 +119,6 @@ export interface StartFlowCapabilityTransaction
     actor: Actor,
     now: Date,
   ): Promise<ActivationPreview>;
-  resolveDeliveryTestFacilityId?(
-    input: CapabilityInput<'create-delivery-test-preview'>,
-  ): Promise<string | null>;
-  createDeliveryTestPreview?(
-    input: CapabilityInput<'create-delivery-test-preview'>,
-    actor: Actor,
-    now: Date,
-  ): Promise<DeliveryTestPreview>;
 }
 
 export type StartFlowCapabilityStore =
@@ -700,15 +608,8 @@ async function loadChannelConfigurations(
   database: StartFlowQueryDatabase,
 ): Promise<readonly ChannelConfiguration[]> {
   const rows = await database
-    .select({
-      configuration: channelConfigurations,
-      status: integrationStatuses,
-    })
+    .select()
     .from(channelConfigurations)
-    .innerJoin(
-      integrationStatuses,
-      eq(channelConfigurations.statusId, integrationStatuses.id),
-    )
     .where(
       inArray(channelConfigurations.integrationId, [
         'mobile-push',
@@ -717,20 +618,10 @@ async function loadChannelConfigurations(
       ]),
     )
     .orderBy(asc(channelConfigurations.integrationId));
-  return rows.map(({ configuration, status }) =>
+  return rows.map((configuration) =>
     ChannelConfigurationSchema.parse({
       integrationId: configuration.integrationId,
       enabled: configuration.enabled,
-      status: IntegrationStatusSchema.parse({
-        integrationId: status.integrationId,
-        label: status.label,
-        verifiedAt:
-          status.verifiedAt === null ? null : dateIso(status.verifiedAt),
-        verifiedByUserId: status.verifiedByUserId,
-        authorizationReference: status.authorizationReference,
-        reasonCode: status.reasonCode,
-        observedAt: dateIso(status.observedAt),
-      }),
       changedAt: dateIso(configuration.changedAt),
     }),
   );
@@ -797,315 +688,6 @@ function mapPreviewConstructionError(error: unknown): never {
   throw error;
 }
 
-export type DeliveryTestEndpointReference = Readonly<{
-  recipientId: string;
-  endpointId: string;
-  channel: 'push' | 'email' | 'sms';
-}>;
-
-interface DeliveryTestPreviewContext {
-  readonly targetSet: DeliveryTestTargetSetVersion;
-  readonly metadata: DeliveryTestNotificationMetadata;
-  readonly credentialVerificationReferences: DeliveryTestCredentialVerificationReferences;
-}
-
-const DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID = Object.freeze({
-  'mobile-push': 'push',
-  'expo-push': 'push',
-  'ses-email': 'email',
-  'aws-eum-sms': 'sms',
-} as const);
-
-function deliveryTestCredentialBlockingReasonCodes(
-  configurations: readonly ChannelConfiguration[],
-  targetSet: DeliveryTestTargetSetVersion,
-  references: DeliveryTestCredentialVerificationReferences,
-): readonly string[] {
-  const targetedChannels = new Set(
-    targetSet.endpoints.map((endpoint) => endpoint.channel),
-  );
-  const statusByChannel = new Map(
-    configurations.flatMap((configuration) => {
-      const channel =
-        DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID[
-          configuration.integrationId as keyof typeof DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID
-        ];
-      return channel === undefined
-        ? []
-        : ([[channel, configuration.status]] as const);
-    }),
-  );
-  return Object.freeze(
-    [...targetedChannels]
-      .filter(
-        (channel) =>
-          !deliveryTestCredentialIsVerified(
-            statusByChannel.get(channel) ?? {
-              label: 'configured-unverified',
-              verifiedAt: null,
-              authorizationReference: null,
-            },
-            references[channel],
-            channel,
-          ),
-      )
-      .map((channel) => `${channel.toUpperCase()}_CREDENTIAL_UNVERIFIED`)
-      .sort(),
-  );
-}
-
-function endpointReferenceKey(
-  reference: DeliveryTestEndpointReference,
-): string {
-  return `${reference.channel}:${reference.recipientId}:${reference.endpointId}`;
-}
-
-export async function loadDeliveryTestTargetSet(
-  database: StartFlowQueryDatabase,
-  reference: Readonly<{ id: string; version: number }>,
-): Promise<DeliveryTestTargetSetVersion | null> {
-  const [row] = await database
-    .select()
-    .from(deliveryTestTargetSetVersions)
-    .where(
-      and(
-        eq(deliveryTestTargetSetVersions.id, reference.id),
-        eq(deliveryTestTargetSetVersions.version, reference.version),
-      ),
-    )
-    .limit(1);
-  if (row === undefined) return null;
-  const endpoints = await database
-    .select()
-    .from(deliveryTestTargetEndpoints)
-    .where(eq(deliveryTestTargetEndpoints.targetSetVersionId, row.id))
-    .orderBy(
-      asc(deliveryTestTargetEndpoints.channel),
-      asc(deliveryTestTargetEndpoints.recipientId),
-      asc(deliveryTestTargetEndpoints.endpointId),
-    );
-  const endpointReferences = endpoints.map((endpoint) => ({
-    eligibilityFactId: endpoint.eligibilityFactId,
-    recipientId: endpoint.recipientId,
-    endpointId: endpoint.endpointId,
-    channel: endpoint.channel,
-    attestation: endpoint.attestation,
-    optedInAt: dateIso(endpoint.optedInAt),
-    attestedAt: dateIso(endpoint.attestedAt),
-    attestedByUserId: endpoint.attestedByUserId,
-    authorizationReference: endpoint.authorizationReference,
-  }));
-  const controlledMode =
-    endpointReferences.length === 1 &&
-    endpointReferences[0]?.channel === 'email'
-      ? ('controlled-email-canary' as const)
-      : endpointReferences.length === 1 &&
-          endpointReferences[0]?.channel === 'push'
-        ? ('controlled-push-canary' as const)
-        : endpointReferences.length === 1 &&
-            endpointReferences[0]?.channel === 'sms'
-          ? ('controlled-sms-canary' as const)
-          : null;
-  return DeliveryTestTargetSetVersionSchema.parse({
-    ...(controlledMode === null ? {} : { mode: controlledMode }),
-    id: row.id,
-    version: row.version,
-    facilityId: row.facilityId,
-    rosterSnapshotId: row.rosterSnapshotId,
-    supersedesVersionId: row.supersedesVersionId,
-    endpoints: endpointReferences,
-    endpointReferenceDigest: row.endpointReferenceDigest,
-    approvedByUserId: row.approvedByUserId,
-    approvedWithSessionId: row.approvedWithSessionId,
-    approvedAt: dateIso(row.approvedAt),
-    createdAt: dateIso(row.createdAt),
-  });
-}
-
-export async function currentActiveAudienceEndpointReferences(
-  database: StartFlowQueryDatabase,
-  rosterSnapshot: RosterSnapshot,
-  facilityId: string,
-): Promise<readonly DeliveryTestEndpointReference[]> {
-  const references = allAudienceEndpointReferences(rosterSnapshot, facilityId);
-  const endpointIds = references.map((endpoint) => endpoint.endpointId);
-  if (endpointIds.length === 0) return [];
-  const rows = await database
-    .select({
-      endpointId: rosterEndpoints.id,
-      recipientId: rosterEndpoints.recipientId,
-      channel: rosterEndpoints.channel,
-      baseStatus: rosterEndpoints.status,
-      latestStatus: sql<'active' | 'invalid' | 'disabled' | null>`(
-        select esr.status
-        from endpoint_status_records esr
-        where esr.roster_snapshot_id = ${rosterEndpoints.rosterSnapshotId}
-          and esr.endpoint_id = ${rosterEndpoints.id}
-        order by esr.recorded_at desc, esr.sequence desc
-        limit 1
-      )`,
-    })
-    .from(rosterEndpoints)
-    .where(
-      and(
-        eq(rosterEndpoints.rosterSnapshotId, rosterSnapshot.id),
-        inArray(rosterEndpoints.id, endpointIds),
-      ),
-    );
-  if (rows.length !== endpointIds.length) {
-    throw unavailable('The configured canary audience is unavailable.');
-  }
-  const referenceKeys = new Set(references.map(endpointReferenceKey));
-  if (
-    rows.some(
-      (row) =>
-        !referenceKeys.has(
-          endpointReferenceKey({
-            endpointId: row.endpointId,
-            recipientId: row.recipientId,
-            channel: row.channel,
-          }),
-        ),
-    )
-  ) {
-    throw conflict('The configured canary audience is inconsistent.');
-  }
-  return Object.freeze(
-    rows
-      .filter((row) => (row.latestStatus ?? row.baseStatus) === 'active')
-      .map((row) =>
-        Object.freeze({
-          recipientId: row.recipientId,
-          endpointId: row.endpointId,
-          channel: row.channel,
-        }),
-      ),
-  );
-}
-
-/**
- * Revalidates the independently authored, append-only eligibility facts and
- * current active audience for a pinned delivery-test target. Callers hold the
- * facility target-set advisory lock so a concurrent revocation cannot race a
- * preview or event start.
- */
-export async function requireCurrentDeliveryTestTargetEligibility(
-  database: StartFlowQueryDatabase,
-  targetSet: DeliveryTestTargetSetVersion,
-  now: Date,
-  hydrationCache?: RosterSnapshotHydrationCache,
-): Promise<void> {
-  const factIds = targetSet.endpoints.map(
-    (endpoint) => endpoint.eligibilityFactId,
-  );
-  const [facility] = await database
-    .select({ active: facilities.active })
-    .from(facilities)
-    .where(eq(facilities.id, targetSet.facilityId))
-    .limit(1);
-  const roster = await loadRosterSnapshot(
-    database,
-    'staff',
-    targetSet.facilityId,
-    undefined,
-    hydrationCache,
-  );
-  if (
-    facility === undefined ||
-    !facility.active ||
-    roster === null ||
-    roster.id !== targetSet.rosterSnapshotId
-  ) {
-    throw new CapabilityEngineError(
-      'FORBIDDEN',
-      'CAPABILITY_INVOCATION_DENIED',
-      'The pinned canary target no longer belongs to the current active staff audience.',
-      403,
-    );
-  }
-
-  const facts = await database
-    .select()
-    .from(deliveryTestCanaryEligibilityFacts)
-    .where(inArray(deliveryTestCanaryEligibilityFacts.id, factIds));
-  const successors = await database
-    .select({
-      supersedesFactId: deliveryTestCanaryEligibilityFacts.supersedesFactId,
-    })
-    .from(deliveryTestCanaryEligibilityFacts)
-    .where(
-      inArray(deliveryTestCanaryEligibilityFacts.supersedesFactId, factIds),
-    );
-  const activeReferences = await currentActiveAudienceEndpointReferences(
-    database,
-    roster,
-    targetSet.facilityId,
-  );
-  const activeKeys = new Set(activeReferences.map(endpointReferenceKey));
-  const factsById = new Map(facts.map((fact) => [fact.id, fact]));
-  const valid =
-    facts.length === factIds.length &&
-    new Set(factIds).size === factIds.length &&
-    successors.length === 0 &&
-    targetSet.endpoints.every((endpoint) => {
-      const fact = factsById.get(endpoint.eligibilityFactId);
-      return (
-        fact !== undefined &&
-        fact.facilityId === targetSet.facilityId &&
-        fact.rosterSnapshotId === targetSet.rosterSnapshotId &&
-        fact.rosterPopulation === 'staff' &&
-        fact.recipientId === endpoint.recipientId &&
-        fact.endpointId === endpoint.endpointId &&
-        fact.channel === endpoint.channel &&
-        fact.decision === 'approved-synthetic-canary' &&
-        dateIso(fact.optedInAt) === endpoint.optedInAt &&
-        dateIso(fact.decidedAt) === endpoint.attestedAt &&
-        fact.decidedAt.getTime() <= now.getTime() &&
-        fact.decidedByUserId === endpoint.attestedByUserId &&
-        fact.authorizationReference === endpoint.authorizationReference &&
-        activeKeys.has(endpointReferenceKey(endpoint))
-      );
-    });
-  if (!valid) {
-    throw new CapabilityEngineError(
-      'FORBIDDEN',
-      'CAPABILITY_INVOCATION_DENIED',
-      'The pinned canary target no longer has exact current eligibility and active-audience evidence.',
-      403,
-    );
-  }
-}
-
-function allAudienceEndpointReferences(
-  rosterSnapshot: RosterSnapshot,
-  facilityId: string,
-): readonly DeliveryTestEndpointReference[] {
-  // Resolve audience membership independently from mutable endpoint health;
-  // the caller applies the latest status overlay before comparing exact sets.
-  const allEndpointsActive = {
-    ...rosterSnapshot,
-    recipients: rosterSnapshot.recipients.map((recipient) => ({
-      ...recipient,
-      endpoints: recipient.endpoints.map((endpoint) => ({
-        ...endpoint,
-        status: 'active' as const,
-      })),
-    })),
-  };
-  const resolved = resolveAudience({
-    facilityId,
-    rosterSnapshot: allEndpointsActive,
-  });
-  return resolved.recipients.flatMap((recipient) =>
-    recipient.endpoints.map((endpoint) => ({
-      recipientId: recipient.recipientId,
-      endpointId: endpoint.id,
-      channel: endpoint.channel,
-    })),
-  );
-}
-
-/** What the operator chose beyond classification and audience. */
 interface ActivationChoice {
   readonly threat: ActivationThreat | null;
   readonly responseDetail: string | null;
@@ -1167,7 +749,6 @@ async function createActivationPreviewFromDatabase(
       },
       actor,
       now,
-      undefined,
       hydrationCache,
     );
   } catch (error) {
@@ -1181,7 +762,6 @@ async function createActivationPreviewRecord(
   choice: ActivationChoice,
   actor: Actor,
   now: Date,
-  deliveryTestContext?: DeliveryTestPreviewContext,
   hydrationCache?: RosterSnapshotHydrationCache,
 ): Promise<ActivationPreview> {
   const input = selection;
@@ -1198,7 +778,7 @@ async function createActivationPreviewRecord(
       database,
       input.rosterPopulation,
       input.facilityId,
-      deliveryTestContext?.targetSet.rosterSnapshotId,
+      undefined,
       hydrationCache,
     );
     const channelConfigurationsValue =
@@ -1208,33 +788,6 @@ async function createActivationPreviewRecord(
     }
     if (rosterSnapshot === null) {
       throw unavailable('A complete roster snapshot is unavailable.');
-    }
-    if (deliveryTestContext !== undefined) {
-      const targetReferences = deliveryTestContext.targetSet.endpoints.map(
-        (endpoint) => ({
-          recipientId: endpoint.recipientId,
-          endpointId: endpoint.endpointId,
-          channel: endpoint.channel,
-        }),
-      );
-      const activeReferences = await currentActiveAudienceEndpointReferences(
-        database,
-        rosterSnapshot,
-        input.facilityId,
-      );
-      if (
-        targetReferences.length === 0 ||
-        !isDeliveryTestEndpointReferenceSubset(
-          targetReferences,
-          activeReferences,
-        ) ||
-        deliveryTestEndpointReferenceDigest(targetReferences) !==
-          deliveryTestContext.targetSet.endpointReferenceDigest
-      ) {
-        throw conflict(
-          'An approved canary endpoint is no longer active in the configured audience.',
-        );
-      }
     }
     const eventTypeVersion = await new DrizzleEventTypeStore(
       eventTypeStoreDatabase(database),
@@ -1272,19 +825,6 @@ async function createActivationPreviewRecord(
       initiator: actor,
       initiatorDisplayName,
       createdAt: now,
-      ...(deliveryTestContext === undefined
-        ? {}
-        : {
-            deliveryTest: deliveryTestContext.metadata,
-            deliveryTestEndpointReferences:
-              deliveryTestContext.targetSet.endpoints,
-            additionalBlockingReasonCodes:
-              deliveryTestCredentialBlockingReasonCodes(
-                channelConfigurationsValue,
-                deliveryTestContext.targetSet,
-                deliveryTestContext.credentialVerificationReferences,
-              ),
-          }),
     });
     await database.insert(activationPreviews).values({
       id: preview.id,
@@ -1304,11 +844,6 @@ async function createActivationPreviewRecord(
       blockingReasonCodes: preview.blockingReasonCodes,
       activeEventIds: preview.activeEventIds,
       consequenceDigest: preview.consequenceDigest,
-      deliveryTestTargetSetId: preview.deliveryTest?.targetSet.id ?? null,
-      deliveryTestTargetSetVersion:
-        preview.deliveryTest?.targetSet.version ?? null,
-      deliveryTestEndpointReferenceDigest:
-        preview.deliveryTest?.endpointReferenceDigest ?? null,
       createdAt: new Date(preview.createdAt),
       expiresAt: new Date(preview.expiresAt),
     });
@@ -1316,88 +851,6 @@ async function createActivationPreviewRecord(
   } catch (error) {
     mapPreviewConstructionError(error);
   }
-}
-
-async function createDeliveryTestPreviewFromDatabase(
-  database: StartFlowQueryDatabase,
-  input: CapabilityInput<'create-delivery-test-preview'>,
-  actor: Actor,
-  now: Date,
-  credentialVerificationReferences: DeliveryTestCredentialVerificationReferences,
-  hydrationCache?: RosterSnapshotHydrationCache,
-): Promise<DeliveryTestPreview> {
-  if (actor.kind !== 'human') {
-    throw new CapabilityEngineError(
-      'FORBIDDEN',
-      'CAPABILITY_INVOCATION_DENIED',
-      'A monthly live delivery-test preview requires an authenticated human.',
-      403,
-    );
-  }
-  const targetSet = await loadDeliveryTestTargetSet(database, input.targetSet);
-  if (targetSet === null) {
-    throw unavailable('The approved canary target-set version is unavailable.');
-  }
-  await database.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(targetSet.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
-  );
-  const [successor] = await database
-    .select({ id: deliveryTestTargetSetVersions.id })
-    .from(deliveryTestTargetSetVersions)
-    .where(eq(deliveryTestTargetSetVersions.supersedesVersionId, targetSet.id))
-    .limit(1);
-  if (successor !== undefined) {
-    throw conflict(
-      'The approved canary target-set version has been superseded.',
-    );
-  }
-  await requireCurrentDeliveryTestTargetEligibility(
-    database,
-    targetSet,
-    now,
-    hydrationCache,
-  );
-  const metadata: DeliveryTestNotificationMetadata = Object.freeze({
-    purpose: 'monthly-live-delivery-test',
-    targetSet: input.targetSet,
-    endpointReferenceDigest: targetSet.endpointReferenceDigest,
-  });
-  // A monthly delivery test exercises the channels, not a threat scenario, so
-  // it is the one preview that pins no threat and no typed description.
-  const activationPreview = await createActivationPreviewRecord(
-    database,
-    {
-      facilityId: targetSet.facilityId,
-      kind: 'drill',
-      templateMode: 'drill',
-      eventTypeVersion: input.eventTypeVersion,
-      rosterPopulation: 'staff',
-    },
-    { threat: null, responseDetail: null },
-    actor,
-    now,
-    { targetSet, metadata, credentialVerificationReferences },
-    hydrationCache,
-  );
-  return DeliveryTestPreviewSchema.parse({
-    purpose: 'monthly-live-delivery-test',
-    activationPreview,
-    targetSet: input.targetSet,
-    endpointReferenceDigest: targetSet.endpointReferenceDigest,
-    channels: activationPreview.channels.map((channel) => ({
-      channel: channel.channel,
-      endpointCount: channel.endpointCount,
-      integrationStatus: channel.integrationStatus,
-      credentialVerified: deliveryTestCredentialIsVerified(
-        channel.integrationStatus,
-        credentialVerificationReferences[channel.channel],
-        channel.channel,
-      ),
-    })),
-    consequenceDigest: activationPreview.consequenceDigest,
-    createdAt: activationPreview.createdAt,
-    expiresAt: activationPreview.expiresAt,
-  });
 }
 
 export interface ActivationPreviewLoadOptions {
@@ -1433,16 +886,11 @@ export async function loadActivationPreview(
   if (row === undefined) {
     return null;
   }
-  // A preview prepared in the ten minutes before this migration deployed has
-  // no threat and is not a delivery test, so it can never satisfy the current
-  // contract. Report it as gone rather than throwing a schema error the
-  // confirmation boundary cannot classify: the operator is told to start
-  // again, which is exactly what they must do.
-  if (
-    row.threatId === null &&
-    row.threatName === null &&
-    row.deliveryTestTargetSetId === null
-  ) {
+  // A preview prepared before threats became mandatory has no threat and can
+  // never satisfy the current contract. Report it as gone rather than throwing
+  // a schema error the confirmation boundary cannot classify: the operator is
+  // told to start again, which is exactly what they must do.
+  if (row.threatId === null && row.threatName === null) {
     return null;
   }
   return ActivationPreviewSchema.parse({
@@ -1463,19 +911,6 @@ export async function loadActivationPreview(
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,
     activeEventIds: row.activeEventIds,
-    deliveryTest:
-      row.deliveryTestTargetSetId === null ||
-      row.deliveryTestTargetSetVersion === null ||
-      row.deliveryTestEndpointReferenceDigest === null
-        ? null
-        : {
-            purpose: 'monthly-live-delivery-test',
-            targetSet: {
-              id: row.deliveryTestTargetSetId,
-              version: row.deliveryTestTargetSetVersion,
-            },
-            endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
-          },
     consequenceDigest: row.consequenceDigest,
     createdAt: dateIso(row.createdAt),
     expiresAt: dateIso(row.expiresAt),
@@ -1484,7 +919,6 @@ export async function loadActivationPreview(
 
 function createDrizzleStartFlowTransaction(
   database: StartFlowQueryDatabase,
-  credentialVerificationReferences: DeliveryTestCredentialVerificationReferences,
   hydrationCache: RosterSnapshotHydrationCache,
 ): StartFlowCapabilityTransaction {
   return {
@@ -1506,41 +940,13 @@ function createDrizzleStartFlowTransaction(
         now,
         hydrationCache,
       ),
-    async resolveDeliveryTestFacilityId(input) {
-      const [row] = await database
-        .select({ facilityId: deliveryTestTargetSetVersions.facilityId })
-        .from(deliveryTestTargetSetVersions)
-        .where(
-          and(
-            eq(deliveryTestTargetSetVersions.id, input.targetSet.id),
-            eq(deliveryTestTargetSetVersions.version, input.targetSet.version),
-          ),
-        )
-        .limit(1);
-      return row?.facilityId ?? null;
-    },
-    createDeliveryTestPreview: (input, actor, now) =>
-      createDeliveryTestPreviewFromDatabase(
-        database,
-        input,
-        actor,
-        now,
-        credentialVerificationReferences,
-        hydrationCache,
-      ),
   };
 }
 
 /** Production Drizzle store; preview persistence and success audit are atomic. */
 export function createDrizzleStartFlowCapabilityStore(
   database: Database,
-  options: Readonly<{
-    credentialVerificationReferences?: DeliveryTestCredentialVerificationReferences;
-  }> = {},
 ): StartFlowCapabilityStore {
-  const credentialVerificationReferences =
-    options.credentialVerificationReferences ??
-    readDeliveryTestCredentialVerificationReferences();
   const hydrationCache: RosterSnapshotHydrationCache = { snapshot: null };
   return {
     transaction<Result>(
@@ -1552,7 +958,6 @@ export function createDrizzleStartFlowCapabilityStore(
         operation(
           createDrizzleStartFlowTransaction(
             startFlowQueryDatabase(transaction),
-            credentialVerificationReferences,
             hydrationCache,
           ),
         ),
@@ -1607,38 +1012,10 @@ export const createActivationPreviewRegistration: ServerCapabilityRegistration<
   },
 };
 
-export const createDeliveryTestPreviewRegistration: ServerCapabilityRegistration<
-  'create-delivery-test-preview',
-  StartFlowCapabilityTransaction
-> = {
-  id: 'create-delivery-test-preview',
-  resolveFacilityId(input, context) {
-    const resolveFacilityId = context.transaction.resolveDeliveryTestFacilityId;
-    if (resolveFacilityId === undefined) {
-      throw unavailable('The monthly delivery-test preview is unavailable.');
-    }
-    return resolveFacilityId(input);
-  },
-  async handler(input, context): Promise<DeliveryTestPreview> {
-    const createPreview = context.transaction.createDeliveryTestPreview;
-    if (createPreview === undefined) {
-      throw unavailable('The monthly delivery-test preview is unavailable.');
-    }
-    return DeliveryTestPreviewSchema.parse(
-      await createPreview(
-        input,
-        context.invocation.actor,
-        await readCapabilityTime(context),
-      ),
-    );
-  },
-};
-
 const registrations = Object.freeze({
   'list-facilities': listFacilitiesRegistration,
   'list-threats': listThreatsRegistration,
   'create-activation-preview': createActivationPreviewRegistration,
-  'create-delivery-test-preview': createDeliveryTestPreviewRegistration,
 });
 
 /** Executes one start-flow query through the canonical capability engine. */

@@ -1,11 +1,9 @@
 import {
   IntegrationIdSchema,
-  IntegrationTruthLabelSchema,
   NotificationChannelSchema,
   RecordDeliveryEvidenceInputSchema,
   type DeliveryEvidence,
   type DeliveryProof,
-  type IntegrationTruthLabel,
   type NotificationChannel,
 } from '@psd-eoc/contracts';
 
@@ -77,7 +75,6 @@ export type ProviderRecoveryResult =
 export interface AttemptIdempotentProviderAdapter {
   readonly channel: NotificationChannel;
   readonly integrationId: string;
-  readonly truthLabel: IntegrationTruthLabel;
   readonly provider: string;
   readonly deliverySemantics: 'attempt-id-idempotent';
   /**
@@ -156,10 +153,6 @@ export interface AttemptExecutionStore {
   release(request: ReleaseAttemptExecutionRequest): Promise<void>;
 }
 
-export type LiveProviderAuthorizer = (
-  workItem: WorkerAttemptWorkItem,
-) => boolean | Promise<boolean>;
-
 /** Optional channel-specific policy gate immediately before a new send. */
 export type ProviderSendAuthorizer = (
   workItem: WorkerAttemptWorkItem,
@@ -177,15 +170,13 @@ export interface WorkerAttemptProcessorOptions {
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
-  /** Omission disables live-verified providers. */
-  readonly authorizeLiveProvider?: LiveProviderAuthorizer;
+  /** Fresh enablement and endpoint truth checked after the claim, before I/O. */
   readonly authorizeProviderSend?: ProviderSendAuthorizer;
 }
 
 export type WorkerProcessingErrorCode =
   | 'INVALID_ADAPTER'
   | 'ADAPTER_MISMATCH'
-  | 'LIVE_PROVIDER_DISABLED'
   | 'PROVIDER_SEND_DISABLED'
   | 'RETRY_BUDGET_EXCEEDED'
   | 'INVALID_IDEMPOTENCY_CLAIM'
@@ -236,7 +227,6 @@ function validateAdapter(adapter: AttemptIdempotentProviderAdapter): void {
   if (
     !NotificationChannelSchema.safeParse(adapter.channel).success ||
     !IntegrationIdSchema.safeParse(adapter.integrationId).success ||
-    !IntegrationTruthLabelSchema.safeParse(adapter.truthLabel).success ||
     adapter.provider.length < 1 ||
     adapter.provider.length > 100 ||
     adapter.provider.trim() !== adapter.provider ||
@@ -426,7 +416,6 @@ export class WorkerAttemptProcessor {
   readonly #retryPolicy: RetryPolicy;
   readonly #leaseMilliseconds: number;
   readonly #random: () => number;
-  readonly #authorizeLive: LiveProviderAuthorizer | undefined;
   readonly #authorizeSend: ProviderSendAuthorizer | undefined;
 
   public constructor(options: WorkerAttemptProcessorOptions) {
@@ -439,7 +428,6 @@ export class WorkerAttemptProcessor {
     );
     this.#leaseMilliseconds = parseLease(options.leaseMilliseconds);
     this.#random = options.random ?? Math.random;
-    this.#authorizeLive = options.authorizeLiveProvider;
     this.#authorizeSend = options.authorizeProviderSend;
   }
 
@@ -450,8 +438,7 @@ export class WorkerAttemptProcessor {
     const batch = workItem.batch;
     if (
       this.#adapter.channel !== batch.channel ||
-      this.#adapter.integrationId !== batch.integrationStatus.integrationId ||
-      this.#adapter.truthLabel !== batch.integrationStatus.label
+      this.#adapter.integrationId !== batch.integrationId
     ) {
       throw new WorkerProcessingError('ADAPTER_MISMATCH');
     }
@@ -541,21 +528,6 @@ export class WorkerAttemptProcessor {
     if (attempt.attemptNumber > this.#retryPolicy.maxAttempts) {
       throw new WorkerProcessingError('RETRY_BUDGET_EXCEEDED');
     }
-    if (this.#adapter.truthLabel === 'live-verified') {
-      if (this.#authorizeLive === undefined) {
-        throw new WorkerProcessingError('LIVE_PROVIDER_DISABLED');
-      }
-      let authorized = false;
-      try {
-        authorized = (await this.#authorizeLive(workItem)) === true;
-      } catch {
-        authorized = false;
-      }
-      if (!authorized) {
-        throw new WorkerProcessingError('LIVE_PROVIDER_DISABLED');
-      }
-    }
-
     let claim: AttemptExecutionClaim;
     try {
       claim = parseClaim(

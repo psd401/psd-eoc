@@ -528,7 +528,6 @@ export class LedgeredExpoPushAdapter
 {
   public readonly channel = 'push' as const;
   public readonly integrationId: 'expo-push' | 'mobile-push';
-  public readonly truthLabel = 'live-verified' as const;
   public readonly provider = EXPO_PUSH_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -680,8 +679,7 @@ export class LedgeredExpoPushAdapter
     }
     if (
       request.idempotencyKey !== workItem.attempt.id ||
-      workItem.batch.integrationStatus.integrationId !== this.integrationId ||
-      workItem.batch.integrationStatus.label !== this.truthLabel ||
+      workItem.batch.integrationId !== this.integrationId ||
       workItem.batch.rosterPopulation !== 'staff'
     ) {
       throw new LedgeredExpoPushAdapterError('EXPO_SEND_REQUEST_INVALID');

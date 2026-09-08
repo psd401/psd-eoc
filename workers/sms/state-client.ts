@@ -15,8 +15,6 @@ import {
 } from '@psd-eoc/contracts';
 
 import type {
-  AwsEumSmsLiveAuthorizationContext,
-  AwsEumSmsLiveAuthorizer,
   AwsEumSmsLedgerClaim,
   AwsEumSmsLedgerCompleteRequest,
   AwsEumSmsLedgerLookup,
@@ -436,17 +434,6 @@ export class SmsRuntimeClient
     );
     if (!value.success) return fail('INVALID_RESPONSE');
     return value.data;
-  };
-
-  public readonly authorizeLiveSend: AwsEumSmsLiveAuthorizer = async (
-    context: AwsEumSmsLiveAuthorizationContext,
-  ) => {
-    const value = exactRecord(
-      await this.#post({ operation: 'authorize-live-send', context }),
-      ['authorized'],
-    );
-    if (typeof value?.authorized !== 'boolean') return fail('INVALID_RESPONSE');
-    return value.authorized;
   };
 
   public async execute(

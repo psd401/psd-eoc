@@ -1,7 +1,5 @@
 const STATUS_MESSAGES = Object.freeze({
   'channel-updated': 'The notification channel configuration was updated.',
-  'email-verified':
-    'SES verification evidence was recorded and the email channel was enabled. No email was sent.',
 } as const);
 
 export interface IntegrationsAdminSearchParameters {

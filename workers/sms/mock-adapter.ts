@@ -23,7 +23,6 @@ interface StoredMockSend {
 export class MockAwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'sms' as const;
   public readonly integrationId = AWS_EUM_SMS_INTEGRATION_ID;
-  public readonly truthLabel = 'mocked' as const;
   public readonly provider = MOCK_AWS_EUM_SMS_PROVIDER;
   public readonly deliverySemantics = 'attempt-id-idempotent' as const;
 
@@ -38,7 +37,7 @@ export class MockAwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   public async send(
     requestValue: ProviderSendRequest,
   ): Promise<ProviderSendOutcome> {
-    const request = parseSmsProviderSendRequest(requestValue, this.truthLabel);
+    const request = parseSmsProviderSendRequest(requestValue);
     const fingerprint = workerAttemptFingerprint(request.workItem);
     const existing = this.#sends.get(request.idempotencyKey);
     if (existing !== undefined) {

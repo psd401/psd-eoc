@@ -71,7 +71,6 @@ export interface SmsServiceConfiguration {
   readonly attemptExecutionToken: string;
   readonly deliveryStateToken: string;
   readonly smsRuntimeToken: string;
-  readonly registrationVerificationReference: string;
   readonly originationIdentity: string;
   readonly configurationSetName: string;
   readonly protectConfigurationId: string;
@@ -211,18 +210,6 @@ export function readSmsServiceConfiguration(
     32,
   );
   const partition = region.startsWith('us-gov-') ? 'aws-us-gov' : 'aws';
-  const registrationVerificationReference = matching(
-    environment,
-    'PSD_EOC_SMS_REGISTRATION_VERIFICATION_REFERENCE',
-    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u,
-    255,
-  );
-  if (
-    registrationVerificationReference === 'UNVERIFIED' ||
-    registrationVerificationReference === 'UNCONFIGURED'
-  ) {
-    throw new SmsServiceError('FEATURE_DISABLED');
-  }
   const queueArn = matching(
     environment,
     'SMS_QUEUE_ARN',
@@ -299,7 +286,6 @@ export function readSmsServiceConfiguration(
       'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
     ),
     smsRuntimeToken: token(environment, 'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN'),
-    registrationVerificationReference,
     originationIdentity: matching(
       environment,
       'PSD_EOC_SMS_ORIGINATION_IDENTITY',
@@ -374,11 +360,8 @@ function buildRuntime(
   return new AwsEumSmsRuntime({
     mode: {
       state: 'enabled',
-      authorizeLiveProvider: async (workItem) =>
-        (await state.authorizeProviderSend(workItem)).authorized,
       authorizeProviderSend: (workItem) =>
         state.authorizeProviderSend(workItem),
-      authorizeLiveSend: (context) => state.authorizeLiveSend(context),
     },
     awsClient: { region: configuration.region },
     adapter: {

@@ -35,7 +35,7 @@ import { facilities, threats } from './configuration';
 
 import { humanConfirmationRecords } from './identity';
 
-import { rosterSnapshots, deliveryTestTargetSetVersions } from './roster';
+import { rosterSnapshots } from './roster';
 
 import { eventTypeVersions } from './event-types';
 /** Short-lived, non-mutating activation consequence previews. */
@@ -66,11 +66,6 @@ export const activationPreviews = pgTable(
     blockingReasonCodes: jsonb('blocking_reason_codes').notNull(),
     activeEventIds: jsonb('active_event_ids').notNull(),
     consequenceDigest: digest('consequence_digest').notNull(),
-    deliveryTestTargetSetId: uuid('delivery_test_target_set_id'),
-    deliveryTestTargetSetVersion: integer('delivery_test_target_set_version'),
-    deliveryTestEndpointReferenceDigest: digest(
-      'delivery_test_endpoint_reference_digest',
-    ),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
     expiresAt: occurredAt('expires_at').notNull(),
   },
@@ -85,13 +80,6 @@ export const activationPreviews = pgTable(
       table.rosterPopulation,
       table.consequenceDigest,
     ),
-    unique('activation_previews_delivery_test_anchor_uq').on(
-      table.id,
-      table.deliveryTestTargetSetId,
-      table.deliveryTestTargetSetVersion,
-      table.deliveryTestEndpointReferenceDigest,
-      table.consequenceDigest,
-    ),
     foreignKey({
       columns: [table.eventTypeVersionId, table.templateMode],
       foreignColumns: [eventTypeVersions.id, eventTypeVersions.templateMode],
@@ -101,19 +89,6 @@ export const activationPreviews = pgTable(
       columns: [table.rosterSnapshotId, table.rosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'activation_previews_roster_population_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [
-        table.deliveryTestTargetSetId,
-        table.deliveryTestTargetSetVersion,
-        table.rosterSnapshotId,
-      ],
-      foreignColumns: [
-        deliveryTestTargetSetVersions.id,
-        deliveryTestTargetSetVersions.version,
-        deliveryTestTargetSetVersions.rosterSnapshotId,
-      ],
-      name: 'activation_previews_delivery_test_target_set_fk',
     }).onDelete('restrict'),
     check(
       'activation_previews_classification',
@@ -143,26 +118,6 @@ export const activationPreviews = pgTable(
     check(
       'activation_previews_digest_format',
       sql`${table.consequenceDigest} ~ '^[a-f0-9]{64}$'`,
-    ),
-    check(
-      'activation_previews_delivery_test_truth',
-      sql`(
-        ${table.deliveryTestTargetSetId} is null
-        and ${table.deliveryTestTargetSetVersion} is null
-        and ${table.deliveryTestEndpointReferenceDigest} is null
-      ) or (
-        ${table.deliveryTestTargetSetId} is not null
-        and ${table.deliveryTestTargetSetVersion} is not null
-        and ${table.deliveryTestEndpointReferenceDigest} is not null
-        and ${table.kind} = 'drill'
-        and ${table.templateMode} = 'drill'
-        and ${table.rosterPopulation} = 'staff'
-      )`,
-    ),
-    check(
-      'activation_previews_delivery_test_digest_format',
-      sql`${table.deliveryTestEndpointReferenceDigest} is null
-        or ${table.deliveryTestEndpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
     ),
     check(
       'activation_previews_threat_pair',

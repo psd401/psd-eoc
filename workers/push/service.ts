@@ -8,7 +8,6 @@ import {
 } from '@aws-sdk/client-sqs';
 import {
   ExpoPushAttemptReferenceMessageSchema,
-  IntegrationVerificationReferenceSchema,
   PushProviderCutoverSchema,
   type PushProviderCutover,
 } from '@psd-eoc/contracts';
@@ -77,13 +76,11 @@ export interface ExpoPushServiceConfiguration {
   readonly deliveryStateToken: string;
   readonly endpointWorkerToken: string;
   readonly pushRuntimeToken: string;
-  readonly verificationReference: string;
   readonly cutover: PushProviderCutover;
   readonly direct: DirectPushServiceConfiguration | null;
 }
 
 export interface DirectPushServiceConfiguration {
-  readonly verificationReference: string;
   readonly apns: Readonly<{
     environment: 'development' | 'production';
     keyId: string;
@@ -210,23 +207,6 @@ function serviceEnvironment(value: string): 'development' | 'production' {
   return value;
 }
 
-function verificationReference(
-  environment: Readonly<Record<string, string | undefined>>,
-  name: string,
-  provider: 'expo' | 'direct',
-): string {
-  const reference = required(environment, name, 255);
-  if (
-    reference === 'UNVERIFIED' ||
-    (provider === 'direct'
-      ? !IntegrationVerificationReferenceSchema.safeParse(reference).success
-      : !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(reference))
-  ) {
-    throw new ExpoPushServiceError('FEATURE_DISABLED');
-  }
-  return reference;
-}
-
 function pushProviderCutover(value: string): PushProviderCutover {
   try {
     const parsed = PushProviderCutoverSchema.safeParse(JSON.parse(value));
@@ -250,11 +230,6 @@ export function readExpoPushServiceConfiguration(
   ) {
     throw new ExpoPushServiceError('FEATURE_DISABLED');
   }
-  const expoVerificationReference = verificationReference(
-    environment,
-    'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
-    'expo',
-  );
   const cutover = pushProviderCutover(
     required(environment, 'PSD_EOC_PUSH_PROVIDER_CUTOVER', 1_024),
   );
@@ -278,11 +253,6 @@ export function readExpoPushServiceConfiguration(
       throw new ExpoPushServiceError('INVALID_CONFIGURATION');
     }
     direct = Object.freeze({
-      verificationReference: verificationReference(
-        environment,
-        'PSD_EOC_DIRECT_PUSH_CREDENTIAL_VERIFICATION_REFERENCE',
-        'direct',
-      ),
       apns: Object.freeze({
         environment: serviceEnvironment(
           required(environment, 'APNS_ENVIRONMENT', 32),
@@ -327,7 +297,6 @@ export function readExpoPushServiceConfiguration(
       environment,
       'PSD_EOC_EXPO_PUSH_RUNTIME_WORKER_TOKEN',
     ),
-    verificationReference: expoVerificationReference,
     cutover,
     direct,
   });
@@ -436,7 +405,6 @@ function buildRuntime(
       endpointInvalidator: invalidator,
       receiptScheduler: receipts,
       endpointEligibility: eligibility,
-      authorizeLiveProvider: () => true,
     });
   const disabledDirectWorker: PushAttemptWorker = Object.freeze({
     process: () => Promise.reject(new ExpoPushServiceError('FEATURE_DISABLED')),
@@ -480,7 +448,6 @@ function buildRuntime(
       evidenceWriter: writer,
       endpointInvalidator: invalidator,
       endpointEligibility: eligibility,
-      authorizeLiveProvider: () => true,
     });
     fcmWorker = new DirectPushWorker({
       adapter: new LedgeredDirectPushAdapter({
@@ -493,7 +460,6 @@ function buildRuntime(
       evidenceWriter: writer,
       endpointInvalidator: invalidator,
       endpointEligibility: eligibility,
-      authorizeLiveProvider: () => true,
     });
   }
   const worker = new PushProviderRouter({

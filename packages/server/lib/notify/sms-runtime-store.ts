@@ -27,11 +27,9 @@ import {
   channelAttempts,
   channelConfigurations,
   deliveryEvidence,
-  deliveryTestTargetEndpoints,
   dispatchBatches,
   events,
   eventTransitions,
-  integrationStatuses,
   outbox,
   rosterSnapshots,
   smsProviderIo,
@@ -122,12 +120,6 @@ export interface SmsRuntimeStore {
   authorizeProviderSend(
     workItem: SmsWorkerAttemptWorkItem,
   ): Promise<SmsProviderSendAuthorization>;
-  authorizeLiveSend(
-    context: Extract<
-      SmsRuntimeRequest,
-      { operation: 'authorize-live-send' }
-    >['context'],
-  ): Promise<boolean>;
   executeLifecycle(
     input: Extract<SmsRuntimeRequest, { operation: 'record-sms-opt-out' }>,
   ): Promise<unknown>;
@@ -260,12 +252,11 @@ async function persistedBatch(
     },
     rosterSnapshotId: record.batch.rosterSnapshotId,
     rosterPopulation: record.batch.rosterPopulation,
-    deliveryTest: message.deliveryTest,
     requestId: record.batch.requestId,
     authorization: record.batch.authorization,
     channel: record.batch.channel,
     renderedMessage: record.batch.renderedMessage,
-    integrationStatus: planned.integrationStatus,
+    integrationId: planned.integrationId,
     sequence: record.batch.sequence,
     endpointCount: record.batch.endpointCount,
     createdAt: iso(record.batch.createdAt),
@@ -301,41 +292,6 @@ async function stableSmsCandidateReferences(
   roster: Awaited<ReturnType<typeof loadRosterSnapshot>>,
 ): Promise<readonly SmsCandidateReference[]> {
   if (roster === null) throw new SmsRuntimeStoreError('BATCH_CONFLICT');
-  if (batch.deliveryTest !== null && batch.deliveryTest !== undefined) {
-    const references = await database
-      .select({
-        recipientId: deliveryTestTargetEndpoints.recipientId,
-        endpointId: deliveryTestTargetEndpoints.endpointId,
-      })
-      .from(deliveryTestTargetEndpoints)
-      .where(
-        and(
-          eq(
-            deliveryTestTargetEndpoints.targetSetVersionId,
-            batch.deliveryTest.targetSet.id,
-          ),
-          eq(
-            deliveryTestTargetEndpoints.targetSetVersion,
-            batch.deliveryTest.targetSet.version,
-          ),
-          eq(
-            deliveryTestTargetEndpoints.rosterSnapshotId,
-            batch.rosterSnapshotId,
-          ),
-          eq(deliveryTestTargetEndpoints.channel, 'sms'),
-        ),
-      )
-      .orderBy(
-        asc(deliveryTestTargetEndpoints.recipientId),
-        asc(deliveryTestTargetEndpoints.endpointId),
-      );
-    if (references.length !== batch.endpointCount) {
-      throw new SmsRuntimeStoreError('BATCH_CONFLICT');
-    }
-    return Object.freeze(
-      references.map((reference) => Object.freeze(reference)),
-    );
-  }
   const references = roster.recipients.flatMap((recipient) =>
     recipient.endpoints.flatMap((endpoint) =>
       endpoint.channel === 'sms' && endpoint.status === 'active'
@@ -373,7 +329,6 @@ function attemptFor(
     eventTypeVersion: batch.eventTypeVersion,
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
-    ...(batch.deliveryTest == null ? {} : { deliveryTest: batch.deliveryTest }),
     recipientId,
     endpointId,
     channel: 'sms',
@@ -861,42 +816,6 @@ export function createDrizzleSmsRuntimeStore(
         return deniedProviderSend;
       }
       return authorizeRemainingLifetime(batch);
-    },
-
-    async authorizeLiveSend(context) {
-      const attempt = await attemptFromId(database, context.attemptId);
-      if (
-        attempt === null ||
-        attempt.batchId !== context.batchId ||
-        attempt.eventId !== context.eventId ||
-        attempt.eventKind !== context.eventKind ||
-        attempt.templateMode !== context.templateMode ||
-        attempt.purpose !== context.purpose
-      ) {
-        return false;
-      }
-      const batch = await persistedBatch(database, attempt.batchId);
-      if (
-        batchIsExpired(batch) ||
-        !(await batchHasCurrentLifecycle(batch)) ||
-        batch.requestId !== context.requestId ||
-        batch.authorization.kind !== context.authorizationKind ||
-        batch.integrationStatus.authorizationReference !==
-          context.integrationAuthorizationReference
-      ) {
-        return false;
-      }
-      // Enablement alone. This previously also required the truth label to be
-      // 'live-verified' and a stored authorization reference to match the send
-      // context. Three pieces of hand-maintained state across two tables had to
-      // agree, and when they did not this returned false with nothing logged:
-      // a drill delivered push and email while SMS vanished silently.
-      const [configuration] = await database
-        .select({ enabled: channelConfigurations.enabled })
-        .from(channelConfigurations)
-        .where(eq(channelConfigurations.integrationId, SMS_INTEGRATION_ID))
-        .limit(1);
-      return configuration?.enabled === true;
     },
 
     async executeLifecycle(input) {
