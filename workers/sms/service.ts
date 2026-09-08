@@ -556,14 +556,17 @@ async function processBody(
       throw new SmsServiceError('QUEUE_MESSAGE_INVALID');
     }
     try {
-      await runtime.processDeliveryEvent(value, {
+      const result = await runtime.processDeliveryEvent(value, {
         requestId: randomUUID(),
         ruleArn: configuration.deliveryEventRuleArn,
         authorization: 'eventbridge-sqs-receipt-queue',
       });
+      // A receipt that names no send this system retained is finished the
+      // moment it is read: it is logged as ignored and leaves the queue,
+      // never retried toward the dead-letter queue.
       return Object.freeze({
         kind: 'complete',
-        count: 1,
+        count: result.kind === 'unmatched' ? 0 : 1,
         event: 'delivery-event',
       });
     } catch (error) {

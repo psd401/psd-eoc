@@ -164,6 +164,10 @@ export type SmsDeliveryEventProcessResult =
       event: ParsedAwsEumSmsDeliveryEvent;
     }>
   | Readonly<{
+      kind: 'unmatched';
+      event: ParsedAwsEumSmsDeliveryEvent;
+    }>
+  | Readonly<{
       kind: 'recorded';
       event: ParsedAwsEumSmsDeliveryEvent;
       evidence: DeliveryEvidence;
@@ -518,17 +522,28 @@ export class SmsDeliveryEventProcessor {
       throw new AwsEumSmsDeliveryEventError('INVOCATION_UNVERIFIED');
     }
     const event = parseAwsEumSmsDeliveryEvent(value, this.#configuration);
-    if (event.attemptId === null) {
-      throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');
-    }
+    // The retained MessageId is the correlation key. AWS End User Messaging
+    // publishes its EventBridge delivery events without the send's
+    // `Context`, so a receipt normally carries no attempt id at all; the
+    // first live delivery on 2026-09-08 (TEXT_DELIVERED for a send whose
+    // attempt held the MessageId) was refused here for lacking one and
+    // dead-lettered after five receives. Context, when a source does carry
+    // it, only recovers a send whose MessageId was never retained, and it
+    // must still agree with the attempt the MessageId names.
     const correlatedAttempt =
       await this.#attempts.loadAttemptByProviderReference(
         AWS_EUM_SMS_PROVIDER,
         event.messageId,
       );
+    if (correlatedAttempt === null && event.attemptId === null) {
+      // Nothing retained names this MessageId and the receipt cannot say
+      // which send it belongs to: a text this system never sent, such as
+      // an account-level verification message. Retrying cannot change that.
+      return Object.freeze({ kind: 'unmatched', event });
+    }
     const attempt =
       correlatedAttempt ??
-      (event.correlationToken === null
+      (event.correlationToken === null || event.attemptId === null
         ? null
         : await this.#attempts.loadUnknownAttemptById(
             AWS_EUM_SMS_PROVIDER,
@@ -542,7 +557,10 @@ export class SmsDeliveryEventProcessor {
           : 'ATTEMPT_NOT_READY',
       );
     }
-    if (attempt.channel !== 'sms' || event.attemptId !== attempt.id) {
+    if (
+      attempt.channel !== 'sms' ||
+      (event.attemptId !== null && event.attemptId !== attempt.id)
+    ) {
       throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');
     }
     const mapping = evidenceFor(event, attempt.id);
