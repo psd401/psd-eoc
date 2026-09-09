@@ -274,7 +274,11 @@ describe('exact Google access-membership evaluator', () => {
       }),
     );
     // Google holds the designated group and nothing at the waiting address.
-    const notHolding = {
+    // Cloud Identity's real answer for a group that does not exist is 403
+    // "Permission denied for resource ... (or it may not exist)", the same
+    // as for a group the credential may not read; a 404 is read the same
+    // way. Both are "not held" for a waiting group.
+    const notHoldingWith = (status: 403 | 404) => ({
       ...base,
       fetch: (async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
@@ -283,31 +287,46 @@ describe('exact Google access-membership evaluator', () => {
           new URL(url).searchParams.get('groupKey.id') === WAITING_EMAIL
         ) {
           base.calls.push(Object.freeze({ url }));
-          return new Response('{"error":{"code":404}}', { status: 404 });
+          return status === 403
+            ? Response.json(
+                {
+                  error: {
+                    code: 403,
+                    message: `Error(2028): Permission denied for resource ${WAITING_EMAIL} (or it may not exist).`,
+                    status: 'PERMISSION_DENIED',
+                  },
+                },
+                { status: 403 },
+              )
+            : new Response('{"error":{"code":404}}', { status: 404 });
         }
         return base.fetch(input, init);
       }) as typeof fetch,
-    };
-    const result = await evaluator(notHolding).evaluate([
-      ...CONFIGURED_GROUPS,
-      waiting,
-    ]);
-    const evaluatedWaiting = result.groups.find(
-      (group) => group.groupSourceId === WAITING_ID,
-    );
-    expect(evaluatedWaiting).toEqual({
-      groupSourceId: WAITING_ID,
-      groupEmail: WAITING_EMAIL,
-      googleGroupId: null,
-      grantedRole: null,
-      memberEmails: [],
     });
-    expect(
-      result.groups.find(
-        (group) => group.groupSourceId === CONFIGURED_GROUPS[0]?.groupSourceId,
-      )?.googleGroupId,
-    ).toBe(GROUP_ID);
-    expect(result.providerGroupIdDigest).toMatch(/^[a-f0-9]{64}$/u);
+    const notHolding = notHoldingWith(403);
+    for (const harness of [notHolding, notHoldingWith(404)]) {
+      const result = await evaluator(harness).evaluate([
+        ...CONFIGURED_GROUPS,
+        waiting,
+      ]);
+      const evaluatedWaiting = result.groups.find(
+        (group) => group.groupSourceId === WAITING_ID,
+      );
+      expect(evaluatedWaiting).toEqual({
+        groupSourceId: WAITING_ID,
+        groupEmail: WAITING_EMAIL,
+        googleGroupId: null,
+        grantedRole: null,
+        memberEmails: [],
+      });
+      expect(
+        result.groups.find(
+          (group) =>
+            group.groupSourceId === CONFIGURED_GROUPS[0]?.groupSourceId,
+        )?.googleGroupId,
+      ).toBe(GROUP_ID);
+      expect(result.providerGroupIdDigest).toMatch(/^[a-f0-9]{64}$/u);
+    }
 
     // Once Google holds the address, the same waiting group carries its ID
     // and its members like any other group.
@@ -325,11 +344,14 @@ describe('exact Google access-membership evaluator', () => {
       memberEmails: [SYNTHETIC_TRANSITION_EMAIL],
     });
 
-    // A group that is not waiting must exist: "not found" is still a refusal.
-    await expectEvaluationError(
-      evaluator(notHolding).evaluate([{ ...waiting, waiting: false }]),
-      'GOOGLE_REQUEST_REJECTED',
-    );
+    // A group that is not waiting must exist: "not held" is still a
+    // refusal, whichever way Google says it.
+    for (const harness of [notHolding, notHoldingWith(404)]) {
+      await expectEvaluationError(
+        evaluator(harness).evaluate([{ ...waiting, waiting: false }]),
+        'GOOGLE_REQUEST_REJECTED',
+      );
+    }
   });
 
   test('evaluates every configured group and refuses a set it cannot trust', async () => {
