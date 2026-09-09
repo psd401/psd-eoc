@@ -41,17 +41,22 @@ a chat, or a build.
 4. **Facilities.** At the review facility add a Google building source for
    the review group, or a manual building source holding the review
    account's address. Saving publishes the roster.
-5. **First sign-in.** Sign in once as the review account on the web or in
-   the app. Sign-in is what creates the account's staff record; there is no
-   way to configure a person who has never signed in.
+5. **First sign-in.** Sign in once as the review account in the app on a
+   district phone, so the account exists and has a device registered for
+   push, then on **Facilities** press **Publish roster snapshot** so that
+   device is in the roster. Keep that phone signed in: an event cannot be
+   started at a site whose roster holds no push device, and the reviewer's
+   own device is only in the roster after the next publish. Sign-in is what
+   creates the account's staff record; there is no way to configure a person
+   who has never signed in.
 6. **Access.** Open the account's row, **Limit to facilities**, choose the
    review facility only, and save. The limit applies to the account's next
    request.
 7. **Prove it.** Signed in as the review account, start a drill preview at
-   the review facility and read the audience: it must name the review
-   account and nobody else, with no others source in the plan. Then confirm
-   one drill and end it, so the reviewer's path has been walked once by a
-   person.
+   the review facility and read the audience: it must name one staff
+   recipient and nobody else, with no others source in the plan, and the
+   preview must not say notifications are not ready. Then confirm one drill
+   and end it, so the reviewer's path has been walked once by a person.
 8. **Store forms.** The account owner enters the sign-in address and its
    secret into App Store Connect's review information and the Play Console's
    app access instructions, together with the instructions below.
