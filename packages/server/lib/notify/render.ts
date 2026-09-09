@@ -586,9 +586,12 @@ function stripEditableClassificationLead(
 
 /**
  * Wording written before the renderer owned the lead often opens with the
- * purpose itself, as "ACTIVATION: " or "ACTIVATION at {{site}}". Either form
- * is dropped so the frame's own lead is not repeated; the sent text once read
- * "ACTIVATION: ACTIVATION at" because only the punctuated form was known.
+ * purpose itself, as "ACTIVATION: ", "ACTIVATION at {{site}}", or the word
+ * alone on its first line. Those forms are dropped so the frame's own lead
+ * is not repeated; the sent text once read "ACTIVATION: ACTIVATION at"
+ * because only the punctuated form was known. The bare word is dropped only
+ * in those two legacy shapes: wording that opens "All clear given by the
+ * fire marshal" keeps its first words.
  */
 function stripEditablePurposeLead(
   value: string,
@@ -596,10 +599,10 @@ function stripEditablePurposeLead(
 ): string {
   const pattern =
     purpose === 'activation'
-      ? /^ACTIVATION(?:\s*[-:—]\s*|\s+)/iu
+      ? /^ACTIVATION(?:\s*[-:—]\s*|\s+(?=at\b)|[ \t]*\n\s*)/iu
       : purpose === 'all-clear'
-        ? /^ALL[- ]CLEAR(?:\s*[-:—]\s*|\s+)/iu
-        : /^REACTIVATION(?:\s*[-:—]\s*|\s+)/iu;
+        ? /^ALL[- ]CLEAR(?:\s*[-:—]\s*|\s+(?=at\b)|[ \t]*\n\s*)/iu
+        : /^REACTIVATION(?:\s*[-:—]\s*|\s+(?=at\b)|[ \t]*\n\s*)/iu;
   return value.replace(pattern, '');
 }
 

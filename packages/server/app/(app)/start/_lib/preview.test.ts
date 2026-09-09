@@ -309,7 +309,7 @@ describe('activation consequence preview threat pinning', () => {
     const pushBody =
       push?.renderedMessage.channel === 'push' ? push.renderedMessage.body : '';
     expect(pushBody).toContain(
-      'Synthetic wildlife — {{initiator}} at {{site}}',
+      'Synthetic wildlife - {{initiator}} at {{site}}',
     );
     expect(pushBody).not.toContain('Harbor Ridge High School');
   });
@@ -328,7 +328,7 @@ describe('activation consequence preview threat pinning', () => {
       email?.renderedMessage.channel === 'email'
         ? email.renderedMessage.subject
         : '';
-    expect(pushBody).toContain('Synthetic wildlife — Gas smell near the gym');
+    expect(pushBody).toContain('Synthetic wildlife - Gas smell near the gym');
     expect(pushBody).not.toContain('{{threat}}');
     // The response name carries the operator's words wherever the wording
     // already names the response.
@@ -341,11 +341,11 @@ describe('activation consequence preview threat pinning', () => {
     expect(renderedThreatLabel(null)).toBe('Not recorded');
     expect(renderedThreatLabel(THREAT)).toBe('Synthetic wildlife');
     expect(renderedThreatLabel({ ...THREAT, detail: 'Gas smell' })).toBe(
-      'Synthetic wildlife — Gas smell',
+      'Synthetic wildlife - Gas smell',
     );
     expect(renderedResponseLabel('Lockdown', null)).toBe('Lockdown');
     expect(renderedResponseLabel('Other', 'Hold in classrooms')).toBe(
-      'Other — Hold in classrooms',
+      'Other - Hold in classrooms',
     );
   });
 });
