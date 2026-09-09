@@ -246,14 +246,50 @@ describe('the ID an access-group edit carries', () => {
     ).resolves.toBe('group-42');
   });
 
-  test('waiting never hides a refusal other than "not held"', async () => {
+  test('answers waiting when Google could not be asked at all', async () => {
+    // A school must be registrable on a server whose Google credential is
+    // missing, or while Google is down: the address is recorded, nobody is
+    // named, and the next check or scheduled sync asks again.
     await expect(
       resolveGoogleGroupIdOrWaitingForForm(
         ADMIN,
         'hhe-eoc@example.invalid',
-        refusing('GOOGLE_REQUEST_REJECTED'),
+        () => {
+          throw new GoogleRosterConfigurationError(
+            'GOOGLE_ROSTER_CONFIGURATION_INVALID',
+            'GOOGLE_ROSTER_CONFIG is missing.',
+          );
+        },
       ),
-    ).rejects.toThrow('Google refused the lookup of hhe-eoc@example.invalid.');
+    ).resolves.toBeNull();
+    for (const code of ['GOOGLE_CONFIGURATION_INVALID', 'GOOGLE_UNAVAILABLE']) {
+      await expect(
+        resolveGoogleGroupIdOrWaitingForForm(
+          ADMIN,
+          'hhe-eoc@example.invalid',
+          refusing(code),
+        ),
+      ).resolves.toBeNull();
+    }
+  });
+
+  test('waiting never hides an answer from Google that is a refusal', async () => {
+    // Google answered: the address is not an exact group, or the credential
+    // may not read it. Registering that as waiting would hide a typo or a
+    // permission problem Google could see.
+    for (const [code, message] of [
+      ['GOOGLE_REQUEST_REJECTED', /refused the lookup of hhe-eoc/u],
+      ['DESIGNATED_GROUP_IDENTITY_INVALID', /did not resolve hhe-eoc/u],
+    ] as const) {
+      const attempt = resolveGoogleGroupIdOrWaitingForForm(
+        ADMIN,
+        'hhe-eoc@example.invalid',
+        refusing(code),
+      );
+      await expect(attempt).rejects.toBeInstanceOf(AdminFormError);
+      await expect(attempt).rejects.toThrow(message);
+      await expect(attempt).rejects.not.toThrow(PROVIDER_DETAIL);
+    }
     await expect(
       resolveGoogleGroupIdOrWaitingForForm(
         STAFF,

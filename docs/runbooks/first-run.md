@@ -135,10 +135,13 @@ readiness page reports how many active facilities still have none.
 The quickest way is **Facilities → Register building groups by naming
 convention**: every active school without a Google building source gets one
 named by its short code, `<code>-eoc@` followed by the staff domain, and the
-roster is published in the same step. A Google Group that does not exist yet
-is registered as **waiting**: the source names nobody until Google holds the
-group, and its ID is recorded and its members read by the next scheduled
-membership sync once it exists. **Check waiting groups with Google** asks at
+roster is published in the same step. A Google Group that does not exist yet,
+or that Google could not be asked about because the server's credential is
+missing or Google is unavailable, is registered as **waiting**: the source
+names nobody until Google holds the group, and its ID is recorded and its
+members read by the next scheduled membership sync once it exists. A refusal
+from Google (the address is not an exact group, or the credential may not
+read it) still blocks the add. **Check waiting groups with Google** asks at
 once which waiting groups Google holds now, without waiting for the schedule.
 A new school added on that page gets its convention group the same way. An
 others source must exist when it is registered; only building sources may

@@ -416,11 +416,12 @@ function ConventionBuildingGroupsForm({
         <p id={helpId}>
           Every active school without a Google building source gets one named by
           its short code, <code>&lt;code&gt;-eoc@</code> followed by the staff
-          domain, such as <code>hhe-eoc</code>. A group Google does not hold yet
-          is registered as waiting: it names nobody until the group exists, and
-          syncs automatically from then on. The roster is published afterwards,
-          so drills can start at every school with the district-wide list. This
-          does not start an event or notify anyone.
+          domain, such as <code>hhe-eoc</code>. A group Google does not hold
+          yet, or could not be asked about, is registered as waiting: it names
+          nobody until Google holds the group, and syncs automatically from then
+          on. The roster is published afterwards, so drills can start at every
+          school with the district-wide list. This does not start an event or
+          notify anyone.
         </p>
         <button aria-describedby={helpId} type="submit">
           Register building groups by naming convention
