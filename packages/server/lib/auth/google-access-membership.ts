@@ -330,6 +330,7 @@ function googleGroupsClient(
     operation: string,
     parse: (value: unknown) => Result | null,
     onNotFound?: () => Result,
+    onForbidden?: () => Result,
   ): Promise<Result> {
     const controller = new AbortController();
     const timeout = setTimeout(
@@ -342,11 +343,16 @@ function googleGroupsClient(
         redirect: 'error',
         signal: controller.signal,
       });
-      // Only a caller that asked for it reads 404 as an answer; for every
-      // other request a missing resource is a rejection like any other.
+      // Only a caller that asked for it reads 404 (or 403) as an answer;
+      // for every other request a missing resource is a rejection like any
+      // other.
       if (response.status === 404 && onNotFound !== undefined) {
         await response.body?.cancel().catch(() => undefined);
         return onNotFound();
+      }
+      if (response.status === 403 && onForbidden !== undefined) {
+        await response.body?.cancel().catch(() => undefined);
+        return onForbidden();
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
@@ -442,9 +448,14 @@ function googleGroupsClient(
   }
   /**
    * Like `resolveGroupIdentity`, but a group Google does not hold answers
-   * null. Only the lookup's 404 is read that way; every other refusal,
-   * including a 403 for a group the credential may not read, still throws,
-   * so "waiting" can never mask a permission problem.
+   * null. Cloud Identity answers `groups:lookup` for a group that does not
+   * exist with 403 PERMISSION_DENIED, "Permission denied for resource ...
+   * (or it may not exist)", the same answer as for a group the credential
+   * may not read; Google itself does not tell the two apart, so both the
+   * lookup's 404 and its 403 are read as "not held". A group that resolves
+   * but whose details cannot be read, or that is not the exact group asked
+   * for, still throws. A source that is not waiting goes through
+   * `resolveGroupIdentity`, where "not held" is still a refusal.
    */
   async function resolveGroupIdentityIfHeld(
     email: string,
@@ -466,6 +477,7 @@ function googleGroupsClient(
         const parsed = GroupNameLookupResponseSchema.safeParse(value);
         return parsed.success ? parsed.data : null;
       },
+      () => notHeld,
       () => notHeld,
     );
     if (resolved === notHeld) return null;
