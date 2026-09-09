@@ -60,6 +60,14 @@ export const FacilitySchema = z
       .regex(/^[A-Z0-9-]+$/u),
     name: z.string().trim().min(1).max(160),
     active: z.boolean(),
+    /**
+     * An isolated facility's events reach its own building sources only,
+     * never the district-wide others lists. It exists for a place whose
+     * events must not page the district: the App Review site, where a
+     * store reviewer runs a drill that reaches only the review account.
+     * Defaulted so evidence recorded before the flag existed still parses.
+     */
+    isolated: z.boolean().default(false),
     createdAt: TimestampSchema,
   })
   .strict()
@@ -174,6 +182,8 @@ export const CreateFacilityInputSchema = z
       .max(32)
       .regex(/^[A-Z0-9-]+$/u),
     name: z.string().trim().min(1).max(160),
+    /** Fixed at creation: see `FacilitySchema.isolated`. Absent means no. */
+    isolated: z.boolean().optional(),
   })
   .strict()
   .readonly();

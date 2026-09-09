@@ -283,12 +283,14 @@ export async function parseFacilitiesAdminMutation(
       form.assertFields([...COMMON_FIELDS]);
       return { intent, command: null, status: 'waiting-groups-checked' };
     case 'create-facility':
-      form.assertFields([...COMMON_FIELDS, 'code', 'name']);
+      form.assertFields([...COMMON_FIELDS, 'code', 'name', 'isolated']);
       return {
         intent,
         command: CreateFacilityInputSchema.parse({
           code: form.required('code'),
           name: form.required('name'),
+          // A checkbox is present only when checked.
+          isolated: form.optional('isolated') === 'on',
         }),
         status: 'facility-created',
       };

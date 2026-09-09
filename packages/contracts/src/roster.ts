@@ -477,6 +477,17 @@ export const RosterSnapshotSchema = z
     complete: z.literal(true),
     sourceConfiguration: RosterSourceConfigurationRefSchema,
     facilityIds: z.array(FacilityIdSchema).min(1).max(200).readonly(),
+    /**
+     * The facilities among `facilityIds` whose events reach their own
+     * building sources only (see `FacilitySchema.isolated`). Read from the
+     * facility when the snapshot is hydrated, so every audience resolution
+     * sees the same rule; defaulted so recorded snapshots still parse.
+     */
+    isolatedFacilityIds: z
+      .array(FacilityIdSchema)
+      .max(200)
+      .readonly()
+      .default([]),
     expectedSourceGroupRefs: z
       .array(RosterGroupSourceRefSchema)
       .min(1)

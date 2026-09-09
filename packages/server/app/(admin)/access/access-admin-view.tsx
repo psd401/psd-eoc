@@ -1,4 +1,4 @@
-import type { GroupSourcePage, UserPage } from '@psd-eoc/contracts';
+import type { Facility, GroupSourcePage, UserPage } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
 import type { AccessAdminCursorState } from './access-page-state';
@@ -14,6 +14,8 @@ export type AccessAdminViewModel =
       kind: 'authorized';
       accessGroups: GroupSourcePage;
       users: UserPage;
+      /** Active facilities, for limiting a person to some of them. */
+      facilities: readonly Facility[];
       cursors: AccessAdminCursorState;
     }>;
 
@@ -272,12 +274,81 @@ function facilityScopeLabel(user: UserPage['items'][number]): string {
   return `${count} ${count === 1 ? 'facility' : 'facilities'}`;
 }
 
+function FacilityScopeForm({
+  user,
+  facilities,
+  csrfToken,
+}: Readonly<{
+  user: UserPage['items'][number];
+  facilities: readonly Facility[];
+  csrfToken: string;
+}>) {
+  const limited = user.facilityScope.kind === 'facilities';
+  const selected = new Set(limited ? user.facilityScope.facilityIds : []);
+  const helpId = `scope-help-${user.id}`;
+  return (
+    <details>
+      <summary>Limit to facilities</summary>
+      <form action="/access/api" method="post">
+        <AdminMutationFields csrfToken={csrfToken} />
+        <input name="intent" type="hidden" value="set-user-facility-scope" />
+        <input name="userId" type="hidden" value={user.id} />
+        <fieldset aria-describedby={helpId}>
+          <legend>Where {user.displayName} may act</legend>
+          <p className="field-help" id={helpId}>
+            District-wide is every facility. Limiting a person to facilities
+            means they see, start, and join events only there. It applies to
+            their next request and is enforced on every capability, not just in
+            the pages they see. Roles are unchanged. An administrator is always
+            district-wide and cannot be limited.
+          </p>
+          <label>
+            <input
+              defaultChecked={!limited}
+              name="scopeKind"
+              type="radio"
+              value="district"
+            />{' '}
+            District-wide
+          </label>
+          <label>
+            <input
+              defaultChecked={limited}
+              name="scopeKind"
+              type="radio"
+              value="facilities"
+            />{' '}
+            Only these facilities
+          </label>
+          {facilities.map((facility) => (
+            <label key={facility.id}>
+              <input
+                defaultChecked={selected.has(facility.id)}
+                name="facilityIds"
+                type="checkbox"
+                value={facility.id}
+              />{' '}
+              {facility.code} — {facility.name}
+              {facility.isolated ? ' (isolated)' : ''}
+            </label>
+          ))}
+          <button type="submit">Save facility scope</button>
+        </fieldset>
+      </form>
+    </details>
+  );
+}
+
 function UsersAndRoles({
   page,
+  facilities,
   cursors,
+  csrfToken,
 }: Readonly<{
   page: UserPage;
+  facilities: readonly Facility[];
   cursors: AccessAdminCursorState;
+  csrfToken: string;
 }>) {
   return (
     <section aria-labelledby="roles-heading">
@@ -286,7 +357,7 @@ function UsersAndRoles({
         Roles are read from trusted-group membership at every request and are
         not editable here: move somebody between groups to change what they may
         do. Facility authorization is still enforced server-side on every
-        capability.
+        capability; where a person may act is set below.
       </p>
       {page.items.length === 0 ? (
         <p role="status">No staff accounts match this view.</p>
@@ -315,7 +386,14 @@ function UsersAndRoles({
                 <tr key={user.id}>
                   <th scope="row">{user.displayName}</th>
                   <td>{user.email}</td>
-                  <td>{facilityScopeLabel(user)}</td>
+                  <td>
+                    {facilityScopeLabel(user)}
+                    <FacilityScopeForm
+                      csrfToken={csrfToken}
+                      facilities={facilities}
+                      user={user}
+                    />
+                  </td>
                   <td>{user.disabledAt === null ? 'Active' : 'Disabled'}</td>
                   <td>
                     {user.roles.length === 0
@@ -387,7 +465,12 @@ export function AccessAdminView({
         cursors={view.cursors}
         page={view.accessGroups}
       />
-      <UsersAndRoles cursors={view.cursors} page={view.users} />
+      <UsersAndRoles
+        csrfToken={csrfToken}
+        cursors={view.cursors}
+        facilities={view.facilities}
+        page={view.users}
+      />
     </main>
   );
 }

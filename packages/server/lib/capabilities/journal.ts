@@ -273,6 +273,7 @@ function facilityFromRow(row: typeof facilities.$inferSelect): Facility {
     code: row.code,
     name: row.name,
     active: row.active,
+    isolated: row.isolated,
     createdAt: dateIso(row.createdAt),
   });
 }

@@ -416,6 +416,65 @@ function oneResponseRequest(
 }
 
 describe('mobile start API client', () => {
+  test('loads the home screen when a page carries a field this build never shipped', async () => {
+    // The server may gain a facility, threat, or event field after this
+    // build is installed. A strict parse of any page would make the whole
+    // home screen unreadable; every page is read tolerantly instead.
+    const request: StartAuthenticatedRequest = async <Output>(
+      input: AuthenticatedRequestOptions<Output>,
+    ): Promise<Output> => {
+      switch (input.path) {
+        case '/api/mobile/start/facilities':
+          return parseResponse(input, {
+            items: [
+              {
+                id: IDS.facility,
+                code: 'NORTH',
+                name: 'North Synthetic School',
+                active: true,
+                createdAt: NOW,
+                fieldFromALaterServer: true,
+              },
+            ],
+            pageInfo: { hasMore: false, nextCursor: null },
+          });
+        case '/api/mobile/start/threats':
+          return parseResponse(input, {
+            items: [
+              {
+                id: IDS.threat,
+                key: 'fire',
+                name: 'Fire',
+                sortOrder: 1,
+                requiresDetail: false,
+                active: true,
+                createdAt: NOW,
+                fieldFromALaterServer: 'x',
+              },
+            ],
+            pageInfo: { hasMore: false, nextCursor: null },
+          });
+        case '/event-types/api?operation=list&enabled=true':
+        case '/api/events':
+          return parseResponse(input, {
+            items: [],
+            pageInfo: { hasMore: false, nextCursor: null },
+            fieldFromALaterServer: null,
+          });
+        default:
+          throw new Error(`Unexpected synthetic request: ${input.path}`);
+      }
+    };
+
+    const result = await loadStartHomeData(request);
+
+    expect(result.facilities.map((facility) => facility.name)).toEqual([
+      'North Synthetic School',
+    ]);
+    expect(result.threats.map((threat) => threat.name)).toEqual(['Fire']);
+    expect(result.activeEvents).toEqual([]);
+  });
+
   test('loads every page while retaining inactive-site names only for active events', async () => {
     const latestVersion = eventTypeVersionFixture({
       id: IDS.latestVersion,

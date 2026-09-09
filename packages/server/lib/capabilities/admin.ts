@@ -245,6 +245,7 @@ const ADMIN_MUTATION_IDS = new Set<RegisteredCapabilityId>([
   'set-channel-enabled',
   'update-facility',
   'update-group-source',
+  'set-user-facility-scope',
   'create-event-type-draft',
   'update-event-type-draft',
   'publish-event-type-version',

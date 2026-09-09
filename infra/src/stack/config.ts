@@ -219,10 +219,12 @@ export function readFacilityContext(node: {
       typeof facility?.code !== 'string' ||
       !/^[A-Z0-9-]{1,32}$/u.test(facility.code) ||
       typeof facility.name !== 'string' ||
-      facility.name.trim().length === 0
+      facility.name.trim().length === 0 ||
+      (facility.isolated !== undefined &&
+        typeof facility.isolated !== 'boolean')
     ) {
       throw new Error(
-        'Each psdEoc:facilities entry needs an upper-case code and a name.',
+        'Each psdEoc:facilities entry needs an upper-case code and a name, and isolated, when present, must be true or false.',
       );
     }
   }

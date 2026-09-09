@@ -6,7 +6,10 @@ import {
   WEB_SESSION_COOKIE_NAME,
 } from '../../../lib/auth/sessions';
 import { authenticateWebSession } from '../../../lib/auth/request-session';
-import { executeListGroupSourcesCapability } from '../facilities/capabilities';
+import {
+  executeListFacilitiesCapability,
+  executeListGroupSourcesCapability,
+} from '../facilities/capabilities';
 import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 import { AccessAdminView, NON_ADMIN_ACCESS_VIEW } from './access-admin-view';
 import {
@@ -43,7 +46,7 @@ export default async function AccessPage({
   const parameters = await searchParams;
   try {
     const cursors = normalizeAccessAdminCursorState(parameters);
-    const [accessGroups, users] = await Promise.all([
+    const [accessGroups, users, facilities] = await Promise.all([
       executeListGroupSourcesCapability({
         authenticated,
         query: {
@@ -64,12 +67,22 @@ export default async function AccessPage({
           limit: 100,
         },
       }),
+      executeListFacilitiesCapability({
+        authenticated,
+        query: { includeInactive: false, cursor: null, limit: 200 },
+      }),
     ]);
     return (
       <AccessAdminView
         csrfToken={csrfToken}
         statusMessage={accessAdminStatusMessage(parameters.status)}
-        view={{ kind: 'authorized', accessGroups, users, cursors }}
+        view={{
+          kind: 'authorized',
+          accessGroups,
+          users,
+          facilities: facilities.items,
+          cursors,
+        }}
       />
     );
   } catch (error) {

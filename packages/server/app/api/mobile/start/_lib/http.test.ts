@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { CapabilityInput } from '@psd-eoc/contracts';
+import type { CapabilityInput, Facility } from '@psd-eoc/contracts';
 
 import { WEB_SESSION_COOKIE_NAME } from '../../../../../lib/auth/middleware';
 import {
@@ -67,6 +67,7 @@ interface ExecutionCall {
 function testRuntime(
   options: Readonly<{
     authenticationError?: unknown;
+    facilities?: readonly Facility[];
   }> = {},
 ) {
   const authentications: Readonly<{
@@ -107,7 +108,7 @@ function testRuntime(
         invocation,
       });
       return {
-        items: [],
+        items: options.facilities ?? [],
         pageInfo: { hasMore: false, nextCursor: null },
       };
     },
@@ -267,6 +268,44 @@ describe('mobile start route handlers', () => {
         }),
       },
     ]);
+  });
+
+  test('sends a facility page carrying only the fields every installed build knows', async () => {
+    // A phone parses this page with the strict facility schema bundled when
+    // it was built. The isolated flag came later, so it never reaches the
+    // page: an app built before it would refuse the whole home screen.
+    const { runtime } = testRuntime({
+      facilities: [
+        {
+          id: IDS.facility,
+          code: 'RVW',
+          name: 'App Review',
+          active: true,
+          isolated: true,
+          createdAt: NOW.toISOString(),
+        },
+      ],
+    });
+    const response = await handleListMobileStartFacilities(
+      new Request('https://eoc.example.test/api/mobile/start/facilities', {
+        headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      }),
+      runtime,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      items: [
+        {
+          id: IDS.facility,
+          code: 'RVW',
+          name: 'App Review',
+          active: true,
+          createdAt: NOW.toISOString(),
+        },
+      ],
+      pageInfo: { hasMore: false, nextCursor: null },
+    });
   });
 
   test('rejects unsupported facility query input before capability execution', async () => {

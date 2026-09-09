@@ -65,6 +65,7 @@ const FACILITY = Object.freeze({
   code: 'HARBOR',
   name: 'Harbor Ridge High School',
   active: true,
+  isolated: false,
   createdAt: CREATED_AT_ISO,
 }) satisfies Facility;
 
@@ -89,6 +90,7 @@ function roster(population: RosterPopulation): RosterSnapshot {
       version: 1,
     },
     facilityIds: Object.freeze([IDS.facility]),
+    isolatedFacilityIds: [],
     expectedSourceGroupRefs: Object.freeze([source]),
     sourceGroupRefs: Object.freeze([source]),
     recipients: Object.freeze([
