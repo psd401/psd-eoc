@@ -1,5 +1,4 @@
 import {
-  conventionBuildingGroupAddress,
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
   executeSetManualRosterMembersCapability,
@@ -28,52 +27,9 @@ import {
 import { parseFacilitiesAdminMutation } from './request';
 import { checkWaitingGroups } from '../waiting-groups-check';
 import {
-  CreateGroupSourceInputSchema,
-  IdempotencyKeySchema,
-  type Facility,
-} from '@psd-eoc/contracts';
-import { createHash } from 'node:crypto';
-import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
-
-/**
- * Registers the naming-convention Google building group for each school:
- * a quick check with Google, and a waiting source when Google does not hold
- * the group yet. One capability call per school under a key derived from the
- * form's, so a replayed form registers nothing twice.
- */
-async function registerConventionBuildingGroups(input: {
-  readonly authenticated: AuthenticatedSession;
-  readonly facilities: readonly Facility[];
-  readonly idempotencyKey: string;
-}): Promise<void> {
-  for (const facility of input.facilities) {
-    const email = conventionBuildingGroupAddress(facility.code);
-    const googleGroupId = await resolveGoogleGroupIdOrWaitingForForm(
-      input.authenticated,
-      email,
-    );
-    await executeCreateGroupSourceCapability({
-      authenticated: input.authenticated,
-      command: CreateGroupSourceInputSchema.parse({
-        kind: 'google-group',
-        purpose: 'building',
-        facilityId: facility.id,
-        displayName: `${facility.name} staff`,
-        active: true,
-        googleGroupId,
-        email,
-      }),
-      metadata: {
-        idempotencyKey: IdempotencyKeySchema.parse(
-          `${createHash('sha256')
-            .update(`${input.idempotencyKey}:${facility.id}`)
-            .digest('hex')
-            .slice(0, 40)}:convention-building-group`,
-        ),
-      },
-    });
-  }
-}
+  CONVENTION_ACTION_LABEL,
+  registerConventionBuildingGroups,
+} from '../convention-registration';
 
 export const dynamic = 'force-dynamic';
 
@@ -98,11 +54,22 @@ export async function POST(request: Request): Promise<Response> {
         });
         // A new school gets its convention building group at once, waiting
         // if Google does not hold it yet, so nobody has to remember to add it.
-        await registerConventionBuildingGroups({
-          authenticated,
-          facilities: [facility],
-          idempotencyKey,
-        });
+        // The school is committed before this step: when the step fails, the
+        // page says the school exists and how to register its group.
+        try {
+          await registerConventionBuildingGroups({
+            authenticated,
+            facilities: [facility],
+            idempotencyKey,
+          });
+        } catch (error) {
+          if (error instanceof AdminFormError) {
+            throw new AdminFormError(
+              `The school ${facility.code} was created, but its building group was not registered: ${error.message} Press "${CONVENTION_ACTION_LABEL}" to register it.`,
+            );
+          }
+          throw error;
+        }
         break;
       }
       case 'register-building-groups-by-convention': {

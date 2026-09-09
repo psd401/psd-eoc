@@ -41,7 +41,6 @@ import {
   inArray,
   lt,
   ne,
-  notExists,
   notInArray,
   or,
   sql,
@@ -2255,38 +2254,54 @@ export function conventionBuildingGroupAddress(
   return `${facilityCode.trim().toLowerCase()}-eoc@${hostedDomain}`;
 }
 /**
- * Active facilities that have no active Google building source yet. A manual
- * or synthetic building source does not count: the convention registers the
- * Google group alongside it, and the school's audience is the union.
+ * Active facilities that have no Google building source Google could still
+ * come to hold. A manual or synthetic building source does not count: the
+ * convention registers the Google group alongside it, and the school's
+ * audience is the union. A waiting source counts only while its address is
+ * the school's current convention address: after a short-code change the old
+ * address is one nobody will create a group at, so the school is listed again
+ * and the convention registers the new address.
  */
 export async function listFacilitiesWithoutGoogleBuildingSource(
   database: ReturnType<
     typeof getDefaultAdminDatabase
   > = getDefaultAdminDatabase(),
+  hostedDomain: string = staffHostedDomain(),
 ): Promise<readonly Facility[]> {
   const rows = await database
-    .select()
+    .select({
+      facility: facilities,
+      sourceEmail: groupSources.email,
+      sourceGoogleGroupId: groupSources.googleGroupId,
+    })
     .from(facilities)
-    .where(
+    .leftJoin(
+      groupSources,
       and(
-        eq(facilities.active, true),
-        notExists(
-          database
-            .select({ id: groupSources.id })
-            .from(groupSources)
-            .where(
-              and(
-                eq(groupSources.facilityId, facilities.id),
-                eq(groupSources.kind, 'google-group'),
-                eq(groupSources.purpose, 'building'),
-                eq(groupSources.active, true),
-              ),
-            ),
-        ),
+        eq(groupSources.facilityId, facilities.id),
+        eq(groupSources.kind, 'google-group'),
+        eq(groupSources.purpose, 'building'),
+        eq(groupSources.active, true),
       ),
     )
+    .where(eq(facilities.active, true))
     .orderBy(asc(facilities.code));
-  return Object.freeze(rows.map((row) => facilityFromRow(row)));
+  const byId = new Map<string, Facility>();
+  const covered = new Set<string>();
+  for (const row of rows) {
+    const facility = facilityFromRow(row.facility);
+    byId.set(facility.id, facility);
+    if (
+      row.sourceGoogleGroupId !== null ||
+      row.sourceEmail?.trim().toLowerCase() ===
+        conventionBuildingGroupAddress(facility.code, hostedDomain)
+    ) {
+      covered.add(facility.id);
+    }
+  }
+  return Object.freeze(
+    [...byId.values()].filter((facility) => !covered.has(facility.id)),
+  );
 }
 export const executeCreateFacilityCapability = (
   input: MutationExecution<CapabilityInput<'create-facility'>>,

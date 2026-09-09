@@ -870,7 +870,11 @@ export function createDrizzleAccessMembershipSyncStore(
             grantedRole: row.grantedRole,
             // A building source registered before Google held its group has
             // no ID yet; the database allows that for building sources only.
-            waiting: row.googleGroupId === null,
+            // Only a building source may wait for its group. The database
+            // refuses a null ID on any other purpose; the purpose is checked
+            // here as well so the anti-lockout guards never see a waiting
+            // sign-in group even if that rule were ever loosened.
+            waiting: row.purpose === 'building' && row.googleGroupId === null,
           });
           if (!parsed.success) {
             throw new AccessMembershipSyncError(
@@ -974,16 +978,34 @@ export function createDrizzleAccessMembershipSyncStore(
         }
         // A waiting source that Google now holds stops waiting: its ID is
         // recorded once, and from here on it syncs like any other group.
+        // Unless that ID already backs another active roster source: then
+        // the address is an alias of a group already registered (or one
+        // registered twice), and recording it would collide with the
+        // one-source-per-group rule on this and every later run. The source
+        // stays waiting and names nobody, which an administrator sees on the
+        // Schools page; the members Google returned for it are not written.
+        const recordedRosterIds = new Set(
+          activeSources.flatMap(({ googleGroupId }) =>
+            googleGroupId === null ? [] : [googleGroupId],
+          ),
+        );
+        const leftWaiting = new Set<string>();
         for (const group of evaluation.groups) {
           const source = activeSources.find(
             ({ id }) => id === group.groupSourceId,
           );
-          if (source?.googleGroupId === null && group.googleGroupId !== null) {
-            await transaction
-              .update(groupSources)
-              .set({ googleGroupId: group.googleGroupId })
-              .where(eq(groupSources.id, group.groupSourceId));
+          if (source?.googleGroupId !== null || group.googleGroupId === null) {
+            continue;
           }
+          if (recordedRosterIds.has(group.googleGroupId)) {
+            leftWaiting.add(group.groupSourceId);
+            continue;
+          }
+          await transaction
+            .update(groupSources)
+            .set({ googleGroupId: group.googleGroupId })
+            .where(eq(groupSources.id, group.groupSourceId));
+          recordedRosterIds.add(group.googleGroupId);
         }
 
         const [latestSnapshot] = await transaction
@@ -1027,6 +1049,7 @@ export function createDrizzleAccessMembershipSyncStore(
           await transaction
             .delete(groupMembers)
             .where(eq(groupMembers.groupSourceId, group.groupSourceId));
+          if (leftWaiting.has(group.groupSourceId)) continue;
           await insertInBatches(
             group.memberEmails.map((email) => ({
               groupSourceId: group.groupSourceId,

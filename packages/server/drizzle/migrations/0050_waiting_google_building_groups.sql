@@ -80,7 +80,8 @@ BEGIN
 	IF OLD."purpose" IN ('building', 'others')
 		AND NEW."google_group_id" IS DISTINCT FROM OLD."google_group_id"
 		AND NOT (
-			OLD."kind" = 'google-group'
+			OLD."purpose" = 'building'
+			AND OLD."kind" = 'google-group'
 			AND OLD."google_group_id" IS NULL
 			AND NEW."google_group_id" IS NOT NULL
 		)

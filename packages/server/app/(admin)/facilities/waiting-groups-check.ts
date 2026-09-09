@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 
 import { groupSources } from '../../../db/schema';
 import {
@@ -42,7 +42,7 @@ export async function checkWaitingGroups(input: {
     .where(
       and(
         eq(groupSources.kind, 'google-group'),
-        inArray(groupSources.purpose, ['building', 'others']),
+        eq(groupSources.purpose, 'building'),
         eq(groupSources.active, true),
         isNull(groupSources.googleGroupId),
       ),
