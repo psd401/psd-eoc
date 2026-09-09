@@ -151,6 +151,17 @@ const googleGroupDetailsShape = {
   googleGroupId: z.string().trim().min(1).max(255),
   email: z.string().trim().email().max(320),
 };
+/**
+ * A building source may be registered before Google holds its group. It is
+ * then "waiting": the address is known, the Google Group ID is not, it names
+ * nobody, and the scheduled sync keeps asking Google for the address until
+ * the group exists, at which point the ID is recorded and the group syncs
+ * like any other. Access and others sources must resolve when registered.
+ */
+const waitingGoogleGroupDetailsShape = {
+  googleGroupId: z.string().trim().min(1).max(255).nullable(),
+  email: z.string().trim().email().max(320),
+};
 
 const syntheticGroupDetailsShape = {
   fixtureKey: z
@@ -202,7 +213,7 @@ export const GroupSourceSchema = z
         facilityId: UuidSchema,
         ...groupSourceMetadataShape,
         ...noGrantedRoleShape,
-        ...googleGroupDetailsShape,
+        ...waitingGoogleGroupDetailsShape,
       })
       .strict(),
     z
@@ -316,7 +327,7 @@ export const CreateGroupSourceInputSchema = z
         purpose: z.literal('building'),
         facilityId: UuidSchema,
         ...groupSourceWriteMetadataShape,
-        ...googleGroupDetailsShape,
+        ...waitingGoogleGroupDetailsShape,
       })
       .strict(),
     z
@@ -396,7 +407,7 @@ export const UpdateGroupSourceInputSchema = z
         purpose: z.literal('building'),
         facilityId: UuidSchema,
         ...groupSourceWriteMetadataShape,
-        ...googleGroupDetailsShape,
+        ...waitingGoogleGroupDetailsShape,
       })
       .strict(),
     z

@@ -5,7 +5,15 @@ import { AdminCapabilityError } from '../../../lib/capabilities/admin';
 
 const STATUS_MESSAGES = Object.freeze({
   'audience-version-created': 'The facility audience version was saved.',
-  'building-group-created': 'The immutable building source was added.',
+  'building-group-created':
+    'The immutable building source was added. If Google does not hold the group yet it is registered as waiting and syncs automatically once the group exists.',
+  'building-groups-registered':
+    'Every school without a Google building source now has one named by its short code, and a new roster snapshot was published. Groups Google does not hold yet are waiting and sync automatically once they exist.',
+  'waiting-groups-held':
+    'Google now holds at least one waiting group. The next scheduled roster sync, within two hours, connects and reads every group Google holds and publishes the roster; nothing else is needed.',
+  'waiting-groups-still-waiting':
+    'Google does not hold any of the waiting groups yet. Each is connected automatically by the first scheduled sync after it exists.',
+  'waiting-groups-none': 'No roster group is waiting for Google.',
   'building-group-replaced':
     'The building source was replaced with a new immutable source and roster configuration version.',
   'facility-created': 'The facility was added.',

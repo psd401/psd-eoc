@@ -1,3 +1,4 @@
+import { CreateGroupSourceInputSchema } from '@psd-eoc/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
@@ -72,6 +73,8 @@ import {
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
+  conventionBuildingGroupAddress,
+  listFacilitiesWithoutGoogleBuildingSource,
   executeSetManualRosterMembersCapability,
   executeCreateNeighborhoodVersionCapability,
   executeFacilitiesAdminProjection,
@@ -1212,6 +1215,203 @@ describeWithDatabase('facilities administrator database flow', () => {
         ]);
       }
     }
+  });
+
+  test('registers a waiting Google building source, lists the schools still without one, and refuses a waiting others source', async () => {
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    await withIsolatedFacilitiesDatabase(
+      currentContext.baseDatabaseUrl,
+      async (isolatedContext, ownerConnection) => {
+        const ownerDatabase = ownerConnection.db;
+        const authenticated = authenticatedAdministrator();
+        const suffix = randomUUID();
+        const requestIds: string[] = [];
+        const accessGroupId = randomUUID();
+        await ownerDatabase.insert(groupSources).values({
+          id: accessGroupId,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          grantedRole: 'admin',
+          displayName: `Waiting-source access ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId: `waiting-access-${suffix}`,
+          email: `waiting-access-${suffix}@example.invalid`,
+          fixtureKey: null,
+        });
+        await persistAuthenticatedAdministrator(
+          ownerDatabase,
+          authenticated,
+          accessGroupId,
+          suffix,
+        );
+        const store = createDrizzleAdminCapabilityStore(
+          ownerDatabase,
+          authenticated,
+        );
+        const facility = await executeCreateFacilityCapability({
+          authenticated,
+          store,
+          command: {
+            code: `WAIT-${suffix.slice(0, 6).toUpperCase()}`,
+            name: `Waiting facility ${suffix.slice(0, 8)}`,
+          },
+          metadata: metadata('waiting-facility-create', requestIds),
+        });
+        // The new school has no Google building source yet.
+        expect(
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
+        ).toContain(facility.id);
+
+        // Google does not hold the group yet: the source is registered
+        // waiting, with its address and no ID.
+        const waiting = await executeCreateGroupSourceCapability({
+          authenticated,
+          store,
+          command: {
+            kind: 'google-group',
+            purpose: 'building',
+            facilityId: facility.id,
+            displayName: `Waiting staff ${suffix.slice(0, 8)}`,
+            active: true,
+            googleGroupId: null,
+            email: `wait-${suffix.slice(0, 6)}-eoc@example.invalid`,
+          },
+          metadata: metadata('waiting-google-building', requestIds),
+        });
+        expect(waiting).toMatchObject({
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: facility.id,
+          googleGroupId: null,
+          email: `wait-${suffix.slice(0, 6)}-eoc@example.invalid`,
+        });
+        expect(
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
+        ).not.toContain(facility.id);
+
+        // The same address cannot wait twice for the same purpose.
+        await expect(
+          executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'google-group',
+              purpose: 'building',
+              facilityId: facility.id,
+              displayName: 'Waiting staff again',
+              active: true,
+              googleGroupId: null,
+              email: `WAIT-${suffix.slice(0, 6)}-EOC@example.invalid`,
+            },
+            metadata: metadata('waiting-google-building-twice', requestIds),
+          }),
+        ).rejects.toThrow('already configured');
+
+        // An others source is the district-wide list and must exist: the
+        // contract refuses a waiting one before the database's rule does.
+        expect(
+          CreateGroupSourceInputSchema.safeParse({
+            kind: 'google-group',
+            purpose: 'others',
+            facilityId: null,
+            displayName: 'Waiting responders',
+            active: true,
+            googleGroupId: null,
+            email: `waiting-others-${suffix}@example.invalid`,
+          }).success,
+        ).toBe(false);
+        await expect(
+          (async () => {
+            await ownerDatabase.insert(groupSources).values({
+              id: randomUUID(),
+              kind: 'google-group',
+              purpose: 'others',
+              facilityId: null,
+              grantedRole: null,
+              displayName: 'Waiting responders',
+              active: true,
+              googleGroupId: null,
+              email: `waiting-others-${suffix}@example.invalid`,
+              fixtureKey: null,
+            });
+          })(),
+        ).rejects.toThrow(/insert into "group_sources"/u);
+        expect(
+          await ownerDatabase
+            .select({ id: groupSources.id })
+            .from(groupSources)
+            .where(
+              eq(
+                groupSources.email,
+                `waiting-others-${suffix}@example.invalid`,
+              ),
+            ),
+        ).toEqual([]);
+
+        // A short-code change makes the waiting address one nobody will
+        // create a group at: the school is listed again, and stops being
+        // listed once the new convention address waits beside the old one.
+        const renamedCode = `${facility.code}2`;
+        await executeUpdateFacilityCapability({
+          authenticated,
+          store,
+          command: {
+            facilityId: facility.id,
+            code: renamedCode,
+            name: facility.name,
+            active: true,
+          },
+          metadata: metadata('waiting-facility-rename', requestIds),
+        });
+        expect(
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
+        ).toContain(facility.id);
+        await executeCreateGroupSourceCapability({
+          authenticated,
+          store,
+          command: {
+            kind: 'google-group',
+            purpose: 'building',
+            facilityId: facility.id,
+            displayName: `Waiting staff ${suffix.slice(0, 8)} renamed`,
+            active: true,
+            googleGroupId: null,
+            email: conventionBuildingGroupAddress(
+              renamedCode,
+              'example.invalid',
+            ),
+          },
+          metadata: metadata('waiting-google-building-renamed', requestIds),
+        });
+        expect(
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
+        ).not.toContain(facility.id);
+      },
+    );
   });
 
   test('executes every owned row-lock capability through the production application role', async () => {
