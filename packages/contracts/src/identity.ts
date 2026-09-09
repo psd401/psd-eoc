@@ -64,6 +64,24 @@ export type UserId = z.infer<typeof UserIdSchema>;
  * disabling a user preserves history rather than deleting or re-keying it.
  * No student identity shape exists in this package.
  */
+/**
+ * Owns an administrator's decision about where one person may act: the
+ * whole district, or a named set of facilities. The scope is enforced by
+ * every session and capability; this input only records the decision.
+ */
+export const SetUserFacilityScopeInputSchema = z
+  .object({
+    userId: UuidSchema,
+    facilityScope: FacilityScopeSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Facility-scope decision inferred from its schema. */
+export type SetUserFacilityScopeInput = z.infer<
+  typeof SetUserFacilityScopeInputSchema
+>;
+
 export const UserSchema = z
   .object({
     id: UserIdSchema,

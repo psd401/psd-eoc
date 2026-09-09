@@ -189,6 +189,9 @@ describe('facilities administration view', () => {
     );
     expect(markup).toContain('<fieldset>');
     expect(markup).toContain('<legend>Add a facility</legend>');
+    expect(markup).toMatch(
+      /<input type="checkbox" name="isolated" value="on"\/>/u,
+    );
     expect(markup).toContain('class="table-region" role="region" tabindex="0"');
     expect(markup).toContain('type="hidden" name="csrfToken"');
     expect(markup).toContain('type="hidden" name="idempotencyKey"');

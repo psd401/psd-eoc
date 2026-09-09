@@ -12,6 +12,7 @@ import {
 } from '../lib/testing/database';
 import { insertChannelConfigurationsBeforeTruthRetirement } from '../lib/testing/held-back-channel-configurations';
 import { insertEventTypesBeforeDisplayOrder } from '../lib/testing/held-back-event-types';
+import { insertFacilitiesBeforeIsolated } from '../lib/testing/held-back-facilities';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -847,6 +848,9 @@ describeWithDatabase('migration 0049 on retained dispatch rows', () => {
         // Response display order arrived in migration 0051; this schema is held
         // before it, so the seed's event types are written without that column.
         insertEventTypes: insertEventTypesBeforeDisplayOrder,
+        // The isolated flag arrived in migration 0052; this schema is held
+        // before it, so the seed's facilities are written without that column.
+        insertFacilities: insertFacilitiesBeforeIsolated,
         insertChannelConfigurations:
           insertChannelConfigurationsBeforeTruthRetirement,
       });

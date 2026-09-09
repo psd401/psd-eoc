@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  FacilityPageSchema,
   IdempotencyKeySchema,
   ListFacilitiesInputSchema,
   ListThreatsInputSchema,
   type CapabilityInput,
+  type Facility,
+  type FacilityPage,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
 
@@ -189,6 +192,31 @@ function queryInvocation(
   });
 }
 
+/**
+ * The facility page as installed apps read it. A phone parses this page with
+ * the facility schema bundled when it was built, and that schema rejects a
+ * field it does not know, so the page carries only the fields every build
+ * knows. The isolated flag is an administrator's concern: the server applies
+ * it when it resolves an audience, and no app screen reads it.
+ */
+type MobileFacilityPage = Readonly<{
+  items: readonly Omit<Facility, 'isolated'>[];
+  pageInfo: FacilityPage['pageInfo'];
+}>;
+
+function mobileFacilityPage(page: FacilityPage): MobileFacilityPage {
+  return {
+    items: page.items.map(({ id, code, name, active, createdAt }) => ({
+      id,
+      code,
+      name,
+      active,
+      createdAt,
+    })),
+    pageInfo: page.pageInfo,
+  };
+}
+
 /** Lists authorized facilities so active events retain names after deactivation. */
 export async function handleListMobileStartFacilities(
   request: Request,
@@ -206,7 +234,10 @@ export async function handleListMobileStartFacilities(
       input,
       queryInvocation(authenticated, requestId, serverTime),
     );
-    return NextResponse.json(result, { headers: RESPONSE_HEADERS });
+    return NextResponse.json(
+      mobileFacilityPage(FacilityPageSchema.parse(result)),
+      { headers: RESPONSE_HEADERS },
+    );
   } catch (error) {
     return startFlowApiErrorResponse(error, requestId);
   }

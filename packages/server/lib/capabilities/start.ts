@@ -261,6 +261,7 @@ function facilityFromRow(row: typeof facilities.$inferSelect) {
     code: row.code,
     name: row.name,
     active: row.active,
+    isolated: row.isolated,
     createdAt: dateIso(row.createdAt),
   });
 }
@@ -415,6 +416,24 @@ export async function loadRosterSnapshot(
         .limit(limit),
     { maxRows: ROSTER_QUERY_LIMITS.facilities },
   );
+  // Isolation is the facility's own rule, read as it stands now: an isolated
+  // facility's events reach its own lists only, whichever snapshot they use.
+  const isolatedRows =
+    facilityRows.length === 0
+      ? []
+      : await database
+          .select({ facilityId: facilities.id })
+          .from(facilities)
+          .where(
+            and(
+              inArray(
+                facilities.id,
+                facilityRows.map((row) => row.facilityId),
+              ),
+              eq(facilities.isolated, true),
+            ),
+          )
+          .orderBy(asc(facilities.id));
   const sourceRows = await collectBoundedDatabaseRows(
     (offset, limit) =>
       database
@@ -593,6 +612,7 @@ export async function loadRosterSnapshot(
       version: snapshot.snapshot.sourceConfigurationVersion,
     },
     facilityIds: facilityRows.map((row) => row.facilityId),
+    isolatedFacilityIds: isolatedRows.map((row) => row.facilityId),
     expectedSourceGroupRefs: parsedSources
       .filter((source) => source.completionKind === 'expected')
       .map((source) => source.reference),

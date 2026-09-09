@@ -173,7 +173,10 @@ function FacilitiesSection({
                   <tr key={facility.id}>
                     <th scope="row">{facility.code}</th>
                     <td>{facility.name}</td>
-                    <td>{facility.active ? 'Active' : 'Inactive'}</td>
+                    <td>
+                      {facility.active ? 'Active' : 'Inactive'}
+                      {facility.isolated ? ', isolated' : ''}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -228,6 +231,12 @@ function FacilitiesSection({
               name="name"
               required
             />
+          </label>
+          <label>
+            <input name="isolated" type="checkbox" value="on" /> Isolated:
+            events here reach this facility's own lists only, never the
+            district-wide lists. For a place whose events must not page the
+            district, such as the App Review site. Fixed at creation.
           </label>
           <button type="submit">Add facility</button>
         </fieldset>

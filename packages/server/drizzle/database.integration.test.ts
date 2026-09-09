@@ -22,6 +22,7 @@ import {
   type SeedSummary,
 } from '../db/seed';
 import { insertEventTypesBeforeDetailRule } from '../lib/testing/held-back-event-types';
+import { insertFacilitiesBeforeIsolated } from '../lib/testing/held-back-facilities';
 import {
   HELD_BACK_INTEGRATION_STATUS_IDS,
   insertChannelConfigurationsBeforeTruthRetirement,
@@ -1484,6 +1485,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
         insertEventTypes: insertEventTypesBeforeDetailRule,
+        // The isolated flag arrived in migration 0052; this schema is held
+        // before it, so the seed's facilities are written without that column.
+        insertFacilities: insertFacilitiesBeforeIsolated,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -2331,6 +2335,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
         insertEventTypes: insertEventTypesBeforeDetailRule,
+        // The isolated flag arrived in migration 0052; this schema is held
+        // before it, so the seed's facilities are written without that column.
+        insertFacilities: insertFacilitiesBeforeIsolated,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier
@@ -2843,6 +2850,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         // the seed must not touch a relation that does not exist yet.
         insertThreats: () => Promise.resolve(),
         insertEventTypes: insertEventTypesBeforeDetailRule,
+        // The isolated flag arrived in migration 0052; this schema is held
+        // before it, so the seed's facilities are written without that column.
+        insertFacilities: insertFacilitiesBeforeIsolated,
         // Written here with the columns this schema actually has: Drizzle emits
         // every column of a table it inserts into, so seeding group sources
         // through the current schema fails against a database held at an earlier

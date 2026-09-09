@@ -33,6 +33,9 @@ export const facilities = pgTable(
     code: varchar('code', { length: 32 }).notNull(),
     name: varchar('name', { length: 160 }).notNull(),
     active: boolean('active').default(true).notNull(),
+    // Events here reach the facility's own building sources only, never
+    // the district-wide others lists. Fixed at creation.
+    isolated: boolean('isolated').default(false).notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [

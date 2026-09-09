@@ -59,8 +59,13 @@ describe('facility configuration parsing', () => {
       ]),
     });
     expect(parsed).toEqual([
-      { active: true, code: 'AES', name: 'Artondale Elementary' },
-      { active: false, code: 'CLOSED-1', name: 'Former Site' },
+      {
+        active: true,
+        code: 'AES',
+        name: 'Artondale Elementary',
+        isolated: false,
+      },
+      { active: false, code: 'CLOSED-1', name: 'Former Site', isolated: false },
     ]);
   });
 
@@ -137,7 +142,7 @@ describeWithDatabase('bootstrapping facilities from configuration', () => {
     const environment = {
       PSD_EOC_FACILITIES: JSON.stringify([
         { code: first, name: 'First School' },
-        { code: second, name: 'Second School', active: false },
+        { code: second, name: 'Second School', active: false, isolated: true },
       ]),
     };
 
@@ -151,6 +156,8 @@ describeWithDatabase('bootstrapping facilities from configuration', () => {
       .where(inArray(facilities.code, [first, second]));
     expect(rows).toHaveLength(2);
     expect(rows.find((row) => row.code === second)?.active).toBe(false);
+    expect(rows.find((row) => row.code === second)?.isolated).toBe(true);
+    expect(rows.find((row) => row.code === first)?.isolated).toBe(false);
     expect(rows.find((row) => row.code === first)?.name).toBe('First School');
   });
 

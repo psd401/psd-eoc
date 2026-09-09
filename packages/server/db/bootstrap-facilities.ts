@@ -56,6 +56,8 @@ const FacilityConfigurationSchema = z
       ),
     name: z.string().trim().min(1).max(160),
     active: z.boolean().default(true),
+    /** Events reach the facility's own lists only; see the facility contract. */
+    isolated: z.boolean().default(false),
   })
   .strict();
 
@@ -152,6 +154,7 @@ export async function bootstrapFacilities(
         active: facility.active,
         code: facility.code,
         name: facility.name,
+        isolated: facility.isolated,
       })),
     );
   }

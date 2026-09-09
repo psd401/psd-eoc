@@ -41,6 +41,17 @@ base URL are configuration. `readDeploymentTarget` and
 neighborhoods, synthetic groups, and threats are validated again before
 bootstrap.
 
+`psdEoc:facilities` lists the district's schools: each entry has a `code`
+(upper-case letters, digits, and hyphens), a `name`, optionally
+`active: false` for a site that no longer hosts events, and optionally
+`isolated: true`. An isolated facility's events reach its own building
+sources only, never the district-wide others lists; it exists for a place
+whose drills must not page the district, such as the site an app store
+reviewer runs a drill at (see the
+[app store review account](runbooks/app-store-review.md) runbook). The
+bootstrap creates any facility the database lacks and never edits one that
+exists.
+
 `psdEoc:threats` is the list an operator chooses from before the response
 when starting an incident or a drill; operators see it alphabetically, with
 an entry that requires a description last, whatever order it is declared in. Each entry has a lower-case

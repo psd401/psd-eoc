@@ -104,7 +104,7 @@ const ids = {
   integrationS3Media: '00000000-0000-4000-8000-000000000304',
 } as const;
 
-const facilityRows = [
+export const facilityRows = [
   FacilitySchema.parse({
     id: ids.facilityNorth,
     code: 'SYN-NORTH',
@@ -737,6 +737,15 @@ export interface SeedDatabaseOptions {
     transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
   ) => Promise<void>;
   /**
+   * Writes the facilities in place of the seed. A fixture held at a migration
+   * before `0052_facility_isolated_and_user_scope` has no `isolated` column,
+   * and Drizzle emits every column of a table it inserts into, so the fixture
+   * writes the rows with the columns its schema actually has.
+   */
+  readonly insertFacilities?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
+  /**
    * Writes the event types in place of the seed. A fixture held at a migration
    * before `0047_threat_on_activation` has no `requires_detail` column, and
    * Drizzle emits every column of a table it inserts into, so the fixture
@@ -767,15 +776,19 @@ export async function seedDatabase(
   options: SeedDatabaseOptions = {},
 ): Promise<SeedSummary> {
   await database.transaction(async (transaction) => {
-    await transaction
-      .insert(facilities)
-      .values(
-        facilityRows.map((facility) => ({
-          ...facility,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
+    if (options.insertFacilities !== undefined) {
+      await options.insertFacilities(transaction);
+    } else {
+      await transaction
+        .insert(facilities)
+        .values(
+          facilityRows.map((facility) => ({
+            ...facility,
+            createdAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
 
     if (options.insertThreats !== undefined) {
       await options.insertThreats(transaction);
