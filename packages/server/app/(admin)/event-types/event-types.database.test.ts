@@ -1299,6 +1299,56 @@ describeWithDatabase('event-type database versioning', () => {
     });
   });
 
+  test("lists responses in the district's order, not alphabetically, with added ones after", async () => {
+    // Investigation, Modified Lockdown, Lockdown, Evacuation, No Evacuation,
+    // Shelter in Place, Other: the order the district reads its responses in
+    // (2026-09-09). A response added on the Responses page has no place in
+    // that order and lists after them, by key.
+    const store = new DrizzleEventTypeStore(databaseConnection().db);
+    for (const [mode, expected] of [
+      [
+        'real',
+        [
+          'investigation',
+          'modified-lockdown',
+          'lockdown',
+          'evacuation',
+          'no-evacuation',
+          'shelter-in-place',
+          'other',
+        ],
+      ],
+      [
+        'drill',
+        [
+          'investigation-drill',
+          'modified-lockdown-drill',
+          'lockdown-drill',
+          'evacuation-drill',
+          'no-evacuation-drill',
+          'shelter-in-place-drill',
+          'other-drill',
+        ],
+      ],
+    ] as const) {
+      const page = await store.list({
+        templateMode: mode,
+        enabled: true,
+        cursor: null,
+        limit: 200,
+      });
+      const seededKeys = page.items
+        .map((item) => item.eventType.key)
+        .filter((key) => (expected as readonly string[]).includes(key));
+      expect(seededKeys).toEqual([...expected]);
+      const seededCount = seededKeys.length;
+      const trailing = page.items
+        .slice(seededCount)
+        .map((item) => item.eventType.key);
+      expect(trailing).toEqual([...trailing].sort());
+    }
+  });
+
   test('renders reviewed lock-screen seed copy for all six real/drill families', async () => {
     const store = new DrizzleEventTypeStore(databaseConnection().db);
     const page = await store.list({

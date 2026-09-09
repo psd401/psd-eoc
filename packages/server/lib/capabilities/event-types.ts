@@ -355,8 +355,14 @@ function templateRowsFor<
 }
 
 function eventTypeFromRow(row: typeof eventTypes.$inferSelect): EventType {
+  // The display order is how the list is sorted, not part of the identity
+  // the contract describes; the row carries it, the record does not.
   return EventTypeSchema.parse({
-    ...row,
+    id: row.id,
+    key: row.key,
+    familyKey: row.familyKey,
+    templateMode: row.templateMode,
+    requiresDetail: row.requiresDetail,
     createdAt: row.createdAt.toISOString(),
   });
 }
@@ -821,7 +827,11 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           ? undefined
           : eq(eventTypes.templateMode, input.templateMode),
       )
-      .orderBy(asc(eventTypes.key), asc(eventTypes.id));
+      .orderBy(
+        asc(eventTypes.displayOrder),
+        asc(eventTypes.key),
+        asc(eventTypes.id),
+      );
 
     if (identityRows.length === 0) {
       return EventTypePageSchema.parse({
