@@ -11,6 +11,7 @@ import {
   createDisposableDatabase,
 } from '../lib/testing/database';
 import { insertChannelConfigurationsBeforeTruthRetirement } from '../lib/testing/held-back-channel-configurations';
+import { insertEventTypesBeforeDisplayOrder } from '../lib/testing/held-back-event-types';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -843,6 +844,9 @@ describeWithDatabase('migration 0049 on retained dispatch rows', () => {
         await applySqlMigrationFile(opened.db, `${tag}.sql`);
       }
       await seedDatabase(opened.db, {
+        // Response display order arrived in migration 0051; this schema is held
+        // before it, so the seed's event types are written without that column.
+        insertEventTypes: insertEventTypesBeforeDisplayOrder,
         insertChannelConfigurations:
           insertChannelConfigurationsBeforeTruthRetirement,
       });

@@ -48,9 +48,9 @@ const DATABASE_SSL_ROOT_CERT = new URL(
   import.meta.url,
 ).pathname;
 const referenceSeedSummary: ReferenceSeedSummary = Object.freeze({
-  eventTypes: 12,
-  eventTypeVersions: 12,
-  eventTypeTemplates: 108,
+  eventTypes: 14,
+  eventTypeVersions: 14,
+  eventTypeTemplates: 126,
   channelConfigurations: 3,
   events: 0,
   outboxMessages: 0,

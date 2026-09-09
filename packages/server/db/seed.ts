@@ -85,6 +85,8 @@ const ids = {
   eventTypeShelterInPlaceDrill: '00000000-0000-4000-8000-00000000010d',
   eventTypeOtherReal: '00000000-0000-4000-8000-00000000010e',
   eventTypeOtherDrill: '00000000-0000-4000-8000-00000000010f',
+  eventTypeInvestigationReal: '00000000-0000-4000-8000-000000000110',
+  eventTypeInvestigationDrill: '00000000-0000-4000-8000-000000000111',
   eventTypeVersionLockdownReal: '00000000-0000-4000-8000-000000000200',
   eventTypeVersionLockdownDrill: '00000000-0000-4000-8000-000000000201',
   eventTypeVersionModifiedLockdownReal: '00000000-0000-4000-8000-000000000202',
@@ -97,6 +99,8 @@ const ids = {
   eventTypeVersionShelterInPlaceDrill: '00000000-0000-4000-8000-00000000020d',
   eventTypeVersionOtherReal: '00000000-0000-4000-8000-00000000020e',
   eventTypeVersionOtherDrill: '00000000-0000-4000-8000-00000000020f',
+  eventTypeVersionInvestigationReal: '00000000-0000-4000-8000-000000000210',
+  eventTypeVersionInvestigationDrill: '00000000-0000-4000-8000-000000000211',
   integrationS3Media: '00000000-0000-4000-8000-000000000304',
 } as const;
 
@@ -352,7 +356,40 @@ const rosterSnapshot = RosterSnapshotSchema.parse({
  * and a drill identity; "Other" requires the operator to describe the
  * response in their own words.
  */
+/**
+ * Where each response family sits in the list an operator chooses from,
+ * as the district reads it: Investigation, Modified Lockdown, Lockdown,
+ * Evacuation, No Evacuation, Shelter in Place, Other. Tens leave room.
+ */
+export const RESPONSE_FAMILY_DISPLAY_ORDER = Object.freeze({
+  investigation: 10,
+  'modified-lockdown': 20,
+  lockdown: 30,
+  evacuation: 40,
+  'no-evacuation': 50,
+  'shelter-in-place': 60,
+  other: 70,
+} as const);
+
 const eventTypeDefinitions = [
+  {
+    id: ids.eventTypeInvestigationReal,
+    versionId: ids.eventTypeVersionInvestigationReal,
+    key: 'investigation',
+    familyKey: 'investigation',
+    name: 'Investigation',
+    mode: 'real',
+    requiresDetail: false,
+  },
+  {
+    id: ids.eventTypeInvestigationDrill,
+    versionId: ids.eventTypeVersionInvestigationDrill,
+    key: 'investigation-drill',
+    familyKey: 'investigation',
+    name: 'Investigation Drill',
+    mode: 'drill',
+    requiresDetail: false,
+  },
   {
     id: ids.eventTypeLockdownReal,
     versionId: ids.eventTypeVersionLockdownReal,
@@ -474,8 +511,8 @@ const channels = [
   'sms',
 ] as const satisfies readonly NotificationChannel[];
 
-export const eventTypeRows = eventTypeDefinitions.map((definition) =>
-  EventTypeSchema.parse({
+export const eventTypeRows = eventTypeDefinitions.map((definition) => ({
+  ...EventTypeSchema.parse({
     id: definition.id,
     key: definition.key,
     familyKey: definition.familyKey,
@@ -483,7 +520,8 @@ export const eventTypeRows = eventTypeDefinitions.map((definition) =>
     requiresDetail: definition.requiresDetail,
     createdAt: SEED_TIMESTAMP,
   }),
-);
+  displayOrder: RESPONSE_FAMILY_DISPLAY_ORDER[definition.familyKey],
+}));
 
 const eventTypeVersionRows = eventTypeDefinitions.map((definition) =>
   EventTypeVersionSchema.parse({
@@ -550,9 +588,9 @@ const channelConfigurationRows = [
  * database that may already contain unrelated records.
  */
 export interface ReferenceSeedSummary {
-  readonly eventTypes: 12;
-  readonly eventTypeVersions: 12;
-  readonly eventTypeTemplates: 108;
+  readonly eventTypes: 14;
+  readonly eventTypeVersions: 14;
+  readonly eventTypeTemplates: 126;
   readonly channelConfigurations: 3;
   readonly events: 0;
   readonly outboxMessages: 0;
@@ -571,9 +609,9 @@ export interface SeedSummary extends ReferenceSeedSummary {
 }
 
 const referenceSeedSummary: ReferenceSeedSummary = {
-  eventTypes: 12,
-  eventTypeVersions: 12,
-  eventTypeTemplates: 108,
+  eventTypes: 14,
+  eventTypeVersions: 14,
+  eventTypeTemplates: 126,
   channelConfigurations: 3,
   events: 0,
   outboxMessages: 0,

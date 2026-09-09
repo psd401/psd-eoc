@@ -316,7 +316,7 @@ function threatFromRow(row: typeof threats.$inferSelect) {
 
 /**
  * Threats are district vocabulary rather than facility data, so every
- * authenticated staff member sees the same list in the declared order.
+ * authenticated staff member sees the same list, alphabetically.
  */
 async function listThreatsFromDatabase(
   database: StartFlowQueryDatabase,
@@ -327,7 +327,15 @@ async function listThreatsFromDatabase(
     .select()
     .from(threats)
     .where(input.includeInactive ? undefined : eq(threats.active, true))
-    .orderBy(asc(threats.sortOrder), asc(threats.name), asc(threats.id))
+    // Alphabetical, because that is how a person scans a list under
+    // pressure (the district's request of 2026-09-09); the one that needs a
+    // description, "Other", comes last as the catch-all. The declared
+    // position is still recorded on the row but no longer orders the list.
+    .orderBy(
+      asc(threats.requiresDetail),
+      asc(sql`lower(${threats.name})`),
+      asc(threats.id),
+    )
     .offset(offset)
     .limit(input.limit + 1);
   const hasMore = rows.length > input.limit;
