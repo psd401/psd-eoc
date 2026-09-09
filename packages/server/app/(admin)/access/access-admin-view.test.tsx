@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   GroupSourcePageSchema,
   UserPageSchema,
+  type Facility,
   type GroupSourcePage,
   type UserPage,
 } from '@psd-eoc/contracts';
@@ -20,10 +21,29 @@ const IDS = {
   user: '10000000-0000-4000-8000-000000000003',
   disabledUser: '10000000-0000-4000-8000-000000000004',
   facility: '10000000-0000-4000-8000-000000000005',
+  reviewFacility: '10000000-0000-4000-8000-000000000006',
 } as const;
 
 const CREATED_AT = '2026-08-08T17:00:00.000Z';
 const CSRF_TOKEN = 'synthetic-csrf-token';
+const FACILITIES: readonly Facility[] = Object.freeze([
+  {
+    id: IDS.facility,
+    code: 'AES',
+    name: 'Artondale Elementary',
+    active: true,
+    isolated: false,
+    createdAt: CREATED_AT,
+  },
+  {
+    id: IDS.reviewFacility,
+    code: 'RVW',
+    name: 'App Review',
+    active: true,
+    isolated: true,
+    createdAt: CREATED_AT,
+  },
+]);
 
 function renderAuthorized(
   view: AccessAdminViewModel = authorizedView(),
@@ -114,6 +134,7 @@ function authorizedView(
     kind: 'authorized' as const,
     accessGroups: groupPage,
     users: users(),
+    facilities: FACILITIES,
     cursors: Object.freeze({
       accessGroupCursor: 'current-access-cursor',
       userCursor: 'current-user-cursor',
@@ -206,12 +227,13 @@ describe('AccessAdminView semantics', () => {
     expect(html).toMatch(
       /<input[^>]*name="intent"[^>]*value="update-access-group"/u,
     );
+    // Two access-group forms, plus one facility-limit form per person.
     expect(
       html.match(/<form action="\/access\/api" method="post">/gu),
-    ).toHaveLength(2);
-    expect(html.match(/name="csrfToken"/gu)).toHaveLength(2);
-    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(2);
-    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(2);
+    ).toHaveLength(4);
+    expect(html.match(/name="csrfToken"/gu)).toHaveLength(4);
+    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(4);
+    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(4);
     expect(html).not.toContain('method="get"');
     expect(html).not.toContain('fixtureKey');
     expect(html).not.toContain('name="kind"');
@@ -237,6 +259,38 @@ describe('AccessAdminView semantics', () => {
     expect(html).not.toContain('synthetic-google-subject-one');
     expect(html).not.toContain('synthetic-google-subject-two');
     expect(html).not.toMatch(/<(?:button|input|select)[^>]*tabindex=/u);
+  });
+
+  test('offers a facility limit per person that posts through the capability route', () => {
+    const html = renderAuthorized();
+
+    // One form per person, each naming the person and every active facility.
+    expect(html.match(/value="set-user-facility-scope"/gu)).toHaveLength(2);
+    expect(html).toContain(`name="userId" value="${IDS.user}"`);
+    expect(html).toContain(`name="userId" value="${IDS.disabledUser}"`);
+    expect(html).toContain('<legend>Where Alex Staff may act</legend>');
+    expect(html).toContain('<legend>Where Casey Staff may act</legend>');
+    expect(html).toContain('AES — Artondale Elementary');
+    expect(html).toContain('RVW — App Review (isolated)');
+    expect(html.match(/type="checkbox" name="facilityIds"/gu)).toHaveLength(4);
+    // The current scope is pre-selected: Alex is district-wide, Casey is
+    // limited to Artondale.
+    expect(
+      html.match(
+        /<input type="checkbox" name="facilityIds" checked="" value="[^"]+"/gu,
+      ),
+    ).toEqual([
+      `<input type="checkbox" name="facilityIds" checked="" value="${IDS.facility}"`,
+    ]);
+    expect(
+      html.match(
+        /<input type="radio" name="scopeKind" checked="" value="[^"]+"/gu,
+      ),
+    ).toEqual([
+      '<input type="radio" name="scopeKind" checked="" value="district"',
+      '<input type="radio" name="scopeKind" checked="" value="facilities"',
+    ]);
+    expect(html).toContain('Save facility scope');
   });
 
   test('renders independent opaque pagination links for both tables', () => {

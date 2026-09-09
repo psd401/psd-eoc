@@ -29,6 +29,7 @@ import {
 } from '../../../db/client';
 import { seedDatabase } from '../../../db/seed';
 import { insertEventTypesBeforeDetailRule } from '../../../lib/testing/held-back-event-types';
+import { insertFacilitiesBeforeIsolated } from '../../../lib/testing/held-back-facilities';
 import { insertChannelConfigurationsBeforeTruthRetirement } from '../../../lib/testing/held-back-channel-configurations';
 import { migrateDatabase, migrationsFolder } from '../../../drizzle/migrate';
 import migrationJournal from '../../../drizzle/migrations/meta/_journal.json';
@@ -424,6 +425,9 @@ async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
     // the seed must not touch a relation that does not exist yet.
     insertThreats: () => Promise.resolve(),
     insertEventTypes: insertEventTypesBeforeDetailRule,
+    // The isolated flag arrived in migration 0052; this schema is held
+    // before it, so the seed's facilities are written without that column.
+    insertFacilities: insertFacilitiesBeforeIsolated,
     async insertRosterEndpoints(transaction) {
       await transaction.execute(sql`
         insert into roster_endpoints (

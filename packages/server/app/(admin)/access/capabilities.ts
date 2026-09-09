@@ -1,4 +1,5 @@
 import {
+  SetUserFacilityScopeInputSchema,
   UserPageSchema,
   UserSchema,
   UuidSchema,
@@ -10,12 +11,15 @@ import {
 import { and, asc, desc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 
 import {
+  facilities,
   userFacilityScopes,
   userRoleChanges,
   userRoles,
   users,
 } from '../../../db/schema';
 import {
+  ADMIN_AVAILABILITY_LOCK_SQL,
+  loadEffectiveAdministratorUserIds,
   projectEffectiveRoles,
   type RoleChangeFact,
 } from '../../../lib/auth/role-state';
@@ -24,14 +28,33 @@ import { type ServerCapabilityRegistration } from '../../../lib/capabilities/eng
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
+  executeAdminMutationCapability,
   executeAdminQueryCapability,
   getDefaultAdminDatabase,
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
   type AdminQueryDatabase,
+  type AdminMutationMetadata,
   type AdminQueryMetadata,
 } from '../../../lib/capabilities/admin';
+
+interface MutationExecution<Input> {
+  readonly authenticated: AuthenticatedSession;
+  readonly store?: AdminCapabilityStore;
+  readonly command: Input;
+  readonly metadata: AdminMutationMetadata;
+}
+
+function executionStore(
+  authenticated: AuthenticatedSession,
+  store: AdminCapabilityStore | undefined,
+): AdminCapabilityStore {
+  return (
+    store ??
+    createDrizzleAdminCapabilityStore(getDefaultAdminDatabase(), authenticated)
+  );
+}
 
 function invalid(message: string): AdminCapabilityError {
   return new AdminCapabilityError('VALIDATION_ERROR', message, 400);
@@ -325,3 +348,137 @@ export function executeListUsersCapability(input: {
     input.metadata,
   );
 }
+
+/**
+ * Records an administrator's decision about where one person may act: the
+ * whole district, or a named set of active facilities. Sessions and every
+ * capability already enforce the stored scope; nothing set it until now.
+ * The first use is the App Review account, limited to the isolated review
+ * site so a store reviewer's drill can reach nobody else.
+ *
+ * The scope rows are written under the administrator-availability lock the
+ * database takes on every write to them, so the mutation is serialized with
+ * everything else that can change who reaches the system.
+ */
+async function setUserFacilityScope(
+  database: AdminQueryDatabase,
+  inputValue: CapabilityInput<'set-user-facility-scope'>,
+): Promise<User> {
+  const input = SetUserFacilityScopeInputSchema.parse(inputValue);
+  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+  const [userRow] = await database
+    .select()
+    .from(users)
+    .where(eq(users.id, input.userId))
+    .limit(1)
+    .for('update');
+  if (userRow === undefined) {
+    throw new AdminCapabilityError(
+      'NOT_FOUND',
+      'The person was not found.',
+      404,
+    );
+  }
+  if (input.facilityScope.kind === 'facilities') {
+    // Administration is district-wide: every admin capability refuses a
+    // limited scope. Limiting an administrator would lock them out of the
+    // pages that could undo it, so the group membership has to change first.
+    const administrators = await loadEffectiveAdministratorUserIds(database);
+    if (administrators.includes(input.userId)) {
+      throw new AdminCapabilityError(
+        'CONFLICT',
+        'An administrator is district-wide. Move them out of the administrator group before limiting where they act.',
+        409,
+      );
+    }
+    const facilityRows = await database
+      .select({ id: facilities.id, active: facilities.active })
+      .from(facilities)
+      .where(inArray(facilities.id, [...input.facilityScope.facilityIds]));
+    const known = new Map(facilityRows.map((row) => [row.id, row.active]));
+    for (const facilityId of input.facilityScope.facilityIds) {
+      const active = known.get(facilityId);
+      if (active === undefined) {
+        throw invalid('A selected facility does not exist.');
+      }
+      if (!active) {
+        throw invalid('A selected facility is inactive.');
+      }
+    }
+  }
+  await database
+    .delete(userFacilityScopes)
+    .where(eq(userFacilityScopes.userId, input.userId));
+  if (input.facilityScope.kind === 'facilities') {
+    await database.insert(userFacilityScopes).values(
+      input.facilityScope.facilityIds.map((facilityId) => ({
+        userId: input.userId,
+        facilityId,
+      })),
+    );
+  }
+  await database
+    .update(users)
+    .set({ facilityScopeKind: input.facilityScope.kind })
+    .where(eq(users.id, input.userId));
+  // Read the person back: the row selected above carries the scope kind as
+  // it was before the change, and the projection reads it from the row.
+  const updated = await getUser(database, input.userId);
+  if (updated === null) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'The person could not be read back.',
+      409,
+    );
+  }
+  return updated;
+}
+
+async function getUser(
+  database: AdminQueryDatabase,
+  userId: string,
+): Promise<User | null> {
+  const [row] = await database
+    .select()
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (row === undefined) return null;
+  const [projected] = await projectUserPage(database, [row]);
+  return projected ?? null;
+}
+
+export const setUserFacilityScopeRegistration: ServerCapabilityRegistration<
+  'set-user-facility-scope',
+  AdminCapabilityTransaction
+> = {
+  id: 'set-user-facility-scope',
+  resolveFacilityId: (_input, context) => guard(context),
+  handler: (input, context) =>
+    setUserFacilityScope(context.transaction.database, input),
+  resultReference: (output) => output.id,
+  async loadReplay(reference, context) {
+    const output = await getUser(context.transaction.database, reference);
+    if (output === null) {
+      throw new AdminCapabilityError(
+        'CONFLICT',
+        'The scoped person is unavailable.',
+        409,
+      );
+    }
+    return output;
+  },
+  resolveReplayFacilityId: () => Promise.resolve(null),
+  replayFacilityId: () => null,
+};
+
+export const executeSetUserFacilityScopeCapability = (
+  input: MutationExecution<CapabilityInput<'set-user-facility-scope'>>,
+) =>
+  executeAdminMutationCapability(
+    setUserFacilityScopeRegistration,
+    input.command,
+    input.authenticated,
+    executionStore(input.authenticated, input.store),
+    input.metadata,
+  );

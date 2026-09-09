@@ -20,6 +20,8 @@ import {
   normalizeGroupAddress,
   resolveGoogleGroupIdForForm,
 } from '../../facilities/google-group-id';
+import { executeSetUserFacilityScopeCapability } from '../capabilities';
+import { parseSetUserFacilityScopeForm } from './request';
 
 export const dynamic = 'force-dynamic';
 
@@ -70,6 +72,15 @@ export async function POST(request: Request): Promise<Response> {
           metadata: { idempotencyKey },
         });
         return adminSuccessRedirect(request, '/access', 'access-group-created');
+      }
+      case 'set-user-facility-scope': {
+        const command = parseSetUserFacilityScopeForm(form);
+        await executeSetUserFacilityScopeCapability({
+          authenticated,
+          command,
+          metadata: { idempotencyKey },
+        });
+        return adminSuccessRedirect(request, '/access', 'user-scope-updated');
       }
       case 'update-access-group': {
         form.assertFields([

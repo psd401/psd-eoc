@@ -321,6 +321,7 @@ describe('facilities admin capability boundary', () => {
       code: 'NEW-SITE',
       name: 'New Site',
       active: true,
+      isolated: false,
       createdAt: NOW.toISOString(),
     };
     let handlerCalls = 0;

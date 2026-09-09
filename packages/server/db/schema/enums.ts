@@ -278,6 +278,7 @@ const PERSISTED_AGENT_CAPABILITY_GRANT_ORDER = [
   'export-event-summary',
   'query-security-audit',
   'verify-security-audit-chain',
+  'set-user-facility-scope',
 ] as const;
 
 const PERSISTED_MUTATION_CAPABILITY_ORDER = [
@@ -324,6 +325,7 @@ const PERSISTED_MUTATION_CAPABILITY_ORDER = [
   'issue-agent-api-key',
   'revoke-agent-api-key',
   'create-lifecycle-consequence-preview',
+  'set-user-facility-scope',
 ] as const;
 
 export const agentCapabilityGrantEnum = contractPgEnum(
