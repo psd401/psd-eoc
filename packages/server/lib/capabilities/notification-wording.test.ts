@@ -83,7 +83,7 @@ describe('notification variables', () => {
       }),
     ).toEqual({
       site: 'Harbor Ridge High School',
-      eventType: 'Lockdown Drill — Gym roof',
+      eventType: 'Lockdown Drill - Gym roof',
       threat: 'Intruder',
       startTime: '2026-09-09T16:01:00.000Z',
       initiator: 'Taylor Morgan',

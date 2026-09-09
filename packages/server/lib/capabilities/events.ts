@@ -508,10 +508,14 @@ function buildNotification(
   }
   const at = timestamp(input.context.invocation.serverTime);
   // The preview was rendered before this moment existed, so its copy says
-  // "the time you confirm" and, for a lifecycle action, may name whoever
-  // built the preview. The workers carry the same templates rendered now,
-  // with the real time and the actor confirming. The version is pinned by
-  // id and immutable, so only those values can differ from the preview.
+  // "the time you confirm" and, for a lifecycle action, names whoever built
+  // the preview. The workers carry the same templates rendered now, with
+  // the real time and the actor confirming. The templates are pinned by
+  // version id and immutable, and the threat and response detail come from
+  // the event record; what can differ from the preview is the time, the
+  // acting person's name, and the school's and response's names as they
+  // stand at this moment (a rename inside the preview's fifteen minutes
+  // reaches staff under the new name, which is the school's name).
   const rendered = new Map(
     renderNotificationChannels({
       eventKind: input.event.kind,

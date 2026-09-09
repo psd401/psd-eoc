@@ -22,23 +22,29 @@ import { resolveActorDisplayName } from './journal-author-names';
  * operator's own words when the threat required a description. A record that
  * predates the catalog names no threat, so the copy says so rather than
  * leaving the sentence dangling.
+ *
+ * The join is an ASCII hyphen on purpose. An em dash is outside the GSM
+ * alphabet, and one character outside it turns a whole text message into
+ * UCS-2, where a part holds 70 characters instead of 160; the "Other"
+ * threats that carry a detail are exactly the ones that need the room.
  */
 export function renderedThreatLabel(threat: ActivationThreat | null): string {
   if (threat === null) return 'Not recorded';
   return threat.detail === null
     ? threat.name
-    : `${threat.name} — ${threat.detail}`;
+    : `${threat.name} - ${threat.detail}`;
 }
 
 /**
  * Composes what staff read for the response: the versioned response name,
  * plus the operator's own words when the response required a description.
+ * Joined with a hyphen for the reason given on `renderedThreatLabel`.
  */
 export function renderedResponseLabel(
   name: string,
   responseDetail: string | null,
 ): string {
-  return responseDetail === null ? name : `${name} — ${responseDetail}`;
+  return responseDetail === null ? name : `${name} - ${responseDetail}`;
 }
 
 /**

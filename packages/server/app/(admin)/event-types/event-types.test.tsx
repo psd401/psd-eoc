@@ -893,6 +893,27 @@ describe('renderer-owned notification frames', () => {
       }
     }
 
+    // The bare word is dropped only in the legacy shapes; ordinary wording
+    // that happens to open with it keeps its first words.
+    const kept = renderTemplateSet({
+      eventKind: 'drill',
+      templates: {
+        ...templateSet('drill', 'all-clear'),
+        push: {
+          ...templateSet('drill', 'all-clear').push,
+          title: 'All clear given by the fire marshal',
+        },
+      },
+      variables: DRILL_VARIABLES,
+    });
+    const keptPush = kept[0];
+    if (keptPush.channel !== 'push') {
+      throw new Error('Expected push rendering first.');
+    }
+    expect(keptPush.title).toBe(
+      '[DRILL] ALL CLEAR: All clear given by the fire marshal',
+    );
+
     const base = templateSet('drill', 'activation');
     const mismatched = renderTemplateSet({
       eventKind: 'drill',
