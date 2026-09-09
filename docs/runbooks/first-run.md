@@ -132,6 +132,29 @@ group source** — an active Google group, `purpose = building`, bound to the
 facility. Create one per facility you intend to start events at. The admin
 readiness page reports how many active facilities still have none.
 
+The quickest way is **Facilities → Register building groups by naming
+convention**: every active school without a Google building source gets one
+named by its short code, `<code>-eoc@` followed by the staff domain, and the
+roster is published in the same step. A Google Group that does not exist yet,
+or that Google could not be asked about because the server's credential is
+missing or Google is unavailable, is registered as **waiting**: the source
+names nobody until Google holds the group, and its ID is recorded and its
+members read by the next scheduled membership sync once it exists. A refusal
+from Google (the address is not an exact group, or the credential may not
+read it) still blocks the add. **Check waiting groups with Google** asks at
+once which waiting groups Google holds now, without waiting for the schedule.
+A new school added on that page gets its convention group the same way. An
+others source must exist when it is registered; only building sources may
+wait.
+
+Each school is registered by its own call, so when Google fails part-way the
+schools before it stay registered and the page says how many; press the
+action again to continue with the rest. Two cases stay waiting on purpose:
+a school whose short code changed keeps a waiting source at the old address,
+so the action lists that school again and registers the new address beside
+it; and a waiting group that turns out to be an alias of a group already
+registered is not recorded, because one Google group backs one roster source.
+
 ## 5. Confirm the roster
 
 The notification roster is separate from access. Access decides who may sign

@@ -51,12 +51,15 @@ const EvaluatedAccessGroupSchema = z
   .object({
     groupSourceId: z.string().uuid(),
     groupEmail: StaffRosterEmailSchema,
+    // Null only for a waiting building group Google does not hold yet; the
+    // publish step refuses null for a group whose ID is already recorded.
     googleGroupId: z
       .string()
       .trim()
       .min(1)
       .max(255)
-      .regex(/^[A-Za-z0-9_-]+$/u),
+      .regex(/^[A-Za-z0-9_-]+$/u)
+      .nullable(),
     // Null for a building group: it says who is at a school, not what they
     // may do. `group_sources_access_role_present` is the authority on which
     // purposes may carry a role.
@@ -115,7 +118,16 @@ const EvaluatedAccessMembershipSetSchema = z
     const distinct = new Set(
       evaluation.groups.flatMap(({ memberEmails }) => [...memberEmails]),
     );
-    if (distinct.size === 0 || distinct.size > MAX_EVALUATED_MEMBERS) {
+    // Nobody at all is refused, so an empty sign-in evaluation can never
+    // lock the deployment out. A roster whose only Google groups are still
+    // waiting for Google is empty for a reason, and is allowed.
+    const waiting = evaluation.groups.some(
+      ({ googleGroupId }) => googleGroupId === null,
+    );
+    if (
+      (distinct.size === 0 && !waiting) ||
+      distinct.size > MAX_EVALUATED_MEMBERS
+    ) {
       context.addIssue({
         code: 'custom',
         message: 'The configured access groups have no members, or too many.',
@@ -834,6 +846,7 @@ export function createDrizzleAccessMembershipSyncStore(
           email: groupSources.email,
           grantedRole: groupSources.grantedRole,
           purpose: groupSources.purpose,
+          googleGroupId: groupSources.googleGroupId,
         })
         .from(groupSources)
         .where(
@@ -855,6 +868,13 @@ export function createDrizzleAccessMembershipSyncStore(
             groupSourceId: row.groupSourceId,
             email: row.email?.toLowerCase(),
             grantedRole: row.grantedRole,
+            // A building source registered before Google held its group has
+            // no ID yet; the database allows that for building sources only.
+            // Only a building source may wait for its group. The database
+            // refuses a null ID on any other purpose; the purpose is checked
+            // here as well so the anti-lockout guards never see a waiting
+            // sign-in group even if that rule were ever loosened.
+            waiting: row.purpose === 'building' && row.googleGroupId === null,
           });
           if (!parsed.success) {
             throw new AccessMembershipSyncError(
@@ -941,7 +961,11 @@ export function createDrizzleAccessMembershipSyncStore(
             );
             return (
               source === undefined ||
-              source.googleGroupId !== group.googleGroupId ||
+              // A recorded ID must be the one Google answered with. A waiting
+              // source (no ID recorded) accepts either "still not held" or
+              // the ID Google now holds, which is recorded below.
+              (source.googleGroupId !== null &&
+                source.googleGroupId !== group.googleGroupId) ||
               source.email?.toLowerCase() !== group.groupEmail ||
               source.grantedRole !== group.grantedRole
             );
@@ -951,6 +975,37 @@ export function createDrizzleAccessMembershipSyncStore(
             'ACCESS_CONFIGURATION_CHANGED',
             'The active access configuration changed during evaluation.',
           );
+        }
+        // A waiting source that Google now holds stops waiting: its ID is
+        // recorded once, and from here on it syncs like any other group.
+        // Unless that ID already backs another active roster source: then
+        // the address is an alias of a group already registered (or one
+        // registered twice), and recording it would collide with the
+        // one-source-per-group rule on this and every later run. The source
+        // stays waiting and names nobody, which an administrator sees on the
+        // Schools page; the members Google returned for it are not written.
+        const recordedRosterIds = new Set(
+          activeSources.flatMap(({ googleGroupId }) =>
+            googleGroupId === null ? [] : [googleGroupId],
+          ),
+        );
+        const leftWaiting = new Set<string>();
+        for (const group of evaluation.groups) {
+          const source = activeSources.find(
+            ({ id }) => id === group.groupSourceId,
+          );
+          if (source?.googleGroupId !== null || group.googleGroupId === null) {
+            continue;
+          }
+          if (recordedRosterIds.has(group.googleGroupId)) {
+            leftWaiting.add(group.groupSourceId);
+            continue;
+          }
+          await transaction
+            .update(groupSources)
+            .set({ googleGroupId: group.googleGroupId })
+            .where(eq(groupSources.id, group.groupSourceId));
+          recordedRosterIds.add(group.googleGroupId);
         }
 
         const [latestSnapshot] = await transaction
@@ -994,6 +1049,7 @@ export function createDrizzleAccessMembershipSyncStore(
           await transaction
             .delete(groupMembers)
             .where(eq(groupMembers.groupSourceId, group.groupSourceId));
+          if (leftWaiting.has(group.groupSourceId)) continue;
           await insertInBatches(
             group.memberEmails.map((email) => ({
               groupSourceId: group.groupSourceId,

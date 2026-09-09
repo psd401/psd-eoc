@@ -287,7 +287,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     groups: readonly Readonly<{
       groupSourceId: string;
       groupEmail: string;
-      googleGroupId: string;
+      googleGroupId: string | null;
       grantedRole: 'staff' | 'admin' | null;
       memberEmails: readonly string[];
     }>[],
@@ -468,6 +468,219 @@ describeWithDatabase('access-membership atomic database publication', () => {
         { email: TRANSITION_EMAIL, groupSourceId: secondSourceId },
         { email: RECOVERY_EMAIL, groupSourceId: BASELINE_SOURCE_ID },
       ].sort((left, right) => left.email.localeCompare(right.email)),
+    );
+  });
+
+  test('records the Google Group ID for a waiting building source once Google holds it', async () => {
+    // A school's group registered before Google held it: no ID, nobody in
+    // it. The roster-scope sync keeps publishing around it, and the first run
+    // that finds the group records its ID; from then on it syncs normally.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const [facility] = await database
+      .insert(facilities)
+      .values({
+        id: '00000000-0000-4000-8000-000000000560',
+        code: 'HHE',
+        name: 'Harbor Heights Elementary School',
+        active: true,
+      })
+      .returning({ id: facilities.id });
+    if (facility === undefined)
+      throw new Error('The facility was not created.');
+    const waitingSourceId = '00000000-0000-4000-8000-000000000561';
+    await database.insert(groupSources).values({
+      id: waitingSourceId,
+      kind: 'google-group',
+      purpose: 'building',
+      facilityId: facility.id,
+      displayName: 'Harbor Heights staff (waiting)',
+      grantedRole: null,
+      active: true,
+      googleGroupId: null,
+      email: 'hhe-eoc@example.invalid',
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+    const configured = await store.readConfiguredAccessGroups('roster');
+    expect(configured).toEqual([
+      {
+        groupSourceId: waitingSourceId,
+        email: 'hhe-eoc@example.invalid',
+        grantedRole: null,
+        waiting: true,
+      },
+    ]);
+    const stillWaiting = await reserve(
+      store,
+      'roster-sync:waiting-0001',
+      'roster',
+    );
+    if (stillWaiting.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      stillWaiting.id,
+      evaluationFor([
+        {
+          groupSourceId: waitingSourceId,
+          groupEmail: 'hhe-eoc@example.invalid',
+          googleGroupId: null,
+          grantedRole: null,
+          memberEmails: [],
+        },
+      ]),
+      'roster',
+    );
+    const [afterWaiting] = await database
+      .select({ googleGroupId: groupSources.googleGroupId })
+      .from(groupSources)
+      .where(eq(groupSources.id, waitingSourceId));
+    expect(afterWaiting?.googleGroupId).toBeNull();
+
+    const nowHeld = await reserve(store, 'roster-sync:waiting-0002', 'roster');
+    if (nowHeld.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      nowHeld.id,
+      evaluationFor([
+        {
+          groupSourceId: waitingSourceId,
+          groupEmail: 'hhe-eoc@example.invalid',
+          googleGroupId: 'hhe_eoc_now_held',
+          grantedRole: null,
+          memberEmails: [TRANSITION_EMAIL],
+        },
+      ]),
+      'roster',
+    );
+    const [afterHeld] = await database
+      .select({ googleGroupId: groupSources.googleGroupId })
+      .from(groupSources)
+      .where(eq(groupSources.id, waitingSourceId));
+    expect(afterHeld?.googleGroupId).toBe('hhe_eoc_now_held');
+    expect(await store.readConfiguredAccessGroups('roster')).toMatchObject([
+      { groupSourceId: waitingSourceId, waiting: false },
+    ]);
+    const members = await database
+      .select({ email: groupMembers.email })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupSourceId, waitingSourceId));
+    expect(members).toEqual([{ email: TRANSITION_EMAIL }]);
+
+    // A recorded ID is then held to: Google answering another ID for the
+    // same address is a changed configuration, not a quiet re-point.
+    const changed = await reserve(store, 'roster-sync:waiting-0003', 'roster');
+    if (changed.kind !== 'reserved') throw new Error('expected reserved');
+    await expect(
+      store.publish(
+        changed.id,
+        evaluationFor([
+          {
+            groupSourceId: waitingSourceId,
+            groupEmail: 'hhe-eoc@example.invalid',
+            googleGroupId: 'some_other_group',
+            grantedRole: null,
+            memberEmails: [TRANSITION_EMAIL],
+          },
+        ]),
+        'roster',
+      ),
+    ).rejects.toMatchObject({ code: 'ACCESS_CONFIGURATION_CHANGED' });
+  });
+
+  test('leaves a waiting source waiting when Google answers a group already registered', async () => {
+    // phs-eoc@ turns out to be an alias of the district responders group,
+    // or the same group registered twice. Recording its ID would collide
+    // with the one-source-per-group rule on this run and every later one,
+    // so the run publishes the other groups, records nothing for this one,
+    // and writes none of the members Google returned under it.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const [facility] = await database
+      .insert(facilities)
+      .values({
+        id: '00000000-0000-4000-8000-000000000570',
+        code: 'PHS',
+        name: 'Peninsula High School',
+        active: true,
+      })
+      .returning({ id: facilities.id });
+    if (facility === undefined)
+      throw new Error('The facility was not created.');
+    const othersSourceId = '00000000-0000-4000-8000-000000000571';
+    const waitingSourceId = '00000000-0000-4000-8000-000000000572';
+    await database.insert(groupSources).values([
+      {
+        id: othersSourceId,
+        kind: 'google-group',
+        purpose: 'others',
+        facilityId: null,
+        displayName: 'District responders',
+        grantedRole: null,
+        active: true,
+        googleGroupId: 'district_responders',
+        email: 'responders@example.invalid',
+        fixtureKey: null,
+        createdAt: BASELINE_TIME,
+      },
+      {
+        id: waitingSourceId,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: 'Peninsula High staff (waiting)',
+        grantedRole: null,
+        active: true,
+        googleGroupId: null,
+        email: 'phs-eoc@example.invalid',
+        fixtureKey: null,
+        createdAt: BASELINE_TIME,
+      },
+    ]);
+    const run = await reserve(store, 'roster-sync:alias-0001', 'roster');
+    if (run.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      run.id,
+      evaluationFor([
+        {
+          groupSourceId: othersSourceId,
+          groupEmail: 'responders@example.invalid',
+          googleGroupId: 'district_responders',
+          grantedRole: null,
+          memberEmails: [TRANSITION_EMAIL],
+        },
+        {
+          groupSourceId: waitingSourceId,
+          groupEmail: 'phs-eoc@example.invalid',
+          googleGroupId: 'district_responders',
+          grantedRole: null,
+          memberEmails: [TRANSITION_EMAIL],
+        },
+      ]),
+      'roster',
+    );
+    const [source] = await database
+      .select({ googleGroupId: groupSources.googleGroupId })
+      .from(groupSources)
+      .where(eq(groupSources.id, waitingSourceId));
+    expect(source?.googleGroupId).toBeNull();
+    expect(
+      await database
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, waitingSourceId)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, othersSourceId)),
+    ).toEqual([{ email: TRANSITION_EMAIL }]);
+    expect(await store.readConfiguredAccessGroups('roster')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          groupSourceId: waitingSourceId,
+          waiting: true,
+        }),
+      ]),
     );
   });
 

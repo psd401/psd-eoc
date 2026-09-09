@@ -198,12 +198,11 @@ export const groupSources = pgTable(
       'group_sources_valid_variant',
       sql`(
         ${table.kind} = 'google-group'
-        and ${table.googleGroupId} is not null
         and ${table.email} is not null
         and ${table.fixtureKey} is null
         and (
           (${table.purpose} = 'building' and ${table.facilityId} is not null)
-          or (${table.purpose} in ('access', 'others') and ${table.facilityId} is null)
+          or (${table.purpose} in ('access', 'others') and ${table.facilityId} is null and ${table.googleGroupId} is not null)
         )
       ) or (
         ${table.kind} = 'synthetic'

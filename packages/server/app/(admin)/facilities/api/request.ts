@@ -18,7 +18,29 @@ import { AdminFormError, type AdminForm } from '../admin-request';
 import {
   normalizeGroupAddress,
   type GoogleGroupIdResolver,
+  type WaitingGoogleGroupIdResolver,
 } from '../google-group-id';
+
+/**
+ * How the form turns a Google Group address into the ID the server records.
+ * A building source may be registered while Google does not hold its group
+ * yet; an access or others source must resolve.
+ */
+export interface GoogleGroupIdResolvers {
+  readonly resolve: GoogleGroupIdResolver;
+  readonly resolveOrWaiting: WaitingGoogleGroupIdResolver;
+}
+/** A lone resolver answers both ways: it never lets a building source wait. */
+export type GoogleGroupIdResolution =
+  | GoogleGroupIdResolver
+  | GoogleGroupIdResolvers;
+function googleGroupIdResolvers(
+  resolution: GoogleGroupIdResolution,
+): GoogleGroupIdResolvers {
+  return typeof resolution === 'function'
+    ? { resolve: resolution, resolveOrWaiting: resolution }
+    : resolution;
+}
 
 const COMMON_FIELDS = ['csrfToken', 'idempotencyKey', 'intent'] as const;
 
@@ -67,6 +89,16 @@ export type FacilitiesAdminMutation =
       intent: 'publish-roster-snapshot';
       command: null;
       status: 'roster-snapshot-published';
+    }>
+  | Readonly<{
+      intent: 'register-building-groups-by-convention';
+      command: null;
+      status: 'building-groups-registered';
+    }>
+  | Readonly<{
+      intent: 'check-waiting-groups';
+      command: null;
+      status: 'waiting-groups-checked';
     }>;
 
 function parseActive(value: string): boolean {
@@ -83,7 +115,7 @@ function parseActive(value: string): boolean {
 async function parseGoogleGroup(
   form: AdminForm,
   intent: 'create-google-building-group' | 'create-google-others-group',
-  resolveGoogleGroupId: GoogleGroupIdResolver,
+  resolvers: GoogleGroupIdResolvers,
 ): Promise<FacilitiesAdminMutation> {
   const building = intent === 'create-google-building-group';
   form.assertFields([
@@ -93,13 +125,17 @@ async function parseGoogleGroup(
     'email',
   ]);
   const email = normalizeGroupAddress(form.required('email'));
+  // A building source may wait for Google to hold its group; it names nobody
+  // until then and the scheduled sync records the ID once the group exists.
   const command = CreateGroupSourceInputSchema.parse({
     kind: 'google-group',
     purpose: building ? 'building' : 'others',
     facilityId: building ? form.required('facilityId') : null,
     displayName: form.required('displayName'),
     active: true,
-    googleGroupId: await resolveGoogleGroupId(email),
+    googleGroupId: building
+      ? await resolvers.resolveOrWaiting(email)
+      : await resolvers.resolve(email),
     email,
   });
   return {
@@ -172,7 +208,7 @@ function parseManualGroup(
 async function parseGoogleGroupReplacement(
   form: AdminForm,
   intent: 'replace-google-building-group' | 'replace-google-others-group',
-  resolveGoogleGroupId: GoogleGroupIdResolver,
+  resolvers: GoogleGroupIdResolvers,
 ): Promise<FacilitiesAdminMutation> {
   const building = intent === 'replace-google-building-group';
   form.assertFields([
@@ -192,7 +228,9 @@ async function parseGoogleGroupReplacement(
       facilityId: building ? form.required('facilityId') : null,
       displayName: form.required('displayName'),
       active: true,
-      googleGroupId: await resolveGoogleGroupId(email),
+      googleGroupId: building
+        ? await resolvers.resolveOrWaiting(email)
+        : await resolvers.resolve(email),
       email,
     }),
     status: building ? 'building-group-replaced' : 'others-group-replaced',
@@ -233,10 +271,17 @@ function parseSyntheticGroupReplacement(
  */
 export async function parseFacilitiesAdminMutation(
   form: AdminForm,
-  resolveGoogleGroupId: GoogleGroupIdResolver,
+  resolution: GoogleGroupIdResolution,
 ): Promise<FacilitiesAdminMutation> {
+  const resolvers = googleGroupIdResolvers(resolution);
   const intent = form.required('intent');
   switch (intent) {
+    case 'register-building-groups-by-convention':
+      form.assertFields([...COMMON_FIELDS]);
+      return { intent, command: null, status: 'building-groups-registered' };
+    case 'check-waiting-groups':
+      form.assertFields([...COMMON_FIELDS]);
+      return { intent, command: null, status: 'waiting-groups-checked' };
     case 'create-facility':
       form.assertFields([...COMMON_FIELDS, 'code', 'name']);
       return {
@@ -267,7 +312,7 @@ export async function parseFacilitiesAdminMutation(
       };
     case 'create-google-building-group':
     case 'create-google-others-group':
-      return parseGoogleGroup(form, intent, resolveGoogleGroupId);
+      return parseGoogleGroup(form, intent, resolvers);
     case 'create-manual-building-group':
     case 'create-manual-others-group':
       return parseManualGroup(form, intent);
@@ -293,7 +338,7 @@ export async function parseFacilitiesAdminMutation(
       return parseSyntheticGroup(form, intent);
     case 'replace-google-building-group':
     case 'replace-google-others-group':
-      return parseGoogleGroupReplacement(form, intent, resolveGoogleGroupId);
+      return parseGoogleGroupReplacement(form, intent, resolvers);
     case 'replace-synthetic-building-group':
     case 'replace-synthetic-others-group':
       return parseSyntheticGroupReplacement(form, intent);

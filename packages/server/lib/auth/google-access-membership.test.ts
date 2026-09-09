@@ -259,6 +259,79 @@ describe('exact Google access-membership evaluator', () => {
     expect(memberships.searchParams.get('pageToken')).toBeNull();
   });
 
+  test('reads a waiting group Google does not hold as nobody, carries its ID once held, and still fails a group that should exist', async () => {
+    const WAITING_EMAIL = 'hhe-eoc@example.invalid';
+    const WAITING_ID = '00000000-0000-4000-8000-000000000777';
+    const waiting = Object.freeze({
+      groupSourceId: WAITING_ID,
+      email: WAITING_EMAIL,
+      grantedRole: null,
+      waiting: true,
+    });
+    const base = providerHarness(() =>
+      Response.json({
+        memberships: [currentMembership(SYNTHETIC_TRANSITION_EMAIL)],
+      }),
+    );
+    // Google holds the designated group and nothing at the waiting address.
+    const notHolding = {
+      ...base,
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (
+          url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups:lookup?`) &&
+          new URL(url).searchParams.get('groupKey.id') === WAITING_EMAIL
+        ) {
+          base.calls.push(Object.freeze({ url }));
+          return new Response('{"error":{"code":404}}', { status: 404 });
+        }
+        return base.fetch(input, init);
+      }) as typeof fetch,
+    };
+    const result = await evaluator(notHolding).evaluate([
+      ...CONFIGURED_GROUPS,
+      waiting,
+    ]);
+    const evaluatedWaiting = result.groups.find(
+      (group) => group.groupSourceId === WAITING_ID,
+    );
+    expect(evaluatedWaiting).toEqual({
+      groupSourceId: WAITING_ID,
+      groupEmail: WAITING_EMAIL,
+      googleGroupId: null,
+      grantedRole: null,
+      memberEmails: [],
+    });
+    expect(
+      result.groups.find(
+        (group) => group.groupSourceId === CONFIGURED_GROUPS[0]?.groupSourceId,
+      )?.googleGroupId,
+    ).toBe(GROUP_ID);
+    expect(result.providerGroupIdDigest).toMatch(/^[a-f0-9]{64}$/u);
+
+    // Once Google holds the address, the same waiting group carries its ID
+    // and its members like any other group.
+    const holding = providerHarness(() =>
+      Response.json({
+        memberships: [currentMembership(SYNTHETIC_TRANSITION_EMAIL)],
+      }),
+    );
+    const held = await evaluator(holding).evaluate([
+      { ...waiting, email: DESIGNATED_ACCESS_GROUP_EMAIL },
+    ]);
+    expect(held.groups[0]).toMatchObject({
+      groupSourceId: WAITING_ID,
+      googleGroupId: GROUP_ID,
+      memberEmails: [SYNTHETIC_TRANSITION_EMAIL],
+    });
+
+    // A group that is not waiting must exist: "not found" is still a refusal.
+    await expectEvaluationError(
+      evaluator(notHolding).evaluate([{ ...waiting, waiting: false }]),
+      'GOOGLE_REQUEST_REJECTED',
+    );
+  });
+
   test('evaluates every configured group and refuses a set it cannot trust', async () => {
     const second = Object.freeze({
       groupSourceId: '00000000-0000-4000-8000-0000000000a2',

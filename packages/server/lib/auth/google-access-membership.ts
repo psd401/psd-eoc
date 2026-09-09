@@ -148,6 +148,13 @@ export interface DesignatedAccessGroup {
   readonly groupSourceId: string;
   readonly email: string;
   readonly grantedRole: Role | null;
+  /**
+   * True for a building source registered before Google held its group: no
+   * Google Group ID is recorded yet. Google answering "not found" for such
+   * a group is an evaluation of nobody, not a failure; once Google resolves
+   * the address the evaluation carries the ID and the group is read.
+   */
+  readonly waiting?: boolean;
 }
 
 export const DesignatedAccessGroupSchema = z
@@ -155,6 +162,7 @@ export const DesignatedAccessGroupSchema = z
     groupSourceId: z.string().uuid(),
     email: StaffRosterEmailSchema,
     grantedRole: RoleSchema.nullable(),
+    waiting: z.boolean().default(false),
   })
   .strict()
   .readonly();
@@ -163,7 +171,8 @@ export const DesignatedAccessGroupSchema = z
 export interface EvaluatedAccessGroup {
   readonly groupSourceId: string;
   readonly groupEmail: string;
-  readonly googleGroupId: string;
+  /** Null only for a waiting group Google does not hold yet. */
+  readonly googleGroupId: string | null;
   readonly grantedRole: Role | null;
   readonly memberEmails: readonly string[];
 }
@@ -422,12 +431,34 @@ function googleGroupsClient(
     email: string,
     authorization: Readonly<Record<string, string>>,
   ): Promise<ResolvedGoogleGroup> {
+    const resolved = await resolveGroupIdentityIfHeld(email, authorization);
+    if (resolved === null) {
+      throw new AccessMembershipEvaluationError(
+        'GOOGLE_REQUEST_REJECTED',
+        'Exact Google access-group lookup was rejected by Google.',
+      );
+    }
+    return resolved;
+  }
+  /**
+   * Like `resolveGroupIdentity`, but a group Google does not hold answers
+   * null. Only the lookup's 404 is read that way; every other refusal,
+   * including a 403 for a group the credential may not read, still throws,
+   * so "waiting" can never mask a permission problem.
+   */
+  async function resolveGroupIdentityIfHeld(
+    email: string,
+    authorization: Readonly<Record<string, string>>,
+  ): Promise<ResolvedGoogleGroup | null> {
     const lookupUrl = new URL(
       `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
     );
     lookupUrl.searchParams.set('groupKey.id', email);
     lookupUrl.searchParams.set('fields', 'name');
-    const resolved = await providerRequest(
+    const notHeld = Symbol('group-not-held');
+    const resolved = await providerRequest<
+      z.infer<typeof GroupNameLookupResponseSchema> | typeof notHeld
+    >(
       lookupUrl,
       { headers: authorization, method: 'GET' },
       'Exact Google access-group lookup',
@@ -435,7 +466,9 @@ function googleGroupsClient(
         const parsed = GroupNameLookupResponseSchema.safeParse(value);
         return parsed.success ? parsed.data : null;
       },
+      () => notHeld,
     );
+    if (resolved === notHeld) return null;
     const groupUrl = new URL(
       `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${resolved.name}`,
     );
@@ -519,6 +552,7 @@ function googleGroupsClient(
     now,
     providerRequest,
     resolveGroupIdentity,
+    resolveGroupIdentityIfHeld,
   };
 }
 
@@ -608,6 +642,11 @@ export function createGoogleMembershipChecker(
 export interface GoogleGroupResolver {
   /** Resolves a group address to its exact Google Group, failing closed. */
   resolve(email: string): Promise<ResolvedGoogleGroup>;
+  /**
+   * Resolves a group address, or answers null when Google does not hold a
+   * group at that address. Any other refusal still fails closed.
+   */
+  resolveIfHeld(email: string): Promise<ResolvedGoogleGroup | null>;
 }
 
 /**
@@ -636,6 +675,20 @@ export function createGoogleGroupResolver(
         Authorization: `Bearer ${token}`,
       });
     },
+    async resolveIfHeld(email: string): Promise<ResolvedGoogleGroup | null> {
+      const address = GroupAddressSchema.safeParse(email);
+      if (!address.success) {
+        throw new AccessMembershipEvaluationError(
+          'DESIGNATED_GROUP_IDENTITY_INVALID',
+          'The Google Group address is not a valid email address.',
+        );
+      }
+      const token = await client.accessToken();
+      return client.resolveGroupIdentityIfHeld(address.data, {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      });
+    },
   });
 }
 
@@ -650,15 +703,35 @@ export function createGoogleAccessMembershipEvaluator(
   configuration: GoogleCloudIdentityRosterConfiguration,
   options: GoogleGroupsClientOptions = {},
 ): GoogleAccessMembershipEvaluator {
-  const { accessToken, now, providerRequest, resolveGroupIdentity } =
-    googleGroupsClient(configuration, options);
+  const {
+    accessToken,
+    now,
+    providerRequest,
+    resolveGroupIdentity,
+    resolveGroupIdentityIfHeld,
+  } = googleGroupsClient(configuration, options);
 
   /** Reads one configured group's direct user members, failing closed. */
   async function evaluateOneGroup(
     group: DesignatedAccessGroup,
     authorization: Readonly<Record<string, string>>,
   ): Promise<EvaluatedAccessGroup> {
-    const resource = await resolveGroupIdentity(group.email, authorization);
+    // A waiting group is one registered before Google held it. "Not found"
+    // is then the expected answer and evaluates to nobody; the first run
+    // that finds the group carries its ID, and the store records it.
+    const resource =
+      group.waiting === true
+        ? await resolveGroupIdentityIfHeld(group.email, authorization)
+        : await resolveGroupIdentity(group.email, authorization);
+    if (resource === null) {
+      return Object.freeze({
+        groupSourceId: group.groupSourceId,
+        groupEmail: group.email,
+        googleGroupId: null,
+        grantedRole: group.grantedRole,
+        memberEmails: Object.freeze([]),
+      });
+    }
     const { googleGroupId } = resource;
     const memberEmails = new Set<string>();
     const seenMembershipNames = new Set<string>();
@@ -813,7 +886,13 @@ export function createGoogleAccessMembershipEvaluator(
       const distinctMembers = new Set(
         evaluated.flatMap(({ memberEmails }) => [...memberEmails]),
       );
-      if (distinctMembers.size === 0) {
+      // A roster whose only Google groups are still waiting for Google is
+      // empty for a reason. Sign-in groups are never waiting, so the
+      // lockout guard below still holds for them.
+      const waiting = evaluated.some(
+        ({ googleGroupId }) => googleGroupId === null,
+      );
+      if (distinctMembers.size === 0 && !waiting) {
         throw new AccessMembershipEvaluationError(
           'CONFIGURED_GROUPS_EMPTY',
           'No configured access group has a current direct user member.',
