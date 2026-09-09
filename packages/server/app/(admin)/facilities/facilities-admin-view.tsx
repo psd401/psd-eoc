@@ -399,6 +399,59 @@ function ManualMembersForm({
  * snapshot, so the roster has to be published before the change takes effect.
  * Publishing notifies nobody.
  */
+function ConventionBuildingGroupsForm({
+  csrfToken,
+}: Readonly<{ csrfToken: string }>) {
+  const helpId = 'convention-building-groups-help';
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input
+        name="intent"
+        type="hidden"
+        value="register-building-groups-by-convention"
+      />
+      <fieldset>
+        <legend>Register building groups by naming convention</legend>
+        <p id={helpId}>
+          Every active school without a Google building source gets one named by
+          its short code, <code>&lt;code&gt;-eoc@</code> followed by the staff
+          domain, such as <code>hhe-eoc</code>. A group Google does not hold yet
+          is registered as waiting: it names nobody until the group exists, and
+          syncs automatically from then on. The roster is published afterwards,
+          so drills can start at every school with the district-wide list. This
+          does not start an event or notify anyone.
+        </p>
+        <button aria-describedby={helpId} type="submit">
+          Register building groups by naming convention
+        </button>
+      </fieldset>
+    </form>
+  );
+}
+function WaitingGroupsCheckForm({
+  csrfToken,
+}: Readonly<{ csrfToken: string }>) {
+  const helpId = 'waiting-groups-check-help';
+  return (
+    <form action="/facilities/api" method="post">
+      <AdminMutationFields csrfToken={csrfToken} />
+      <input name="intent" type="hidden" value="check-waiting-groups" />
+      <fieldset>
+        <legend>Check waiting groups with Google</legend>
+        <p id={helpId}>
+          Asks Google now whether it holds each waiting group. A group Google
+          holds is connected and read by the next scheduled roster sync, within
+          two hours, and syncs automatically from then on; this check changes
+          nothing itself. This does not start an event or notify anyone.
+        </p>
+        <button aria-describedby={helpId} type="submit">
+          Check waiting groups with Google
+        </button>
+      </fieldset>
+    </form>
+  );
+}
 function RosterPublishForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
   const helpId = 'roster-publish-help';
   return (
@@ -490,7 +543,11 @@ function ManualOthersGroupForm({
 
 function groupSourceIdentity(group: GroupSource): string {
   if (group.kind === 'google-group') {
-    return `${group.googleGroupId} (${group.email})`;
+    // A waiting source was registered before Google held its group. It names
+    // nobody until the group exists; the sync then records the ID.
+    return group.googleGroupId === null
+      ? `Waiting for Google Group ${group.email}`
+      : `${group.googleGroupId} (${group.email})`;
   }
   if (group.kind === 'synthetic') {
     return group.fixtureKey;
@@ -658,6 +715,8 @@ function GroupSourcesSection({
           />
         ))}
       </div>
+      <ConventionBuildingGroupsForm csrfToken={csrfToken} />
+      <WaitingGroupsCheckForm csrfToken={csrfToken} />
       <RosterPublishForm csrfToken={csrfToken} />
       {buildingPage.pageInfo.hasMore
         ? nextPageLink(

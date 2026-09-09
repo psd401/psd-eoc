@@ -194,6 +194,81 @@ describe('facilities administration form parsing', () => {
     ]);
   });
 
+  test('registers a building source as waiting when Google does not hold its group, and never an others source', async () => {
+    const asked: string[] = [];
+    const resolvers = {
+      resolve: googleThatIsNeverAsked(),
+      resolveOrWaiting: async (email: string) => {
+        asked.push(email);
+        return null;
+      },
+    };
+    const waiting = await parseFacilitiesAdminMutation(
+      adminForm('create-google-building-group', [
+        ['facilityId', IDS.facilityA],
+        ['displayName', 'Site A staff'],
+        ['email', 'SITE-A-EOC@example.invalid'],
+      ]),
+      resolvers,
+    );
+    expect(waiting).toMatchObject({
+      command: {
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: IDS.facilityA,
+        googleGroupId: null,
+        email: 'site-a-eoc@example.invalid',
+      },
+      status: 'building-group-created',
+    });
+    expect(asked).toEqual(['site-a-eoc@example.invalid']);
+
+    // An others source is the district-wide list; it must exist to be
+    // registered, so it resolves strictly and a lone function resolver
+    // never lets anything wait.
+    await expect(
+      parseFacilitiesAdminMutation(
+        adminForm('create-google-others-group', [
+          ['displayName', 'District responders'],
+          ['email', 'responders@example.invalid'],
+        ]),
+        {
+          resolve: async () => {
+            throw new AdminFormError('Google refused the lookup.');
+          },
+          resolveOrWaiting: async () => null,
+        },
+      ),
+    ).rejects.toThrow('Google refused the lookup.');
+  });
+
+  test('parses the convention registration and sync-now intents with no fields beyond the common ones', async () => {
+    const convention = await parseFacilitiesAdminMutation(
+      adminForm('register-building-groups-by-convention', []),
+      googleThatIsNeverAsked(),
+    );
+    expect(convention).toEqual({
+      intent: 'register-building-groups-by-convention',
+      command: null,
+      status: 'building-groups-registered',
+    });
+    const syncNow = await parseFacilitiesAdminMutation(
+      adminForm('check-waiting-groups', []),
+      googleThatIsNeverAsked(),
+    );
+    expect(syncNow).toEqual({
+      intent: 'check-waiting-groups',
+      command: null,
+      status: 'waiting-groups-checked',
+    });
+    await expect(
+      parseFacilitiesAdminMutation(
+        adminForm('check-waiting-groups', [['facilityId', IDS.facilityA]]),
+        googleThatIsNeverAsked(),
+      ),
+    ).rejects.toBeInstanceOf(AdminFormError);
+  });
+
   test('takes the Google Group ID from Google, never from the form', async () => {
     // A form that carries an ID of its own is refused outright: the field is
     // not on the allowed list, so nothing a person types can become the

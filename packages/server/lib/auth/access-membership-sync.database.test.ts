@@ -287,7 +287,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     groups: readonly Readonly<{
       groupSourceId: string;
       groupEmail: string;
-      googleGroupId: string;
+      googleGroupId: string | null;
       grantedRole: 'staff' | 'admin' | null;
       memberEmails: readonly string[];
     }>[],
@@ -469,6 +469,121 @@ describeWithDatabase('access-membership atomic database publication', () => {
         { email: RECOVERY_EMAIL, groupSourceId: BASELINE_SOURCE_ID },
       ].sort((left, right) => left.email.localeCompare(right.email)),
     );
+  });
+
+  test('records the Google Group ID for a waiting building source once Google holds it', async () => {
+    // A school's group registered before Google held it: no ID, nobody in
+    // it. The roster-scope sync keeps publishing around it, and the first run
+    // that finds the group records its ID; from then on it syncs normally.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const [facility] = await database
+      .insert(facilities)
+      .values({
+        id: '00000000-0000-4000-8000-000000000560',
+        code: 'HHE',
+        name: 'Harbor Heights Elementary School',
+        active: true,
+      })
+      .returning({ id: facilities.id });
+    if (facility === undefined)
+      throw new Error('The facility was not created.');
+    const waitingSourceId = '00000000-0000-4000-8000-000000000561';
+    await database.insert(groupSources).values({
+      id: waitingSourceId,
+      kind: 'google-group',
+      purpose: 'building',
+      facilityId: facility.id,
+      displayName: 'Harbor Heights staff (waiting)',
+      grantedRole: null,
+      active: true,
+      googleGroupId: null,
+      email: 'hhe-eoc@example.invalid',
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+    const configured = await store.readConfiguredAccessGroups('roster');
+    expect(configured).toEqual([
+      {
+        groupSourceId: waitingSourceId,
+        email: 'hhe-eoc@example.invalid',
+        grantedRole: null,
+        waiting: true,
+      },
+    ]);
+    const stillWaiting = await reserve(
+      store,
+      'roster-sync:waiting-0001',
+      'roster',
+    );
+    if (stillWaiting.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      stillWaiting.id,
+      evaluationFor([
+        {
+          groupSourceId: waitingSourceId,
+          groupEmail: 'hhe-eoc@example.invalid',
+          googleGroupId: null,
+          grantedRole: null,
+          memberEmails: [],
+        },
+      ]),
+      'roster',
+    );
+    const [afterWaiting] = await database
+      .select({ googleGroupId: groupSources.googleGroupId })
+      .from(groupSources)
+      .where(eq(groupSources.id, waitingSourceId));
+    expect(afterWaiting?.googleGroupId).toBeNull();
+
+    const nowHeld = await reserve(store, 'roster-sync:waiting-0002', 'roster');
+    if (nowHeld.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      nowHeld.id,
+      evaluationFor([
+        {
+          groupSourceId: waitingSourceId,
+          groupEmail: 'hhe-eoc@example.invalid',
+          googleGroupId: 'hhe_eoc_now_held',
+          grantedRole: null,
+          memberEmails: [TRANSITION_EMAIL],
+        },
+      ]),
+      'roster',
+    );
+    const [afterHeld] = await database
+      .select({ googleGroupId: groupSources.googleGroupId })
+      .from(groupSources)
+      .where(eq(groupSources.id, waitingSourceId));
+    expect(afterHeld?.googleGroupId).toBe('hhe_eoc_now_held');
+    expect(await store.readConfiguredAccessGroups('roster')).toMatchObject([
+      { groupSourceId: waitingSourceId, waiting: false },
+    ]);
+    const members = await database
+      .select({ email: groupMembers.email })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupSourceId, waitingSourceId));
+    expect(members).toEqual([{ email: TRANSITION_EMAIL }]);
+
+    // A recorded ID is then held to: Google answering another ID for the
+    // same address is a changed configuration, not a quiet re-point.
+    const changed = await reserve(store, 'roster-sync:waiting-0003', 'roster');
+    if (changed.kind !== 'reserved') throw new Error('expected reserved');
+    await expect(
+      store.publish(
+        changed.id,
+        evaluationFor([
+          {
+            groupSourceId: waitingSourceId,
+            groupEmail: 'hhe-eoc@example.invalid',
+            googleGroupId: 'some_other_group',
+            grantedRole: null,
+            memberEmails: [TRANSITION_EMAIL],
+          },
+        ]),
+        'roster',
+      ),
+    ).rejects.toMatchObject({ code: 'ACCESS_CONFIGURATION_CHANGED' });
   });
 
   test('a group removed after the first snapshot becomes a valid baseline', async () => {

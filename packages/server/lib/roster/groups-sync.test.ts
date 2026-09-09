@@ -12,6 +12,7 @@ import {
   type RosterSyncResult,
 } from '@psd-eoc/contracts';
 
+import { resetStaffRosterEmailForTests } from '../config/staff-email';
 import {
   createScheduledRosterSyncAuthorizer,
   createSyncRosterHandler,
@@ -132,6 +133,7 @@ function loadedConfiguration(
     id: IDS.configuration,
     version: 3,
   }),
+  population: 'staff' | 'synthetic' = 'synthetic',
 ): LoadedRosterSourceConfiguration {
   const facilityIds = [
     ...new Set(
@@ -143,7 +145,7 @@ function loadedConfiguration(
   const configuration = RosterSourceConfigurationSchema.parse({
     id: reference.id,
     version: reference.version,
-    population: 'synthetic',
+    population,
     facilityIds,
     groupSourceRefs: sources.map(sourceReference),
     createdAt: HISTORICAL_TIME,
@@ -897,6 +899,92 @@ describe('rejected roster synchronization', () => {
     expect(collector.alerts.at(-1)?.errorCodes).toEqual([
       'EMPTY_BUILDING_GROUP',
     ]);
+  });
+
+  test('publishes when a waiting Google building source names nobody', async () => {
+    // A building source registered before Google held its group has no ID
+    // and no members yet. It keeps its school in the snapshot, reached by
+    // the others sources, rather than being refused as an empty group. A
+    // staff population, because only Google and manual sources may wait.
+    const previousDomain = process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+    process.env.GOOGLE_OIDC_HOSTED_DOMAIN = 'example.invalid';
+    resetStaffRosterEmailForTests();
+    try {
+      const waitingSource = GroupSourceSchema.parse({
+        id: '00000000-0000-4000-8000-000000000450',
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: IDS.facilityNorth,
+        grantedRole: null,
+        displayName: 'North staff (waiting)',
+        active: true,
+        membersCapturedAt: null,
+        googleGroupId: null,
+        email: 'north-eoc@example.invalid',
+        createdAt: HISTORICAL_TIME,
+      });
+      const manualSource = (
+        id: string,
+        purpose: 'building' | 'others',
+        facilityId: string | null,
+      ): GroupSource =>
+        GroupSourceSchema.parse({
+          id,
+          kind: 'manual',
+          purpose,
+          facilityId,
+          grantedRole: null,
+          displayName: `Manual ${purpose}`,
+          active: true,
+          membersCapturedAt: null,
+          googleGroupId: null,
+          email: null,
+          fixtureKey: null,
+          createdAt: HISTORICAL_TIME,
+        });
+      const southManual = manualSource(
+        '00000000-0000-4000-8000-000000000451',
+        'building',
+        IDS.facilitySouth,
+      );
+      const othersManual = manualSource(
+        '00000000-0000-4000-8000-000000000452',
+        'others',
+        null,
+      );
+      const loaded = loadedConfiguration(
+        [waitingSource, southManual, othersManual],
+        REVISION_DIGEST,
+        undefined,
+        'staff',
+      );
+      const store = new MemoryRosterSyncStore(loaded);
+      const collector = alertCollector();
+      const result = await syncRoster(
+        SYNC_INPUT,
+        context('roster-sync-waiting-building-0001'),
+        dependencies(
+          store,
+          {
+            [waitingSource.id]: [],
+            [southManual.id]: [SOUTH_MEMBER],
+            [othersManual.id]: [SHARED_MEMBER],
+          },
+          collector.sink,
+        ),
+      );
+      expect(result.outcome).toBe('complete');
+      expect(result.groupFailures).toEqual([]);
+      expect(result.publishedSnapshotId).not.toBeNull();
+      expect(store.snapshots[0]?.facilityIds).toContain(IDS.facilityNorth);
+    } finally {
+      if (previousDomain === undefined) {
+        delete process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+      } else {
+        process.env.GOOGLE_OIDC_HOSTED_DOMAIN = previousDomain;
+      }
+      resetStaffRosterEmailForTests();
+    }
   });
 
   test('rejects a suspicious non-empty building drop against the unchanged configuration', async () => {
