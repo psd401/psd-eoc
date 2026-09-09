@@ -586,6 +586,104 @@ describeWithDatabase('access-membership atomic database publication', () => {
     ).rejects.toMatchObject({ code: 'ACCESS_CONFIGURATION_CHANGED' });
   });
 
+  test('leaves a waiting source waiting when Google answers a group already registered', async () => {
+    // phs-eoc@ turns out to be an alias of the district responders group,
+    // or the same group registered twice. Recording its ID would collide
+    // with the one-source-per-group rule on this run and every later one,
+    // so the run publishes the other groups, records nothing for this one,
+    // and writes none of the members Google returned under it.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const [facility] = await database
+      .insert(facilities)
+      .values({
+        id: '00000000-0000-4000-8000-000000000570',
+        code: 'PHS',
+        name: 'Peninsula High School',
+        active: true,
+      })
+      .returning({ id: facilities.id });
+    if (facility === undefined)
+      throw new Error('The facility was not created.');
+    const othersSourceId = '00000000-0000-4000-8000-000000000571';
+    const waitingSourceId = '00000000-0000-4000-8000-000000000572';
+    await database.insert(groupSources).values([
+      {
+        id: othersSourceId,
+        kind: 'google-group',
+        purpose: 'others',
+        facilityId: null,
+        displayName: 'District responders',
+        grantedRole: null,
+        active: true,
+        googleGroupId: 'district_responders',
+        email: 'responders@example.invalid',
+        fixtureKey: null,
+        createdAt: BASELINE_TIME,
+      },
+      {
+        id: waitingSourceId,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: 'Peninsula High staff (waiting)',
+        grantedRole: null,
+        active: true,
+        googleGroupId: null,
+        email: 'phs-eoc@example.invalid',
+        fixtureKey: null,
+        createdAt: BASELINE_TIME,
+      },
+    ]);
+    const run = await reserve(store, 'roster-sync:alias-0001', 'roster');
+    if (run.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      run.id,
+      evaluationFor([
+        {
+          groupSourceId: othersSourceId,
+          groupEmail: 'responders@example.invalid',
+          googleGroupId: 'district_responders',
+          grantedRole: null,
+          memberEmails: [TRANSITION_EMAIL],
+        },
+        {
+          groupSourceId: waitingSourceId,
+          groupEmail: 'phs-eoc@example.invalid',
+          googleGroupId: 'district_responders',
+          grantedRole: null,
+          memberEmails: [TRANSITION_EMAIL],
+        },
+      ]),
+      'roster',
+    );
+    const [source] = await database
+      .select({ googleGroupId: groupSources.googleGroupId })
+      .from(groupSources)
+      .where(eq(groupSources.id, waitingSourceId));
+    expect(source?.googleGroupId).toBeNull();
+    expect(
+      await database
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, waitingSourceId)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, othersSourceId)),
+    ).toEqual([{ email: TRANSITION_EMAIL }]);
+    expect(await store.readConfiguredAccessGroups('roster')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          groupSourceId: waitingSourceId,
+          waiting: true,
+        }),
+      ]),
+    );
+  });
+
   test('a group removed after the first snapshot becomes a valid baseline', async () => {
     // The other half, and the one this deployment actually needed: retiring a
     // group had no implementation at all.

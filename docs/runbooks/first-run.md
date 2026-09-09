@@ -137,10 +137,20 @@ convention**: every active school without a Google building source gets one
 named by its short code, `<code>-eoc@` followed by the staff domain, and the
 roster is published in the same step. A Google Group that does not exist yet
 is registered as **waiting**: the source names nobody until Google holds the
-group, and it is connected and read automatically by the next scheduled sync
-once it exists, or at once from **Check waiting groups and sync now**. A new
-school added on that page gets its convention group the same way. An others
-source must exist when it is registered; only building sources may wait.
+group, and its ID is recorded and its members read by the next scheduled
+membership sync once it exists. **Check waiting groups with Google** asks at
+once which waiting groups Google holds now, without waiting for the schedule.
+A new school added on that page gets its convention group the same way. An
+others source must exist when it is registered; only building sources may
+wait.
+
+Each school is registered by its own call, so when Google fails part-way the
+schools before it stay registered and the page says how many; press the
+action again to continue with the rest. Two cases stay waiting on purpose:
+a school whose short code changed keeps a waiting source at the old address,
+so the action lists that school again and registers the new address beside
+it; and a waiting group that turns out to be an alias of a group already
+registered is not recorded, because one Google group backs one roster source.
 
 ## 5. Confirm the roster
 

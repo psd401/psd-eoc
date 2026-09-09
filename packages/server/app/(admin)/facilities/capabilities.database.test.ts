@@ -73,6 +73,7 @@ import {
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
+  conventionBuildingGroupAddress,
   listFacilitiesWithoutGoogleBuildingSource,
   executeSetManualRosterMembersCapability,
   executeCreateNeighborhoodVersionCapability,
@@ -1262,9 +1263,12 @@ describeWithDatabase('facilities administrator database flow', () => {
         });
         // The new school has no Google building source yet.
         expect(
-          (await listFacilitiesWithoutGoogleBuildingSource(ownerDatabase)).map(
-            ({ id }) => id,
-          ),
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
         ).toContain(facility.id);
 
         // Google does not hold the group yet: the source is registered
@@ -1291,9 +1295,12 @@ describeWithDatabase('facilities administrator database flow', () => {
           email: `wait-${suffix.slice(0, 6)}-eoc@example.invalid`,
         });
         expect(
-          (await listFacilitiesWithoutGoogleBuildingSource(ownerDatabase)).map(
-            ({ id }) => id,
-          ),
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
         ).not.toContain(facility.id);
 
         // The same address cannot wait twice for the same purpose.
@@ -1354,6 +1361,55 @@ describeWithDatabase('facilities administrator database flow', () => {
               ),
             ),
         ).toEqual([]);
+
+        // A short-code change makes the waiting address one nobody will
+        // create a group at: the school is listed again, and stops being
+        // listed once the new convention address waits beside the old one.
+        const renamedCode = `${facility.code}2`;
+        await executeUpdateFacilityCapability({
+          authenticated,
+          store,
+          command: {
+            facilityId: facility.id,
+            code: renamedCode,
+            name: facility.name,
+            active: true,
+          },
+          metadata: metadata('waiting-facility-rename', requestIds),
+        });
+        expect(
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
+        ).toContain(facility.id);
+        await executeCreateGroupSourceCapability({
+          authenticated,
+          store,
+          command: {
+            kind: 'google-group',
+            purpose: 'building',
+            facilityId: facility.id,
+            displayName: `Waiting staff ${suffix.slice(0, 8)} renamed`,
+            active: true,
+            googleGroupId: null,
+            email: conventionBuildingGroupAddress(
+              renamedCode,
+              'example.invalid',
+            ),
+          },
+          metadata: metadata('waiting-google-building-renamed', requestIds),
+        });
+        expect(
+          (
+            await listFacilitiesWithoutGoogleBuildingSource(
+              ownerDatabase,
+              'example.invalid',
+            )
+          ).map(({ id }) => id),
+        ).not.toContain(facility.id);
       },
     );
   });
