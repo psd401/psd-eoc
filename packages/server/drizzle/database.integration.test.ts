@@ -6045,9 +6045,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       rosterSnapshots: 1,
       rosterRecipients: 4,
       rosterEndpoints: 12,
-      eventTypes: 12,
-      eventTypeVersions: 12,
-      eventTypeTemplates: 108,
+      eventTypes: 14,
+      eventTypeVersions: 14,
+      eventTypeTemplates: 126,
       channelConfigurations: 3,
       events: 0,
       outboxMessages: 0,
@@ -6084,8 +6084,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       neighborhood_facilities: 2,
       roster_recipients: 4,
       roster_endpoints: 12,
-      event_types: 12,
-      event_type_templates: 108,
+      event_types: 14,
+      event_type_templates: 126,
       events: 0,
       notification_intents: 0,
       outbox_messages: 0,
@@ -6122,7 +6122,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       order by template_mode, purpose, channel
     `);
     expect(templateCoverage).toHaveLength(18);
-    expect(templateCoverage.every((row) => row.count === 6)).toBe(true);
+    // One template per response type of each mode: seven families now.
+    expect(templateCoverage.every((row) => row.count === 7)).toBe(true);
 
     const northFacility = await db.query.facilities.findFirst({
       where: (facility, { eq }) => eq(facility.code, 'SYN-NORTH'),

@@ -101,10 +101,11 @@ export type BootstrapThreatsOutcome = Readonly<{
  * Creates any configured threat the database does not already have.
  *
  * Matched on key, and existing rows are left exactly as they are, including
- * their position: the declared order is written once, when a row is created,
- * so a later reordering of configuration never silently reshuffles a list
- * operators have learned. The point is that a rebuild does not lose the
- * vocabulary, not that configuration outranks what is already there.
+ * their recorded position: the declared order is written once, when a row is
+ * created. Operators see the list alphabetically (the one needing a
+ * description last), so the position is a record of how the vocabulary was
+ * declared, not what anyone reads. The point is that a rebuild does not lose
+ * the vocabulary, not that configuration outranks what is already there.
  */
 export async function bootstrapThreats(
   database: Database,

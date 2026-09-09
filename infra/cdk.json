@@ -206,11 +206,11 @@
         "facilityCodes": ["DES", "DRC", "GHH", "HBH", "PIE"]
       },
       {
-        "name": "Goodman\u2013Harbor Heights Campus",
+        "name": "Goodman–Harbor Heights Campus",
         "facilityCodes": ["GMS", "HHE"]
       },
       {
-        "name": "Kopachuck\u2013Voyager Campus",
+        "name": "Kopachuck–Voyager Campus",
         "facilityCodes": ["KMS", "VGE"]
       },
       {
@@ -226,26 +226,79 @@
       }
     ],
     "psdEoc:threats": [
-      { "key": "medical", "name": "Medical" },
-      { "key": "drugs", "name": "Drugs" },
-      { "key": "fight-altercation", "name": "Fight/Altercation" },
-      { "key": "fire", "name": "Fire" },
-      { "key": "bus-incident", "name": "Bus Incident" },
-      { "key": "intruder", "name": "Intruder" },
-      { "key": "student-incident", "name": "Student Incident" },
-      { "key": "missing-student", "name": "Missing Student" },
-      { "key": "utility-interruption", "name": "Utility Interruption" },
-      { "key": "gun-firearm", "name": "Gun/Firearm" },
-      { "key": "wildlife", "name": "Wildlife" },
-      { "key": "earthquake", "name": "Earthquake" },
+      {
+        "key": "alarm-activation",
+        "name": "Alarm Activation"
+      },
+      {
+        "key": "bus-incident",
+        "name": "Bus Incident"
+      },
+      {
+        "key": "drugs",
+        "name": "Drugs"
+      },
+      {
+        "key": "earthquake",
+        "name": "Earthquake"
+      },
+      {
+        "key": "fight-altercation",
+        "name": "Fight/Altercation"
+      },
+      {
+        "key": "fire",
+        "name": "Fire"
+      },
+      {
+        "key": "gun-firearm",
+        "name": "Gun/Firearm"
+      },
+      {
+        "key": "intruder",
+        "name": "Intruder"
+      },
+      {
+        "key": "medical",
+        "name": "Medical"
+      },
+      {
+        "key": "missing-student",
+        "name": "Missing Student"
+      },
       {
         "key": "neighborhood-police-activity",
         "name": "Neighborhood Police Activity"
       },
-      { "key": "alarm-activation", "name": "Alarm Activation" },
-      { "key": "weapon", "name": "Weapon" },
-      { "key": "shooting", "name": "Shooting" },
-      { "key": "other", "name": "Other", "requiresDetail": true }
+      {
+        "key": "parent-incident",
+        "name": "Parent Incident"
+      },
+      {
+        "key": "shooting",
+        "name": "Shooting"
+      },
+      {
+        "key": "student-incident",
+        "name": "Student Incident"
+      },
+      {
+        "key": "utility-interruption",
+        "name": "Utility Interruption"
+      },
+      {
+        "key": "weapon",
+        "name": "Weapon"
+      },
+      {
+        "key": "wildlife",
+        "name": "Wildlife"
+      },
+      {
+        "key": "other",
+        "name": "Other",
+        "requiresDetail": true
+      }
     ]
   }
 }
