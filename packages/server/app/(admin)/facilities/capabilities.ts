@@ -41,12 +41,14 @@ import {
   inArray,
   lt,
   ne,
+  notExists,
   notInArray,
   or,
   sql,
   type SQL,
 } from 'drizzle-orm';
 
+import { staffHostedDomain } from '../../../lib/config/deployment';
 import {
   facilities,
   groupMembers,
@@ -985,8 +987,42 @@ async function assertGroupIdentityAvailable(
     // are a legitimate way to keep separate lists of people.
     return;
   }
+  if (source.kind === 'google-group' && source.googleGroupId === null) {
+    // A waiting building source has no Google Group ID yet; its address is
+    // its identity until Google holds the group. One active source per
+    // address and purpose, so the same school group is not registered twice
+    // while it waits.
+    const address = source.email.trim().toLowerCase();
+    await lockAdminIdentity(
+      database,
+      `admin-group-source:google-group:address:${address}`,
+    );
+    const [waitingTwin] = await database
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, source.purpose),
+          eq(groupSources.active, true),
+          sql`lower(${groupSources.email}) = ${address}`,
+        ),
+      )
+      .limit(1)
+      .for('update');
+    if (waitingTwin !== undefined && waitingTwin.id !== exceptId) {
+      throw conflict('That Google Group address is already configured.');
+    }
+    return;
+  }
   const identity =
     source.kind === 'google-group' ? source.googleGroupId : source.fixtureKey;
+  if (identity === null) {
+    // Unreachable: a waiting Google source returned above and a synthetic
+    // source always carries its fixture key. Stated so the identity below is
+    // known to be a string.
+    throw conflict('The group source identity is unavailable.');
+  }
   await lockAdminIdentity(
     database,
     `admin-group-source:${source.kind}:${identity}`,
@@ -999,7 +1035,7 @@ async function assertGroupIdentityAvailable(
   const condition =
     source.kind === 'google-group'
       ? and(
-          eq(groupSources.googleGroupId, source.googleGroupId),
+          eq(groupSources.googleGroupId, identity),
           eq(groupSources.purpose, source.purpose),
         )
       : eq(groupSources.fixtureKey, source.fixtureKey);
@@ -1020,7 +1056,7 @@ async function assertGroupIdentityAvailable(
       .from(groupSources)
       .where(
         and(
-          eq(groupSources.googleGroupId, source.googleGroupId),
+          eq(groupSources.googleGroupId, identity),
           eq(groupSources.purpose, otherRosterPurpose),
           eq(groupSources.active, true),
         ),
@@ -2206,6 +2242,52 @@ export const executeGetFacilityCapability = (
     input.metadata,
   );
 
+/**
+ * The building-group naming convention: a school's Google Group is its short
+ * code, lower-cased, followed by `-eoc` at the staff domain, so Harbor
+ * Heights Elementary (HHE) is `hhe-eoc@` the domain. The domain is the
+ * deployment's, never a literal here.
+ */
+export function conventionBuildingGroupAddress(
+  facilityCode: string,
+  hostedDomain: string = staffHostedDomain(),
+): string {
+  return `${facilityCode.trim().toLowerCase()}-eoc@${hostedDomain}`;
+}
+/**
+ * Active facilities that have no active Google building source yet. A manual
+ * or synthetic building source does not count: the convention registers the
+ * Google group alongside it, and the school's audience is the union.
+ */
+export async function listFacilitiesWithoutGoogleBuildingSource(
+  database: ReturnType<
+    typeof getDefaultAdminDatabase
+  > = getDefaultAdminDatabase(),
+): Promise<readonly Facility[]> {
+  const rows = await database
+    .select()
+    .from(facilities)
+    .where(
+      and(
+        eq(facilities.active, true),
+        notExists(
+          database
+            .select({ id: groupSources.id })
+            .from(groupSources)
+            .where(
+              and(
+                eq(groupSources.facilityId, facilities.id),
+                eq(groupSources.kind, 'google-group'),
+                eq(groupSources.purpose, 'building'),
+                eq(groupSources.active, true),
+              ),
+            ),
+        ),
+      ),
+    )
+    .orderBy(asc(facilities.code));
+  return Object.freeze(rows.map((row) => facilityFromRow(row)));
+}
 export const executeCreateFacilityCapability = (
   input: MutationExecution<CapabilityInput<'create-facility'>>,
 ) =>

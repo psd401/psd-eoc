@@ -441,7 +441,7 @@ const syncAccessMembershipResultFields = {
   snapshotVersion: VersionSchema,
   capturedAt: TimestampSchema,
   activeAccessGroupCount: z.number().int().min(1).max(100),
-  evaluatedMembershipCount: z.number().int().min(1).max(1_200),
+  evaluatedMembershipCount: z.number().int().min(0).max(1_200),
   membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
   providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
   publication: z.enum(['created', 'already-current']),

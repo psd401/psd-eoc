@@ -19,6 +19,14 @@ import { executeListGroupSourcesCapability } from './capabilities';
 
 /** Resolves a Google Group address to the ID the server stores for it. */
 export type GoogleGroupIdResolver = (email: string) => Promise<string>;
+/**
+ * Resolves an address to its Google Group ID, or to null when Google does not
+ * hold a group at that address yet. Only building sources may wait; the form
+ * parser decides which intents use this resolver.
+ */
+export type WaitingGoogleGroupIdResolver = (
+  email: string,
+) => Promise<string | null>;
 
 /** The part of a session these helpers decide on. */
 export type AdminSession = Pick<AuthenticatedSession, 'roles'>;
@@ -99,6 +107,51 @@ export async function resolveGoogleGroupIdForForm(
   }
   try {
     return (await client.resolve(address)).googleGroupId;
+  } catch (error) {
+    if (error instanceof AccessMembershipEvaluationError) {
+      throw new AdminFormError(explain(address, error.code));
+    }
+    throw error;
+  }
+}
+/**
+ * Like `resolveGoogleGroupIdForForm`, but a group Google does not hold yet
+ * answers null so a building source can be registered as waiting: it names
+ * nobody until the group exists, and the scheduled sync records the ID the
+ * first time Google resolves the address. Every other refusal, including a
+ * credential that may not read the group, is still an error, so waiting can
+ * never hide a permission problem.
+ */
+/** The resolver the administration forms use unless a test injects one. */
+export function defaultGoogleGroupResolver(): GoogleGroupResolver {
+  return defaultResolver();
+}
+export async function resolveGoogleGroupIdOrWaitingForForm(
+  authenticated: AdminSession,
+  email: string,
+  resolver: () => GoogleGroupResolver = defaultResolver,
+): Promise<string | null> {
+  requireAdministrator(authenticated);
+  const address = normalizeGroupAddress(email);
+  if (!GroupAddressShape.safeParse(address).success) {
+    throw new AdminFormError(
+      `${address || 'The Google Group address'} is not a valid email address.`,
+    );
+  }
+  let client: GoogleGroupResolver;
+  try {
+    client = resolver();
+  } catch (error) {
+    if (error instanceof GoogleRosterConfigurationError) {
+      throw new AdminFormError(
+        "This server's Google Groups credential is missing or invalid, so a Google Group cannot be looked up. Nothing was saved.",
+      );
+    }
+    throw error;
+  }
+  try {
+    const held = await client.resolveIfHeld(address);
+    return held === null ? null : held.googleGroupId;
   } catch (error) {
     if (error instanceof AccessMembershipEvaluationError) {
       throw new AdminFormError(explain(address, error.code));

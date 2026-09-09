@@ -14,6 +14,7 @@ import {
   googleGroupIdForAccessGroupUpdate,
   normalizeGroupAddress,
   resolveGoogleGroupIdForForm,
+  resolveGoogleGroupIdOrWaitingForForm,
 } from './google-group-id';
 
 const PROVIDER_DETAIL = 'provider detail that must not reach the form';
@@ -28,13 +29,40 @@ function refusing(code: string): () => GoogleGroupResolver {
     resolve: async () => {
       throw new AccessMembershipEvaluationError(code, PROVIDER_DETAIL);
     },
+    resolveIfHeld: async () => {
+      throw new AccessMembershipEvaluationError(code, PROVIDER_DETAIL);
+    },
   });
+}
+
+/** Google holds no group at any address: every waiting lookup answers null. */
+function holdingNothing(): (() => GoogleGroupResolver) & {
+  readonly asked: string[];
+} {
+  const asked: string[] = [];
+  const factory = (): GoogleGroupResolver => ({
+    resolve: async () => {
+      throw new AccessMembershipEvaluationError(
+        'GOOGLE_REQUEST_REJECTED',
+        PROVIDER_DETAIL,
+      );
+    },
+    resolveIfHeld: async (email) => {
+      asked.push(email);
+      return null;
+    },
+  });
+  return Object.assign(factory, { asked });
 }
 
 function resolving(id: string) {
   const asked: string[] = [];
   const factory = (): GoogleGroupResolver => ({
     resolve: async (email) => {
+      asked.push(email);
+      return { name: `groups/${id}`, googleGroupId: id };
+    },
+    resolveIfHeld: async (email) => {
       asked.push(email);
       return { name: `groups/${id}`, googleGroupId: id };
     },
@@ -135,6 +163,9 @@ describe('Google Group ID resolution for the administration forms', () => {
         resolve: async () => {
           throw new TypeError('unexpected');
         },
+        resolveIfHeld: async () => {
+          throw new TypeError('unexpected');
+        },
       })),
     ).rejects.toBeInstanceOf(TypeError);
   });
@@ -193,5 +224,42 @@ describe('the ID an access-group edit carries', () => {
       { lookup: async () => null, resolver: google.factory },
     );
     expect(id).toBe('01resolved');
+  });
+
+  test('answers waiting for a group Google does not hold yet, and the ID once it does', async () => {
+    const nothing = holdingNothing();
+    await expect(
+      resolveGoogleGroupIdOrWaitingForForm(
+        ADMIN,
+        'HHE-EOC@example.invalid',
+        nothing,
+      ),
+    ).resolves.toBeNull();
+    expect(nothing.asked).toEqual(['hhe-eoc@example.invalid']);
+    const held = resolving('group-42');
+    await expect(
+      resolveGoogleGroupIdOrWaitingForForm(
+        ADMIN,
+        'hhe-eoc@example.invalid',
+        held.factory,
+      ),
+    ).resolves.toBe('group-42');
+  });
+
+  test('waiting never hides a refusal other than "not held"', async () => {
+    await expect(
+      resolveGoogleGroupIdOrWaitingForForm(
+        ADMIN,
+        'hhe-eoc@example.invalid',
+        refusing('GOOGLE_REQUEST_REJECTED'),
+      ),
+    ).rejects.toThrow('Google refused the lookup of hhe-eoc@example.invalid.');
+    await expect(
+      resolveGoogleGroupIdOrWaitingForForm(
+        STAFF,
+        'hhe-eoc@example.invalid',
+        holdingNothing(),
+      ),
+    ).rejects.toThrow('Access is denied.');
   });
 });

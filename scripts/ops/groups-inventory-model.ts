@@ -371,10 +371,17 @@ export interface GroupsInventoryConfiguration {
   readonly academicTimeZone: string;
   readonly organizationPrefixes: readonly string[];
 }
+/**
+ * A building source the inventory proposes from a group Google already holds,
+ * so its Google Group ID is always known. A source registered in the
+ * application before Google holds its group is "waiting" and carries no ID;
+ * the inventory never proposes one of those.
+ */
 export type GoogleBuildingGroupSource = Extract<
   CreateGroupSourceInput,
   { readonly kind: 'google-group'; readonly purpose: 'building' }
->;
+> &
+  Readonly<{ googleGroupId: string }>;
 export type ReviewDecision =
   | 'pending'
   | 'confirmed'

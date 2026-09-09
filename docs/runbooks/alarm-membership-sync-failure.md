@@ -74,7 +74,9 @@ stays authoritative rather than being replaced by one that reaches fewer people.
 
 - `EMPTY_BUILDING_GROUP` — a building source now resolves to nobody. Confirm
   whether that is true before treating it as an outage; if it is not, the
-  source's membership is what to fix.
+  source's membership is what to fix. A Google building source still
+  **waiting** for Google to hold its group is expected to name nobody and is
+  not refused; it shows as waiting on the Facilities page.
 - `SUSPICIOUS_BUILDING_GROUP_DROP` — membership fell far enough to look like a
   bad read. Confirm the drop is intended, then publish once from
   **Facilities → Publish the roster** to accept it.

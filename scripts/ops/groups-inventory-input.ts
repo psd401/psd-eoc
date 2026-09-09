@@ -301,7 +301,12 @@ export const parseGroupSourceFromDraft = (
     if (source.kind !== 'google-group' || source.purpose !== 'building') {
       throw new Error('Draft group source is not a Google building source.');
     }
-    return source;
+    if (source.googleGroupId === null) {
+      throw new Error(
+        'Draft group source must name a Google group Google holds, not a waiting one.',
+      );
+    }
+    return { ...source, googleGroupId: source.googleGroupId };
   } catch (error) {
     throw new Error(
       'Draft group source does not satisfy the canonical building contract.',

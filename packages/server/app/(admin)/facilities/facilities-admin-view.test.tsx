@@ -240,6 +240,40 @@ describe('facilities administration view', () => {
     expect(markup).not.toContain(`value="${IDS.buildingSuperseded}"`);
   });
 
+  test('shows a waiting Google building source and offers the convention and sync-now actions', () => {
+    const [waitingSource, ...otherBuildingSources] =
+      AUTHORIZED_VIEW.buildingGroups.items;
+    if (waitingSource?.kind !== 'google-group') {
+      throw new Error('The fixture must lead with a Google building source.');
+    }
+    const view = {
+      ...AUTHORIZED_VIEW,
+      buildingGroups: GroupSourcePageSchema.parse({
+        ...AUTHORIZED_VIEW.buildingGroups,
+        items: [
+          { ...waitingSource, googleGroupId: null },
+          ...otherBuildingSources,
+        ],
+      }),
+    } satisfies FacilitiesAdminViewModel;
+    const markup = renderToStaticMarkup(
+      <FacilitiesAdminView
+        csrfToken="csrf-token-for-view-test"
+        statusMessage={null}
+        view={view}
+      />,
+    );
+
+    // A source registered before Google held its group says so, instead of
+    // showing an ID it does not have.
+    expect(markup).toContain(`Waiting for Google Group ${waitingSource.email}`);
+    expect(markup).not.toContain('null (');
+    expect(markup).toContain('value="register-building-groups-by-convention"');
+    expect(markup).toContain('Register building groups by naming convention');
+    expect(markup).toContain('value="check-waiting-groups"');
+    expect(markup).toContain('Check waiting groups with Google');
+  });
+
   test('keeps complete form selections while all four displays paginate independently', () => {
     const facilityA = AUTHORIZED_VIEW.facilities.items[0]!;
     const facilityB = AUTHORIZED_VIEW.facilities.items[1]!;

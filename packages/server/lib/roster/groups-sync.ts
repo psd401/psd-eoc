@@ -988,9 +988,23 @@ export async function syncRoster(
       }),
     );
     const groupDiff = diffRosterGroupCounts(groupCountEvidence, baseline);
+    // A waiting Google building source (registered before Google held its
+    // group, no ID recorded yet) is expected to name nobody. It keeps its
+    // school in the snapshot so the district-wide others sources reach that
+    // school now; it is not an empty group to refuse.
+    const waitingSourceIds = new Set(
+      loaded.sources.flatMap((source) =>
+        source.kind === 'google-group' && source.googleGroupId === null
+          ? [source.id]
+          : [],
+      ),
+    );
     const suspiciousBuildingFailures: readonly FailedGroup[] =
       groupDiff.flatMap((entry) => {
-        if (entry.groupSourceRef.purpose !== 'building') {
+        if (
+          entry.groupSourceRef.purpose !== 'building' ||
+          waitingSourceIds.has(entry.groupSourceRef.id)
+        ) {
           return [];
         }
         const removed =
