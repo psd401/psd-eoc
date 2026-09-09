@@ -41,8 +41,9 @@ base URL are configuration. `readDeploymentTarget` and
 neighborhoods, synthetic groups, and threats are validated again before
 bootstrap.
 
-`psdEoc:threats` is the ordered list an operator chooses from before the
-response when starting an incident or a drill. Each entry has a lower-case
+`psdEoc:threats` is the list an operator chooses from before the response
+when starting an incident or a drill; operators see it alphabetically, with
+an entry that requires a description last, whatever order it is declared in. Each entry has a lower-case
 `key` the bootstrap matches on, a `name`, and optionally `requiresDetail: true`
 for an entry such as "Other" that cannot be chosen without a typed
 description. The bootstrap creates any threat the database lacks and never

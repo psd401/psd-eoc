@@ -35,6 +35,11 @@ export const eventTypes = pgTable(
     // A response such as "Other" that an operator must describe in their own
     // words before it can be chosen.
     requiresDetail: boolean('requires_detail').default(false).notNull(),
+    // Where the response sits in the list an operator chooses from. The
+    // district reads its responses in a fixed order (Investigation first,
+    // Other last), not alphabetically; a response added on the Responses
+    // page takes the default and lists after the ordered ones, by key.
+    displayOrder: integer('display_order').default(1000).notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [

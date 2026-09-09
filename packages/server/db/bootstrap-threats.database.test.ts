@@ -22,6 +22,7 @@ import {
 } from './client';
 import { threats } from './schema';
 import { migrateDatabase } from '../drizzle/migrate';
+import { createDrizzleStartFlowCapabilityStore } from '../lib/capabilities/start';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -127,6 +128,49 @@ describeWithDatabase('threat bootstrap', () => {
 
   afterAll(async () => {
     await connection?.close();
+  });
+
+  test('operators see threats alphabetically, the one needing a description last, whatever order was declared', async () => {
+    // The declared position is written on the row when a threat is created;
+    // the list an operator chooses from ignores it (the district's request
+    // of 2026-09-09: alphabetical is what a person can scan under pressure).
+    const generated = uniqueKeys(3);
+    const zebra = keyAt(generated, 0);
+    const alpha = keyAt(generated, 1);
+    const described = keyAt(generated, 2);
+    const suffix = randomUUID().slice(0, 8);
+    await bootstrapThreats(connection!.db, {
+      PSD_EOC_THREATS: JSON.stringify([
+        { key: zebra, name: `Zebra ordering ${suffix}` },
+        {
+          key: described,
+          name: `Alpha described ${suffix}`,
+          requiresDetail: true,
+        },
+        { key: alpha, name: `Alpha ordering ${suffix}` },
+      ]),
+    });
+    const store = createDrizzleStartFlowCapabilityStore(connection!.db);
+    const page = await store.transaction((transaction) =>
+      transaction.listThreats({
+        includeInactive: false,
+        cursor: null,
+        limit: 200,
+      }),
+    );
+    const ours = page.items.filter((threat) => threat.name.endsWith(suffix));
+    expect(ours.map((threat) => threat.key)).toEqual([alpha, zebra, described]);
+    // Nothing that takes no description lists after anything that does.
+    const firstDescribed = page.items.findIndex(
+      (threat) => threat.requiresDetail,
+    );
+    if (firstDescribed !== -1) {
+      expect(
+        page.items
+          .slice(firstDescribed)
+          .every((threat) => threat.requiresDetail),
+      ).toBe(true);
+    }
   });
 
   test('creates the configured threats a fresh deployment lacks, in declared order', async () => {

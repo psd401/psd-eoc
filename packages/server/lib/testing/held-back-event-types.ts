@@ -28,3 +28,26 @@ export async function insertEventTypesBeforeDetailRule(
     `);
   }
 }
+
+/**
+ * Writes the seed's event types with the columns a schema held before
+ * `0051_response_display_order` has: everything but the display order. The
+ * rows take the column's default when the fixture upgrades; the fixtures
+ * that hold a database back assert migration behavior, never list order.
+ */
+export async function insertEventTypesBeforeDisplayOrder(
+  transaction: SeedTransaction,
+): Promise<void> {
+  for (const row of eventTypeRows) {
+    await transaction.execute(sql`
+      insert into event_types (
+        id, key, family_key, template_mode, requires_detail, created_at
+      )
+      values (
+        ${row.id}, ${row.key}, ${row.familyKey}, ${row.templateMode},
+        ${row.requiresDetail}, ${row.createdAt}
+      )
+      on conflict do nothing
+    `);
+  }
+}
