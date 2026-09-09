@@ -72,6 +72,13 @@ export type ClassificationMarker = z.infer<typeof ClassificationMarkerSchema>;
  * Owns the complete renderer-variable vocabulary available to administrator-
  * editable message wording. New variables require a contracts revision so
  * every channel renderer remains consistent.
+ *
+ * `startTime` and `initiator` describe the activation: when the event
+ * started and who started it, in every purpose's wording. `updatedBy` and
+ * `updatedAt` describe the action a lifecycle notification announces: who
+ * gave the all-clear or reactivated the event, and when. They exist only for
+ * those purposes; activation wording has no such action to describe, so the
+ * template set refuses them there.
  */
 export const TemplateVariableSchema = z.enum([
   'site',
@@ -79,10 +86,35 @@ export const TemplateVariableSchema = z.enum([
   'threat',
   'startTime',
   'initiator',
+  'updatedBy',
+  'updatedAt',
 ]);
 
 /** Renderer variable name inferred from its schema. */
 export type TemplateVariable = z.infer<typeof TemplateVariableSchema>;
+
+/** The variables every purpose may use. */
+export const ACTIVATION_TEMPLATE_VARIABLES = Object.freeze([
+  'site',
+  'eventType',
+  'threat',
+  'startTime',
+  'initiator',
+] as const satisfies readonly TemplateVariable[]);
+
+/** The variables only an all-clear or reactivation may use. */
+export const LIFECYCLE_TEMPLATE_VARIABLES = Object.freeze([
+  'updatedBy',
+  'updatedAt',
+] as const satisfies readonly TemplateVariable[]);
+
+/** A variable every purpose may use. */
+export type ActivationTemplateVariable =
+  (typeof ACTIVATION_TEMPLATE_VARIABLES)[number];
+
+/** A variable only an all-clear or reactivation may use. */
+export type LifecycleTemplateVariable =
+  (typeof LIFECYCLE_TEMPLATE_VARIABLES)[number];
 
 /**
  * Owns the exact token syntax accepted in message templates. Renderers replace
@@ -94,12 +126,20 @@ export const TemplateTokenSchema = z.enum([
   '{{threat}}',
   '{{startTime}}',
   '{{initiator}}',
+  '{{updatedBy}}',
+  '{{updatedAt}}',
 ]);
 
 /** Allowed renderer token inferred from its schema. */
 export type TemplateToken = z.infer<typeof TemplateTokenSchema>;
 
 const allowedTemplateTokens = new Set<string>(TemplateTokenSchema.options);
+
+/** The tokens an activation template may not carry. */
+export const LIFECYCLE_ONLY_TEMPLATE_TOKENS = Object.freeze([
+  '{{updatedBy}}',
+  '{{updatedAt}}',
+] as const satisfies readonly TemplateToken[]);
 
 function isUnsafeVisibleTextCodePoint(codePoint: number): boolean {
   return (
@@ -350,6 +390,29 @@ export const MessageTemplateSetSchema = z
         });
       }
     });
+    // An activation announces no later action, so there is nobody and no
+    // time for these tokens to name; refusing them here keeps the renderer
+    // from ever meeting an activation it cannot render.
+    if (templates.purpose === 'activation') {
+      const fields: ReadonlyArray<readonly [string, string, string]> = [
+        ['push', 'title', templates.push.title],
+        ['push', 'body', templates.push.body],
+        ['email', 'subject', templates.email.subject],
+        ['email', 'textBody', templates.email.textBody],
+        ['sms', 'body', templates.sms.body],
+      ];
+      for (const [channel, field, text] of fields) {
+        for (const token of LIFECYCLE_ONLY_TEMPLATE_TOKENS) {
+          if (text.includes(token)) {
+            context.addIssue({
+              code: 'custom',
+              message: `Activation wording cannot use ${token}; it describes an all-clear or reactivation.`,
+              path: [channel, field],
+            });
+          }
+        }
+      }
+    }
   })
   .readonly();
 

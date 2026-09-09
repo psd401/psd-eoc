@@ -133,6 +133,8 @@ export const EVENT_TYPE_PREVIEW_VARIABLES = Object.freeze({
   threat: 'Intruder',
   startTime: '2026-08-08T16:30:00.000Z',
   initiator: 'Taylor Morgan',
+  updatedBy: 'Jordan Lee',
+  updatedAt: '2026-08-08T16:52:00.000Z',
 });
 
 export type EventTypeCapabilityErrorCode =
