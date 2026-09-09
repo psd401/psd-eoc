@@ -413,7 +413,7 @@ describe('activation consequence preview', () => {
       first.channels.map(({ renderedMessage }) => renderedMessage),
     ).toEqual(later.channels.map(({ renderedMessage }) => renderedMessage));
     const persistedChannels = JSON.stringify(first.channels);
-    expect(persistedChannels).toContain('once confirmed');
+    expect(persistedChannels).toContain('the time you confirm');
     expect(persistedChannels).not.toContain(
       formatNotificationStartTime(CREATED_AT_ISO),
     );
@@ -442,7 +442,7 @@ describe('activation consequence preview', () => {
     ]);
     for (const { renderedMessage } of preview.channels) {
       const exactPayload = JSON.stringify(renderedMessage);
-      expect(exactPayload).toContain('once confirmed');
+      expect(exactPayload).toContain('the time you confirm');
       expect(exactPayload).not.toContain('{{startTime}}');
       expect(exactPayload).not.toContain(
         formatNotificationStartTime(CREATED_AT_ISO),

@@ -67,6 +67,13 @@ import {
 } from '../notify/dispatcher';
 import { activationThreatFromColumns } from './start-preview';
 import {
+  loadNotificationWording,
+  notificationVariables,
+  type NotificationWording,
+  type NotificationWordingInput,
+} from './notification-wording';
+import { renderTemplateSet, TemplateRenderError } from '../notify/render';
+import {
   activationPreviews,
   channelConfigurations,
   eventTransitions,
@@ -147,6 +154,14 @@ export interface EventCapabilityTransaction
   ): Promise<ResolvedActivationSource | null>;
   resolveEventFacilityId(eventId: string): Promise<string | null>;
   resolveEventForUpdate(eventId: string): Promise<ResolvedEventState | null>;
+  /**
+   * What the wording needs beyond the event: the version's templates for the
+   * purpose, the school's name, the response's name, and the display names
+   * of the initiator and of the actor performing this action.
+   */
+  resolveNotificationWording(
+    input: NotificationWordingInput,
+  ): Promise<NotificationWording | null>;
   resolveLifecyclePreview(
     previewId: string,
   ): Promise<ResolvedLifecyclePreview | null>;
@@ -476,6 +491,7 @@ function buildNotification(
       | Event['activationAuthorization']
       | LifecycleActionAuthorization;
     preview: ActivationPreview | LifecycleConsequencePreview;
+    wording: NotificationWording;
     context: CapabilityHandlerContext<EventCapabilityTransaction>;
   }>,
 ): Readonly<{
@@ -485,11 +501,38 @@ function buildNotification(
   if (
     input.authorization === null ||
     input.event.rosterSnapshotId === null ||
-    input.event.rosterPopulation === null
+    input.event.rosterPopulation === null ||
+    input.event.activatedAt === null
   ) {
     throw conflict('Activated notification provenance is incomplete.');
   }
   const at = timestamp(input.context.invocation.serverTime);
+  // The preview was rendered before this moment existed, so its copy says
+  // "the time you confirm" and, for a lifecycle action, may name whoever
+  // built the preview. The workers carry the same templates rendered now,
+  // with the real time and the actor confirming. The version is pinned by
+  // id and immutable, so only those values can differ from the preview.
+  const rendered = new Map(
+    renderNotificationChannels({
+      eventKind: input.event.kind,
+      templates: input.wording.templates,
+      variables: notificationVariables({
+        wording: input.wording,
+        purpose: input.purpose,
+        responseDetail: input.event.responseDetail,
+        threat: input.event.threat,
+        activatedAt: input.event.activatedAt,
+        at,
+      }),
+    }).map((message) => [message.channel, message] as const),
+  );
+  const channels = input.preview.channels.map((channel) => {
+    const renderedMessage = rendered.get(channel.channel);
+    if (renderedMessage === undefined) {
+      throw conflict('The notification wording is missing a channel.');
+    }
+    return { ...channel, renderedMessage };
+  });
   const intent = NotificationIntentSchema.parse({
     id: randomUUID(),
     eventId: input.event.id,
@@ -503,7 +546,7 @@ function buildNotification(
     source: input.context.invocation.source,
     requestId: input.context.invocation.requestId,
     authorization: input.authorization,
-    channels: input.preview.channels,
+    channels,
     createdAt: at,
   });
   const outboxId = randomUUID();
@@ -538,6 +581,33 @@ function buildNotification(
       lastErrorCode: null,
     }),
   };
+}
+
+async function requireNotificationWording(
+  input: NotificationWordingInput,
+  context: CapabilityHandlerContext<EventCapabilityTransaction>,
+): Promise<NotificationWording> {
+  const wording = await context.transaction.resolveNotificationWording(input);
+  if (wording === null) {
+    throw conflict(
+      'The notification wording for this response is unavailable.',
+    );
+  }
+  return wording;
+}
+
+/** Renders the payload, naming a failure without echoing any wording. */
+function renderNotificationChannels(
+  input: Parameters<typeof renderTemplateSet>[0],
+): ReturnType<typeof renderTemplateSet> {
+  try {
+    return renderTemplateSet(input);
+  } catch (error) {
+    if (error instanceof TemplateRenderError) {
+      throw conflict('The notification wording could not be rendered.');
+    }
+    throw error;
+  }
 }
 
 function lifecycleResultReference(
@@ -689,6 +759,17 @@ export const startEventRegistration: ServerCapabilityRegistration<
       purpose: 'activation',
       authorization: activationAuthorization,
       preview,
+      wording: await requireNotificationWording(
+        {
+          eventTypeVersionId: preview.eventTypeVersion.id,
+          templateMode: preview.templateMode,
+          purpose: 'activation',
+          facilityId: preview.facilityId,
+          initiator: context.invocation.actor,
+          actor: context.invocation.actor,
+        },
+        context,
+      ),
       context,
     });
     const journalEntries = [
@@ -867,6 +948,17 @@ async function notifyingLifecycleResult(
     purpose,
     authorization: notificationAuthorization,
     preview: resolvedPreview.preview,
+    wording: await requireNotificationWording(
+      {
+        eventTypeVersionId: event.eventTypeVersion.id,
+        templateMode: event.templateMode,
+        purpose,
+        facilityId: event.facilityId,
+        initiator: event.createdBy,
+        actor: context.invocation.actor,
+      },
+      context,
+    ),
     context,
   });
   const transitionCode =
@@ -2602,6 +2694,8 @@ function createDrizzleEventTransaction(
       resolveEventFacilityIdFromDatabase(database, eventId),
     resolveEventForUpdate: (eventId) =>
       resolveEventForUpdateFromDatabase(database, eventId),
+    resolveNotificationWording: (input) =>
+      loadNotificationWording(database, input),
     async resolveLifecyclePreview(previewId) {
       const preview = await lifecyclePreviewById(database, previewId);
       if (preview === null) return null;

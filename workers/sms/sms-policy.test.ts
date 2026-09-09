@@ -179,10 +179,8 @@ describe('SMS rendering policy', () => {
       },
     });
 
-    expect(rendered.body).toStartWith(
-      '[DRILL] TEST - NOT A REAL INCIDENT - ACTIVATION:',
-    );
-    expect(rendered.body).toEndWith('[DRILL]');
+    expect(rendered.body).toStartWith('[DRILL] TEST - NOT A REAL INCIDENT: ');
+    expect(rendered.body).not.toEndWith('[DRILL]');
     expect(rendered.body).not.toContain('[INCIDENT]');
   });
 

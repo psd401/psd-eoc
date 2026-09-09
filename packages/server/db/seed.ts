@@ -4,12 +4,10 @@ import {
   EventTypeVersionSchema,
   FacilitySchema,
   GroupSourceSchema,
-  MessageTemplateCatalogSchema,
   NeighborhoodSchema,
   RosterSnapshotSchema,
   RosterSourceConfigurationSchema,
   ThreatSchema,
-  type MessageTemplateCatalog,
   type NotificationChannel,
   type NotificationPurpose,
   type Recipient,
@@ -22,6 +20,7 @@ import {
   readDatabaseConfig,
   type Database,
 } from './client.js';
+import { defaultMessageTemplateCatalog } from '../lib/notify/default-templates';
 import {
   channelConfigurations,
   eventTypeTemplates,
@@ -475,64 +474,6 @@ const channels = [
   'sms',
 ] as const satisfies readonly NotificationChannel[];
 
-function purposeLabel(purpose: NotificationPurpose): string {
-  switch (purpose) {
-    case 'activation':
-      return 'ACTIVATION';
-    case 'all-clear':
-      return 'ALL-CLEAR';
-    case 'reactivation':
-      return 'REACTIVATION';
-  }
-}
-
-function makeTemplateCatalog(
-  eventTypeName: string,
-  templateMode: 'real' | 'drill',
-): MessageTemplateCatalog {
-  const classificationMarker = templateMode === 'real' ? 'INCIDENT' : 'DRILL';
-  const visibleMode =
-    templateMode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY';
-
-  const sets = Object.fromEntries(
-    purposes.map((purpose) => {
-      const action = purposeLabel(purpose);
-      return [
-        purpose,
-        {
-          templateMode,
-          purpose,
-          push: {
-            templateMode,
-            purpose,
-            classificationMarker,
-            channel: 'push',
-            title: `${visibleMode} ${action}: ${eventTypeName}`,
-            body: `${visibleMode} ${action} at {{site}}. Threat: {{threat}}. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.`,
-          },
-          email: {
-            templateMode,
-            purpose,
-            classificationMarker,
-            channel: 'email',
-            subject: `${visibleMode} ${action}: ${eventTypeName} at {{site}}`,
-            textBody: `${visibleMode} ${action}\n\nResponse: {{eventType}}\nThreat: {{threat}}\nSite: {{site}}\nStarted: {{startTime}}\nInitiated by: {{initiator}}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
-          },
-          sms: {
-            templateMode,
-            purpose,
-            classificationMarker,
-            channel: 'sms',
-            body: `${visibleMode} ${action}: {{eventType}} at {{site}}. Threat: {{threat}}. Open PSD EOC for current instructions.`,
-          },
-        },
-      ];
-    }),
-  );
-
-  return MessageTemplateCatalogSchema.parse(sets);
-}
-
 export const eventTypeRows = eventTypeDefinitions.map((definition) =>
   EventTypeSchema.parse({
     id: definition.id,
@@ -556,7 +497,7 @@ const eventTypeVersionRows = eventTypeDefinitions.map((definition) =>
         ? `Seeded real ${definition.name} incident type.`
         : `Seeded synthetic ${definition.name} training type.`,
     enabled: true,
-    templates: makeTemplateCatalog(definition.name, definition.mode),
+    templates: defaultMessageTemplateCatalog(definition.mode),
     supersedesVersionId: null,
     createdBy: { kind: 'system', serviceId: 'database-seed' },
     publicationAuthorization: {

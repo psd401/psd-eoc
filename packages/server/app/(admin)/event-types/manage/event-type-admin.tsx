@@ -2,6 +2,8 @@
 
 import { useRouter } from 'next/navigation';
 
+import { defaultMessageTemplateCatalog } from '../../../../lib/notify/default-templates';
+
 import { responseListHref, type ResponseListFilters } from './filters';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
@@ -812,96 +814,8 @@ async function requestPreviews(
   );
 }
 
-function templateSet(
-  mode: TemplateMode,
-  purpose: NotificationPurpose,
-): MessageTemplateSet {
-  const classificationMarker = mode === 'real' ? 'INCIDENT' : 'DRILL';
-  const purposeCopy = {
-    activation:
-      mode === 'real'
-        ? {
-            title: 'REAL INCIDENT: {{eventType}} at {{site}}',
-            body: 'Threat: {{threat}}. Follow district safety procedures. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
-            email:
-              '{{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nThreat: {{threat}}.\n\nFollow district safety procedures and open PSD EOC for current instructions. PSD EOC does not contact 911; call 911 first if emergency assistance is needed.',
-            sms: 'REAL INCIDENT: {{eventType}} at {{site}}. Threat: {{threat}}. Open PSD EOC.',
-          }
-        : {
-            title: 'TRAINING ONLY: {{eventType}} at {{site}}',
-            body: 'Threat: {{threat}}. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
-            email:
-              'TRAINING ONLY. {{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nThreat: {{threat}}.\n\nFollow district safety procedures and open PSD EOC for current instructions.',
-            sms: 'TRAINING ONLY: {{eventType}} at {{site}}. Threat: {{threat}}. Open PSD EOC.',
-          },
-    'all-clear':
-      mode === 'real'
-        ? {
-            title: 'ALL CLEAR: {{eventType}} at {{site}}',
-            body: '{{eventType}} at {{site}} is all clear. Open PSD EOC for current information.',
-            email:
-              'The {{eventType}} at {{site}} is all clear. The notification began {{startTime}}. Open PSD EOC for current information.',
-            sms: 'ALL CLEAR: {{eventType}} at {{site}}. Open PSD EOC for current information.',
-          }
-        : {
-            title: 'TRAINING ONLY: {{eventType}} complete at {{site}}',
-            body: '{{eventType}} is complete. Open PSD EOC for current information.',
-            email:
-              'TRAINING ONLY. The {{eventType}} at {{site}} is complete. The notification began {{startTime}}. Open PSD EOC for current information.',
-            sms: 'TRAINING ONLY: {{eventType}} complete at {{site}}. Open PSD EOC for current information.',
-          },
-    reactivation:
-      mode === 'real'
-        ? {
-            title: 'REACTIVATION: {{eventType}} at {{site}}',
-            body: '{{eventType}} is active again. Open PSD EOC for current instructions.',
-            email:
-              'The {{eventType}} at {{site}} is active again. The notification originally began {{startTime}} and was initiated by {{initiator}}. Open PSD EOC for current instructions.',
-            sms: 'REACTIVATION: {{eventType}} at {{site}}. Open PSD EOC for current instructions.',
-          }
-        : {
-            title: 'TRAINING ONLY: {{eventType}} reactivated at {{site}}',
-            body: '{{eventType}} is active again. Open PSD EOC for current instructions.',
-            email:
-              'TRAINING ONLY. The {{eventType}} at {{site}} is active again. The notification originally began {{startTime}} and was initiated by {{initiator}}. Open PSD EOC for current instructions.',
-            sms: 'TRAINING ONLY: {{eventType}} reactivated at {{site}}. Open PSD EOC for current instructions.',
-          },
-  }[purpose];
-  return {
-    templateMode: mode,
-    purpose,
-    push: {
-      channel: 'push',
-      templateMode: mode,
-      purpose,
-      classificationMarker,
-      title: purposeCopy.title,
-      body: purposeCopy.body,
-    },
-    email: {
-      channel: 'email',
-      templateMode: mode,
-      purpose,
-      classificationMarker,
-      subject: purposeCopy.title,
-      textBody: purposeCopy.email,
-    },
-    sms: {
-      channel: 'sms',
-      templateMode: mode,
-      purpose,
-      classificationMarker,
-      body: purposeCopy.sms,
-    },
-  };
-}
-
 function defaultCatalog(mode: TemplateMode): MessageTemplateCatalog {
-  return {
-    activation: templateSet(mode, 'activation'),
-    'all-clear': templateSet(mode, 'all-clear'),
-    reactivation: templateSet(mode, 'reactivation'),
-  };
+  return defaultMessageTemplateCatalog(mode);
 }
 
 function requiredText(form: FormData, name: string): string {
@@ -1016,12 +930,20 @@ export function TemplateFields({
             <legend>{PURPOSE_LABELS[purpose]} messages</legend>
             <p className="field-help" id={helpId}>
               Allowed variables: {'{{site}}'}, {'{{eventType}}'}, {'{{threat}}'}
-              , {'{{startTime}}'}, and {'{{initiator}}'}. The response and
-              threat variables carry the operator's typed description when the
-              catalog entry required one. PSD EOC wraps every rendered field in
-              immutable real-or-drill and lifecycle markers. Write clear
-              district-approved instructions; the seeded wording is a starting
-              point and can be changed without rebuilding PSD EOC.
+              , {'{{startTime}}'}, and {'{{initiator}}'}
+              {purpose === 'activation'
+                ? '.'
+                : `, plus {{updatedBy}} and {{updatedAt}} for who ${
+                    purpose === 'all-clear'
+                      ? 'gave the all-clear'
+                      : 'reactivated the event'
+                  } and when.`}{' '}
+              The response and threat variables carry the operator's typed
+              description when the catalog entry required one. PSD EOC starts
+              every rendered field with the immutable real-or-drill marker and,
+              for an all-clear or reactivation, the state it announces. Write
+              clear district-approved instructions; the seeded wording is a
+              starting point and can be changed without rebuilding PSD EOC.
             </p>
             <section
               className="channel-editor"

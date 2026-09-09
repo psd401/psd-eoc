@@ -22,7 +22,6 @@ import {
   JournalEntryPageSchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
-  MessageTemplateSetSchema,
   PaginationCursorSchema,
   UuidSchema,
   projectJournalEntryForRead,
@@ -40,6 +39,7 @@ import {
   type JournalEntryPage,
   type LifecycleConsequencePreview,
   type RegisteredCapabilityId,
+  type Actor,
 } from '@psd-eoc/contracts';
 import {
   and,
@@ -72,7 +72,6 @@ import {
   activationPreviews,
   channelConfigurations,
   events,
-  eventTypeTemplates,
   eventTypeVersions,
   facilities,
   humanConfirmationActions,
@@ -95,12 +94,14 @@ import {
 } from './engine';
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
-import { deriveCloseConsequenceDigest } from './events';
 import {
-  activationThreatFromColumns,
-  renderedResponseLabel,
-  renderedThreatLabel,
-} from './start-preview';
+  confirmationBoundTemplates,
+  loadMessageTemplateSet,
+  notificationVariables,
+  type NotificationWording,
+} from './notification-wording';
+import { deriveCloseConsequenceDigest } from './events';
+import { activationThreatFromColumns } from './start-preview';
 import {
   authorDisplayNameForRow,
   resolveActorDisplayName,
@@ -161,6 +162,7 @@ export interface JournalCapabilityTransaction
   getFacility(facilityId: string): Promise<Facility | null>;
   createLifecycleConsequencePreview(
     input: CapabilityInput<'create-lifecycle-consequence-preview'>,
+    actor: Actor,
   ): Promise<LifecycleConsequencePreview>;
   resolveJournalReplayFacilityId(
     resultReference: string,
@@ -1144,7 +1146,10 @@ export const createLifecycleConsequencePreviewRegistration: ServerCapabilityRegi
     eventFacilityId(input.eventId, context),
   async handler(input, context): Promise<LifecycleConsequencePreview> {
     return LifecycleConsequencePreviewSchema.parse(
-      await context.transaction.createLifecycleConsequencePreview(input),
+      await context.transaction.createLifecycleConsequencePreview(
+        input,
+        context.invocation.actor,
+      ),
     );
   },
   resultReference: lifecyclePreviewResultReference,
@@ -1761,6 +1766,7 @@ async function getFacilityFromDatabase(
 async function createLifecycleConsequencePreviewFromDatabase(
   database: JournalQueryDatabase,
   input: CapabilityInput<'create-lifecycle-consequence-preview'>,
+  actor: Actor,
 ): Promise<LifecycleConsequencePreview> {
   const [eventRow] = await database
     .select()
@@ -1823,86 +1829,41 @@ async function createLifecycleConsequencePreviewFromDatabase(
     .from(facilities)
     .where(eq(facilities.id, event.facilityId))
     .limit(1);
-  const [versionRow] = await database
-    .select()
-    .from(eventTypeVersions)
-    .where(eq(eventTypeVersions.id, event.eventTypeVersion.id))
-    .limit(1);
-  const templateRows = await database
-    .select()
-    .from(eventTypeTemplates)
-    .where(
-      and(
-        eq(eventTypeTemplates.eventTypeVersionId, event.eventTypeVersion.id),
-        eq(eventTypeTemplates.purpose, input.purpose),
-      ),
-    );
-  if (
-    facilityRow === undefined ||
-    versionRow === undefined ||
-    versionRow.templateMode !== event.templateMode
-  ) {
+  const loaded = await loadMessageTemplateSet(
+    database,
+    event.eventTypeVersion.id,
+    input.purpose,
+    event.templateMode,
+  );
+  if (facilityRow === undefined || loaded === null) {
     throw conflict(
       'The event configuration needed for preview is unavailable.',
     );
   }
-
-  const rowFor = (channel: 'push' | 'email' | 'sms') => {
-    const matching = templateRows.filter((row) => row.channel === channel);
-    if (matching.length !== 1 || matching[0] === undefined) {
-      throw conflict('The lifecycle message templates are incomplete.');
-    }
-    return matching[0];
+  // The preview shows the operator who is about to confirm as the actor and
+  // the time as what it is; the payload is rendered again at confirmation
+  // with the real time and whoever actually confirms.
+  const wording: NotificationWording = {
+    templates: loaded.templates,
+    facilityName: facilityRow.name,
+    eventTypeName: loaded.name,
+    initiatorDisplayName: await resolveActorDisplayName(
+      database,
+      event.createdBy,
+    ),
+    actorDisplayName: await resolveActorDisplayName(database, actor),
   };
-  const push = rowFor('push');
-  const email = rowFor('email');
-  const sms = rowFor('sms');
-  if (
-    push.title === null ||
-    push.body === null ||
-    email.subject === null ||
-    email.textBody === null ||
-    sms.body === null
-  ) {
-    throw conflict('The lifecycle message templates are incomplete.');
-  }
-  const templates = MessageTemplateSetSchema.parse({
-    templateMode: event.templateMode,
-    purpose: input.purpose,
-    push: {
-      channel: 'push',
-      templateMode: push.templateMode,
-      purpose: push.purpose,
-      classificationMarker: push.classificationMarker,
-      title: push.title,
-      body: push.body,
-    },
-    email: {
-      channel: 'email',
-      templateMode: email.templateMode,
-      purpose: email.purpose,
-      classificationMarker: email.classificationMarker,
-      subject: email.subject,
-      textBody: email.textBody,
-    },
-    sms: {
-      channel: 'sms',
-      templateMode: sms.templateMode,
-      purpose: sms.purpose,
-      classificationMarker: sms.classificationMarker,
-      body: sms.body,
-    },
-  });
   const rendered = renderTemplateSet({
     eventKind: event.kind,
-    templates,
-    variables: {
-      site: facilityRow.name,
-      eventType: renderedResponseLabel(versionRow.name, event.responseDetail),
-      threat: renderedThreatLabel(event.threat),
-      startTime: event.activatedAt,
-      initiator: 'Recorded initiator',
-    },
+    templates: confirmationBoundTemplates(wording.templates),
+    variables: notificationVariables({
+      wording,
+      purpose: input.purpose,
+      responseDetail: event.responseDetail,
+      threat: event.threat,
+      activatedAt: event.activatedAt,
+      at: null,
+    }),
   });
 
   const integrationIds = source.channels.map(
@@ -2128,8 +2089,8 @@ function createDrizzleJournalTransaction(
     loadEventSummarySnapshot: (eventId, generatedAt) =>
       loadEventSummarySnapshot(database, eventId, generatedAt),
     getFacility: (facilityId) => getFacilityFromDatabase(database, facilityId),
-    createLifecycleConsequencePreview: (input) =>
-      createLifecycleConsequencePreviewFromDatabase(database, input),
+    createLifecycleConsequencePreview: (input, actor) =>
+      createLifecycleConsequencePreviewFromDatabase(database, input, actor),
     resolveJournalReplayFacilityId: (reference) =>
       resolveJournalReplayFacilityIdFromDatabase(database, reference),
     loadJournalReplay: (reference) =>
