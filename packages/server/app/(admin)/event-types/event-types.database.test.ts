@@ -1355,10 +1355,13 @@ describeWithDatabase('event-type database versioning', () => {
       expect(push.title.length).toBeLessThanOrEqual(120);
       expect(push.body.length).toBeLessThanOrEqual(500);
       expect(measureSmsLength(sms.body).exceedsProviderLimit).toBe(false);
+      // The marker leads every field; nothing else spells the mode out,
+      // and the drill's own name says "Drill".
       if (drill) {
-        expect(`${push.title} ${push.body} ${sms.body}`).toContain(
-          'TRAINING ONLY',
+        expect(`${push.title} ${push.body} ${sms.body}`).not.toContain(
+          '[INCIDENT]',
         );
+        expect(item.latestVersion.name).toContain('Drill');
       } else {
         expect(`${push.title} ${push.body} ${sms.body}`).not.toContain(
           '[DRILL]',

@@ -309,7 +309,7 @@ describe('activation consequence preview threat pinning', () => {
     const pushBody =
       push?.renderedMessage.channel === 'push' ? push.renderedMessage.body : '';
     expect(pushBody).toContain(
-      'Synthetic wildlife — {{initiator}} at {{site}}',
+      'Synthetic wildlife - {{initiator}} at {{site}}',
     );
     expect(pushBody).not.toContain('Harbor Ridge High School');
   });
@@ -328,7 +328,7 @@ describe('activation consequence preview threat pinning', () => {
       email?.renderedMessage.channel === 'email'
         ? email.renderedMessage.subject
         : '';
-    expect(pushBody).toContain('Synthetic wildlife — Gas smell near the gym');
+    expect(pushBody).toContain('Synthetic wildlife - Gas smell near the gym');
     expect(pushBody).not.toContain('{{threat}}');
     // The response name carries the operator's words wherever the wording
     // already names the response.
@@ -341,11 +341,11 @@ describe('activation consequence preview threat pinning', () => {
     expect(renderedThreatLabel(null)).toBe('Not recorded');
     expect(renderedThreatLabel(THREAT)).toBe('Synthetic wildlife');
     expect(renderedThreatLabel({ ...THREAT, detail: 'Gas smell' })).toBe(
-      'Synthetic wildlife — Gas smell',
+      'Synthetic wildlife - Gas smell',
     );
     expect(renderedResponseLabel('Lockdown', null)).toBe('Lockdown');
     expect(renderedResponseLabel('Other', 'Hold in classrooms')).toBe(
-      'Other — Hold in classrooms',
+      'Other - Hold in classrooms',
     );
   });
 });
@@ -413,7 +413,7 @@ describe('activation consequence preview', () => {
       first.channels.map(({ renderedMessage }) => renderedMessage),
     ).toEqual(later.channels.map(({ renderedMessage }) => renderedMessage));
     const persistedChannels = JSON.stringify(first.channels);
-    expect(persistedChannels).toContain('once confirmed');
+    expect(persistedChannels).toContain('the time you confirm');
     expect(persistedChannels).not.toContain(
       formatNotificationStartTime(CREATED_AT_ISO),
     );
@@ -442,7 +442,7 @@ describe('activation consequence preview', () => {
     ]);
     for (const { renderedMessage } of preview.channels) {
       const exactPayload = JSON.stringify(renderedMessage);
-      expect(exactPayload).toContain('once confirmed');
+      expect(exactPayload).toContain('the time you confirm');
       expect(exactPayload).not.toContain('{{startTime}}');
       expect(exactPayload).not.toContain(
         formatNotificationStartTime(CREATED_AT_ISO),

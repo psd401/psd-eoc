@@ -1636,6 +1636,13 @@ describeWithDatabase('event journal database guarantees', () => {
           { channel: 'push', marker: 'DRILL', integrationId: 'mobile-push' },
           { channel: 'email', marker: 'DRILL', integrationId: 'ses-email' },
         ]);
+        // The preview names the people on record and says the time is the
+        // time of confirmation; the first live all-clear said "by Recorded
+        // initiator" because a placeholder stood in for the initiator here.
+        const previewCopy = JSON.stringify(lifecyclePreview.channels);
+        expect(previewCopy).not.toContain('Recorded initiator');
+        expect(previewCopy).not.toContain('Recorded operator');
+        expect(previewCopy).not.toContain('{{');
 
         const allClearInput = {
           eventId,

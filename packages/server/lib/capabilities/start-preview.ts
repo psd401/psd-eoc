@@ -19,6 +19,13 @@ import {
 } from '@psd-eoc/contracts';
 
 import { renderTemplateSet } from '../notify/render';
+import {
+  confirmationBoundTemplates,
+  renderedResponseLabel,
+  renderedThreatLabel,
+} from './notification-wording';
+
+export { renderedResponseLabel, renderedThreatLabel };
 import { resolveAudience } from '../roster/resolve';
 import { digestCapabilityValue } from './engine';
 
@@ -38,8 +45,6 @@ const ALL_CHANNELS = Object.freeze([
   'email',
   'sms',
 ] as const satisfies readonly NotificationChannel[]);
-
-const CONFIRMATION_BOUND_START_TIME_COPY = 'once confirmed';
 
 /** Safe, non-recipient-bearing reasons a preview cannot be assembled. */
 export type ActivationPreviewBuildErrorCode =
@@ -108,30 +113,6 @@ function configurationByChannel(
 
 function compareStrings(left: string, right: string): number {
   return left.localeCompare(right);
-}
-
-function confirmationBoundActivationTemplates(
-  templates: EventTypeVersion['templates']['activation'],
-): EventTypeVersion['templates']['activation'] {
-  const replaceStartTime = (text: string) =>
-    text.replaceAll('{{startTime}}', CONFIRMATION_BOUND_START_TIME_COPY);
-  return Object.freeze({
-    ...templates,
-    push: Object.freeze({
-      ...templates.push,
-      title: replaceStartTime(templates.push.title),
-      body: replaceStartTime(templates.push.body),
-    }),
-    email: Object.freeze({
-      ...templates.email,
-      subject: replaceStartTime(templates.email.subject),
-      textBody: replaceStartTime(templates.email.textBody),
-    }),
-    sms: Object.freeze({
-      ...templates.sms,
-      body: replaceStartTime(templates.sms.body),
-    }),
-  });
 }
 
 /**
@@ -223,7 +204,7 @@ export function buildActivationPreview(
     // time does not exist until the later explicit confirmation, so activation
     // copy is intentionally causal instead of backdating the event to preview
     // creation. The renderer still validates this required, now-unused value.
-    templates: confirmationBoundActivationTemplates(
+    templates: confirmationBoundTemplates(
       eventTypeVersion.templates.activation,
     ),
     variables: {
@@ -308,30 +289,6 @@ export function buildActivationPreview(
       consequence,
     }),
   });
-}
-
-/**
- * Composes what staff read for the threat: the catalog name, plus the
- * operator's own words when the threat required a description. A record that
- * predates the catalog names no threat, so the copy says so rather than
- * leaving the sentence dangling.
- */
-export function renderedThreatLabel(threat: ActivationThreat | null): string {
-  if (threat === null) return 'Not recorded';
-  return threat.detail === null
-    ? threat.name
-    : `${threat.name} — ${threat.detail}`;
-}
-
-/**
- * Composes what staff read for the response: the versioned response name,
- * plus the operator's own words when the response required a description.
- */
-export function renderedResponseLabel(
-  name: string,
-  responseDetail: string | null,
-): string {
-  return responseDetail === null ? name : `${name} — ${responseDetail}`;
 }
 
 /**

@@ -3,7 +3,9 @@ import {
   MessageTemplateSetSchema,
   RenderedMessageSchema,
   TimestampSchema,
+  type ActivationTemplateVariable,
   type EventKind,
+  type LifecycleTemplateVariable,
   type MessageTemplateSet,
   type NotificationChannel,
   type NotificationPurpose,
@@ -13,7 +15,7 @@ import {
 } from '@psd-eoc/contracts';
 
 const TEMPLATE_TOKEN_PATTERN =
-  /\{\{(site|eventType|threat|startTime|initiator)\}\}/gu;
+  /\{\{(site|eventType|threat|startTime|initiator|updatedBy|updatedAt)\}\}/gu;
 const FORMAT_CHARACTER_PATTERN = /\p{Format}/u;
 const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 const WHITESPACE_PATTERN = /\s/u;
@@ -23,6 +25,7 @@ const SINGLE_PART_GSM_MAX_SEPTETS = 160;
 const SINGLE_PART_UCS2_MAX_CODE_UNITS = 70;
 const TRUNCATION_MARKER = '...';
 const SAFE_CONTEXT_FALLBACKS = Object.freeze({
+  updatedBy: 'Recorded operator',
   site: 'Recorded site',
   threat: 'Recorded threat',
   initiator: 'Recorded initiator',
@@ -225,9 +228,15 @@ const START_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZoneName: 'short',
 });
 
-/** Structured values accepted by the closed contract token grammar. */
+/**
+ * Structured values accepted by the closed contract token grammar. The
+ * activation values are always present; `updatedBy` and `updatedAt` exist
+ * only when the wording announces a lifecycle action, and a template that
+ * names them without one is refused rather than rendered with a blank.
+ */
 export type TemplateRenderVariables = Readonly<
-  Record<TemplateVariable, string>
+  Record<ActivationTemplateVariable, string> &
+    Partial<Record<LifecycleTemplateVariable, string>>
 >;
 
 export interface RenderTemplateSetInput {
@@ -269,7 +278,6 @@ export class TemplateRenderError extends Error {
 type Classification = Readonly<{
   templateMode: TemplateMode;
   marker: 'INCIDENT' | 'DRILL';
-  label: string;
 }>;
 
 type RendererFrame = Readonly<{
@@ -279,66 +287,65 @@ type RendererFrame = Readonly<{
 
 function classificationFor(eventKind: EventKind): Classification {
   const templateMode = eventKind === 'incident' ? 'real' : 'drill';
-  const presentation = getEventClassificationPresentation({
-    kind: eventKind,
-    templateMode,
-  });
+  // Read for its refusal of an impossible pairing; the frame itself carries
+  // only the marker.
+  getEventClassificationPresentation({ kind: eventKind, templateMode });
   return Object.freeze({
     templateMode,
     marker: eventKind === 'incident' ? 'INCIDENT' : 'DRILL',
-    // ASCII keeps training/test SMS in the 160-septet GSM alphabet instead of
-    // forcing the much shorter 70-character UCS-2 limit solely for an em dash.
-    label: presentation.label.replaceAll(' — ', ' - '),
   });
 }
 
-function purposeLabel(purpose: NotificationPurpose): string {
+/** What a lifecycle notification announces; an activation needs no word. */
+function purposeLead(purpose: NotificationPurpose): string {
   switch (purpose) {
     case 'activation':
-      return 'ACTIVATION';
+      return '';
     case 'all-clear':
-      return 'ALL CLEAR';
+      return 'ALL CLEAR: ';
     case 'reactivation':
-      return 'REACTIVATION';
+      return 'REACTIVATED: ';
   }
 }
 
 /**
- * Both boundaries are renderer-owned. Configurable text can say anything, but
- * it can neither remove nor impersonate the immutable mode and purpose frame.
+ * The words between the marker and the wording. A synthetic delivery test
+ * shares the drill marker, so it keeps saying what it is; a real incident
+ * and a training drill say only the state a lifecycle notification announces.
  */
-function rendererOwnedFrame(
-  classification: Classification,
-  purpose: NotificationPurpose,
-): RendererFrame {
-  return Object.freeze({
-    prefix: `[${classification.marker}] ${classification.label} - ${purposeLabel(purpose)}: `,
-    suffix: ` [${classification.marker}]`,
-  });
+function stateLead(eventKind: EventKind, purpose: NotificationPurpose): string {
+  const lead = purposeLead(purpose);
+  if (eventKind !== 'test') return lead;
+  return lead === ''
+    ? 'TEST - NOT A REAL INCIDENT: '
+    : `TEST - NOT A REAL INCIDENT - ${lead}`;
 }
 
 /**
- * The compact frame used for a push title and an email subject.
+ * The renderer-owned lead on every visible field: the classification marker,
+ * then the state a lifecycle notification announces. Configurable text can
+ * say anything after it, but it can neither remove nor impersonate the marker
+ * (see `containsReservedRendererMarker`).
  *
- * A headline is read in a list, on a lock screen, at a glance. The full frame
- * spends about forty characters before any content, so
- * `[DRILL] DRILL - TRAINING ONLY - ALL CLEAR: Lockdown Drill` arrived on a
- * phone as `[DRILL] DRILL - TRAINING ONLY - ALL...` and the operator could not
- * see which event it was or what had happened to it.
- *
- * Both edges stay renderer-owned and the classification marker stays on both,
- * so configurable text still cannot remove or impersonate it. What is dropped
- * is only the long spelled-out label, which the body still carries in full --
- * a headline that says `[DRILL]` twice is already unmistakable, and one that
- * shows nothing but its own frame is worse than useless during an emergency.
+ * This used to be `[DRILL] DRILL - TRAINING ONLY - ACTIVATION: ... [DRILL]`
+ * on every field. Read on a phone beside the district's previous alerting
+ * product, the frame spent the first forty characters of every message
+ * saying the same thing three times before any content, and the trailing
+ * marker was cut off exactly when a message ran long. The decision of
+ * 2026-09-09 keeps the one lead the installed mobile app requires (its
+ * notification content check accepts only a title and body that start with
+ * the marker) and drops the rest. Drills stay unmistakable: the marker leads
+ * every field, the response name itself says "Drill", and the email carries
+ * the spelled-out classification in its banner.
  */
-function rendererOwnedHeadlineFrame(
+function rendererOwnedFrame(
+  eventKind: EventKind,
   classification: Classification,
   purpose: NotificationPurpose,
 ): RendererFrame {
   return Object.freeze({
-    prefix: `[${classification.marker}] ${purposeLabel(purpose)}: `,
-    suffix: ` [${classification.marker}]`,
+    prefix: `[${classification.marker}] ${stateLead(eventKind, purpose)}`,
+    suffix: '',
   });
 }
 
@@ -530,7 +537,7 @@ function rendererOwnedEventTypeName(
 }
 
 function safeContextVariable(
-  name: 'initiator' | 'site' | 'threat',
+  name: keyof typeof SAFE_CONTEXT_FALLBACKS,
   value: string,
 ): string {
   try {
@@ -553,6 +560,12 @@ function validatedVariables(
     threat: safeContextVariable('threat', variables.threat),
     startTime: formatNotificationStartTime(variables.startTime),
     initiator: safeContextVariable('initiator', variables.initiator),
+    ...(variables.updatedBy === undefined
+      ? {}
+      : { updatedBy: safeContextVariable('updatedBy', variables.updatedBy) }),
+    ...(variables.updatedAt === undefined
+      ? {}
+      : { updatedAt: formatNotificationStartTime(variables.updatedAt) }),
   });
 }
 
@@ -571,16 +584,25 @@ function stripEditableClassificationLead(
       );
 }
 
+/**
+ * Wording written before the renderer owned the lead often opens with the
+ * purpose itself, as "ACTIVATION: ", "ACTIVATION at {{site}}", or the word
+ * alone on its first line. Those forms are dropped so the frame's own lead
+ * is not repeated; the sent text once read "ACTIVATION: ACTIVATION at"
+ * because only the punctuated form was known. The bare word is dropped only
+ * in those two legacy shapes: wording that opens "All clear given by the
+ * fire marshal" keeps its first words.
+ */
 function stripEditablePurposeLead(
   value: string,
   purpose: NotificationPurpose,
 ): string {
   const pattern =
     purpose === 'activation'
-      ? /^ACTIVATION(?:\s*[-:—]\s*)/iu
+      ? /^ACTIVATION(?:\s*[-:—]\s*|\s+(?=at\b)|[ \t]*\n\s*)/iu
       : purpose === 'all-clear'
-        ? /^ALL[- ]CLEAR(?:\s*[-:—]\s*)/iu
-        : /^REACTIVATION(?:\s*[-:—]\s*)/iu;
+        ? /^ALL[- ]CLEAR(?:\s*[-:—]\s*|\s+(?=at\b)|[ \t]*\n\s*)/iu
+        : /^REACTIVATION(?:\s*[-:—]\s*|\s+(?=at\b)|[ \t]*\n\s*)/iu;
   return value.replace(pattern, '');
 }
 
@@ -602,10 +624,16 @@ function interpolate(
   templateMode: TemplateMode,
 ): string {
   const replaceTokens = (values: TemplateRenderVariables) =>
-    value.replace(
-      TEMPLATE_TOKEN_PATTERN,
-      (_token, name: TemplateVariable) => values[name],
-    );
+    value.replace(TEMPLATE_TOKEN_PATTERN, (token, name: TemplateVariable) => {
+      const replacement = values[name];
+      if (replacement === undefined) {
+        throw new TemplateRenderError(
+          'INVALID_VARIABLE',
+          `${token} names a lifecycle action this notification does not have.`,
+        );
+      }
+      return replacement;
+    });
   const rendered = replaceTokens(variables);
   if (containsUnsafeVisibleCodePoint(rendered)) {
     throw new TemplateRenderError(
@@ -623,6 +651,9 @@ function interpolate(
           ? 'Configured response'
           : 'Configured drill response',
       initiator: SAFE_CONTEXT_FALLBACKS.initiator,
+      ...(variables.updatedBy === undefined
+        ? {}
+        : { updatedBy: SAFE_CONTEXT_FALLBACKS.updatedBy }),
     });
     if (
       containsUnsafeVisibleCodePoint(recovered) ||
@@ -840,8 +871,8 @@ export function renderMessageTemplate(
     );
   }
 
-  const frame = rendererOwnedFrame(classification, template.purpose);
-  const headlineFrame = rendererOwnedHeadlineFrame(
+  const frame = rendererOwnedFrame(
+    input.eventKind,
     classification,
     template.purpose,
   );
@@ -865,7 +896,7 @@ export function renderMessageTemplate(
         ...common,
         channel: 'push',
         title: frameVisibleField(
-          headlineFrame,
+          frame,
           renderInterior(template.title),
           RENDERED_FIELD_LIMITS.pushTitle,
         ),
@@ -880,7 +911,7 @@ export function renderMessageTemplate(
         ...common,
         channel: 'email',
         subject: frameVisibleField(
-          headlineFrame,
+          frame,
           renderInterior(template.subject),
           RENDERED_FIELD_LIMITS.emailSubject,
         ),

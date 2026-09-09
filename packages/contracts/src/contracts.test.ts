@@ -1034,6 +1034,33 @@ describe('event type, targeting, and activation contracts', () => {
     ).toBe(false);
   });
 
+  test('lets only an all-clear or reactivation name who acted and when', () => {
+    const drillTemplates = templateCatalog('drill');
+    const withBody = (purpose: 'activation' | 'all-clear', body: string) => ({
+      ...drillTemplates,
+      [purpose]: {
+        ...drillTemplates[purpose],
+        push: { ...drillTemplates[purpose].push, body },
+      },
+    });
+    expect(TemplateTokenSchema.options).toContain('{{updatedBy}}');
+    expect(TemplateTokenSchema.options).toContain('{{updatedAt}}');
+    expect(
+      MessageTemplateCatalogSchema.safeParse(
+        withBody('all-clear', 'Completed by {{updatedBy}} at {{updatedAt}}.'),
+      ).success,
+    ).toBe(true);
+    const refused = MessageTemplateCatalogSchema.safeParse(
+      withBody('activation', 'Started by {{updatedBy}} at {{updatedAt}}.'),
+    );
+    expect(refused.success).toBe(false);
+    if (!refused.success) {
+      expect(refused.error.issues.map((issue) => issue.path.join('.'))).toEqual(
+        ['activation.push.body', 'activation.push.body'],
+      );
+    }
+  });
+
   test('rejects Unicode controls that can visually spoof real versus drill', () => {
     const bidiSpoof = '[DRILL] \u202E]TNEDICNI[\u202C';
     expect(
