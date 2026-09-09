@@ -114,18 +114,30 @@ export async function resolveGoogleGroupIdForForm(
     throw error;
   }
 }
-/**
- * Like `resolveGoogleGroupIdForForm`, but a group Google does not hold yet
- * answers null so a building source can be registered as waiting: it names
- * nobody until the group exists, and the scheduled sync records the ID the
- * first time Google resolves the address. Every other refusal, including a
- * credential that may not read the group, is still an error, so waiting can
- * never hide a permission problem.
- */
 /** The resolver the administration forms use unless a test injects one. */
 export function defaultGoogleGroupResolver(): GoogleGroupResolver {
   return defaultResolver();
 }
+
+/** Google could not be asked at all; nothing about the address is known. */
+const UNASKED_CODES: ReadonlySet<string> = new Set([
+  'GOOGLE_CONFIGURATION_INVALID',
+  'GOOGLE_UNAVAILABLE',
+]);
+
+/**
+ * Like `resolveGoogleGroupIdForForm`, but answers null when Google has not
+ * confirmed the group, so a building source can be registered as waiting:
+ * it names nobody until Google holds the group, and the scheduled sync
+ * records the ID the first time Google resolves the address. Google has not
+ * confirmed a group it does not hold yet, and one it could not be asked
+ * about: a missing or invalid credential on this server, or Google being
+ * unavailable, must not stop a school from being registered, and the next
+ * check or sync asks again. A refusal is different: Google answered, and
+ * said the address is not an exact group or may not be read. That is still
+ * an error before anything is saved, so waiting never hides a permission
+ * problem or a typo Google could see.
+ */
 export async function resolveGoogleGroupIdOrWaitingForForm(
   authenticated: AdminSession,
   email: string,
@@ -142,11 +154,7 @@ export async function resolveGoogleGroupIdOrWaitingForForm(
   try {
     client = resolver();
   } catch (error) {
-    if (error instanceof GoogleRosterConfigurationError) {
-      throw new AdminFormError(
-        "This server's Google Groups credential is missing or invalid, so a Google Group cannot be looked up. Nothing was saved.",
-      );
-    }
+    if (error instanceof GoogleRosterConfigurationError) return null;
     throw error;
   }
   try {
@@ -154,6 +162,7 @@ export async function resolveGoogleGroupIdOrWaitingForForm(
     return held === null ? null : held.googleGroupId;
   } catch (error) {
     if (error instanceof AccessMembershipEvaluationError) {
+      if (UNASKED_CODES.has(error.code)) return null;
       throw new AdminFormError(explain(address, error.code));
     }
     throw error;
