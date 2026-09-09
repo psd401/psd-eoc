@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { legacyMobileWording } from './legacy-mobile-wording';
+
 import {
   ApiErrorSchema,
   CreateEventTypeDraftInputSchema,
@@ -104,6 +106,17 @@ function handleError(error: unknown, requestId: string): Response {
   );
 }
 
+/**
+ * The installed mobile app (1.0.14) refuses the two lifecycle wording tokens;
+ * a mobile session gets them rewritten until every device runs 1.0.15.
+ */
+function forClient<Value>(
+  authenticated: Readonly<{ source: 'web' | 'mobile' }>,
+  value: Value,
+): Value {
+  return authenticated.source === 'mobile' ? legacyMobileWording(value) : value;
+}
+
 export async function GET(request: Request): Promise<Response> {
   const requestId = randomUUID();
   try {
@@ -119,36 +132,42 @@ export async function GET(request: Request): Promise<Response> {
       case 'list': {
         const enabledParameter = parameters.get('enabled');
         return json(
-          await executeListEventTypesCapability({
-            store,
+          forClient(
             authenticated,
-            requestId,
-            query: parseRequestInput(ListEventTypesInputSchema, {
-              templateMode: parameters.get('templateMode'),
-              enabled:
-                enabledParameter === null
-                  ? null
-                  : enabledParameter === 'true'
-                    ? true
-                    : enabledParameter === 'false'
-                      ? false
-                      : enabledParameter,
-              cursor: parameters.get('cursor'),
-              limit: Number(parameters.get('limit') ?? '200'),
+            await executeListEventTypesCapability({
+              store,
+              authenticated,
+              requestId,
+              query: parseRequestInput(ListEventTypesInputSchema, {
+                templateMode: parameters.get('templateMode'),
+                enabled:
+                  enabledParameter === null
+                    ? null
+                    : enabledParameter === 'true'
+                      ? true
+                      : enabledParameter === 'false'
+                        ? false
+                        : enabledParameter,
+                cursor: parameters.get('cursor'),
+                limit: Number(parameters.get('limit') ?? '200'),
+              }),
             }),
-          }),
+          ),
         );
       }
       case 'version':
         return json(
-          await executeGetEventTypeVersionCapability({
-            store,
+          forClient(
             authenticated,
-            requestId,
-            query: parseRequestInput(GetEventTypeVersionInputSchema, {
-              eventTypeVersionId: parameters.get('eventTypeVersionId'),
+            await executeGetEventTypeVersionCapability({
+              store,
+              authenticated,
+              requestId,
+              query: parseRequestInput(GetEventTypeVersionInputSchema, {
+                eventTypeVersionId: parameters.get('eventTypeVersionId'),
+              }),
             }),
-          }),
+          ),
         );
       case 'draft':
         return json(
