@@ -198,6 +198,11 @@
       {
         "code": "VGE",
         "name": "Voyager Elementary School"
+      },
+      {
+        "code": "RVW",
+        "name": "App Review",
+        "isolated": true
       }
     ],
     "psdEoc:neighborhoods": [

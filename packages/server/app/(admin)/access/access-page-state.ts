@@ -5,6 +5,8 @@ const STATUS_MESSAGES = Object.freeze({
   'access-group-created': 'The Google access group was added.',
   'access-group-updated': 'The Google access group was updated.',
   'roles-updated': 'The staff role assignment was updated.',
+  'user-scope-updated':
+    "The person's facility scope was updated. It applies to their next request.",
 } as const);
 
 export interface AccessAdminCursorState {

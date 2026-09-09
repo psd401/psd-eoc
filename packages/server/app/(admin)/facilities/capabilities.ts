@@ -438,7 +438,12 @@ async function createFacility(
   await assertUniqueFacilityCode(database, input.code, null);
   const [row] = await database
     .insert(facilities)
-    .values({ code: input.code, name: input.name, active: true })
+    .values({
+      code: input.code,
+      name: input.name,
+      active: true,
+      isolated: input.isolated ?? false,
+    })
     .returning();
   if (row === undefined) {
     throw conflict('The facility could not be created.');

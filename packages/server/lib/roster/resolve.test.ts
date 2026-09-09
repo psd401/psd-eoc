@@ -297,6 +297,34 @@ describe('roster audience resolution for one school', () => {
     ).toEqual([IDS.endpointOthersPush]);
   });
 
+  test('an isolated school reaches its own building source and no others source', () => {
+    // The App Review site: a store reviewer's drill must reach the review
+    // account and nobody on the district list. The others source is still in
+    // the snapshot; it is simply not selected for this one facility.
+    const north = resolveAudience(
+      input(IDS.facilityNorth, {
+        rosterSnapshot: snapshot({ isolatedFacilityIds: [IDS.facilityNorth] }),
+      }),
+    );
+    const south = resolveAudience(
+      input(IDS.facilitySouth, {
+        rosterSnapshot: snapshot({ isolatedFacilityIds: [IDS.facilityNorth] }),
+      }),
+    );
+
+    expect(north.sourceGroupRefs).toEqual([NORTH_GROUP]);
+    expect(recipientIds(north)).not.toContain(IDS.recipientOthers);
+    expect(recipientIds(north)).toContain(IDS.recipientNorth);
+    // A person on the school's building source and the others source is
+    // reached, but only through the building source.
+    expect(recipientById(north, IDS.recipientShared)?.groupSourceRefs).toEqual([
+      NORTH_GROUP,
+    ]);
+    // The flag isolates one school; every other school is unchanged.
+    expect(south.sourceGroupRefs).toEqual([SOUTH_GROUP, OTHERS_GROUP]);
+    expect(recipientIds(south)).toContain(IDS.recipientOthers);
+  });
+
   test('a recipient at both schools resolves under either', () => {
     expect(recipientIds(resolveAudience(input(IDS.facilityNorth)))).toContain(
       IDS.recipientShared,

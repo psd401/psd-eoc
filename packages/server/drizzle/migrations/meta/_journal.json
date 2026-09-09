@@ -365,6 +365,13 @@
       "when": 1788979513944,
       "tag": "0051_response_display_order",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1788988236706,
+      "tag": "0052_facility_isolated_and_user_scope",
+      "breakpoints": true
     }
   ]
 }

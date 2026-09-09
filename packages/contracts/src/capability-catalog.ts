@@ -115,6 +115,8 @@ import {
   MySmsConsentViewSchema,
   ReadMySmsConsentInputSchema,
   UserPageSchema,
+  SetUserFacilityScopeInputSchema,
+  UserSchema,
 } from './identity';
 import {
   GetIntegrationHealthInputSchema,
@@ -1288,6 +1290,14 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: UpdateFacilityInputSchema,
     outputSchema: FacilitySchema,
+  }),
+  'set-user-facility-scope': canonicalCapability({
+    id: 'set-user-facility-scope',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanAgentInvocationPolicy,
+    inputSchema: SetUserFacilityScopeInputSchema,
+    outputSchema: UserSchema,
   }),
   'create-neighborhood-version': canonicalCapability({
     id: 'create-neighborhood-version',

@@ -214,10 +214,16 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
   // district-level list, the responders who belong at every event. Every
   // snapshot carried them and nothing ever selected them, so a person on one
   // was reached nowhere.
+  //
+  // An isolated facility is the exception: its events reach its own lists
+  // only. It exists so a store reviewer's drill at the App Review site
+  // reaches the review account and nobody on the district list.
   selectBuildingFacility(facilityId);
-  for (const source of rosterSnapshot.sourceGroupRefs) {
-    if (source.purpose === 'others') {
-      addSelectedSource(selectedSources, source);
+  if (!rosterSnapshot.isolatedFacilityIds.includes(facilityId)) {
+    for (const source of rosterSnapshot.sourceGroupRefs) {
+      if (source.purpose === 'others') {
+        addSelectedSource(selectedSources, source);
+      }
     }
   }
 

@@ -61,10 +61,25 @@ describe('facilities administration form parsing', () => {
     );
     expect(created).toEqual({
       intent: 'create-facility',
-      command: { code: 'NEW-SITE', name: 'New Site' },
+      command: { code: 'NEW-SITE', name: 'New Site', isolated: false },
       status: 'facility-created',
     });
     expect(Object.isFrozen(created.command)).toBe(true);
+
+    // The checkbox arrives as "on" only when ticked.
+    const isolated = await parseFacilitiesAdminMutation(
+      adminForm('create-facility', [
+        ['code', 'RVW'],
+        ['name', 'App Review'],
+        ['isolated', 'on'],
+      ]),
+      googleThatIsNeverAsked(),
+    );
+    expect(isolated).toEqual({
+      intent: 'create-facility',
+      command: { code: 'RVW', name: 'App Review', isolated: true },
+      status: 'facility-created',
+    });
 
     const updated = await parseFacilitiesAdminMutation(
       adminForm('update-facility', [

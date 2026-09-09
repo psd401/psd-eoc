@@ -38,6 +38,7 @@ import {
   type SeedDatabaseOptions,
 } from '../db/seed';
 import { insertEventTypesBeforeDetailRule } from '../lib/testing/held-back-event-types';
+import { insertFacilitiesBeforeIsolated } from '../lib/testing/held-back-facilities';
 import { insertChannelConfigurationsBeforeTruthRetirement } from '../lib/testing/held-back-channel-configurations';
 import { migrateDatabase, migrationsFolder } from './migrate';
 
@@ -379,6 +380,9 @@ async function stageReviewedLiveShape(
     // the seed must not touch a relation that does not exist yet.
     insertThreats: () => Promise.resolve(),
     insertEventTypes: insertEventTypesBeforeDetailRule,
+    // The isolated flag arrived in migration 0052; this schema is held
+    // before it, so the seed's facilities are written without that column.
+    insertFacilities: insertFacilitiesBeforeIsolated,
     // Written here with the columns this schema actually has: Drizzle emits
     // every column of a table it inserts into, so seeding group sources
     // through the current schema fails against a database held at an earlier
@@ -587,8 +591,13 @@ async function retainedTruthSnapshot(
   const rows = databaseExecuteRows<SnapshotRow>(
     await database.execute<SnapshotRow>(sql`
       select jsonb_build_object(
+        -- The isolated flag arrived in migration 0052 with a default; a
+        -- column a later migration adds is not a rewrite of the retained rows,
+        -- so it is left out of the hash on both sides of the upgrade.
         'realFacilities', (
-          select md5(jsonb_agg(to_jsonb(row_value) order by id)::text)
+          select md5(
+            jsonb_agg(to_jsonb(row_value) - 'isolated' order by id)::text
+          )
           from facilities as row_value
           where id not in (${ids.north}::uuid, ${ids.south}::uuid)
         ),

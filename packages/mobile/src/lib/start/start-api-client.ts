@@ -300,22 +300,28 @@ export async function loadStartHomeData(
   request: StartAuthenticatedRequest,
 ): Promise<StartHomeData> {
   const [facilities, eventTypes, threats, activeEvents] = await Promise.all([
+    // Each page is read tolerantly: a field the server gained after this
+    // build shipped is dropped rather than making the home screen unreadable.
     loadAllPages<Facility>(
       request,
       '/api/mobile/start/facilities',
-      FacilityPageSchema,
+      tolerantResponseSchema(FacilityPageSchema),
     ),
     loadAllPages<EventTypeListItem>(
       request,
       '/event-types/api?operation=list&enabled=true',
-      EventTypePageSchema,
+      tolerantResponseSchema(EventTypePageSchema),
     ),
     loadAllPages<Threat>(
       request,
       '/api/mobile/start/threats',
-      ThreatPageSchema,
+      tolerantResponseSchema(ThreatPageSchema),
     ),
-    loadAllPages<Event>(request, '/api/events', EventPageSchema),
+    loadAllPages<Event>(
+      request,
+      '/api/events',
+      tolerantResponseSchema(EventPageSchema),
+    ),
   ]);
   if (activeEvents.some((event) => event.status !== 'active')) {
     throw requestFailure(
