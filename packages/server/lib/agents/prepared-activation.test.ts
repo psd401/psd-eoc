@@ -15,6 +15,12 @@ import {
   type PreparedActivation,
 } from '@psd-eoc/contracts';
 
+import { defaultMessageTemplateCatalog } from '../notify/default-templates';
+import type {
+  NotificationWording,
+  NotificationWordingInput,
+} from '../capabilities/notification-wording';
+
 import {
   CapabilityEngineError,
   type CapabilityAuditEvent,
@@ -424,6 +430,20 @@ class PreparedConsumptionEventStore
 
   public async resolveLifecyclePreview(): Promise<ResolvedLifecyclePreview | null> {
     return null;
+  }
+
+  public async resolveNotificationWording(
+    input: NotificationWordingInput,
+  ): Promise<NotificationWording | null> {
+    return {
+      templates: defaultMessageTemplateCatalog(input.templateMode)[
+        input.purpose
+      ],
+      facilityName: 'Synthetic Facility',
+      eventTypeName: 'Synthetic response',
+      initiatorDisplayName: 'Synthetic Initiator',
+      actorDisplayName: 'Synthetic Initiator',
+    };
   }
 
   public async getEvent(eventId: string): Promise<Event | null> {

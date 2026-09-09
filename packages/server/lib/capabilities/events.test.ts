@@ -24,6 +24,12 @@ import {
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../auth/sessions';
+import { defaultMessageTemplateCatalog } from '../notify/default-templates';
+import { formatNotificationStartTime } from '../notify/render';
+import type {
+  NotificationWording,
+  NotificationWordingInput,
+} from './notification-wording';
 import {
   CapabilityEngineError,
   resolveHumanCapabilityInvocation,
@@ -364,6 +370,23 @@ class MemoryEventCapabilityTransaction implements EventCapabilityTransaction {
     previewId: string,
   ): Promise<ResolvedLifecyclePreview | null> {
     return this.state.lifecyclePreviews.get(previewId) ?? null;
+  }
+
+  public async resolveNotificationWording(
+    input: NotificationWordingInput,
+  ): Promise<NotificationWording | null> {
+    return {
+      templates: defaultMessageTemplateCatalog(input.templateMode)[
+        input.purpose
+      ],
+      facilityName: 'Synthetic Facility',
+      eventTypeName: 'Synthetic response',
+      initiatorDisplayName: 'Synthetic Initiator',
+      actorDisplayName:
+        input.purpose === 'activation'
+          ? 'Synthetic Initiator'
+          : 'Synthetic Operator',
+    };
   }
 
   public async getEvent(eventId: string): Promise<Event | null> {
@@ -945,6 +968,82 @@ async function startSyntheticEvent(
 }
 
 describe('event lifecycle capabilities', () => {
+  test('renders the payload at confirmation with the real time and actor, not the preview copy', async () => {
+    // The preview is built before the event starts, so its copy says "the
+    // time you confirm" and a lifecycle preview names whoever built it. The
+    // workers must carry the moment and the person that actually acted: the
+    // first live drill sent "Started once confirmed" and "by Recorded
+    // initiator" to staff because the preview copy was the payload.
+    const store = new MemoryEventCapabilityStore();
+    const started = await startSyntheticEvent(store, {
+      requestId: uuid(230),
+      idempotencyKey: 'rendered-payload-start-0001',
+    });
+    const activation = store.outboxRecords[0]?.message;
+    if (activation === undefined) throw new Error('No activation outbox.');
+    const activationPush = activation.channels.find(
+      (channel) => channel.channel === 'push',
+    )?.renderedMessage;
+    if (activationPush?.channel !== 'push') {
+      throw new Error('Expected a push activation message.');
+    }
+    expect(activationPush.body).toBe(
+      `[DRILL] TEST - NOT A REAL INCIDENT: Started by Synthetic Initiator at ${formatNotificationStartTime(TIMES.activation)}. Threat: Synthetic wildlife. Open PSD EOC for current instructions.`,
+    );
+    expect(activationPush.title).toBe(
+      '[DRILL] TEST - NOT A REAL INCIDENT: Synthetic response at Synthetic Facility',
+    );
+    expect(JSON.stringify(activation)).not.toContain('the time you confirm');
+    // The preview's own channel plan (endpoints, integrations) is kept.
+    expect(
+      activation.channels.map(({ channel, endpointCount, integrationId }) => ({
+        channel,
+        endpointCount,
+        integrationId,
+      })),
+    ).toEqual(
+      activationPreview().channels.map(
+        ({ channel, endpointCount, integrationId }) => ({
+          channel,
+          endpointCount,
+          integrationId,
+        }),
+      ),
+    );
+
+    const preview = lifecyclePreview(started.event, 'all-clear', {
+      id: IDS.allClearPreview,
+      createdAt: TIMES.firstAllClearPreview,
+    });
+    seedLifecycle(store, preview);
+    await executeEventCapability(
+      'all-clear-event',
+      { eventId: started.event.id, lifecyclePreviewId: preview.id },
+      humanMutationInvocation({
+        requestId: uuid(231),
+        idempotencyKey: 'rendered-payload-clear-0001',
+        serverTime: TIMES.firstAllClear,
+      }),
+      store,
+    );
+    const allClear = store.outboxRecords[1]?.message;
+    if (allClear === undefined) throw new Error('No all-clear outbox.');
+    const allClearEmail = allClear.channels.find(
+      (channel) => channel.channel === 'email',
+    )?.renderedMessage;
+    if (allClearEmail?.channel !== 'email') {
+      throw new Error('Expected an email all-clear message.');
+    }
+    expect(allClearEmail.subject).toBe(
+      '[DRILL] TEST - NOT A REAL INCIDENT - ALL CLEAR: Synthetic response at Synthetic Facility',
+    );
+    expect(allClearEmail.textBody).toBe(
+      `[DRILL] TEST - NOT A REAL INCIDENT - ALL CLEAR: Synthetic Operator has completed Synthetic response at Synthetic Facility.\nEvent completed: ${formatNotificationStartTime(TIMES.firstAllClear)}\nLocation: Synthetic Facility\n\nOpen PSD EOC for current information.`,
+    );
+    expect(JSON.stringify(allClear)).not.toContain('Recorded');
+    expect(JSON.stringify(allClear)).not.toContain('the time you confirm');
+  });
+
   test('persists activation acceptance as one atomic event, transition, journal, intent, and outbox bundle', async () => {
     const store = new MemoryEventCapabilityStore();
 

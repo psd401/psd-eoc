@@ -192,6 +192,25 @@ the Facilities page.
 | **Audit**        | The append-only, hash-chained security audit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | **Agents**       | Non-human capability access.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
+### What a notification says
+
+Every push, email, and text starts with the classification marker the
+renderer owns, `[DRILL]` or `[INCIDENT]`, followed for an all-clear or a
+reactivation by the state it announces (`ALL CLEAR:`, `REACTIVATED:`);
+nothing an administrator types can remove or imitate it. After the lead
+comes the response type's wording. The wording every response type starts
+with names the response and the school, then who started the event and
+when, the threat, and where to look; an all-clear names who completed it
+and when. It lives in `packages/server/lib/notify/default-templates.ts`
+and is what the Responses page offers for a new response type. Each
+response type's wording is a versioned, immutable record: to change one,
+publish a new version from the Responses page. To bring every response type
+to the current default at once, run
+`packages/server/scripts/operations/publish-message-templates.ts` in the
+access-sync task definition with `MESSAGE_TEMPLATES_APPROVED_BY_USER_ID`
+set to the approving administrator's user id; it supersedes only the
+versions whose wording differs and reports what it published.
+
 ## 7. Run a drill
 
 Start a drill, confirm the consequence preview names the recipients you expect,

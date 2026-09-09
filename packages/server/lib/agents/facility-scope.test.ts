@@ -83,6 +83,9 @@ class ScopeEventStore
   public readonly resolveLifecyclePreview: EventCapabilityTransaction['resolveLifecyclePreview'] =
     async () => unexpectedCall();
 
+  public readonly resolveNotificationWording: EventCapabilityTransaction['resolveNotificationWording'] =
+    async () => unexpectedCall();
+
   public readonly getEvent: EventCapabilityTransaction['getEvent'] = async () =>
     unexpectedCall();
 

@@ -6,7 +6,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   EventTypePageSchema,
   EventTypeRenderingPreviewSchema,
-  getEventClassificationPresentation,
   MessageTemplateCatalogSchema,
   SessionEstablishmentResultSchema,
   type AgentCapabilityGrant,
@@ -267,12 +266,11 @@ function capabilityStore(eventTypes: EventTypeStore): EventTypeCapabilityStore {
 }
 
 /**
- * Every independently visible field, paired with the frame it must carry.
- *
- * A push title and an email subject are headlines, read in a list or on a lock
- * screen, and they carry a compact frame so the classification marker does not
- * consume the whole line. Bodies carry the full spelled-out frame. Both frames
- * are renderer-owned on both edges; only the long label differs.
+ * Every independently visible field. Each carries the same renderer-owned
+ * lead: the classification marker, then the state a lifecycle notification
+ * announces (and, for a synthetic delivery test, what it is). There is no
+ * trailing marker: a message that ran long lost it exactly when it mattered,
+ * and the lead alone is what the installed mobile app checks.
  */
 function visibleFields(
   message: ReturnType<typeof renderTemplateSet>[number],
@@ -306,48 +304,28 @@ describe('renderer-owned notification frames', () => {
     purpose: NotificationPurpose,
   ): Readonly<{ prefix: string; suffix: string }> {
     const marker = mode === 'real' ? 'INCIDENT' : 'DRILL';
-    const modeLabel = getEventClassificationPresentation({
-      kind: eventKind,
-      templateMode: mode,
-    }).label.replaceAll(' — ', ' - ');
-    const purposeLabel =
+    const state =
       purpose === 'activation'
-        ? 'ACTIVATION'
+        ? ''
         : purpose === 'all-clear'
-          ? 'ALL CLEAR'
-          : 'REACTIVATION';
-    return {
-      prefix: `[${marker}] ${modeLabel} - ${purposeLabel}: `,
-      suffix: ` [${marker}]`,
-    };
-  }
-
-  function expectedHeadlineFrame(
-    mode: TemplateMode,
-    purpose: NotificationPurpose,
-  ): Readonly<{ prefix: string; suffix: string }> {
-    const marker = mode === 'real' ? 'INCIDENT' : 'DRILL';
-    const purposeLabel =
-      purpose === 'activation'
-        ? 'ACTIVATION'
-        : purpose === 'all-clear'
-          ? 'ALL CLEAR'
-          : 'REACTIVATION';
-    return {
-      prefix: `[${marker}] ${purposeLabel}: `,
-      suffix: ` [${marker}]`,
-    };
+          ? 'ALL CLEAR: '
+          : 'REACTIVATED: ';
+    const lead =
+      eventKind === 'test'
+        ? state === ''
+          ? 'TEST - NOT A REAL INCIDENT: '
+          : `TEST - NOT A REAL INCIDENT - ${state}`
+        : state;
+    return { prefix: `[${marker}] ${lead}`, suffix: '' };
   }
 
   function frameFor(
-    field: Readonly<{ headline: boolean }>,
+    _field: Readonly<{ headline: boolean }>,
     eventKind: EventKind,
     mode: TemplateMode,
     purpose: NotificationPurpose,
   ): Readonly<{ prefix: string; suffix: string }> {
-    return field.headline
-      ? expectedHeadlineFrame(mode, purpose)
-      : expectedFrame(eventKind, mode, purpose);
+    return expectedFrame(eventKind, mode, purpose);
   }
 
   test('frames every independently visible field for every mode and purpose', () => {
@@ -373,12 +351,13 @@ describe('renderer-owned notification frames', () => {
           for (const field of visibleFields(message)) {
             const expected = frameFor(field, eventKind, mode, purpose);
             expect(field.value.startsWith(expected.prefix)).toBe(true);
-            expect(field.value.endsWith(expected.suffix)).toBe(true);
-            // The marker is owned on both edges of every field, headline or
-            // not, so configurable copy can never remove or impersonate it.
+            // The marker leads every field, headline or not, so configurable
+            // copy can never remove or impersonate it; nothing trails.
             expect(expected.prefix).toContain(
               mode === 'real' ? '[INCIDENT]' : '[DRILL]',
             );
+            expect(field.value.endsWith(' [DRILL]')).toBe(false);
+            expect(field.value.endsWith(' [INCIDENT]')).toBe(false);
           }
         }
       }
@@ -427,14 +406,7 @@ describe('renderer-owned notification frames', () => {
     expect(visible).toContain('هذا حادث حقيقي وفق النص الإداري');
     expect(visible).toContain('これは実際の事件です');
     for (const field of messages.flatMap(visibleFields)) {
-      expect(
-        field.value.startsWith(
-          field.headline
-            ? '[DRILL] ACTIVATION: '
-            : '[DRILL] DRILL - TRAINING ONLY - ACTIVATION: ',
-        ),
-      ).toBe(true);
-      expect(field.value.endsWith(' [DRILL]')).toBe(true);
+      expect(field.value.startsWith('[DRILL] ')).toBe(true);
     }
   });
 
@@ -601,8 +573,7 @@ describe('renderer-owned notification frames', () => {
         throw new Error('Expected push rendering first.');
       }
       expect(push.title).toContain(configuredCopy);
-      expect(push.title.startsWith('[INCIDENT] ACTIVATION: ')).toBe(true);
-      expect(push.title.endsWith(' [INCIDENT]')).toBe(true);
+      expect(push.title.startsWith('[INCIDENT] ')).toBe(true);
     }
   });
 
@@ -641,14 +612,7 @@ describe('renderer-owned notification frames', () => {
     expect(visible).toContain('Shelter [North Wing]');
     expect(visible).toContain('Harbor Ridge [Building A]');
     for (const field of messages.flatMap(visibleFields)) {
-      expect(
-        field.value.startsWith(
-          field.headline
-            ? '[INCIDENT] ACTIVATION: '
-            : '[INCIDENT] REAL INCIDENT - ACTIVATION: ',
-        ),
-      ).toBe(true);
-      expect(field.value.endsWith(' [INCIDENT]')).toBe(true);
+      expect(field.value.startsWith('[INCIDENT] ')).toBe(true);
     }
   });
 
@@ -885,10 +849,7 @@ describe('renderer-owned notification frames', () => {
       }
       expect(sms.body).toContain('Recorded site');
       expect(sms.body).not.toContain(forgedMarker);
-      expect(
-        sms.body.startsWith('[DRILL] DRILL - TRAINING ONLY - ACTIVATION: '),
-      ).toBe(true);
-      expect(sms.body.endsWith(' [DRILL]')).toBe(true);
+      expect(sms.body.startsWith('[DRILL] ')).toBe(true);
     }
   });
 
@@ -902,29 +863,34 @@ describe('renderer-owned notification frames', () => {
       ['drill', 'drill', 'reactivation', 'DRILL — TRAINING ONLY REACTIVATION'],
     ] as const) {
       const base = templateSet(mode, purpose);
-      const messages = renderTemplateSet({
-        eventKind,
-        templates: {
-          ...base,
-          push: {
-            ...base.push,
-            title: `${legacyLead}: Keep this configured text`,
+      // The lead may be punctuated or run straight into the wording, as the
+      // first seeded templates did ("ACTIVATION at {{site}}"); the sent text
+      // once read "ACTIVATION: ACTIVATION at" because only the punctuated
+      // form was stripped.
+      for (const configured of [
+        `${legacyLead}: Keep this configured text`,
+        `${legacyLead} at Keep this configured text`,
+      ]) {
+        const messages = renderTemplateSet({
+          eventKind,
+          templates: {
+            ...base,
+            push: { ...base.push, title: configured },
           },
-        },
-        variables: mode === 'real' ? VARIABLES : DRILL_VARIABLES,
-      });
-      const push = messages[0];
-      if (push.channel !== 'push') {
-        throw new Error('Expected push rendering first.');
+          variables: mode === 'real' ? VARIABLES : DRILL_VARIABLES,
+        });
+        const push = messages[0];
+        if (push.channel !== 'push') {
+          throw new Error('Expected push rendering first.');
+        }
+        expect(push.title).not.toContain(legacyLead);
+        expect(push.title).toContain('Keep this configured text');
+        expect(push.title).toBe(
+          `${expectedFrame(eventKind, mode, purpose).prefix}${
+            configured.startsWith(`${legacyLead}:`) ? '' : 'at '
+          }Keep this configured text`,
+        );
       }
-      expect(push.title).not.toContain(legacyLead);
-      expect(push.title).toContain('Keep this configured text');
-      expect(
-        push.title.startsWith(expectedHeadlineFrame(mode, purpose).prefix),
-      ).toBe(true);
-      expect(
-        push.title.endsWith(expectedFrame(eventKind, mode, purpose).suffix),
-      ).toBe(true);
     }
 
     const base = templateSet('drill', 'activation');
