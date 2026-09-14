@@ -202,22 +202,24 @@ describeWithDatabase('sign-in to session round trip', () => {
     const both = await enrollments();
     expect(both).toHaveLength(2);
     expect(new Set(both.map((row) => row.userId)).size).toBe(2);
+    // Whoever signed in last holds the device: the first account's
+    // enrollment is closed in the same transaction, so its sessions stop
+    // authorizing and its notifications stop reaching this phone.
+    const first = both[0];
+    if (first === undefined) throw new Error('no first enrollment');
+    expect(first.revokedAt).not.toBeNull();
+    expect(both[1]?.revokedAt).toBeNull();
 
     // Signing in again reuses the account's own active enrollment.
     await signIn(STAFF_EMAIL, new Date(now.getTime() + 2_000), installationId);
     expect(await enrollments()).toHaveLength(2);
 
-    // A revoked enrollment ends that record, not the installation: the same
-    // account enrolls again as a new one.
-    const first = both[0];
-    if (first === undefined) throw new Error('no first enrollment');
-    await database()
-      .update(deviceEnrollments)
-      .set({ revokedAt: new Date(now.getTime() + 3_000) })
-      .where(eq(deviceEnrollments.id, first.id));
+    // A closed enrollment ends that record, not the installation: the first
+    // account enrolls again as a new one, and now holds the device.
     await signIn(ADMIN_EMAIL, new Date(now.getTime() + 4_000), installationId);
     const after = await enrollments();
     expect(after).toHaveLength(3);
+    expect(after.filter((row) => row.revokedAt === null)).toHaveLength(1);
     expect(
       after.filter(
         (row) => row.userId === first.userId && row.revokedAt === null,

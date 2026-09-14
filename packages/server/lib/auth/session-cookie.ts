@@ -37,6 +37,7 @@ import {
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './sign-in-audit';
+import { supersedeOtherAccountsOnInstallation } from './installation-handoff';
 import { decideAccess } from './trusted-group-access';
 import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
@@ -901,6 +902,12 @@ export function createDrizzleInitialWebSessionStore(
                 'The device enrollment is unavailable.',
               );
             }
+            await supersedeOtherAccountsOnInstallation(
+              transaction,
+              request.device.installationId,
+              request.user.id,
+              request.createdAt,
+            );
 
             const [activeDevice] = await transaction
               .update(deviceEnrollments)

@@ -46,8 +46,6 @@ import {
   connectivityEpochInvalidations,
   connectivityEpochs,
   deviceEnrollments,
-  devicePushTokenRegistrations,
-  devicePushTokenUnregistrations,
   idempotencyRecords,
   sessionRevocations,
   sessions,
@@ -75,6 +73,10 @@ import {
   type TrustedCapabilityInvocation,
 } from '../capabilities/engine';
 import { type RoleStateDatabase } from './role-state';
+import {
+  appendDevicePushTokenUnregistrations,
+  supersedeOtherAccountsOnInstallation,
+} from './installation-handoff';
 import { decideAccess } from './trusted-group-access';
 
 const SECOND_MS = 1_000;
@@ -416,47 +418,6 @@ export interface CompletedSelfRevocationRetryInput {
   readonly sessionId: string;
   readonly idempotencyKey: IdempotencyKey;
   readonly requestDigest: string;
-}
-
-type SessionMutationDatabase = Pick<Database, 'insert' | 'select'>;
-
-async function appendDevicePushTokenUnregistrations(
-  database: SessionMutationDatabase,
-  deviceEnrollmentId: string,
-  unregisteredAt: Date,
-): Promise<void> {
-  const activePushRegistrations = await database
-    .select({
-      registrationId: devicePushTokenRegistrations.id,
-      deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
-    })
-    .from(devicePushTokenRegistrations)
-    .leftJoin(
-      devicePushTokenUnregistrations,
-      eq(
-        devicePushTokenUnregistrations.registrationId,
-        devicePushTokenRegistrations.id,
-      ),
-    )
-    .where(
-      and(
-        eq(devicePushTokenRegistrations.deviceEnrollmentId, deviceEnrollmentId),
-        isNull(devicePushTokenUnregistrations.id),
-      ),
-    );
-  if (activePushRegistrations.length === 0) return;
-  await database
-    .insert(devicePushTokenUnregistrations)
-    .values(
-      activePushRegistrations.map((registration) => ({
-        registrationId: registration.registrationId,
-        deviceEnrollmentId: registration.deviceEnrollmentId,
-        unregisteredAt,
-      })),
-    )
-    .onConflictDoNothing({
-      target: devicePushTokenUnregistrations.registrationId,
-    });
 }
 
 /** Storage contract keeps all authentication decisions independently testable. */
@@ -1644,6 +1605,12 @@ export class DrizzleSessionStore implements SessionStore {
             revokedAt: null,
           });
         }
+        await supersedeOtherAccountsOnInstallation(
+          transaction,
+          input.device.installationId,
+          input.userId,
+          input.issuedAt,
+        );
         await transaction.insert(sessions).values({
           id: input.sessionId,
           userId: input.userId,
