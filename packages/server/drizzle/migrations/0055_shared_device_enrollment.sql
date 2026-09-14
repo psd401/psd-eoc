@@ -1,0 +1,2 @@
+DROP INDEX "device_enrollments_installation_uq";--> statement-breakpoint
+CREATE UNIQUE INDEX "device_enrollments_installation_user_active_uq" ON "device_enrollments" USING btree ("installation_id","user_id") WHERE "device_enrollments"."revoked_at" is null;
