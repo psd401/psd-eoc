@@ -8,6 +8,7 @@ export * from './email-runtime';
 export * from './event';
 export * from './event-room';
 export * from './event-type';
+export * from './admitted-account';
 export * from './facility';
 export * from './group';
 export * from './human-only';

@@ -246,6 +246,8 @@ const ADMIN_MUTATION_IDS = new Set<RegisteredCapabilityId>([
   'update-facility',
   'update-group-source',
   'set-user-facility-scope',
+  'admit-account',
+  'revoke-admitted-account',
   'create-event-type-draft',
   'update-event-type-draft',
   'publish-event-type-version',

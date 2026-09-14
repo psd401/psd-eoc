@@ -282,6 +282,34 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
+    // The staff list. Answered first because its statement embeds the
+    // access-group, membership, admission, and legacy-grant subqueries that
+    // name tables answered below.
+    if (sql.includes('from "users"') && sql.includes('order by')) {
+      return {
+        records: [
+          [
+            { stringValue: USER_ID },
+            { stringValue: 'synthetic-google-subject-2670' },
+            { stringValue: 'synthetic-admin@example.invalid' },
+            { stringValue: 'Synthetic Administrator' },
+            { stringValue: 'district' },
+            { stringValue: CLOCK_VALUE },
+            { isNull: true },
+          ],
+          [
+            { stringValue: SECOND_USER_ID },
+            { stringValue: 'synthetic-google-subject-2675' },
+            { stringValue: 'synthetic-operator@example.invalid' },
+            { stringValue: 'Synthetic Operator' },
+            { stringValue: 'district' },
+            { stringValue: CLOCK_VALUE },
+            { isNull: true },
+          ],
+        ],
+        $metadata: {},
+      };
+    }
     if (sql.startsWith('insert into "facilities"')) {
       this.facilityCreated = true;
       return {
@@ -719,30 +747,15 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
-    if (sql.includes('from "users"') && sql.includes('order by')) {
-      return {
-        records: [
-          [
-            { stringValue: USER_ID },
-            { stringValue: 'synthetic-google-subject-2670' },
-            { stringValue: 'synthetic-admin@example.invalid' },
-            { stringValue: 'Synthetic Administrator' },
-            { stringValue: 'district' },
-            { stringValue: CLOCK_VALUE },
-            { isNull: true },
-          ],
-          [
-            { stringValue: SECOND_USER_ID },
-            { stringValue: 'synthetic-google-subject-2675' },
-            { stringValue: 'synthetic-operator@example.invalid' },
-            { stringValue: 'Synthetic Operator' },
-            { stringValue: 'district' },
-            { stringValue: CLOCK_VALUE },
-            { isNull: true },
-          ],
-        ],
-        $metadata: {},
-      };
+    // The staff list derives roles from access-group membership and direct
+    // admissions; this fixture has neither, so both reads answer nothing and
+    // the listed roles come from the legacy stored grants below.
+    if (
+      !sql.includes('from "users"') &&
+      (sql.includes('from "group_members"') ||
+        sql.includes('from "admitted_accounts"'))
+    ) {
+      return { records: [], $metadata: {} };
     }
     if (sql.includes('from "users"')) {
       const userId = parameterStrings.includes(SECOND_USER_ID)

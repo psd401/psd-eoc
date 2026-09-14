@@ -94,6 +94,7 @@ async function signIn(
     user: authorization.user,
     membership: {
       groupSourceIds: [...authorization.groupSourceIds],
+      admittedAccountId: authorization.admittedAccountId,
       capturedAt: now,
     },
     device: {

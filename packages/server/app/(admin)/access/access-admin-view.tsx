@@ -1,4 +1,9 @@
-import type { Facility, GroupSourcePage, UserPage } from '@psd-eoc/contracts';
+import type {
+  AdmittedAccount,
+  Facility,
+  GroupSourcePage,
+  UserPage,
+} from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
 import type { AccessAdminCursorState } from './access-page-state';
@@ -16,6 +21,8 @@ export type AccessAdminViewModel =
       users: UserPage;
       /** Active facilities, for limiting a person to some of them. */
       facilities: readonly Facility[];
+      /** Addresses admitted without a group, current and revoked. */
+      admittedAccounts: readonly AdmittedAccount[];
       cursors: AccessAdminCursorState;
     }>;
 
@@ -46,9 +53,9 @@ function CreateAccessGroupForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
         <legend>Add a Google access group</legend>
         <p id="new-access-group-help">
           Access groups permit staff sign-in. They do not add anyone to a
-          notification audience. Only designated Google Groups can grant PSD EOC
-          access. Enter the group&apos;s address; its Google Group ID is looked
-          up from Google when you save.
+          notification audience. Only designated Google Groups, or an address
+          admitted below, can grant PSD EOC access. Enter the group&apos;s
+          address; its Google Group ID is looked up from Google when you save.
         </p>
         <label>
           Display name
@@ -198,9 +205,9 @@ function AccessGroups({
     <section aria-labelledby="access-groups-heading">
       <h2 id="access-groups-heading">Google access groups</h2>
       <p>
-        Membership in at least one active designated group gates PSD EOC access.
-        Google data remains untrusted until a complete server-side sync
-        validates it.
+        Membership in at least one active designated group, or an admission
+        below, gates PSD EOC access. Google data remains untrusted until a
+        complete server-side sync validates it.
       </p>
       {omittedUnexpectedGroup ? (
         <p role="alert">
@@ -264,6 +271,124 @@ function AccessGroups({
           )
         : null}
       <CreateAccessGroupForm csrfToken={csrfToken} />
+    </section>
+  );
+}
+
+function admissionStatus(account: AdmittedAccount): string {
+  return account.revokedAt === null
+    ? 'Admitted'
+    : `Revoked ${account.revokedAt.slice(0, 10)}`;
+}
+
+function AdmittedAccounts({
+  accounts,
+  csrfToken,
+}: Readonly<{
+  accounts: readonly AdmittedAccount[];
+  csrfToken: string;
+}>) {
+  return (
+    <section aria-labelledby="admitted-accounts-heading">
+      <h2 id="admitted-accounts-heading">Admitted accounts</h2>
+      <p>
+        An admitted address may sign in as staff without being in any Google
+        access group. Use it for an account no group should hold, such as the
+        one an app store reviewer signs in with. Admission never grants
+        administrator, and a revoked admission refuses the next sign-in.
+        Revocations stay listed as the record of who was let in and when it
+        ended.
+      </p>
+      <div
+        aria-label="Admitted accounts"
+        className="table-region"
+        role="region"
+        tabIndex={0}
+      >
+        <table>
+          <caption>Addresses admitted to sign in without a group</caption>
+          <thead>
+            <tr>
+              <th scope="col">Address</th>
+              <th scope="col">Note</th>
+              <th scope="col">Admitted</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.length === 0 ? (
+              <tr>
+                <td colSpan={4}>No address has been admitted.</td>
+              </tr>
+            ) : (
+              accounts.map((account) => (
+                <tr key={account.id}>
+                  <th scope="row">{account.email}</th>
+                  <td>{account.note}</td>
+                  <td>{account.admittedAt.slice(0, 10)}</td>
+                  <td>{admissionStatus(account)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div aria-label="Revoke admissions" role="group">
+        {accounts
+          .filter((account) => account.revokedAt === null)
+          .map((account) => (
+            <form action="/access/api" key={account.id} method="post">
+              <AdminMutationFields csrfToken={csrfToken} />
+              <input
+                name="intent"
+                type="hidden"
+                value="revoke-admitted-account"
+              />
+              <input
+                name="admittedAccountId"
+                type="hidden"
+                value={account.id}
+              />
+              <button type="submit">Revoke {account.email}</button>
+            </form>
+          ))}
+      </div>
+      <form action="/access/api" method="post">
+        <AdminMutationFields csrfToken={csrfToken} />
+        <input name="intent" type="hidden" value="admit-account" />
+        <fieldset aria-describedby="admit-account-help">
+          <legend>Admit an account</legend>
+          <p className="field-help" id="admit-account-help">
+            The address signs in with Google like everyone else; admission only
+            replaces the group membership check. It takes effect at the next
+            sign-in.
+          </p>
+          <label>
+            Google account address
+            <input
+              autoCapitalize="none"
+              autoComplete="off"
+              inputMode="email"
+              maxLength={320}
+              name="email"
+              required
+              spellCheck={false}
+              type="email"
+            />
+          </label>
+          <label>
+            Note
+            <input
+              autoComplete="off"
+              maxLength={240}
+              name="note"
+              placeholder="Why this address is admitted"
+              type="text"
+            />
+          </label>
+          <button type="submit">Admit account</button>
+        </fieldset>
+      </form>
     </section>
   );
 }
@@ -464,6 +589,10 @@ export function AccessAdminView({
         csrfToken={csrfToken}
         cursors={view.cursors}
         page={view.accessGroups}
+      />
+      <AdmittedAccounts
+        accounts={view.admittedAccounts}
+        csrfToken={csrfToken}
       />
       <UsersAndRoles
         csrfToken={csrfToken}

@@ -68,6 +68,7 @@ const AUTHORIZATION: CompleteOidcSignInContext['authorization'] = Object.freeze(
     }),
     membership: Object.freeze({
       groupSourceIds: Object.freeze([ACCESS_GROUP_ID]),
+      admittedAccountId: null,
       capturedAt: new Date(CAPTURED_AT),
     }),
   },

@@ -5,6 +5,10 @@ const STATUS_MESSAGES = Object.freeze({
   'access-group-created': 'The Google access group was added.',
   'access-group-updated': 'The Google access group was updated.',
   'roles-updated': 'The staff role assignment was updated.',
+  'account-admitted':
+    'The address was admitted. It may sign in as staff from now on.',
+  'admission-revoked':
+    'The admission was revoked. The next sign-in with that address is refused.',
   'user-scope-updated':
     "The person's facility scope was updated. It applies to their next request.",
 } as const);
