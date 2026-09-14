@@ -852,34 +852,49 @@ export function createDrizzleInitialWebSessionStore(
               );
             }
 
-            await transaction
-              .insert(deviceEnrollments)
-              .values({
-                userId: request.user.id,
-                platform: request.device.platform,
-                unlockMethod: request.device.unlockMethod,
-                installationId: request.device.installationId,
-                enrolledAt: request.createdAt,
-                lastSeenAt: request.createdAt,
-              })
-              .onConflictDoNothing();
-
-            const [device] = await transaction
+            // An installation is not owned by the first account that signed
+            // in on it: whoever the access decision admits may enroll it, and
+            // a revoked enrollment never blocks a fresh one. The account's own
+            // active enrollment on this installation is reused; otherwise a
+            // new one is written. The lock is the one the session service
+            // takes for the same installation, so two first sign-ins racing
+            // for one pair serialize instead of tripping the unique index.
+            await transaction.execute(
+              sql`select pg_advisory_xact_lock(hashtextextended(${request.device.installationId}, 4017))`,
+            );
+            const [enrolled] = await transaction
               .select()
               .from(deviceEnrollments)
               .where(
-                eq(
-                  deviceEnrollments.installationId,
-                  request.device.installationId,
+                and(
+                  eq(
+                    deviceEnrollments.installationId,
+                    request.device.installationId,
+                  ),
+                  eq(deviceEnrollments.userId, request.user.id),
+                  isNull(deviceEnrollments.revokedAt),
                 ),
               )
               .limit(1);
+            const device =
+              enrolled ??
+              (
+                await transaction
+                  .insert(deviceEnrollments)
+                  .values({
+                    userId: request.user.id,
+                    platform: request.device.platform,
+                    unlockMethod: request.device.unlockMethod,
+                    installationId: request.device.installationId,
+                    enrolledAt: request.createdAt,
+                    lastSeenAt: request.createdAt,
+                  })
+                  .returning()
+              )[0];
             if (
               device === undefined ||
-              device.userId !== request.user.id ||
               device.platform !== request.device.platform ||
-              device.unlockMethod !== request.device.unlockMethod ||
-              device.revokedAt !== null
+              device.unlockMethod !== request.device.unlockMethod
             ) {
               throw new WebSessionIssuanceError(
                 'SESSION_PERSISTENCE_REJECTED',

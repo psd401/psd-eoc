@@ -1344,31 +1344,23 @@ describeWithDatabase('device push-token persistence', () => {
       ),
     );
 
+    // The token follows the latest enrollment that registers it: both
+    // registrations succeed, the earlier one is unregistered under the token
+    // lock, and exactly one enrollment owns the token afterwards. This is
+    // what a second account signing in on the same phone looks like.
     expect(
       results.filter((result) => result.status === 'fulfilled'),
-    ).toHaveLength(1);
-    const rejected = results.find((result) => result.status === 'rejected');
-    expect(rejected).toMatchObject({
-      status: 'rejected',
-      reason: {
-        status: 409,
-        reasonCode: 'PERSISTENCE_CONFLICT',
-        message:
-          'The push token is already bound to another device enrollment.',
-      },
-    });
-    expect(JSON.stringify(rejected)).not.toContain(contendedToken);
+    ).toHaveLength(2);
 
     const active = await activeRegistrationsForToken(database, contendedToken);
     expect(active).toHaveLength(1);
-    const winnerIndex = results.findIndex(
-      (result) => result.status === 'fulfilled',
+    const winner = candidates.find(
+      (candidate) =>
+        candidate.deviceEnrollmentId === active[0]?.deviceEnrollmentId,
     );
-    const winner = candidates[winnerIndex];
     if (winner === undefined || active[0] === undefined) {
-      throw new Error('The cross-device token winner was not retained.');
+      throw new Error('The cross-device token owner was not retained.');
     }
-    expect(active[0].deviceEnrollmentId).toBe(winner.deviceEnrollmentId);
 
     await executeDeviceCapability(
       'unregister-push-token',
