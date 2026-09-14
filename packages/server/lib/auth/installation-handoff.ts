@@ -85,7 +85,10 @@ export async function supersedeOtherAccountsOnInstallation(
         )`,
       })
       .where(
-        and(eq(deviceEnrollments.id, other.id), isNull(deviceEnrollments.revokedAt)),
+        and(
+          eq(deviceEnrollments.id, other.id),
+          isNull(deviceEnrollments.revokedAt),
+        ),
       );
   }
 }
