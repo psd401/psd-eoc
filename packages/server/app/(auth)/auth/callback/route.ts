@@ -294,6 +294,7 @@ export async function GET(request: Request): Promise<NextResponse> {
         user: access.user,
         membership: Object.freeze({
           groupSourceIds: access.groupSourceIds,
+          admittedAccountId: access.admittedAccountId,
           capturedAt: new Date(serverTime),
         }),
       }),

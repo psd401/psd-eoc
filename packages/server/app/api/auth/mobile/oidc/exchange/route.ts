@@ -188,6 +188,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         user: access.user,
         membership: Object.freeze({
           groupSourceIds: access.groupSourceIds,
+          admittedAccountId: access.admittedAccountId,
           capturedAt: new Date(serverTime),
         }),
       }),

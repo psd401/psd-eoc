@@ -19,6 +19,7 @@ import {
   facilities,
   groupMembers,
   groupSources,
+  securityAuditEntries,
   sessions,
   userFacilityScopes,
   users,
@@ -36,7 +37,13 @@ import {
   requireSyntheticTestDatabaseUrl,
   type DisposableDatabase,
 } from '../../../lib/testing/database';
-import { executeSetUserFacilityScopeCapability } from './capabilities';
+import {
+  executeAdmitAccountCapability,
+  executeListAdmittedAccountsCapability,
+  executeListUsersCapability,
+  executeRevokeAdmittedAccountCapability,
+  executeSetUserFacilityScopeCapability,
+} from './capabilities';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -362,4 +369,220 @@ describeWithDatabase('set-user-facility-scope', () => {
     expect(await scopeKind(personId)).toBe('district');
     expect(await scopeRows(personId)).toEqual([]);
   });
+
+  test('admits an address once, lists it, and revokes it, keeping the record', async () => {
+    const store = createDrizzleAdminCapabilityStore(database(), admin);
+    const email = `Reviewer-${randomUUID().slice(0, 8)}@Example.invalid`;
+    const admitted = await executeAdmitAccountCapability({
+      authenticated: admin,
+      store,
+      command: { email, note: 'App store review' },
+      metadata: metadata(),
+    });
+    if (admin.actor.kind !== 'human') throw new Error('human only');
+    expect(admitted).toMatchObject({
+      email: email.toLowerCase(),
+      note: 'App store review',
+      admittedByUserId: admin.actor.userId,
+      revokedAt: null,
+      revokedByUserId: null,
+    });
+
+    // One active admission per address, however it is capitalized.
+    await expectRefusal(
+      executeAdmitAccountCapability({
+        authenticated: admin,
+        store,
+        command: { email: email.toUpperCase() },
+        metadata: metadata(),
+      }),
+      409,
+      'That address is already admitted.',
+    );
+
+    const listed = await executeListAdmittedAccountsCapability({
+      authenticated: admin,
+      store,
+      query: { includeRevoked: false },
+    });
+    expect(listed.items.map(({ id }) => id)).toContain(admitted.id);
+
+    const revoked = await executeRevokeAdmittedAccountCapability({
+      authenticated: admin,
+      store,
+      command: { admittedAccountId: admitted.id },
+      metadata: metadata(),
+    });
+    expect(revoked.id).toBe(admitted.id);
+    expect(revoked.revokedAt).not.toBeNull();
+    expect(revoked.revokedByUserId).toBe(admin.actor.userId);
+
+    // The record stays; it is simply no longer current.
+    const current = await executeListAdmittedAccountsCapability({
+      authenticated: admin,
+      store,
+      query: { includeRevoked: false },
+    });
+    expect(current.items.map(({ id }) => id)).not.toContain(admitted.id);
+    const all = await executeListAdmittedAccountsCapability({
+      authenticated: admin,
+      store,
+      query: { includeRevoked: true },
+    });
+    expect(all.items.map(({ id }) => id)).toContain(admitted.id);
+
+    await expectRefusal(
+      executeRevokeAdmittedAccountCapability({
+        authenticated: admin,
+        store,
+        command: { admittedAccountId: admitted.id },
+        metadata: metadata(),
+      }),
+      409,
+      'That admission was already revoked.',
+    );
+    await expectRefusal(
+      executeRevokeAdmittedAccountCapability({
+        authenticated: admin,
+        store,
+        command: { admittedAccountId: randomUUID() },
+        metadata: metadata(),
+      }),
+      404,
+      'The admission was not found.',
+    );
+    // Revoked, the address may be admitted again as a new record.
+    const again = await executeAdmitAccountCapability({
+      authenticated: admin,
+      store,
+      command: { email },
+      metadata: metadata(),
+    });
+    expect(again.id).not.toBe(admitted.id);
+    expect(again.note).toBe('');
+  });
+
+  test('only a district administrator on the web may admit or revoke', async () => {
+    const staff = session(['staff']);
+    await persistSession(staff);
+    const store = createDrizzleAdminCapabilityStore(database(), staff);
+    await expectRefusal(
+      executeAdmitAccountCapability({
+        authenticated: staff,
+        store,
+        command: { email: 'someone@example.invalid' },
+        metadata: metadata(),
+      }),
+      403,
+      'District administrator access is required.',
+    );
+    await expectRefusal(
+      executeListAdmittedAccountsCapability({
+        authenticated: staff,
+        store,
+        query: { includeRevoked: true },
+      }),
+      403,
+      'District administrator access is required.',
+    );
+  });
+
+  test('the staff list shows who a group admits and who was admitted directly', async () => {
+    const store = createDrizzleAdminCapabilityStore(database(), admin);
+    const groupPerson = await persistPerson();
+    const admittedPerson = await persistPerson();
+    const nobody = await persistPerson();
+    const stalePerson = await persistPerson();
+    const [groupRow] = await database()
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, groupPerson));
+    const [admittedRow] = await database()
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, admittedPerson));
+    if (groupRow === undefined || admittedRow === undefined) {
+      throw new Error('The people vanished.');
+    }
+    const groupId = randomUUID();
+    await database()
+      .insert(groupSources)
+      .values({
+        id: groupId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'Listing test administrators',
+        grantedRole: 'admin',
+        active: true,
+        googleGroupId: `listing-admins-${groupId.slice(0, 8)}`,
+        email: `listing-admins-${groupId.slice(0, 8)}@example.invalid`,
+        fixtureKey: null,
+      });
+    const [staleRow] = await database()
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, stalePerson));
+    if (staleRow === undefined) throw new Error('The person vanished.');
+    await database()
+      .insert(groupMembers)
+      .values([
+        {
+          groupSourceId: groupId,
+          email: groupRow.email,
+          capturedAt: new Date(),
+        },
+        // Read two days ago and never since: sign-in would refuse this
+        // person as stale, so the page does not show them as an admin.
+        {
+          groupSourceId: groupId,
+          email: staleRow.email,
+          capturedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000),
+        },
+      ]);
+    const admitted = await executeAdmitAccountCapability({
+      authenticated: admin,
+      store,
+      command: { email: admittedRow.email },
+      metadata: metadata(),
+    });
+    // The hash-chained audit names the admission row.
+    const [auditRow] = await database()
+      .select({
+        targetKind: securityAuditEntries.targetKind,
+        targetId: securityAuditEntries.targetId,
+      })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.targetId, admitted.id));
+    expect(auditRow).toEqual({
+      targetKind: 'configuration',
+      targetId: admitted.id,
+    });
+
+    const page = await executeListUsersCapability({
+      authenticated: admin,
+      store,
+      query: {
+        facilityId: null,
+        includeDisabled: true,
+        cursor: null,
+        limit: 100,
+      },
+    });
+    const byId = new Map(page.items.map((item) => [item.id, item]));
+    // Roles on the page are what admits the person, not a stored grant:
+    // nothing stores roles any more, and a list of stored grants was empty.
+    expect(byId.get(groupPerson)?.roles).toEqual(['admin']);
+    expect(byId.get(admittedPerson)?.roles).toEqual(['staff']);
+    expect(byId.has(nobody)).toBe(false);
+    expect(byId.has(stalePerson)).toBe(false);
+  });
 });
+
+function metadata() {
+  return {
+    idempotencyKey: `admission-${randomUUID()}`,
+    requestId: randomUUID(),
+    now: new Date(),
+  };
+}

@@ -14,7 +14,12 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { groupMembers, groupSources } from '../../db/schema';
+import {
+  admittedAccounts,
+  groupMembers,
+  groupSources,
+  users,
+} from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { decideAccess, MEMBERSHIP_FRESHNESS_MS } from './trusted-group-access';
 
@@ -27,6 +32,9 @@ const NOW = new Date('2026-08-19T12:00:00.000Z');
 const ADMIN_GROUP = randomUUID();
 const STAFF_GROUP = randomUUID();
 const RETIRED_GROUP = randomUUID();
+const ADMITTER = randomUUID();
+const ADMISSION = randomUUID();
+const REVOKED_ADMISSION = randomUUID();
 
 let connection: PostgresDatabaseConnection | undefined;
 let databaseName = '';
@@ -113,6 +121,41 @@ describeWithDatabase('trusted group access', () => {
       },
     ]);
     void stale;
+
+    // Admission: an administrator wrote these addresses down; no group.
+    await opened.db.insert(users).values({
+      id: ADMITTER,
+      googleSubject: 'admitter-subject',
+      email: 'admitter@example.invalid',
+      displayName: 'Admitting administrator',
+      facilityScopeKind: 'district',
+    });
+    await opened.db.insert(admittedAccounts).values([
+      {
+        id: ADMISSION,
+        email: 'reviewer@example.invalid',
+        note: 'App store review',
+        admittedAt: fresh,
+        admittedByUserId: ADMITTER,
+      },
+      {
+        id: REVOKED_ADMISSION,
+        email: 'former.reviewer@example.invalid',
+        note: '',
+        admittedAt: stale,
+        admittedByUserId: ADMITTER,
+        revokedAt: fresh,
+        revokedByUserId: ADMITTER,
+      },
+      // Admitted and also in the admin group: both grants apply.
+      {
+        id: randomUUID(),
+        email: 'boss@example.invalid',
+        note: '',
+        admittedAt: fresh,
+        admittedByUserId: ADMITTER,
+      },
+    ]);
   });
 
   afterAll(async () => {
@@ -136,6 +179,60 @@ describeWithDatabase('trusted group access', () => {
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: true, roles: ['admin', 'staff'] });
+  });
+
+  test('a directly admitted address signs in as staff with no group at all', async () => {
+    const decision = await decideAccess(database(), {
+      email: 'Reviewer@example.invalid',
+      checkedAt: NOW,
+    });
+    expect(decision).toEqual({
+      granted: true,
+      roles: ['staff'],
+      groupSourceIds: [],
+      admittedAccountId: ADMISSION,
+      // Read from this database now, so the evidence is as fresh as the ask.
+      capturedAt: NOW,
+    });
+  });
+
+  test('admission adds staff to what the groups grant, never administrator', async () => {
+    const decision = await decideAccess(database(), {
+      email: 'boss@example.invalid',
+      checkedAt: NOW,
+    });
+    expect(decision).toMatchObject({
+      granted: true,
+      roles: ['admin', 'staff'],
+      groupSourceIds: [ADMIN_GROUP, STAFF_GROUP].sort(),
+    });
+    expect(decision.granted && decision.admittedAccountId).not.toBeNull();
+    // A person in only the admin group is an administrator and not staff;
+    // admission is the only thing that adds staff here.
+    const revokedOnly = await decideAccess(database(), {
+      email: 'former.reviewer@example.invalid',
+      checkedAt: NOW,
+    });
+    expect(revokedOnly).toEqual({
+      granted: false,
+      refusal: 'NOT_IN_A_TRUSTED_GROUP',
+    });
+  });
+
+  test('an admission is never stale, even when every group read is', async () => {
+    const longAfter = new Date(NOW.getTime() + 30 * 24 * 60 * 60 * 1_000);
+    expect(
+      await decideAccess(database(), {
+        email: 'reviewer@example.invalid',
+        checkedAt: longAfter,
+      }),
+    ).toMatchObject({ granted: true, roles: ['staff'] });
+    expect(
+      await decideAccess(database(), {
+        email: 'teacher@example.invalid',
+        checkedAt: longAfter,
+      }),
+    ).toMatchObject({ granted: false, refusal: 'MEMBERSHIP_STALE' });
   });
 
   test('a retired group stops granting access immediately', async () => {

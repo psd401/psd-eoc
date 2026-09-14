@@ -18,6 +18,8 @@ export type SignInAuthorization =
       user: User;
       /** The trusted groups that granted this sign-in. */
       groupSourceIds: readonly string[];
+      /** The direct admission that granted it, when no group did or as well. */
+      admittedAccountId: string | null;
       created: boolean;
     }>
   | Readonly<{
@@ -132,6 +134,7 @@ export async function authorizeSignIn(
         disabledAt: null,
       }),
       groupSourceIds: decision.groupSourceIds,
+      admittedAccountId: decision.admittedAccountId,
       created: existing === undefined,
     });
   });

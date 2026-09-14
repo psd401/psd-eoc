@@ -1,9 +1,9 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 
 import { RoleSchema, type Role } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
-import { groupMembers, groupSources } from '../../db/schema';
+import { admittedAccounts, groupMembers, groupSources } from '../../db/schema';
 
 /**
  * How stale a group's membership may be and still authorize a sign-in.
@@ -33,6 +33,8 @@ export type AccessDecision =
       granted: true;
       roles: readonly Role[];
       groupSourceIds: readonly string[];
+      /** The admission that granted this sign-in without a group, if any. */
+      admittedAccountId: string | null;
       /**
        * When the granting membership was last read from the provider — the
        * freshest capture among the groups that granted it. Callers that need
@@ -49,7 +51,8 @@ export type AccessDecision =
  *
  * The whole rule: they are in at least one active access group whose
  * membership was read recently enough, and they receive the roles those groups
- * grant. Membership in one trusted group is sufficient — requiring membership
+ * grant; or an administrator admitted their address directly, which grants
+ * staff. Membership in one trusted group is sufficient — requiring membership
  * in every configured group is what made a second group impossible to add.
  *
  * There is deliberately no snapshot, version, generation, or baseline here.
@@ -61,6 +64,24 @@ export async function decideAccess(
   database: Database,
   input: Readonly<{ email: string; checkedAt: Date }>,
 ): Promise<AccessDecision> {
+  const email = input.email.toLowerCase();
+
+  // An admission is the one way in that is not a group: an administrator
+  // wrote this address down on the Access page. It is read from this
+  // database, so it is current by definition and needs no freshness bound,
+  // and it grants staff only.
+  const [admission] = await database
+    .select({ id: admittedAccounts.id })
+    .from(admittedAccounts)
+    .where(
+      and(
+        eq(admittedAccounts.email, email),
+        isNull(admittedAccounts.revokedAt),
+      ),
+    )
+    .limit(1);
+  const admittedAccountId = admission?.id ?? null;
+
   const active = await database
     .select({
       id: groupSources.id,
@@ -71,29 +92,32 @@ export async function decideAccess(
     .where(
       and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
     );
-  if (active.length === 0) {
+  if (active.length === 0 && admittedAccountId === null) {
     return Object.freeze({
       granted: false,
       refusal: 'NO_TRUSTED_GROUPS_CONFIGURED' as const,
     });
   }
 
-  const memberships = await database
-    .select({
-      groupSourceId: groupMembers.groupSourceId,
-      capturedAt: groupMembers.capturedAt,
-    })
-    .from(groupMembers)
-    .where(
-      and(
-        eq(groupMembers.email, input.email.toLowerCase()),
-        inArray(
-          groupMembers.groupSourceId,
-          active.map(({ id }) => id),
-        ),
-      ),
-    );
-  if (memberships.length === 0) {
+  const memberships =
+    active.length === 0
+      ? []
+      : await database
+          .select({
+            groupSourceId: groupMembers.groupSourceId,
+            capturedAt: groupMembers.capturedAt,
+          })
+          .from(groupMembers)
+          .where(
+            and(
+              eq(groupMembers.email, email),
+              inArray(
+                groupMembers.groupSourceId,
+                active.map(({ id }) => id),
+              ),
+            ),
+          );
+  if (memberships.length === 0 && admittedAccountId === null) {
     return Object.freeze({
       granted: false,
       refusal: 'NOT_IN_A_TRUSTED_GROUP' as const,
@@ -132,23 +156,28 @@ export async function decideAccess(
     }
     return [{ id: group.id, grantedRole: group.grantedRole, capturedAt }];
   });
-  if (usable.length === 0) {
+  if (usable.length === 0 && admittedAccountId === null) {
     return Object.freeze({
       granted: false,
       refusal: 'MEMBERSHIP_STALE' as const,
     });
   }
 
-  const roles = [
-    ...new Set(usable.map((group) => RoleSchema.parse(group.grantedRole))),
-  ].sort();
+  const roles = new Set(
+    usable.map((group) => RoleSchema.parse(group.grantedRole)),
+  );
+  if (admittedAccountId !== null) roles.add('staff');
   const capturedAt = new Date(
-    Math.max(...usable.map((group) => group.capturedAt.getTime())),
+    Math.max(
+      ...usable.map((group) => group.capturedAt.getTime()),
+      ...(admittedAccountId === null ? [] : [input.checkedAt.getTime()]),
+    ),
   );
   return Object.freeze({
     granted: true,
-    roles: Object.freeze(roles),
+    roles: Object.freeze([...roles].sort()),
     groupSourceIds: Object.freeze(usable.map(({ id }) => id).sort()),
+    admittedAccountId,
     capturedAt,
   });
 }
