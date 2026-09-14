@@ -2428,6 +2428,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         user: bootstrapUser,
         membership: {
           groupSourceIds: [accessGroup.id],
+          admittedAccountId: null,
           capturedAt: bootstrapSnapshotAt,
         },
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 1_000),

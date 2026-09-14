@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   GroupSourcePageSchema,
   UserPageSchema,
+  type AdmittedAccount,
   type Facility,
   type GroupSourcePage,
   type UserPage,
@@ -26,6 +27,27 @@ const IDS = {
 
 const CREATED_AT = '2026-08-08T17:00:00.000Z';
 const CSRF_TOKEN = 'synthetic-csrf-token';
+const ADMITTED: readonly AdmittedAccount[] = Object.freeze([
+  {
+    id: '10000000-0000-4000-8000-000000000007',
+    email: 'reviewer@example.invalid',
+    note: 'App store review',
+    admittedAt: '2026-09-13T17:00:00.000Z',
+    admittedByUserId: IDS.user,
+    revokedAt: null,
+    revokedByUserId: null,
+  },
+  {
+    id: '10000000-0000-4000-8000-000000000008',
+    email: 'former.reviewer@example.invalid',
+    note: '',
+    admittedAt: '2026-08-01T17:00:00.000Z',
+    admittedByUserId: IDS.user,
+    revokedAt: '2026-08-20T17:00:00.000Z',
+    revokedByUserId: IDS.user,
+  },
+]);
+
 const FACILITIES: readonly Facility[] = Object.freeze([
   {
     id: IDS.facility,
@@ -135,6 +157,7 @@ function authorizedView(
     accessGroups: groupPage,
     users: users(),
     facilities: FACILITIES,
+    admittedAccounts: ADMITTED,
     cursors: Object.freeze({
       accessGroupCursor: 'current-access-cursor',
       userCursor: 'current-user-cursor',
@@ -218,7 +241,7 @@ describe('AccessAdminView semantics', () => {
       /value="create-access-group"[\s\S]*?<option value="staff" selected=""/u,
     );
     expect(html).toContain(
-      'Only designated Google Groups can grant PSD EOC access.',
+      'Only designated Google Groups, or an address admitted below, can grant PSD EOC access.',
     );
     expect(html).not.toContain('synthetic groups cannot be access groups');
     expect(html).toMatch(
@@ -227,13 +250,14 @@ describe('AccessAdminView semantics', () => {
     expect(html).toMatch(
       /<input[^>]*name="intent"[^>]*value="update-access-group"/u,
     );
-    // Two access-group forms, plus one facility-limit form per person.
+    // Two access-group forms, one facility-limit form per person, one
+    // revoke form for the current admission, and the admit form.
     expect(
       html.match(/<form action="\/access\/api" method="post">/gu),
-    ).toHaveLength(4);
-    expect(html.match(/name="csrfToken"/gu)).toHaveLength(4);
-    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(4);
-    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(4);
+    ).toHaveLength(6);
+    expect(html.match(/name="csrfToken"/gu)).toHaveLength(6);
+    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(6);
+    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(6);
     expect(html).not.toContain('method="get"');
     expect(html).not.toContain('fixtureKey');
     expect(html).not.toContain('name="kind"');
@@ -291,6 +315,35 @@ describe('AccessAdminView semantics', () => {
       '<input type="radio" name="scopeKind" checked="" value="facilities"',
     ]);
     expect(html).toContain('Save facility scope');
+  });
+
+  test('lists admitted addresses, offers revocation only for current ones, and an admit form', () => {
+    const html = renderAuthorized();
+
+    expect(html).toContain(
+      '<h2 id="admitted-accounts-heading">Admitted accounts</h2>',
+    );
+    expect(html).toContain('<th scope="row">reviewer@example.invalid</th>');
+    expect(html).toContain('<td>App store review</td>');
+    expect(html).toContain('<td>Admitted</td>');
+    expect(html).toContain('<td>Revoked 2026-08-20</td>');
+    // One revoke form, for the current admission only.
+    expect(html.match(/value="revoke-admitted-account"/gu)).toHaveLength(1);
+    expect(html).toContain(
+      'name="admittedAccountId" value="10000000-0000-4000-8000-000000000007"',
+    );
+    expect(html).not.toContain(
+      'name="admittedAccountId" value="10000000-0000-4000-8000-000000000008"',
+    );
+    expect(html).toContain('Revoke reviewer@example.invalid');
+    // The admit form posts through the same route with the same guards.
+    expect(html).toContain('value="admit-account"');
+    expect(html).toContain('<legend>Admit an account</legend>');
+    expect(html).toMatch(/<input[^>]*type="email"[^>]*name="email"/u);
+    expect(html).toMatch(/<input[^>]*name="note"/u);
+    expect(html).toContain('Admit account</button>');
+    // Nothing here can grant administrator.
+    expect(html).not.toMatch(/name="grantedRole"[^>]*value="admin"[^>]*admit/u);
   });
 
   test('renders independent opaque pagination links for both tables', () => {

@@ -74,6 +74,51 @@ export const userRoles = pgTable(
   (table) => [primaryKey({ columns: [table.userId, table.role] })],
 );
 
+/**
+ * Addresses admitted to sign in without a designated Google group.
+ *
+ * One active admission per address; a revoked row stays, with who ended it
+ * and when, so admission history is never rewritten. Admission grants staff
+ * only; nothing here can make an administrator.
+ */
+export const admittedAccounts = pgTable(
+  'admitted_accounts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    email: varchar('email', { length: 320 }).notNull(),
+    note: varchar('note', { length: 240 }).default('').notNull(),
+    admittedAt: occurredAt('admitted_at').defaultNow().notNull(),
+    admittedByUserId: uuid('admitted_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    revokedAt: occurredAt('revoked_at'),
+    revokedByUserId: uuid('revoked_by_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+    }),
+  },
+  (table) => [
+    uniqueIndex('admitted_accounts_active_email_uq')
+      .on(table.email)
+      .where(sql`${table.revokedAt} is null`),
+    index('admitted_accounts_email_idx').on(table.email),
+    check(
+      'admitted_accounts_normalized_email',
+      sql`${table.email} = lower(${table.email})
+        and ${table.email} = btrim(${table.email})
+        and length(${table.email}) between 3 and 320
+        and ${table.email} ~ '^[^[:space:]@]+@[^[:space:]@]+$'`,
+    ),
+    check(
+      'admitted_accounts_revocation_complete',
+      sql`(${table.revokedAt} is null) = (${table.revokedByUserId} is null)`,
+    ),
+    check(
+      'admitted_accounts_revoked_after_admission',
+      sql`${table.revokedAt} is null or ${table.revokedAt} >= ${table.admittedAt}`,
+    ),
+  ],
+);
+
 /** Explicit facility rows for users whose scope is not district-wide. */
 export const userFacilityScopes = pgTable(
   'user_facility_scopes',

@@ -715,6 +715,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       }),
       membership: Object.freeze({
         groupSourceIds: Object.freeze([groupSourceId]),
+        admittedAccountId: null,
         capturedAt: snapshotAt,
       }),
       device: Object.freeze({
@@ -892,6 +893,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       }),
       membership: Object.freeze({
         groupSourceIds: Object.freeze([groupSourceId]),
+        admittedAccountId: null,
         capturedAt: snapshotAt,
       }),
       device: Object.freeze({

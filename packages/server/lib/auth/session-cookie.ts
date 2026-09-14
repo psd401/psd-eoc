@@ -77,6 +77,8 @@ export interface GroupAuthorizedWebIdentity {
    */
   readonly membership: Readonly<{
     groupSourceIds: readonly string[];
+    /** A direct admission authorizes a sign-in that no group did. */
+    admittedAccountId: string | null;
     capturedAt: Date;
   }>;
 }
@@ -260,10 +262,14 @@ function assertGroupAuthorizedContext(
     authorization.user.disabledAt !== null ||
     authorization.user.googleSubject !== input.claims.subject ||
     authorization.user.email !== input.claims.email ||
-    authorization.membership.groupSourceIds.length === 0 ||
+    (authorization.membership.groupSourceIds.length === 0 &&
+      authorization.membership.admittedAccountId === null) ||
     authorization.membership.groupSourceIds.some(
       (id) => !UuidSchema.safeParse(id).success,
     ) ||
+    (authorization.membership.admittedAccountId !== null &&
+      !UuidSchema.safeParse(authorization.membership.admittedAccountId)
+        .success) ||
     Number.isNaN(authorization.membership.capturedAt.getTime())
   ) {
     throw new WebSessionIssuanceError(
@@ -784,6 +790,8 @@ export function createDrizzleInitialWebSessionStore(
                 [...confirmed.groupSourceIds],
                 [...request.membership.groupSourceIds],
               ) ||
+              confirmed.admittedAccountId !==
+                request.membership.admittedAccountId ||
               confirmed.roles.length !== request.user.roles.length ||
               !confirmed.roles.every((role) =>
                 request.user.roles.includes(role),

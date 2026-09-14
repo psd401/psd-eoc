@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import { AdminForm, AdminFormError } from '../../facilities/admin-request';
-import { parseSetUserFacilityScopeForm } from './request';
+import {
+  parseAdmitAccountForm,
+  parseRevokeAdmittedAccountForm,
+  parseSetUserFacilityScopeForm,
+} from './request';
 
 const IDS = Object.freeze({
   user: '20000000-0000-4000-8000-000000000001',
@@ -9,11 +13,14 @@ const IDS = Object.freeze({
   facilityB: '20000000-0000-4000-8000-000000000003',
 });
 
-function form(fields: readonly (readonly [string, string])[]): AdminForm {
+function form(
+  fields: readonly (readonly [string, string])[],
+  intent = 'set-user-facility-scope',
+): AdminForm {
   const parameters = new URLSearchParams();
   parameters.set('csrfToken', 'csrf-token-for-request-test');
   parameters.set('idempotencyKey', 'user-scope-request-test-0001');
-  parameters.set('intent', 'set-user-facility-scope');
+  parameters.set('intent', intent);
   fields.forEach(([name, value]) => parameters.append(name, value));
   return new AdminForm(parameters);
 }
@@ -113,5 +120,67 @@ describe('set-user-facility-scope form parsing', () => {
         ),
       'The administration form is invalid.',
     );
+  });
+});
+
+describe('admitted account form parsing', () => {
+  test('admits a normalized address with or without a note', () => {
+    expect(
+      parseAdmitAccountForm(
+        form(
+          [
+            ['email', '  Reviewer@Example.invalid '],
+            ['note', 'App store review'],
+          ],
+          'admit-account',
+        ),
+      ),
+    ).toEqual({ email: 'reviewer@example.invalid', note: 'App store review' });
+    // An empty note field is the browser's way of sending no note.
+    expect(
+      parseAdmitAccountForm(
+        form(
+          [
+            ['email', 'reviewer@example.invalid'],
+            ['note', '   '],
+          ],
+          'admit-account',
+        ),
+      ),
+    ).toEqual({ email: 'reviewer@example.invalid' });
+  });
+
+  test('refuses a malformed address or an unexpected field', () => {
+    expect(() =>
+      parseAdmitAccountForm(
+        form([['email', 'not-an-address']], 'admit-account'),
+      ),
+    ).toThrow();
+    expectFormError(
+      () =>
+        parseAdmitAccountForm(
+          form(
+            [
+              ['email', 'reviewer@example.invalid'],
+              ['grantedRole', 'admin'],
+            ],
+            'admit-account',
+          ),
+        ),
+      'The administration form is invalid.',
+    );
+  });
+
+  test('reads the admission to revoke', () => {
+    expect(
+      parseRevokeAdmittedAccountForm(
+        form([['admittedAccountId', IDS.user]], 'revoke-admitted-account'),
+      ),
+    ).toEqual({ admittedAccountId: IDS.user });
+    expect(() =>
+      parseRevokeAdmittedAccountForm(
+        form([['admittedAccountId', 'nope']], 'revoke-admitted-account'),
+      ),
+    ).toThrow();
   });
 });

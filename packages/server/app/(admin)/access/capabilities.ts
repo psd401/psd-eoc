@@ -1,17 +1,27 @@
 import {
+  AdmitAccountInputSchema,
+  AdmittedAccountListSchema,
+  AdmittedAccountSchema,
+  RevokeAdmittedAccountInputSchema,
+  RoleSchema,
   SetUserFacilityScopeInputSchema,
   UserPageSchema,
   UserSchema,
   UuidSchema,
+  type AdmittedAccount,
+  type AdmittedAccountList,
   type CapabilityInput,
   type Role,
   type User,
   type UserPage,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import {
+  admittedAccounts,
   facilities,
+  groupMembers,
+  groupSources,
   userFacilityScopes,
   userRoleChanges,
   userRoles,
@@ -24,6 +34,7 @@ import {
   type RoleChangeFact,
 } from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
+import { MEMBERSHIP_FRESHNESS_MS } from '../../../lib/auth/trusted-group-access';
 import { type ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
 import {
   AdminCapabilityError,
@@ -180,9 +191,33 @@ export function decodeUserPageCursor(
   }
 }
 
+const ROLE_DISPLAY_ORDER: readonly Role[] = ['admin', 'staff'];
+
+/**
+ * A membership read recently enough to authorize a sign-in, by the same rule
+ * `decideAccess` applies: the fresher of the row's own capture and the
+ * group's bulk read. The page lists who can sign in now, not who was once
+ * on a list the sync stopped refreshing.
+ */
+function freshAccessMembership(now: Date) {
+  const cutoff = new Date(now.getTime() - MEMBERSHIP_FRESHNESS_MS);
+  return and(
+    eq(groupSources.purpose, 'access'),
+    eq(groupSources.active, true),
+    // An SQL expression has no column type for the driver to map a Date
+    // through, so the bound is passed as text and Postgres reads it as the
+    // timestamp the comparison needs.
+    gt(
+      sql`greatest(${groupMembers.capturedAt}, coalesce(${groupSources.membersCapturedAt}, ${groupMembers.capturedAt}))`,
+      cutoff.toISOString(),
+    ),
+  );
+}
+
 async function projectUserPage(
   database: AdminQueryDatabase,
   rows: readonly (typeof users.$inferSelect)[],
+  now: Date,
 ): Promise<readonly User[]> {
   if (rows.length === 0) return Object.freeze([]);
   const userIds = rows.map(({ id }) => id);
@@ -239,6 +274,53 @@ async function projectUserPage(
     facilityIdsByUserId.set(userId, facilityIds);
   }
 
+  // Roles are what a person's groups grant, plus staff for a direct
+  // admission; the stored grants above are the legacy remainder. Listing
+  // only stored grants left this page empty once roles stopped being stored.
+  const emails = rows.map(({ email }) => email);
+  const groupGrantRows = await database
+    .select({ email: groupMembers.email, role: groupSources.grantedRole })
+    .from(groupMembers)
+    .innerJoin(groupSources, eq(groupSources.id, groupMembers.groupSourceId))
+    .where(and(freshAccessMembership(now), inArray(groupMembers.email, emails)))
+    .orderBy(asc(groupMembers.email), asc(groupSources.grantedRole));
+  const admittedRows = await database
+    .select({ email: admittedAccounts.email })
+    .from(admittedAccounts)
+    .where(
+      and(
+        isNull(admittedAccounts.revokedAt),
+        inArray(admittedAccounts.email, emails),
+      ),
+    );
+  const grantedRolesByEmail = new Map<string, Set<Role>>();
+  for (const { email, role } of groupGrantRows) {
+    if (role === null) continue;
+    const roles = grantedRolesByEmail.get(email) ?? new Set<Role>();
+    roles.add(RoleSchema.parse(role));
+    grantedRolesByEmail.set(email, roles);
+  }
+  for (const { email } of admittedRows) {
+    const roles = grantedRolesByEmail.get(email) ?? new Set<Role>();
+    roles.add('staff');
+    grantedRolesByEmail.set(email, roles);
+  }
+  const rolesFor = (row: typeof users.$inferSelect): readonly Role[] => {
+    const roles = new Set<Role>(
+      projectEffectiveRoles(
+        baseRolesByUserId.get(row.id) ?? [],
+        roleChangesByUserId.get(row.id) ?? [],
+      ),
+    );
+    for (const role of grantedRolesByEmail.get(row.email) ?? []) {
+      roles.add(role);
+    }
+    return [...roles].sort(
+      (left, right) =>
+        ROLE_DISPLAY_ORDER.indexOf(left) - ROLE_DISPLAY_ORDER.indexOf(right),
+    );
+  };
+
   return Object.freeze(
     rows.map((row) =>
       UserSchema.parse({
@@ -246,10 +328,7 @@ async function projectUserPage(
         googleSubject: row.googleSubject,
         email: row.email,
         displayName: row.displayName,
-        roles: projectEffectiveRoles(
-          baseRolesByUserId.get(row.id) ?? [],
-          roleChangesByUserId.get(row.id) ?? [],
-        ),
+        roles: rolesFor(row),
         facilityScope:
           row.facilityScopeKind === 'district'
             ? { kind: 'district' }
@@ -267,6 +346,7 @@ async function projectUserPage(
 async function listUsers(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-users'>,
+  now: Date,
 ): Promise<UserPage> {
   const cursorFilters = {
     facilityId: input.facilityId,
@@ -281,9 +361,21 @@ async function listUsers(
           .from(userFacilityScopes)
           .where(eq(userFacilityScopes.facilityId, input.facilityId));
   // The shared users table also owns roster endpoint subjects that have never
-  // signed in and therefore have no role. UserSchema intentionally requires at
-  // least one role, so this administration surface lists access accounts only.
-  const accessAccountUserIds = database
+  // signed in and have no role, so this administration surface lists access
+  // accounts only: the people an active access group admits (read recently
+  // enough to sign in), the people admitted directly, and the legacy stored
+  // grants. Roles are not stored any more, so a list of stored grants alone
+  // showed nobody.
+  const groupAdmittedEmails = database
+    .select({ email: groupMembers.email })
+    .from(groupMembers)
+    .innerJoin(groupSources, eq(groupSources.id, groupMembers.groupSourceId))
+    .where(freshAccessMembership(now));
+  const directlyAdmittedEmails = database
+    .select({ email: admittedAccounts.email })
+    .from(admittedAccounts)
+    .where(isNull(admittedAccounts.revokedAt));
+  const legacyGrantUserIds = database
     .select({ userId: userRoles.userId })
     .from(userRoles);
   const rows = await database
@@ -293,7 +385,11 @@ async function listUsers(
       and(
         input.includeDisabled ? undefined : isNull(users.disabledAt),
         afterUserId === null ? undefined : gt(users.id, afterUserId),
-        inArray(users.id, accessAccountUserIds),
+        or(
+          inArray(users.email, groupAdmittedEmails),
+          inArray(users.email, directlyAdmittedEmails),
+          inArray(users.id, legacyGrantUserIds),
+        ),
         facilityUserIds === null
           ? undefined
           : or(
@@ -305,7 +401,7 @@ async function listUsers(
     .orderBy(asc(users.id))
     .limit(input.limit + 1);
   const selected = rows.slice(0, input.limit);
-  const items = await projectUserPage(database, selected);
+  const items = await projectUserPage(database, selected, now);
   const hasMore = rows.length > input.limit;
   return UserPageSchema.parse({
     items,
@@ -325,7 +421,12 @@ export const listUsersRegistration: ServerCapabilityRegistration<
 > = {
   id: 'list-users',
   resolveFacilityId: (_input, context) => guard(context),
-  handler: (input, context) => listUsers(context.transaction.database, input),
+  handler: (input, context) =>
+    listUsers(
+      context.transaction.database,
+      input,
+      context.invocation.serverTime,
+    ),
 };
 
 export function executeListUsersCapability(input: {
@@ -363,6 +464,7 @@ export function executeListUsersCapability(input: {
 async function setUserFacilityScope(
   database: AdminQueryDatabase,
   inputValue: CapabilityInput<'set-user-facility-scope'>,
+  now: Date,
 ): Promise<User> {
   const input = SetUserFacilityScopeInputSchema.parse(inputValue);
   await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
@@ -423,7 +525,7 @@ async function setUserFacilityScope(
     .where(eq(users.id, input.userId));
   // Read the person back: the row selected above carries the scope kind as
   // it was before the change, and the projection reads it from the row.
-  const updated = await getUser(database, input.userId);
+  const updated = await getUser(database, input.userId, now);
   if (updated === null) {
     throw new AdminCapabilityError(
       'CONFLICT',
@@ -437,6 +539,7 @@ async function setUserFacilityScope(
 async function getUser(
   database: AdminQueryDatabase,
   userId: string,
+  now: Date,
 ): Promise<User | null> {
   const [row] = await database
     .select()
@@ -444,7 +547,7 @@ async function getUser(
     .where(eq(users.id, userId))
     .limit(1);
   if (row === undefined) return null;
-  const [projected] = await projectUserPage(database, [row]);
+  const [projected] = await projectUserPage(database, [row], now);
   return projected ?? null;
 }
 
@@ -454,11 +557,22 @@ export const setUserFacilityScopeRegistration: ServerCapabilityRegistration<
 > = {
   id: 'set-user-facility-scope',
   resolveFacilityId: (_input, context) => guard(context),
-  handler: (input, context) =>
-    setUserFacilityScope(context.transaction.database, input),
+  async handler(input, context) {
+    const output = await setUserFacilityScope(
+      context.transaction.database,
+      input,
+      context.invocation.serverTime,
+    );
+    context.transaction.setAuditTarget({ kind: 'user', id: output.id });
+    return output;
+  },
   resultReference: (output) => output.id,
   async loadReplay(reference, context) {
-    const output = await getUser(context.transaction.database, reference);
+    const output = await getUser(
+      context.transaction.database,
+      reference,
+      context.invocation.serverTime,
+    );
     if (output === null) {
       throw new AdminCapabilityError(
         'CONFLICT',
@@ -477,6 +591,274 @@ export const executeSetUserFacilityScopeCapability = (
 ) =>
   executeAdminMutationCapability(
     setUserFacilityScopeRegistration,
+    input.command,
+    input.authenticated,
+    executionStore(input.authenticated, input.store),
+    input.metadata,
+  );
+
+function admittedAccountFromRow(
+  row: typeof admittedAccounts.$inferSelect,
+): AdmittedAccount {
+  return AdmittedAccountSchema.parse({
+    id: row.id,
+    email: row.email,
+    note: row.note,
+    admittedAt: row.admittedAt.toISOString(),
+    admittedByUserId: row.admittedByUserId,
+    revokedAt: row.revokedAt?.toISOString() ?? null,
+    revokedByUserId: row.revokedByUserId,
+  });
+}
+
+function humanActorUserId(
+  context: Readonly<{
+    invocation: { actor: { kind: string; userId?: string } };
+  }>,
+): string {
+  const actor = context.invocation.actor;
+  if (actor.kind !== 'human' || actor.userId === undefined) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'District administrator access is required.',
+      403,
+    );
+  }
+  return actor.userId;
+}
+
+async function listAdmittedAccounts(
+  database: AdminQueryDatabase,
+  input: CapabilityInput<'list-admitted-accounts'>,
+): Promise<AdmittedAccountList> {
+  const rows = await database
+    .select()
+    .from(admittedAccounts)
+    .where(
+      input.includeRevoked ? undefined : isNull(admittedAccounts.revokedAt),
+    )
+    .orderBy(desc(admittedAccounts.admittedAt), asc(admittedAccounts.id))
+    .limit(500);
+  return AdmittedAccountListSchema.parse({
+    items: rows.map(admittedAccountFromRow),
+  });
+}
+
+async function getAdmittedAccount(
+  database: AdminQueryDatabase,
+  admittedAccountId: string,
+): Promise<AdmittedAccount | null> {
+  const [row] = await database
+    .select()
+    .from(admittedAccounts)
+    .where(eq(admittedAccounts.id, admittedAccountId))
+    .limit(1);
+  return row === undefined ? null : admittedAccountFromRow(row);
+}
+
+/**
+ * Admits one address to sign in as staff without a group. The same advisory
+ * lock every access change takes serializes two administrators admitting the
+ * same address at once; the partial unique index is the backstop.
+ */
+async function admitAccount(
+  database: AdminQueryDatabase,
+  inputValue: CapabilityInput<'admit-account'>,
+  admittedByUserId: string,
+  now: Date,
+): Promise<AdmittedAccount> {
+  const input = AdmitAccountInputSchema.parse(inputValue);
+  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+  const [existing] = await database
+    .select({ id: admittedAccounts.id })
+    .from(admittedAccounts)
+    .where(
+      and(
+        eq(admittedAccounts.email, input.email),
+        isNull(admittedAccounts.revokedAt),
+      ),
+    )
+    .limit(1);
+  if (existing !== undefined) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'That address is already admitted.',
+      409,
+    );
+  }
+  const [row] = await database
+    .insert(admittedAccounts)
+    .values({
+      email: input.email,
+      note: input.note ?? '',
+      admittedAt: now,
+      admittedByUserId,
+    })
+    .returning();
+  if (row === undefined) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'The admission could not be recorded.',
+      409,
+    );
+  }
+  return admittedAccountFromRow(row);
+}
+
+/** Ends an admission; the next sign-in is refused and the row stays as record. */
+async function revokeAdmittedAccount(
+  database: AdminQueryDatabase,
+  inputValue: CapabilityInput<'revoke-admitted-account'>,
+  revokedByUserId: string,
+  now: Date,
+): Promise<AdmittedAccount> {
+  const input = RevokeAdmittedAccountInputSchema.parse(inputValue);
+  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+  const [row] = await database
+    .select()
+    .from(admittedAccounts)
+    .where(eq(admittedAccounts.id, input.admittedAccountId))
+    .limit(1)
+    .for('update');
+  if (row === undefined) {
+    throw new AdminCapabilityError(
+      'NOT_FOUND',
+      'The admission was not found.',
+      404,
+    );
+  }
+  if (row.revokedAt !== null) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'That admission was already revoked.',
+      409,
+    );
+  }
+  const [updated] = await database
+    .update(admittedAccounts)
+    .set({ revokedAt: now, revokedByUserId })
+    .where(eq(admittedAccounts.id, row.id))
+    .returning();
+  if (updated === undefined) {
+    throw new AdminCapabilityError(
+      'CONFLICT',
+      'The admission could not be revoked.',
+      409,
+    );
+  }
+  return admittedAccountFromRow(updated);
+}
+
+export const listAdmittedAccountsRegistration: ServerCapabilityRegistration<
+  'list-admitted-accounts',
+  AdminCapabilityTransaction
+> = {
+  id: 'list-admitted-accounts',
+  resolveFacilityId: (_input, context) => guard(context),
+  handler: (input, context) =>
+    listAdmittedAccounts(context.transaction.database, input),
+};
+
+export function executeListAdmittedAccountsCapability(input: {
+  readonly authenticated: AuthenticatedSession;
+  readonly query: CapabilityInput<'list-admitted-accounts'>;
+  readonly store?: AdminCapabilityStore;
+  readonly metadata?: AdminQueryMetadata;
+}): Promise<AdmittedAccountList> {
+  return executeAdminQueryCapability(
+    listAdmittedAccountsRegistration,
+    input.query,
+    input.authenticated,
+    executionStore(input.authenticated, input.store),
+    input.metadata,
+  );
+}
+
+function admissionReplayLoader(
+  reference: string,
+  context: Readonly<{ transaction: AdminCapabilityTransaction }>,
+): Promise<AdmittedAccount> {
+  return getAdmittedAccount(context.transaction.database, reference).then(
+    (output) => {
+      if (output === null) {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'The admission is unavailable.',
+          409,
+        );
+      }
+      return output;
+    },
+  );
+}
+
+export const admitAccountRegistration: ServerCapabilityRegistration<
+  'admit-account',
+  AdminCapabilityTransaction
+> = {
+  id: 'admit-account',
+  resolveFacilityId: (_input, context) => guard(context),
+  async handler(input, context) {
+    const output = await admitAccount(
+      context.transaction.database,
+      input,
+      humanActorUserId(context),
+      context.invocation.serverTime,
+    );
+    // The hash-chained audit names the admission row, never the address.
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.id,
+    });
+    return output;
+  },
+  resultReference: (output) => output.id,
+  loadReplay: admissionReplayLoader,
+  resolveReplayFacilityId: () => Promise.resolve(null),
+  replayFacilityId: () => null,
+};
+
+export const revokeAdmittedAccountRegistration: ServerCapabilityRegistration<
+  'revoke-admitted-account',
+  AdminCapabilityTransaction
+> = {
+  id: 'revoke-admitted-account',
+  resolveFacilityId: (_input, context) => guard(context),
+  async handler(input, context) {
+    const output = await revokeAdmittedAccount(
+      context.transaction.database,
+      input,
+      humanActorUserId(context),
+      context.invocation.serverTime,
+    );
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.id,
+    });
+    return output;
+  },
+  resultReference: (output) => output.id,
+  loadReplay: admissionReplayLoader,
+  resolveReplayFacilityId: () => Promise.resolve(null),
+  replayFacilityId: () => null,
+};
+
+export const executeAdmitAccountCapability = (
+  input: MutationExecution<CapabilityInput<'admit-account'>>,
+) =>
+  executeAdminMutationCapability(
+    admitAccountRegistration,
+    input.command,
+    input.authenticated,
+    executionStore(input.authenticated, input.store),
+    input.metadata,
+  );
+
+export const executeRevokeAdmittedAccountCapability = (
+  input: MutationExecution<CapabilityInput<'revoke-admitted-account'>>,
+) =>
+  executeAdminMutationCapability(
+    revokeAdmittedAccountRegistration,
     input.command,
     input.authenticated,
     executionStore(input.authenticated, input.store),

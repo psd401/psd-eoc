@@ -20,8 +20,16 @@ import {
   normalizeGroupAddress,
   resolveGoogleGroupIdForForm,
 } from '../../facilities/google-group-id';
-import { executeSetUserFacilityScopeCapability } from '../capabilities';
-import { parseSetUserFacilityScopeForm } from './request';
+import {
+  executeAdmitAccountCapability,
+  executeRevokeAdmittedAccountCapability,
+  executeSetUserFacilityScopeCapability,
+} from '../capabilities';
+import {
+  parseAdmitAccountForm,
+  parseRevokeAdmittedAccountForm,
+  parseSetUserFacilityScopeForm,
+} from './request';
 
 export const dynamic = 'force-dynamic';
 
@@ -72,6 +80,24 @@ export async function POST(request: Request): Promise<Response> {
           metadata: { idempotencyKey },
         });
         return adminSuccessRedirect(request, '/access', 'access-group-created');
+      }
+      case 'admit-account': {
+        const command = parseAdmitAccountForm(form);
+        await executeAdmitAccountCapability({
+          authenticated,
+          command,
+          metadata: { idempotencyKey },
+        });
+        return adminSuccessRedirect(request, '/access', 'account-admitted');
+      }
+      case 'revoke-admitted-account': {
+        const command = parseRevokeAdmittedAccountForm(form);
+        await executeRevokeAdmittedAccountCapability({
+          authenticated,
+          command,
+          metadata: { idempotencyKey },
+        });
+        return adminSuccessRedirect(request, '/access', 'admission-revoked');
       }
       case 'set-user-facility-scope': {
         const command = parseSetUserFacilityScopeForm(form);
