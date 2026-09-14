@@ -348,6 +348,66 @@ describeWithDatabase('set-user-facility-scope', () => {
     expect(unchanged.facilityScope).toEqual({ kind: 'district' });
   });
 
+  test('the production application role can limit a person and restore them', async () => {
+    // Deployed code runs as psd_eoc_app. The limit rewrites user_facility_scopes
+    // (delete then insert) and users.facility_scope_kind; production refused
+    // the first limit with 42501 because that role lacked one of those
+    // privileges. This runs the same statements as that role.
+    if (ownedDatabase === undefined) throw new Error('no owned database');
+    const personId = await persistPerson();
+    const roleConnection = createDatabaseClient({
+      driver: 'postgres',
+      url: ownedDatabase.url,
+      maxConnections: 1,
+    });
+    if (roleConnection.driver !== 'postgres') throw new Error('postgres');
+    try {
+      await roleConnection.db.execute(sql`set role psd_eoc_app`);
+      const store = createDrizzleAdminCapabilityStore(roleConnection.db, admin);
+      const limited = await executeSetUserFacilityScopeCapability({
+        authenticated: admin,
+        store,
+        command: {
+          userId: personId,
+          facilityScope: {
+            kind: 'facilities',
+            facilityIds: [activeFacilityId],
+          },
+        },
+        metadata: metadata(),
+      });
+      expect(limited.facilityScope).toEqual({
+        kind: 'facilities',
+        facilityIds: [activeFacilityId],
+      });
+      const narrowed = await executeSetUserFacilityScopeCapability({
+        authenticated: admin,
+        store,
+        command: {
+          userId: personId,
+          facilityScope: {
+            kind: 'facilities',
+            facilityIds: [otherActiveFacilityId],
+          },
+        },
+        metadata: metadata(),
+      });
+      expect(narrowed.facilityScope).toEqual({
+        kind: 'facilities',
+        facilityIds: [otherActiveFacilityId],
+      });
+      const restored = await executeSetUserFacilityScopeCapability({
+        authenticated: admin,
+        store,
+        command: { userId: personId, facilityScope: { kind: 'district' } },
+        metadata: metadata(),
+      });
+      expect(restored.facilityScope).toEqual({ kind: 'district' });
+    } finally {
+      await roleConnection.close();
+    }
+  });
+
   test('refuses an unknown person and a non-administrator', async () => {
     await expectRefusal(
       setScope(admin, randomUUID(), { kind: 'district' }),

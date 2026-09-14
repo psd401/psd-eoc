@@ -393,6 +393,13 @@
       "when": 1789413340206,
       "tag": "0055_shared_device_enrollment",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1789422279616,
+      "tag": "0056_user_facility_scopes_delete_grant",
+      "breakpoints": true
     }
   ]
 }
