@@ -8,6 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import { asc, eq } from 'drizzle-orm';
 
 import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
 
@@ -15,7 +16,7 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { groupMembers, groupSources } from '../../db/schema';
+import { deviceEnrollments, groupMembers, groupSources } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   closeAndDropDisposableDatabase,
@@ -72,6 +73,7 @@ function accessGroup(id: string, role: 'staff' | 'admin', capturedAt: Date) {
 async function signIn(
   email: string,
   now: Date,
+  installationId = `round-trip-${randomUUID()}`,
 ): Promise<Readonly<{ credential: string; roles: readonly string[] }>> {
   const googleSubject = `round-trip-subject-${email}`;
   const authorization = await authorizeSignIn(database(), {
@@ -100,7 +102,7 @@ async function signIn(
     device: {
       platform: 'web',
       unlockMethod: 'secure-session-cookie',
-      installationId: `round-trip-${randomUUID()}`,
+      installationId,
     },
     credentialDigest: digestWebSessionCredential(credential),
     createdAt: now,
@@ -178,6 +180,51 @@ describeWithDatabase('sign-in to session round trip', () => {
     // separate stored grant here is what let a session outlive, or never
     // receive, the authority its groups decided.
     expect([...authenticated.roles]).toEqual(['admin']);
+  });
+
+  test('an installation is enrolled by whoever signs in on it, and again after revocation', async () => {
+    // A shared iPad, a spare district phone, a reviewer's device: the
+    // installation is not owned by the first account that signed in on it.
+    const now = new Date();
+    const installationId = `round-trip-shared-${randomUUID()}`;
+    await signIn(ADMIN_EMAIL, now, installationId);
+    await signIn(STAFF_EMAIL, new Date(now.getTime() + 1_000), installationId);
+    const enrollments = () =>
+      database()
+        .select({
+          id: deviceEnrollments.id,
+          userId: deviceEnrollments.userId,
+          revokedAt: deviceEnrollments.revokedAt,
+        })
+        .from(deviceEnrollments)
+        .where(eq(deviceEnrollments.installationId, installationId))
+        .orderBy(asc(deviceEnrollments.enrolledAt), asc(deviceEnrollments.id));
+    const both = await enrollments();
+    expect(both).toHaveLength(2);
+    expect(new Set(both.map((row) => row.userId)).size).toBe(2);
+    // Whoever signed in last holds the device: the first account's
+    // enrollment is closed in the same transaction, so its sessions stop
+    // authorizing and its notifications stop reaching this phone.
+    const first = both[0];
+    if (first === undefined) throw new Error('no first enrollment');
+    expect(first.revokedAt).not.toBeNull();
+    expect(both[1]?.revokedAt).toBeNull();
+
+    // Signing in again reuses the account's own active enrollment.
+    await signIn(STAFF_EMAIL, new Date(now.getTime() + 2_000), installationId);
+    expect(await enrollments()).toHaveLength(2);
+
+    // A closed enrollment ends that record, not the installation: the first
+    // account enrolls again as a new one, and now holds the device.
+    await signIn(ADMIN_EMAIL, new Date(now.getTime() + 4_000), installationId);
+    const after = await enrollments();
+    expect(after).toHaveLength(3);
+    expect(after.filter((row) => row.revokedAt === null)).toHaveLength(1);
+    expect(
+      after.filter(
+        (row) => row.userId === first.userId && row.revokedAt === null,
+      ),
+    ).toHaveLength(1);
   });
 
   test('a staff-group signer never receives administrator authority', async () => {
