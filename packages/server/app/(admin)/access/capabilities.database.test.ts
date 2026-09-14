@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -460,6 +460,48 @@ describeWithDatabase('set-user-facility-scope', () => {
     });
     expect(again.id).not.toBe(admitted.id);
     expect(again.note).toBe('');
+  });
+
+  test('the production application role can admit and revoke', async () => {
+    // Deployed code runs as psd_eoc_app, not the migration owner. Migration
+    // 0053 granted INSERT on the columns the capability sets, but the query
+    // builder names every column and writes DEFAULT for the rest, and
+    // PostgreSQL wants INSERT on every named column: production refused the
+    // first admission with 42501. This runs the same statements as that role.
+    if (ownedDatabase === undefined) throw new Error('no owned database');
+    const roleConnection = createDatabaseClient({
+      driver: 'postgres',
+      url: ownedDatabase.url,
+      maxConnections: 1,
+    });
+    if (roleConnection.driver !== 'postgres') throw new Error('postgres');
+    try {
+      await roleConnection.db.execute(sql`set role psd_eoc_app`);
+      const store = createDrizzleAdminCapabilityStore(roleConnection.db, admin);
+      const email = `role-${randomUUID().slice(0, 8)}@example.invalid`;
+      const admitted = await executeAdmitAccountCapability({
+        authenticated: admin,
+        store,
+        command: { email, note: 'Admitted as the application role' },
+        metadata: metadata(),
+      });
+      expect(admitted.email).toBe(email);
+      const revoked = await executeRevokeAdmittedAccountCapability({
+        authenticated: admin,
+        store,
+        command: { admittedAccountId: admitted.id },
+        metadata: metadata(),
+      });
+      expect(revoked.revokedAt).not.toBeNull();
+      const listed = await executeListAdmittedAccountsCapability({
+        authenticated: admin,
+        store,
+        query: { includeRevoked: true },
+      });
+      expect(listed.items.map(({ id }) => id)).toContain(admitted.id);
+    } finally {
+      await roleConnection.close();
+    }
   });
 
   test('only a district administrator on the web may admit or revoke', async () => {
