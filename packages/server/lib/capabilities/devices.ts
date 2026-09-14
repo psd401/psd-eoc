@@ -1791,14 +1791,27 @@ async function lockPushToken(
   );
 }
 
-async function assertPushTokenAvailableForDevice(
+/**
+ * A push token belongs to the device, and the device belongs to whoever is
+ * signed in on it now. Registering a token under one enrollment therefore
+ * ends its registration under any other, which is what happens when a second
+ * account signs in on the same installation: the previous account's pushes
+ * stop reaching a phone it no longer holds. The token lock taken by the
+ * caller serializes two enrollments racing for the same token, so exactly one
+ * owns it afterwards.
+ */
+async function releasePushTokenFromOtherDevices(
   database: DeviceQueryDatabase,
   deviceEnrollmentId: string,
   provider: string,
   token: string,
+  registeredAt: Date,
 ): Promise<void> {
-  const [conflicting] = await database
-    .select({ id: devicePushTokenRegistrations.id })
+  const conflicting = await database
+    .select({
+      id: devicePushTokenRegistrations.id,
+      deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+    })
     .from(devicePushTokenRegistrations)
     .leftJoin(
       devicePushTokenUnregistrations,
@@ -1814,13 +1827,15 @@ async function assertPushTokenAvailableForDevice(
         ne(devicePushTokenRegistrations.deviceEnrollmentId, deviceEnrollmentId),
         isNull(devicePushTokenUnregistrations.id),
       ),
-    )
-    .limit(1);
-  if (conflicting !== undefined) {
-    throw deviceConflict(
-      'The push token is already bound to another device enrollment.',
     );
-  }
+  await appendPushTokenUnregistrationFacts(
+    database,
+    conflicting.map((registration) => ({
+      registrationId: registration.id,
+      deviceEnrollmentId: registration.deviceEnrollmentId,
+    })),
+    registeredAt,
+  );
 }
 
 async function assertPushTokenRegistrationAllowed(
@@ -2179,11 +2194,12 @@ async function registerOnePushTokenWithDatabase(
     input.token,
     registeredAt,
   );
-  await assertPushTokenAvailableForDevice(
+  await releasePushTokenFromOtherDevices(
     database,
     device.id,
     input.provider,
     input.token,
+    registeredAt,
   );
   const active = await activePushRegistrations(database, device.id);
   const plan = planPushTokenRegistration(active, input.token, input.provider);

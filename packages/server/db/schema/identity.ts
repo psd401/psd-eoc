@@ -157,7 +157,13 @@ export const deviceEnrollments = pgTable(
       table.id,
       table.platform,
     ),
-    uniqueIndex('device_enrollments_installation_uq').on(table.installationId),
+    // An installation is not owned by the first account that signed in on
+    // it. Whoever the access decision admits may enroll it, and a revoked
+    // enrollment never blocks a fresh one: one active enrollment per
+    // installation and account.
+    uniqueIndex('device_enrollments_installation_user_active_uq')
+      .on(table.installationId, table.userId)
+      .where(sql`${table.revokedAt} is null`),
     index('device_enrollments_user_idx').on(table.userId),
     check(
       'device_enrollments_unlock_platform',

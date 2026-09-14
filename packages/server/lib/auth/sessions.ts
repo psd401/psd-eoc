@@ -1594,24 +1594,30 @@ export class DrizzleSessionStore implements SessionStore {
         await transaction.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${input.device.installationId}, 4017))`,
         );
+        // The account's own active enrollment on this installation, if any.
+        // Another account's enrollment, or a revoked one, is not this
+        // account's business: an installation is not owned by whoever signed
+        // in first, so a fresh enrollment is written instead of a refusal.
         const [existingDevice] = await transaction
           .select()
           .from(deviceEnrollments)
           .where(
-            eq(deviceEnrollments.installationId, input.device.installationId),
+            and(
+              eq(deviceEnrollments.installationId, input.device.installationId),
+              eq(deviceEnrollments.userId, input.userId),
+              isNull(deviceEnrollments.revokedAt),
+            ),
           )
           .limit(1);
         let selectedDeviceId = input.deviceEnrollmentId;
         if (existingDevice !== undefined) {
           if (
-            existingDevice.userId !== input.userId ||
             existingDevice.platform !== input.device.platform ||
-            existingDevice.unlockMethod !== input.device.unlockMethod ||
-            existingDevice.revokedAt !== null
+            existingDevice.unlockMethod !== input.device.unlockMethod
           ) {
             throw new SessionAccessError(
               'FORBIDDEN',
-              'Device enrollment does not match the authenticated user.',
+              'Device enrollment does not match this installation.',
             );
           }
           selectedDeviceId = existingDevice.id;
