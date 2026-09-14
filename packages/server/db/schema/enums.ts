@@ -326,6 +326,8 @@ const PERSISTED_MUTATION_CAPABILITY_ORDER = [
   'revoke-agent-api-key',
   'create-lifecycle-consequence-preview',
   'set-user-facility-scope',
+  'admit-account',
+  'revoke-admitted-account',
 ] as const;
 
 export const agentCapabilityGrantEnum = contractPgEnum(

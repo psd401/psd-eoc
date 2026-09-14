@@ -1,4 +1,6 @@
 import {
+  AdmitAccountInputSchema,
+  RevokeAdmittedAccountInputSchema,
   SetUserFacilityScopeInputSchema,
   type CapabilityInput,
 } from '@psd-eoc/contracts';
@@ -36,5 +38,27 @@ export function parseSetUserFacilityScopeForm(
       scopeKind === 'district'
         ? { kind: 'district' }
         : { kind: 'facilities', facilityIds },
+  });
+}
+
+/** Reads the "Admit an account" form: an address and an optional note. */
+export function parseAdmitAccountForm(
+  form: AdminForm,
+): CapabilityInput<'admit-account'> {
+  form.assertFields([...COMMON_FIELDS, 'email', 'note']);
+  const note = form.optional('note');
+  return AdmitAccountInputSchema.parse({
+    email: form.required('email'),
+    ...(note === null || note.trim() === '' ? {} : { note }),
+  });
+}
+
+/** Reads a row's "Revoke" form: the admission to end. */
+export function parseRevokeAdmittedAccountForm(
+  form: AdminForm,
+): CapabilityInput<'revoke-admitted-account'> {
+  form.assertFields([...COMMON_FIELDS, 'admittedAccountId']);
+  return RevokeAdmittedAccountInputSchema.parse({
+    admittedAccountId: form.required('admittedAccountId'),
   });
 }

@@ -372,6 +372,13 @@
       "when": 1788988236706,
       "tag": "0052_facility_isolated_and_user_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1789363994276,
+      "tag": "0053_admitted_accounts",
+      "breakpoints": true
     }
   ]
 }

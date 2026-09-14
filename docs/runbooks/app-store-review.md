@@ -17,30 +17,29 @@ a chat, or a build.
 
 ## What the pieces are
 
-| Piece                                                        | Where                        | Why                                                                                                                                            |
-| ------------------------------------------------------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| A dedicated Google account                                   | Google Workspace             | The reviewer signs in with it. A named person's account is never lent.                                                                         |
-| A review Google Group                                        | Google Workspace             | Membership is what admits a sign-in. One group holding only the review account keeps the admission reviewable and revocable in one place.      |
-| The group as an access group, role **staff**                 | **Access** page              | Staff may start a drill and see events; only administrators configure the district.                                                            |
-| An **isolated** facility                                     | `psdEoc:facilities` manifest | An isolated facility's events reach its own building source only, never the district's others lists, so a reviewer's drill pages no responder. |
-| A building source at that facility naming the review account | **Facilities** page          | The drill's audience is the facility's building sources; this one holds exactly the review account.                                            |
-| The account limited to that facility                         | **Access** page              | Even with a district-wide roster, the reviewer can then see, start, and join events only at the review facility.                               |
+| Piece                                                        | Where                        | Why                                                                                                                                                        |
+| ------------------------------------------------------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A dedicated Google account                                   | Google Workspace             | The reviewer signs in with it. A named person's account is never lent.                                                                                     |
+| The address admitted on the **Access** page                  | **Access** page              | Admission is what lets the account sign in, as staff, without being in any Google group. It is revocable in the same place and never grants administrator. |
+| An **isolated** facility                                     | `psdEoc:facilities` manifest | An isolated facility's events reach its own building source only, never the district's others lists, so a reviewer's drill pages no responder.             |
+| A building source at that facility naming the review account | **Facilities** page          | The drill's audience is the facility's building sources; this one holds exactly the review account.                                                        |
+| The account limited to that facility                         | **Access** page              | Even with a district-wide roster, the reviewer can then see, start, and join events only at the review facility.                                           |
 
 ## Procedure
 
-1. **Google.** Create the review account and a group that holds only it.
-   Turn off 2-Step Verification enforcement for that account or issue it
-   static backup codes; a reviewer cannot answer a live second factor.
+1. **Google.** Create the review account. Turn off 2-Step Verification
+   enforcement for that account or issue it static backup codes; a reviewer
+   cannot answer a live second factor. No group is needed.
 2. **Manifest.** Add the review facility to `psdEoc:facilities` with
    `"isolated": true` and deploy. Bootstrap creates it; a later deploy never
    edits it. (It may also be added on the **Facilities** page with the
    **Isolated** box ticked.)
-3. **Access.** Register the review group as an access group granting
-   **staff**. The Google Group ID is resolved from the address when it is
-   saved.
-4. **Facilities.** At the review facility add a Google building source for
-   the review group, or a manual building source holding the review
-   account's address. Saving publishes the roster.
+3. **Access.** Under **Admitted accounts**, admit the review account's
+   address with a note saying what it is for. It may sign in as staff from
+   then on; nothing else on the page changes.
+4. **Facilities.** At the review facility add a manual building source and
+   put the review account's address in it. Saving the people publishes the
+   roster.
 5. **First sign-in.** Sign in once as the review account in the app on a
    district phone, so the account exists and has a device registered for
    push, then on **Facilities** press **Publish roster snapshot** so that
@@ -75,16 +74,16 @@ owner and the review facility's name.
 
 ## Rotation and removal
 
-- To remove access, remove the account from the review group. The next
-  sign-in is refused and the scheduled membership sync signs it out of the
-  roster.
+- To remove access, revoke the admission on **Access**. The next sign-in
+  is refused, the account's sessions stop authorizing on their next request,
+  and the revoked admission stays listed as the record.
 - To rotate the secret, change it in Google and update both store consoles;
   nothing in the app or repository holds it.
 - Never widen the account to district-wide, and never move the isolated flag
   off the review facility: the guard against paging the district is those two
   settings.
-- Never put the review account in a group that grants **admin**. An
-  administrator is district-wide by definition and cannot be limited, so the
-  limit would be refused. If a limited person is added to that group later,
-  every administration page refuses them until another administrator sets
-  them district-wide on **Access** or they leave the group.
+- Never put the review account in a group that grants **admin**. Admission
+  grants staff only, and an administrator is district-wide by definition and
+  cannot be limited, so the limit would be refused. If it happens anyway,
+  every administration page refuses the account until another administrator
+  sets it district-wide on **Access** or it leaves the group.

@@ -14,7 +14,13 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { groupMembers, groupSources, userRoles, users } from '../../db/schema';
+import {
+  admittedAccounts,
+  groupMembers,
+  groupSources,
+  userRoles,
+  users,
+} from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   closeAndDropDisposableDatabase,
@@ -161,6 +167,67 @@ describeWithDatabase('sign-in authorization', () => {
     expect(second.user.roles).toEqual(['staff']);
     expect(await rolesOf(second.user.id)).toEqual([]);
     expect(second.created).toBe(false);
+  });
+
+  test('a directly admitted address signs in as staff, and not after revocation', async () => {
+    // The admitting administrator must exist; admission records who did it.
+    const admitter = randomUUID();
+    await database()
+      .insert(users)
+      .values({
+        id: admitter,
+        googleSubject: `admitter-${admitter}`,
+        email: `admitter-${admitter.slice(0, 8)}@example.invalid`,
+        displayName: 'Admitting administrator',
+        facilityScopeKind: 'district',
+      });
+    const admission = randomUUID();
+    await database()
+      .insert(admittedAccounts)
+      .values({
+        id: admission,
+        email: 'reviewer@example.invalid',
+        note: 'App store review',
+        admittedAt: new Date(NOW.getTime() - 60_000),
+        admittedByUserId: admitter,
+      });
+    // Google is asked and holds this address in no group at all.
+    const liveMembership = { reconcile: async () => 'reconciled' as const };
+
+    const first = await authorizeSignIn(
+      database(),
+      {
+        googleSubject: 'reviewer-subject',
+        email: 'Reviewer@example.invalid',
+        displayName: 'Store Reviewer',
+        checkedAt: NOW,
+      },
+      { liveMembership },
+    );
+    expect(first).toMatchObject({
+      authorized: true,
+      created: true,
+      groupSourceIds: [],
+      admittedAccountId: admission,
+      user: { email: 'reviewer@example.invalid', roles: ['staff'] },
+    });
+
+    await database()
+      .update(admittedAccounts)
+      .set({ revokedAt: NOW, revokedByUserId: admitter })
+      .where(eq(admittedAccounts.id, admission));
+    expect(
+      await authorizeSignIn(
+        database(),
+        {
+          googleSubject: 'reviewer-subject',
+          email: 'reviewer@example.invalid',
+          displayName: 'Store Reviewer',
+          checkedAt: new Date(NOW.getTime() + 60_000),
+        },
+        { liveMembership },
+      ),
+    ).toEqual({ authorized: false, refusal: 'NOT_IN_A_TRUSTED_GROUP' });
   });
 
   test('a person in no trusted group is refused and no account is created', async () => {

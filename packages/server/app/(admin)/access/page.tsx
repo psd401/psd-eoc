@@ -18,7 +18,10 @@ import {
   normalizeAccessAdminCursorState,
   type AccessAdminSearchParameters,
 } from './access-page-state';
-import { executeListUsersCapability } from './capabilities';
+import {
+  executeListAdmittedAccountsCapability,
+  executeListUsersCapability,
+} from './capabilities';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -46,32 +49,37 @@ export default async function AccessPage({
   const parameters = await searchParams;
   try {
     const cursors = normalizeAccessAdminCursorState(parameters);
-    const [accessGroups, users, facilities] = await Promise.all([
-      executeListGroupSourcesCapability({
-        authenticated,
-        query: {
-          kind: 'google-group',
-          purpose: 'access',
-          facilityId: null,
-          active: null,
-          cursor: cursors.accessGroupCursor,
-          limit: 100,
-        },
-      }),
-      executeListUsersCapability({
-        authenticated,
-        query: {
-          facilityId: null,
-          includeDisabled: true,
-          cursor: cursors.userCursor,
-          limit: 100,
-        },
-      }),
-      executeListFacilitiesCapability({
-        authenticated,
-        query: { includeInactive: false, cursor: null, limit: 200 },
-      }),
-    ]);
+    const [accessGroups, users, facilities, admittedAccounts] =
+      await Promise.all([
+        executeListGroupSourcesCapability({
+          authenticated,
+          query: {
+            kind: 'google-group',
+            purpose: 'access',
+            facilityId: null,
+            active: null,
+            cursor: cursors.accessGroupCursor,
+            limit: 100,
+          },
+        }),
+        executeListUsersCapability({
+          authenticated,
+          query: {
+            facilityId: null,
+            includeDisabled: true,
+            cursor: cursors.userCursor,
+            limit: 100,
+          },
+        }),
+        executeListFacilitiesCapability({
+          authenticated,
+          query: { includeInactive: false, cursor: null, limit: 200 },
+        }),
+        executeListAdmittedAccountsCapability({
+          authenticated,
+          query: { includeRevoked: true },
+        }),
+      ]);
     return (
       <AccessAdminView
         csrfToken={csrfToken}
@@ -81,6 +89,7 @@ export default async function AccessPage({
           accessGroups,
           users,
           facilities: facilities.items,
+          admittedAccounts: admittedAccounts.items,
           cursors,
         }}
       />

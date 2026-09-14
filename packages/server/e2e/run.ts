@@ -167,6 +167,7 @@ async function issueIdentity(
     user,
     membership: {
       groupSourceIds: [input.groupSourceId],
+      admittedAccountId: null,
       capturedAt: input.now,
     },
     device: {

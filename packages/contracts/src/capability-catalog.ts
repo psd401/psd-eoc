@@ -79,6 +79,13 @@ import {
   NeighborhoodSchema,
   UpdateFacilityInputSchema,
 } from './facility';
+import {
+  AdmitAccountInputSchema,
+  AdmittedAccountListSchema,
+  AdmittedAccountSchema,
+  ListAdmittedAccountsInputSchema,
+  RevokeAdmittedAccountInputSchema,
+} from './admitted-account';
 import { ListThreatsInputSchema, ThreatPageSchema } from './threat';
 import {
   CreateGroupSourceInputSchema,
@@ -1592,6 +1599,33 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: ListUsersInputSchema,
     outputSchema: UserPageSchema,
+  }),
+  // Admission is a sign-in decision made by a person on the web: an admitted
+  // address may sign in as staff without a designated group. Never offered
+  // to agents.
+  'admit-account': canonicalCapability({
+    id: 'admit-account',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: AdmitAccountInputSchema,
+    outputSchema: AdmittedAccountSchema,
+  }),
+  'revoke-admitted-account': canonicalCapability({
+    id: 'revoke-admitted-account',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: RevokeAdmittedAccountInputSchema,
+    outputSchema: AdmittedAccountSchema,
+  }),
+  'list-admitted-accounts': canonicalCapability({
+    id: 'list-admitted-accounts',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: ListAdmittedAccountsInputSchema,
+    outputSchema: AdmittedAccountListSchema,
   }),
   'list-drill-records': canonicalCapability({
     id: 'list-drill-records',
