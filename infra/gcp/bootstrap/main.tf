@@ -9,6 +9,17 @@ terraform {
   }
 }
 
+variable "billing_account" {
+  description = "District Google Cloud billing account attached to the project. Supplied by the operator tooling from infra/cdk.local.json; never committed."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$", var.billing_account))
+    error_message = "Billing account must use the canonical 6-6-6 uppercase form."
+  }
+}
+
 provider "google" {
   region          = "us-west1"
   deletion_policy = "PREVENT"
@@ -28,7 +39,7 @@ resource "google_project" "psd_eoc" {
   project_id      = "psd401-eoc"
   name            = "PSD EOC"
   org_id          = "482073499306"
-  billing_account = "<billing-account>"
+  billing_account = var.billing_account
 
   auto_create_network = false
   deletion_policy     = "PREVENT"

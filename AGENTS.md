@@ -68,9 +68,10 @@ Follow these unless the product owner says otherwise:
   OAuth client IDs, and stack names are **configuration** — environment
   variables, deployment parameters, or database rows. Never literals in source.
   If you are about to type a district's name, an AWS account ID, a region, or
-  a hostname into a `.ts` file, stop: it belongs in config. The account ID and
-  the SMS support phone never enter the repository at all; they live in
-  git-ignored `infra/cdk.local.json` (see `docs/CONFIGURATION.md`).
+  a hostname into a `.ts` file, stop: it belongs in config. The AWS account
+  ID, the SMS support phone, and the Google Cloud billing account never enter
+  the repository at all; they live in git-ignored `infra/cdk.local.json` (see
+  `docs/CONFIGURATION.md`).
 - **Simple and working beats clever and complete.** This runs for a decade in
   a school district. No new datastores, queues, services, or abstractions
   without a measured need.

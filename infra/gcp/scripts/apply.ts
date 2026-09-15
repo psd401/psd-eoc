@@ -32,11 +32,13 @@ import {
   validateProjectIamPolicy,
   validateRosterReaderResourcePolicy,
 } from './project-policy';
+import { tenantGcpBillingAccount } from '../../src/tenant-context';
 
 const PROJECT_ID = 'psd401-eoc';
 const PROJECT_NAME = 'PSD EOC';
 const ORGANIZATION_ID = '482073499306';
-const BILLING_ACCOUNT = '<billing-account>';
+/** From infra/cdk.local.json; refuses to run without it. */
+const BILLING_ACCOUNT = tenantGcpBillingAccount();
 const STATE_BUCKET = 'psd401-eoc-terraform-state';
 const ROSTER_READER_ADDRESS = 'google_service_account.roster_reader';
 const ROSTER_READER_RESOURCE = `projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}`;
@@ -1648,7 +1650,15 @@ export function parseStateListResult(
 
 function runTerraformInteractive(args: readonly string[], cwd = gcpRoot): void {
   assertDefaultTerraformWorkspace(cwd);
-  runInteractive('terraform', args, cwd);
+  // Both roots declare billing_account without a default. plan and import
+  // evaluate the configuration and need it; apply consumes a saved plan,
+  // which refuses -var, and state commands never read variables.
+  const [command] = args;
+  const withVariables =
+    command === 'plan' || command === 'import'
+      ? [...args, `-var=billing_account=${BILLING_ACCOUNT}`]
+      : args;
+  runInteractive('terraform', withVariables, cwd);
 }
 
 function stateResources(cwd = gcpRoot): Set<string> {
