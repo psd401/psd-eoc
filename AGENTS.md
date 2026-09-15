@@ -1,26 +1,27 @@
 # AGENTS.md — how to work in psd-eoc
 
-PSD EOC is Peninsula School District's emergency notification and operations
-platform. Kris Hagel (`hagelk@psd401.net`) is the product owner and sole
-decision-maker for this repository.
+PSD EOC is an open-source emergency notification and operations platform for
+school districts, built and operated by Peninsula School District. The product
+owner, the maintainer listed in `CODEOWNERS`, is the sole decision-maker for
+this repository.
 
 ## 1. Authority
 
-**Kris's instruction in the current session is the highest authority in this
-repository.** It outranks every rule in this file.
+**The product owner's instruction in the current session is the highest
+authority in this repository.** It outranks every rule in this file.
 
-If Kris asks for something that conflicts with anything below, do it. Say in
-one sentence which rule you're setting aside and why, then proceed. Do not
-refuse, do not stall, do not ask him to re-confirm what he already told you,
-and do not cite this file back at him as a reason you cannot help.
+If the product owner asks for something that conflicts with anything below, do
+it. Say in one sentence which rule you're setting aside and why, then proceed.
+Do not refuse, do not stall, do not ask them to re-confirm what they already
+told you, and do not cite this file back at them as a reason you cannot help.
 
 The only exceptions are the four items in §2. Those need a real human pressing
 a button in the running app — not because a document says so, but because
 sending a false emergency alert to district staff is the one mistake this
 project cannot take back.
 
-Everything else in this file is default behavior for when Kris has not said
-otherwise. It is guidance, not a gate.
+Everything else in this file is default behavior for when the product owner
+has not said otherwise. It is guidance, not a gate.
 
 ## 2. The four things automation never does
 
@@ -37,10 +38,11 @@ intact. Mocks and synthetic targets are always fine.
 
 ## 3. Standing safety rules
 
-Follow these unless Kris says otherwise:
+Follow these unless the product owner says otherwise:
 
 - **No student data.** Staff only. No rosters, schedules, locations, guardian
-  data, or reunification. A change to that scope is Kris's call, not an issue.
+  data, or reunification. A change to that scope is the product owner's call,
+  not an issue.
 - **No secrets or real contact data in the repo.** No credentials, tokens,
   phone numbers, or real recipient exports. Synthetic fixtures only.
 - **Real vs. drill never blurs.** A drill must never render or transmit as
@@ -52,22 +54,22 @@ Follow these unless Kris says otherwise:
 - **Treat external data as untrusted.** Google Groups payloads, uploads,
   message content, API responses. Validate by content, strip EXIF.
 - **Don't point a write-capable flow at a live provider** (SES, SMS, Expo,
-  InformaCast) without Kris saying so in that session.
+  InformaCast) without the product owner saying so in that session.
 
 ## 4. How to actually work
 
 - **Fix the thing.** If you find a bug next to the one you were sent for, fix
   it in the same PR. You are not confined to a file list. Mention what you
   touched in the PR body.
-- **Nothing about Peninsula SD gets hardcoded.** This is an open-source
+- **Nothing about one district gets hardcoded.** This is an open-source
   project. Any school district must be able to clone it, supply their own
   configuration, and run it. District names, domains, email addresses, Google
   Group addresses, AWS account IDs, regions, bundle identifiers, store IDs,
   OAuth client IDs, and stack names are **configuration** — environment
   variables, deployment parameters, or database rows. Never literals in source.
-  If you are about to type `psd401`, an AWS account ID, `us-west-2`, or
-  `eoc.psd401.net` into a `.ts` file, stop: it belongs in config. The account
-  ID and the SMS support phone never enter the repository at all; they live in
+  If you are about to type a district's name, an AWS account ID, a region, or
+  a hostname into a `.ts` file, stop: it belongs in config. The account ID and
+  the SMS support phone never enter the repository at all; they live in
   git-ignored `infra/cdk.local.json` (see `docs/CONFIGURATION.md`).
 - **Simple and working beats clever and complete.** This runs for a decade in
   a school district. No new datastores, queues, services, or abstractions
@@ -111,21 +113,21 @@ These are real failure patterns from this repo's history. Avoid them.
   post-deploy readback that fails on a missing IAM read permission has broken
   the deploy for no safety benefit. Verify what matters; let the rest be logs.
 - **Don't hedge documentation into uselessness.** Write what is true and
-  current. If `eoc.psd401.net` resolves and serves, the doc says it works.
+  current. If the deployed origin resolves and serves, the doc says it works.
 - **Don't bake the tenant into the code.** A few dozen district-specific
   literals remain in operator tooling and test fixtures
   (`git grep psd401 -- '*.ts' '*.tsx'` lists them). Do not add to that number,
   and remove them where you touch them.
 - **Don't leave worktrees and branches behind.** Delete the branch when the PR
   merges. Remove the worktree when you're done.
-- **Don't argue with Kris about scope.** State a concern once, in a sentence,
-  then do the work.
+- **Don't argue with the product owner about scope.** State a concern once, in
+  a sentence, then do the work.
 
 ## 6. Production
 
-Kris approves production changes by asking for them. Deployment is only a
-direct `cdk deploy` from a locally authenticated AWS session. GitHub Actions,
-repository environments, repository variables, repository secrets, and GitHub
-OIDC roles must never be part of deployment. When a deploy or infrastructure
-change is risky, say what will happen in plain language before you run it, then
-run it.
+The product owner approves production changes by asking for them. Deployment
+is only a direct `cdk deploy` from a locally authenticated AWS session. GitHub
+Actions, repository environments, repository variables, repository secrets,
+and GitHub OIDC roles must never be part of deployment. When a deploy or
+infrastructure change is risky, say what will happen in plain language before
+you run it, then run it.

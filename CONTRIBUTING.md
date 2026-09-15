@@ -104,5 +104,5 @@ project's [MIT license](LICENSE).
 
 ## Contact
 
-Maintainer contact for private, non-security matters: see the Code of
-Conduct.
+Maintainer contact for private, non-security matters, including Code of
+Conduct reports: hagelk@psd401.net.

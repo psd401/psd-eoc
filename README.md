@@ -69,8 +69,6 @@ bun run test:db:stop
 - [Operations runbooks](docs/runbooks/README.md) — durable response and
   maintenance procedures
 - [Security policy](SECURITY.md) — security posture and data classification
-- [Historical archive](docs/archive/README.md) — planning records and preserved
-  one-off evidence; never a current instruction source
 
 ## Deploy for your district
 

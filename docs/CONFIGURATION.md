@@ -2,7 +2,10 @@
 
 This is the current index of portable tenant configuration and direct CDK
 deployment parameters. `infra/cdk.json` is the checked-in tenant manifest for this
-deployment. `infra/bin/synthesize-example.ts` replaces its identity with a
+deployment, Peninsula School District's. A district that forks the repository
+replaces every `psdEoc:*` value in it, from the application origin and hosted
+zone to the facility list, before its first synthesis; nothing in the
+manifest is generic. `infra/bin/synthesize-example.ts` replaces its identity with a
 reserved second-district fixture to prove the stack is portable without cloud
 credentials or provider calls.
 

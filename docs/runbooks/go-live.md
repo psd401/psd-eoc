@@ -54,5 +54,5 @@ instruction to deploy that release is the sign-off; no separate form, signature
 ritual, or approval workflow is required. If the product owner has not approved
 production traffic for that release, do not deploy it.
 
-The superseded launch checklist and its unfilled evidence fields are preserved
-in the [historical archive](../archive/runbooks/go-live-2026-08-25.md).
+The superseded launch checklist and its unfilled evidence fields are retained
+in the district's private operations records, outside this repository.
