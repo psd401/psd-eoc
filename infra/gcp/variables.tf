@@ -32,13 +32,13 @@ variable "organization_id" {
 }
 
 variable "billing_account" {
-  description = "District Google Cloud billing account attached to the project."
+  description = "District Google Cloud billing account attached to the project. Supplied by the operator tooling from infra/cdk.local.json; never committed."
   type        = string
-  default     = "01760A-35A65E-94FB90"
+  sensitive   = true
 
   validation {
-    condition     = var.billing_account == "01760A-35A65E-94FB90"
-    error_message = "This root is intentionally bound to the district billing account."
+    condition     = can(regex("^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$", var.billing_account))
+    error_message = "Billing account must use the canonical 6-6-6 uppercase form."
   }
 }
 

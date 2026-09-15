@@ -45,6 +45,9 @@ over `cdk.json` for the CDK app and for the operator scripts under
 
 - `psdEoc:awsAccount` — the 12-digit deployment account
 - `psdEoc:smsSupportPhone` — the E.164 support number in SMS consent copy
+- `psdEoc:gcpBillingAccount` — the Google Cloud billing account in canonical
+  6-6-6 form; only the GCP operator tooling under `infra/gcp` reads it, and it
+  passes the value to both Terraform roots as a variable
 
 Each key lives in exactly one file: the CDK app refuses to run when `cdk.json`
 or a `-c` flag overrides a local key, and the merged reader refuses a key
