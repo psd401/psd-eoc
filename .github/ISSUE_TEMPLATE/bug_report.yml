@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a defect in PSD EOC.
+title: 'bug: '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include real staff data, phone numbers, or credentials in this
+        report. Reproduce against the synthetic quickstart described in
+        README.md whenever possible.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      description: Which part of the repository does this bug affect?
+      options:
+        - web app
+        - mobile iOS
+        - mobile Android
+        - workers/notifications
+        - infrastructure
+        - docs
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear, concrete description of the defect.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Steps to reproduce using the synthetic quickstart (`bun install
+        --frozen-lockfile`, `bun run test:db:start`, `bun run
+        test:db:migrate`, `bun run test:db:seed`, `bun run test:web`).
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The commit hash or release tag you ran.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: >
+            This report contains no real staff data, phone numbers, or
+            credentials, and it is not a security vulnerability. Security
+            vulnerabilities are reported privately through
+            [SECURITY.md](https://github.com/psd401/psd-eoc/blob/main/SECURITY.md),
+            not as a public issue.
+          required: true
