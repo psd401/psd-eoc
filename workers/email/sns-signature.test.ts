@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   MAX_SNS_SIGNING_CERTIFICATE_BYTES,
@@ -18,56 +22,55 @@ const TOPIC_ARN = 'arn:aws:sns:us-east-1:000000000000:psd-eoc-email-events';
 const CERTIFICATE_URL =
   'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-00000000000000000000000000000000.pem';
 
-// Synthetic, test-only certificate material. It authenticates no service and
-// expires in 2036; keeping it inline makes signature tests network-free.
-const TEST_PRIVATE_KEY = `-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDBnESjgGQBI80U
-1JllioaEFGweFwBEbB7Er0b+QR+WIBQe9jA/zxRBoa3ct/a5f9nU7Vz9+Az9QuqM
-HdGNfLnZm5vhLlWZ8RQrDOXNx+yQWnShqmw6UORApHIhkT1gAzbEwasboV4dsizj
-QkiOCVmvGek5V8tEoQiOaDhjlDxWY6UslPfYI7BEFRJ+myeI8sxM07UvK4Jzd1ws
-FdY8dI6bBu3GsZQ5kh9rKmCogL+oO5s0YPrXCLGTTy1uaPu3k1VwmF+zynqnDzOy
-HaJTe5S+HpSRrzztElvQmt4HdHP9Nd2p5H1mBHDwQf04z58WhTJD0JsHLyN8DVwB
-3FOfkGInAgMBAAECggEAAYYgxV4Gh+66lCY14KstSAbwiEFu+0DRk7MMTqxSxpWC
-8dkS+VXmdP3LK4J6Jhd+M0zIoKx3AwrgiZk2CvkibfRbTu7i4JE/loCkYDN3sTg5
-M2MU6V9poKzHIq7f6Fq/TpOvYKkwDtSrdcf1aaZtVuIEJNRxHb7N2weerr9OnwQv
-JoGl5c+j+YHLlorXCWS4QQCo8VTOex8cBPcW5BJtiipWa9Uc492FkiASNIXVYnTH
-zOGgH29lWu2GyJ3/Ta9Z5V798+OCxIz/xdjKu8bBFV8PqpoFzL+io5kTYSwMUzcA
-89SAMA2W5Ef59U8mfKCTpv9u+c39pfP4QlGbrsTNAQKBgQDtO1c6Tn2uaxxkO6w9
-3i5ljne1NelE1WWwcmIAC2qeErhait/8VPO/0Vs6jHbDtdHOX10mc87BwXLtWjwu
-1I3lVhdprU7Hw9mRb+H+MxoxQthqRSVk6OHuPmh3jFdqyBm4KCNHBToAtJ55ykME
-MKEpH/fXRr3nEZqHCDwV/Zh0EQKBgQDQ7XaEwPtJn2iNAm0/NAExwzMKA34IbIkN
-1r6RklB0gJMZgkMxNqW/gBIcCVhws5TK+mQojrILokJUjn5yr+4egSO0VqFF5h52
-DqKTmKhZybkBLyyRKe2uSE2FtvMMOE90YqteLBOZzL4elbNOCCzUaoNPRKsAOuLi
-B2dMTADKtwKBgH9p8rSHOat3Ld2LyzvDXEoBVbwHA42Ly70UAhyiBRZ3WXqPwjNl
-cTEiAYyVqqf8vH3J7F7drjuUaeSfJVnFoZx+O77vbTOPtggN/mQoEDZK/688ChSD
-m+z4qeUjhEP+ywmEzUW0we1lFQS2pH3YnIZY/CUsgoxbgRJrUtJAzSPxAoGBAJGd
-f+ZEzp9gkDD/iP7tEwwI3ZDUIEpkwx03F7lD/flFB8FWrdgmG12eOID77n0WXNUf
-sSEnW2aKX6qpae4rOk5eeXEek+aw3Xgw+RTf6C40T1JI+8ntLDA1SnqwqTNSJ+aZ
-QpEvLTYbokKU2dTAE+a0mfJsjLZrVGhu+osNydt/AoGAHkhhc4lf0nePegskvyVI
-L/9UdWyRj7kiZ1CMBLdMvXgOaEtiZzHqaLZJnSNQJBMvmkR/hfHydWdOuoAqBXy5
-F4hbPWdtyTYcYfcwo8KMojASIQ86AkP+f2wO6z6LvqlH6KEKt73zLSsNQU4SFE+T
-aBEr40zInqIefPr5nS2pURg=
------END PRIVATE KEY-----`;
+// Synthetic, test-only certificate material created per run with the system
+// OpenSSL, so no key ever lives in the repository. It authenticates no
+// service: the verifier needs an RSA public key inside an X.509 certificate
+// whose validity window contains `now`, nothing more.
+const { certificate: TEST_CERTIFICATE, privateKey: TEST_PRIVATE_KEY } =
+  generateTestCertificate();
 
-const TEST_CERTIFICATE = `-----BEGIN CERTIFICATE-----
-MIIDKzCCAhOgAwIBAgIUIpelbBnExR3xhalWgbpfvjSj974wDQYJKoZIhvcNAQEL
-BQAwJTEjMCEGA1UEAwwac3ludGhldGljLXNucy10ZXN0LmludmFsaWQwHhcNMjYw
-ODExMjAxOTI4WhcNMzYwODA4MjAxOTI4WjAlMSMwIQYDVQQDDBpzeW50aGV0aWMt
-c25zLXRlc3QuaW52YWxpZDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
-AMGcRKOAZAEjzRTUmWWKhoQUbB4XAERsHsSvRv5BH5YgFB72MD/PFEGhrdy39rl/
-2dTtXP34DP1C6owd0Y18udmbm+EuVZnxFCsM5c3H7JBadKGqbDpQ5ECkciGRPWAD
-NsTBqxuhXh2yLONCSI4JWa8Z6TlXy0ShCI5oOGOUPFZjpSyU99gjsEQVEn6bJ4jy
-zEzTtS8rgnN3XCwV1jx0jpsG7caxlDmSH2sqYKiAv6g7mzRg+tcIsZNPLW5o+7eT
-VXCYX7PKeqcPM7IdolN7lL4elJGvPO0SW9Ca3gd0c/013ankfWYEcPBB/TjPnxaF
-MkPQmwcvI3wNXAHcU5+QYicCAwEAAaNTMFEwHQYDVR0OBBYEFDEPvTOQAMru9jCK
-a5Tnjt5oif/gMB8GA1UdIwQYMBaAFDEPvTOQAMru9jCKa5Tnjt5oif/gMA8GA1Ud
-EwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAKHH9Y9mtnyb0FoU7Eui93se
-pPPbGXI0igjhNwZWCF4EA4oGJiz5Drpw0BiIiL8xP+cEkKHNCwHoGCJW9QOQZOCZ
-S4dnogFYv0cxsjg1rCu3s18YVqjc52j+Fdx2El27RtQ0zSpZj+bAxuV0Ix49/jN6
-8NAJuUk98GaztVJI56nU6zBlFuPyl1cgSGIQPZ18uvNdkSrKboj22iMxsfW4Hc2Q
-jFTL2oqvgISezEWdM0x88EHGmKK8hxrHch4FTjpZvDT2vcx4gagc/y3UiuTxrxUn
-rMNmOrHtio+QaVCZcdcs3QMwcZjIB2wLQLiCPDLz2B4mGKaTyFprzR4+9EESGEo=
------END CERTIFICATE-----`;
+function generateTestCertificate(): {
+  readonly certificate: string;
+  readonly privateKey: string;
+} {
+  const directory = mkdtempSync(join(tmpdir(), 'psd-eoc-sns-signature-'));
+  try {
+    const keyPath = join(directory, 'key.pem');
+    const certificatePath = join(directory, 'certificate.pem');
+    const result = spawnSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        keyPath,
+        '-out',
+        certificatePath,
+        '-days',
+        '3650',
+        '-subj',
+        '/CN=sns-signature.test.invalid',
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    if (result.status !== 0) {
+      throw new Error(
+        `openssl could not create the test certificate: ${
+          result.error?.message ?? result.stderr.toString('utf8').trim()
+        }`,
+      );
+    }
+    return {
+      certificate: readFileSync(certificatePath, 'utf8'),
+      privateKey: readFileSync(keyPath, 'utf8'),
+    };
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+}
 
 type EnvelopeInput = Readonly<{
   Type: 'Notification';
@@ -131,7 +134,8 @@ function signedEnvelope(
 }
 
 const loadTestCertificate = async (): Promise<string> => TEST_CERTIFICATE;
-const testCertificateNow = (): Date => new Date('2026-08-11T20:30:00.000Z');
+// The certificate is valid from the moment it is generated, so use real time.
+const testCertificateNow = (): Date => new Date();
 
 function testCertificateOptions() {
   return {

@@ -1,6 +1,6 @@
 [profile psd401-prr-prod]
 sso_session = macbookpro
-sso_account_id = 338414773271
+sso_account_id = 000000000000
 sso_role_name = AWSAdministratorAccess
 region = us-west-2
 

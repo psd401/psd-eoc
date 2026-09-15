@@ -60,7 +60,7 @@ output "google_oauth_contract" {
 output "aws_secrets_contract" {
   description = "Non-secret target contract for credential handoff; values are never Terraform inputs or outputs."
   value = {
-    account_id           = "338414773271"
+    account_id           = var.aws_account_id
     groups_secret_name   = "/psd-eoc/google-groups"
     oauth_secret_name    = "/psd-eoc/google-oauth"
     region               = "us-west-2"

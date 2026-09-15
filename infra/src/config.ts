@@ -1,4 +1,3 @@
-export const DEPLOYMENT_ACCOUNT = '338414773271';
 export const DEPLOYMENT_REGION = 'us-west-2';
 export const STACK_NAME = 'PsdEoc';
 

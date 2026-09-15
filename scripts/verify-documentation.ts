@@ -71,7 +71,7 @@ export function currentDocumentationViolations(
   if (
     repositoryPath !== 'AGENTS.md' &&
     repositoryPath !== 'SECURITY.md' &&
-    /(?:338414773271|\bpsd401-prr-prod\b|\beoc\.psd401\.net\b|\bnet\.psd401\.eoc\b|@psd401\.net\b|\bpsd401\.net\b|\bus-west-2\b)/iu.test(
+    /(?:\bpsd401-prr-prod\b|\beoc\.psd401\.net\b|\bnet\.psd401\.eoc\b|@psd401\.net\b|\bpsd401\.net\b|\bus-west-2\b)/iu.test(
       contents,
     )
   ) {

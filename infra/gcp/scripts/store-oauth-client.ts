@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AWS_ACCOUNT_ID,
   assertAwsAccount,
   assertDefaultTerraformWorkspace,
   assertNoAmbientTransportOverrides,
@@ -20,7 +21,6 @@ import {
   secretVersionIsCurrent,
 } from './runtime';
 
-const AWS_ACCOUNT_ID = '338414773271';
 const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const SECRET_NAME = '/psd-eoc/google-oauth';

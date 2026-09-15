@@ -14,7 +14,6 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 <!-- docs-contract:cdk-context:start -->
 
 - `psdEoc:applicationOrigin`
-- `psdEoc:awsAccount`
 - `psdEoc:awsAccountAlias`
 - `psdEoc:awsRegion`
 - `psdEoc:displayTimeZone`
@@ -29,11 +28,30 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:sesFromAddress`
 - `psdEoc:sesIdentityDomain`
 - `psdEoc:smsSupportEmail`
-- `psdEoc:smsSupportPhone`
 - `psdEoc:sourceRepositoryUrl`
 - `psdEoc:syntheticGroups`
 - `psdEoc:threats`
 <!-- docs-contract:cdk-context:end -->
+
+### Local tenant context
+
+`infra/cdk.local.json` carries the manifest keys this deployment keeps out of
+the public repository. Git ignores it; `infra/src/tenant-context.ts` merges it
+over `cdk.json` for the CDK app and for the operator scripts under
+`infra/src/ops`, `infra/gcp/scripts`, and `scripts/ops`. It holds:
+
+- `psdEoc:awsAccount` — the 12-digit deployment account
+- `psdEoc:smsSupportPhone` — the E.164 support number in SMS consent copy
+
+Synthesis and deployment fail without it because `readDeploymentTarget` and
+`readDeploymentIdentity` require both keys. CI never has it: it synthesizes the
+second-district fixture instead. Operator scripts treat a missing file as the
+reserved account `000000000000`, which matches no live credential, so they
+refuse every AWS mutation until the file exists. `infra/cdk.context.json`, the
+availability-zone cache CDK writes beside it, is ignored for the same reason:
+its keys embed the account. A fresh checkout recreates it on the first deploy.
+`infra/gcp/aws.config` follows the same pattern; copy `aws.config.example` and
+fill in the account.
 
 Identity, target account/region, facility data, sender identity, and runbook
 base URL are configuration. `readDeploymentTarget` and

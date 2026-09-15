@@ -170,9 +170,13 @@ function tagsByKey(resource: SynthesizedResource): Map<string, unknown> {
   );
 }
 
-const productionContext = productionConfiguration.context as Readonly<
-  Record<string, unknown>
->;
+// The manifest keeps the account and support phone in git-ignored
+// cdk.local.json, so the synthesized fixture supplies its own values here.
+const productionContext: Readonly<Record<string, unknown>> = {
+  ...(productionConfiguration.context as Readonly<Record<string, unknown>>),
+  'psdEoc:awsAccount': '123456789012',
+  'psdEoc:smsSupportPhone': '+12535550123',
+};
 const currentDeploymentTarget = readDeploymentTarget({
   tryGetContext: (key) => productionContext[key],
 });
@@ -375,7 +379,7 @@ describe('deployment boundary', () => {
     expect(dockerfile).toContain(
       'org.psd-eoc.data-classification="staff-minimized"',
     );
-    expect(dockerfile).not.toMatch(/psd401|338414773271/iu);
+    expect(dockerfile).not.toMatch(/psd401|\b\d{12}\b/iu);
     expect(dockerfile).not.toContain('synthetic-only');
   });
 
@@ -540,7 +544,7 @@ describe('deployment boundary', () => {
     });
     expect(oauthArn.NoEcho).toBe(true);
     expect(oauthArn.AllowedPattern).toBe(
-      '^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$',
+      `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
     );
     expect(initialAccessGroupId).toMatchObject({
       Default: '',

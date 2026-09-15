@@ -685,7 +685,7 @@ describe('offline safety boundary', () => {
         submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
         harness.runtime,
       ),
-    ).rejects.toThrow('expected 338414773271');
+    ).rejects.toThrow(`expected ${TARGET_ACCOUNT}`);
     expect(api.calls).toEqual(['identity']);
   });
 
