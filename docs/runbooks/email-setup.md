@@ -51,5 +51,5 @@ region, sender domain, secret references, and deployment inputs come from
    the readiness register only for the exact boundary proved.
 
 The dated tenant-specific inventory, setup fields, and historical command
-transcript are preserved in the
-[archive](../archive/runbooks/email-setup-2026-08-25.md).
+transcript are retained in the district's private operations records, outside
+this repository.

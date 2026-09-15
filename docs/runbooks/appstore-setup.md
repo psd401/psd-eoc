@@ -72,6 +72,6 @@ public production track. Remote version/build counters are read back after the
 provider action rather than computed locally.
 
 The dated app identity, build/upload transcript, exact commands, and provider
-readbacks are preserved in the
-[historical setup record](../archive/runbooks/appstore-setup-2026-08-25.md).
-The current mobile build and rollback procedure is [release.md](release.md).
+readbacks are retained in the district's private operations records, outside
+this repository. The current mobile build and rollback procedure is
+[release.md](release.md).

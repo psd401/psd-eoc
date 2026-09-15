@@ -72,5 +72,5 @@ provider states distinct and link access-controlled evidence without secrets,
 contacts, raw provider payloads, or student data. Append corrections with
 provenance; never edit old evidence to make the timeline cleaner.
 
-The superseded readiness-heavy index is retained in the
-[historical archive](../archive/runbooks/README-2026-08-25.md).
+The superseded readiness-heavy index is retained in the district's private
+operations records, outside this repository.

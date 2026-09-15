@@ -18,7 +18,7 @@ const ACTIVATION_VARIABLES = Object.freeze({
   eventType: 'Lockdown Drill',
   threat: 'Intruder',
   startTime: '2026-09-09T16:01:00.000Z',
-  initiator: 'Brent Campbell',
+  initiator: 'Jordan Rivera',
 });
 
 describe('default message templates', () => {
@@ -41,16 +41,16 @@ describe('default message templates', () => {
       {
         channel: 'push',
         title: '[DRILL] Lockdown Drill at Henderson Bay High School',
-        body: `[DRILL] Started by Brent Campbell at ${STARTED}. Threat: Intruder. Open PSD EOC for current instructions.`,
+        body: `[DRILL] Started by Jordan Rivera at ${STARTED}. Threat: Intruder. Open PSD EOC for current instructions.`,
       },
       {
         channel: 'email',
         subject: '[DRILL] Lockdown Drill at Henderson Bay High School',
-        textBody: `[DRILL] Lockdown Drill at Henderson Bay High School has been started by Brent Campbell.\nLocation: Henderson Bay High School\nThreat: Intruder\nTime: ${STARTED}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
+        textBody: `[DRILL] Lockdown Drill at Henderson Bay High School has been started by Jordan Rivera.\nLocation: Henderson Bay High School\nThreat: Intruder\nTime: ${STARTED}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
       },
       {
         channel: 'sms',
-        body: `[DRILL] Lockdown Drill at Henderson Bay High School started by Brent Campbell, ${STARTED}. Threat: Intruder. Open PSD EOC.`,
+        body: `[DRILL] Lockdown Drill at Henderson Bay High School started by Jordan Rivera, ${STARTED}. Threat: Intruder. Open PSD EOC.`,
       },
     ]);
 

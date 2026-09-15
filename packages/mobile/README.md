@@ -98,11 +98,9 @@ preview builds remain disabled; only an exact allowlisted privately distributed
 build may dual-register.
 
 Physical delivery remains a controlled external-integration run. The Expo
-activation record is
-[`issue-278-expo-push.md`](../../docs/archive/evidence/issue-278-expo-push.md)
-and the direct-provider record is
-[`issue-43-direct-push.md`](../../docs/archive/evidence/issue-43-direct-push.md);
-current state is in `docs/INTEGRATIONS.md`. APNs and FCM credentials, exact
+activation and direct-provider records are retained in the district's private
+operations records; current state is in `docs/INTEGRATIONS.md`. APNs and FCM
+credentials, exact
 private builds, and the two physical-device drills require authenticated human
 work. Never place push tokens, credentials, real recipients, or raw provider
 payloads in evidence.

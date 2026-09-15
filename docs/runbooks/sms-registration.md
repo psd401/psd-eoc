@@ -37,5 +37,5 @@ synthetic send is a separate authenticated-human action and still may not use a
 real incident, staff roster, or real recipient.
 
 The dated tenant-specific discovery, provider-policy snapshot, input examples,
-and historical commands are preserved in the
-[archive](../archive/runbooks/sms-registration-2026-08-25.md).
+and historical commands are retained in the district's private operations
+records, outside this repository.

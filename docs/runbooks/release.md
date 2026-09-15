@@ -88,5 +88,5 @@ never run a down migration or use a mobile rollback to reinterpret append-only
 event/delivery state. Revoke a credential only after all intended consumers
 have moved or immediately if compromise requires it.
 
-The prior release ledger and one-off provider evidence fields are preserved in
-the [historical archive](../archive/runbooks/release-2026-08-25.md).
+The prior release ledger and one-off provider evidence fields are retained in
+the district's private operations records, outside this repository.

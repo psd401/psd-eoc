@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a change to PSD EOC.
+title: 'feature: '
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this solve, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-change
+    attributes:
+      label: Proposed change
+      description: What you propose to change or add.
+    validations:
+      required: true
+  - type: textarea
+    id: beneficiaries
+    attributes:
+      label: Which districts or roles benefit
+      description: >
+        Who benefits from this change: which district roles (staff,
+        building admin, district admin, responder) or deployment scenarios?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why you did not propose them.
+    validations:
+      required: false
+  - type: checkboxes
+    id: human-only
+    attributes:
+      label: Human-only actions
+      description: >
+        Four actions are registered as human-only and enforced server-side:
+        see AGENTS.md.
+      options:
+        - label: >
+            This request does not ask automation to start a real incident,
+            send a real notification, issue a real all-clear, or close a real
+            event. Those four actions stay human-only.
+          required: true

@@ -37,5 +37,5 @@ and service association as rollback evidence.
 After recovery, repeat every inspection step from two independent public
 resolvers and update only the corresponding readiness row with dated evidence.
 
-The prior tenant-specific recovery record is preserved in the
-[historical archive](../archive/runbooks/eoc-custom-domain-2026-08-25.md).
+The prior tenant-specific recovery record is retained in the district's
+private operations records, outside this repository.

@@ -19,8 +19,6 @@ never application literals.
   deployed-stack, DNS, OIDC, alarm, provider, and mobile readiness.
 - [Runbooks](docs/runbooks/README.md) contain stable procedures and always
   defer current state to the readiness register.
-- [Historical archive](docs/archive/README.md) preserves planning and evidence;
-  archived documents are not instructions.
 
 ## Commands
 

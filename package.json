@@ -1,6 +1,12 @@
 {
   "name": "@psd-eoc/root",
   "version": "0.0.0",
+  "description": "Open-source emergency notification and operations platform for school districts: incident and drill activation, staff notification, live event collaboration, and append-only records.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/psd401/psd-eoc.git"
+  },
   "private": true,
   "packageManager": "bun@1.2.23",
   "workspaces": [
