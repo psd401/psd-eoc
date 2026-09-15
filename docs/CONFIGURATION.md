@@ -52,10 +52,10 @@ never has it: it synthesizes the
 second-district fixture instead. Operator scripts treat a missing file as the
 reserved account `000000000000`, which matches no live credential, so they
 refuse every AWS mutation until the file exists. `infra/cdk.context.json`, the
-availability-zone cache CDK writes beside it, is ignored for the same reason:
-its keys embed the account. A fresh checkout recreates it on the first deploy.
-`infra/gcp/aws.config` follows the same pattern; copy `aws.config.example` and
-fill in the account.
+context cache CDK may write beside it, is ignored for the same reason: its
+keys embed the account. The stack names its availability zones directly, so
+nothing depends on that cache. `infra/gcp/aws.config` follows the same
+pattern; copy `aws.config.example` and fill in the account.
 
 Identity, target account/region, facility data, sender identity, and runbook
 base URL are configuration. `readDeploymentTarget` and
