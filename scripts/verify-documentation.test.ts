@@ -595,6 +595,18 @@ describe('documentation contract', () => {
     ]);
     expect(
       currentDocumentationViolations(
+        'docs/runbooks/provider.md',
+        'Deploy into account 123456789012 only.',
+      ),
+    ).toEqual(['current documentation hardcodes protected tenant identity']);
+    expect(
+      currentDocumentationViolations(
+        'docs/CONFIGURATION.md',
+        'The reserved account `000000000000` matches no live credential.',
+      ),
+    ).toEqual([]);
+    expect(
+      currentDocumentationViolations(
         'docs/INTEGRATIONS.md',
         'The boundary remains `blocked`.',
       ),
