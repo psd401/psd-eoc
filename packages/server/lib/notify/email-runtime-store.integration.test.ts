@@ -784,7 +784,15 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
     // Indexing the eligible set instead would leave cursor 50 past the end of
     // a now-50-long list, and the last person in the roster would be silently
     // skipped with nothing reporting it.
-    const victim = pagedRecipients[3]!;
+    // The store pages the snapshot in recipient-id order, not fixture order,
+    // so the victim must be someone the first page actually returned; a fixed
+    // fixture index lands on page two roughly one run in fifty.
+    const firstPageAddresses = new Set(
+      first.items.map((item) => emailAddress(item.endpoint)),
+    );
+    const victim = pagedRecipients.find((recipient) =>
+      firstPageAddresses.has(recipient.email),
+    )!;
     await databaseConnection().db.insert(endpointStatusRecords).values({
       rosterSnapshotId: fixture.pagedSnapshotId,
       recipientId: victim.recipientId,
