@@ -144,7 +144,7 @@ describe('server image contents', () => {
     expect(dockerfile).toContain(
       'org.psd-eoc.data-classification="staff-minimized"',
     );
-    expect(dockerfile).not.toMatch(/psd401|<aws-account-id>/iu);
+    expect(dockerfile).not.toMatch(/psd401|\b\d{12}\b/iu);
   });
 
   test('every reachable worker module is copied into the image', () => {

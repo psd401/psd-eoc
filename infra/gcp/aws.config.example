@@ -1,0 +1,10 @@
+[profile psd401-prr-prod]
+sso_session = macbookpro
+sso_account_id = 000000000000
+sso_role_name = AWSAdministratorAccess
+region = us-west-2
+
+[sso-session macbookpro]
+sso_start_url = https://psd401.awsapps.com/start
+sso_region = us-west-2
+sso_registration_scopes = sso:account:access

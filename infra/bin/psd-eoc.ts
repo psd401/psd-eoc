@@ -10,8 +10,11 @@ import {
 } from '../src/stack/config';
 import { PsdEocStack } from '../src/stack/psd-eoc-stack';
 import { readSourceRevision } from '../src/source-revision';
+import { readLocalTenantContext } from '../src/tenant-context';
 
-const app = new App();
+// cdk.local.json supplies the tenant keys kept out of the repository; the CLI
+// context from cdk.json and -c still overrides anything it defines.
+const app = new App({ context: { ...readLocalTenantContext() } });
 const deploymentTarget = readDeploymentTarget(app.node);
 const enforceProtectedTarget =
   process.env.PSD_EOC_ENFORCE_DEPLOYMENT_TARGET === 'true';

@@ -1,4 +1,3 @@
-export const DEPLOYMENT_ACCOUNT = '<aws-account-id>';
 export const DEPLOYMENT_REGION = 'us-west-2';
 export const STACK_NAME = 'PsdEoc';
 

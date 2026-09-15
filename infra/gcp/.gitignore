@@ -13,3 +13,4 @@ client_secret_*.plist
 ios-client*.plist
 web-client*.json
 workspace-admin-client*.json
+aws.config
