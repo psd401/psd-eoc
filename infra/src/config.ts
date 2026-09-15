@@ -3,8 +3,6 @@ export const STACK_NAME = 'PsdEoc';
 
 export const APP_RUNNER_HEALTH_CHECK_PATH = '/api/health';
 export const SES_IDENTITY_DOMAIN = 'alerts.psd401.net';
-export const SES_PARENT_HOSTED_ZONE_ID = 'Z2B9XR5HEMTG1R';
-export const SES_PARENT_HOSTED_ZONE_NAME = 'psd401.net';
 export const SES_MAIL_FROM_DOMAIN = `mail.${SES_IDENTITY_DOMAIN}`;
 export const SES_CONFIGURATION_SET_NAME = 'psd-eoc-transactional';
 export const SES_EVENT_DESTINATION_NAME = 'psd-eoc-email-events';
