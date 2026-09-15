@@ -2,19 +2,20 @@ import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
 
 import {
-  DEPLOYMENT_ACCOUNT,
   DEPLOYMENT_REGION,
   SES_CONFIGURATION_SET_NAME,
   SES_IDENTITY_DOMAIN,
   SES_MAIL_FROM_DOMAIN,
 } from '../config';
+import { tenantAwsAccount } from '../tenant-context';
 
 export {
   SES_CONFIGURATION_SET_NAME,
   SES_IDENTITY_DOMAIN,
   SES_MAIL_FROM_DOMAIN,
 };
-export const TARGET_ACCOUNT_ID = DEPLOYMENT_ACCOUNT;
+/** From cdk.local.json; the reserved unconfigured account refuses every call. */
+export const TARGET_ACCOUNT_ID = tenantAwsAccount();
 export const TARGET_REGION = DEPLOYMENT_REGION;
 export const SES_CLIENT_MAX_ATTEMPTS = 1;
 export const SES_TEST_FROM_ADDRESS =

@@ -1,17 +1,15 @@
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
-import productionConfiguration from '../cdk.json';
 import { assertDatabaseArn } from '../lambda/failover-metric/index.mjs';
 import { readDeploymentTarget } from '../src/stack/config';
 import { PsdEocStack } from '../src/stack/psd-eoc-stack';
+import { readTenantContext } from '../src/tenant-context';
 
-const productionContext = productionConfiguration.context as Readonly<
-  Record<string, unknown>
->;
-const productionDeploymentTarget = readDeploymentTarget({
-  tryGetContext: (key) => productionContext[key],
-});
+// The manifest plus any local context, read only to pick fixture values that
+// differ from this deployment's own; a checkout without cdk.local.json
+// still synthesizes because every missing key falls back to ''.
+const productionContext = readTenantContext();
 
 function alternative(
   current: string,
@@ -31,12 +29,12 @@ const exampleHostedDomain = alternative(
 );
 const exampleConfiguration = Object.freeze({
   account: alternative(
-    productionDeploymentTarget.account,
+    String(productionContext['psdEoc:awsAccount'] ?? ''),
     '000000000000',
     '111111111111',
   ),
   accountAlias: alternative(
-    productionDeploymentTarget.accountAlias,
+    String(productionContext['psdEoc:awsAccountAlias'] ?? ''),
     'example-district',
     'sample-district',
   ),
@@ -60,7 +58,7 @@ const exampleConfiguration = Object.freeze({
   smsSupportEmail: `servicecentral@${exampleHostedDomain}`,
   smsSupportPhone: '+12535550123',
   region: alternative(
-    productionDeploymentTarget.region,
+    String(productionContext['psdEoc:awsRegion'] ?? ''),
     'us-east-1',
     'us-west-1',
   ),

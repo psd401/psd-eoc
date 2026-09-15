@@ -8,6 +8,7 @@ import {
   type GroupsReaderContract,
 } from './groups-contract';
 import {
+  AWS_ACCOUNT_ID,
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
   assertAwsAccount,
@@ -19,7 +20,6 @@ import {
 } from './runtime';
 import { validateStoredCredential } from './verify-groups-readonly';
 
-const AWS_ACCOUNT_ID = '338414773271';
 const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const SECRET_NAME = '/psd-eoc/google-groups';
