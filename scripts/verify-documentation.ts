@@ -71,7 +71,9 @@ export function currentDocumentationViolations(
   if (
     repositoryPath !== 'AGENTS.md' &&
     repositoryPath !== 'SECURITY.md' &&
-    /(?:<aws-account-id>|\bpsd401-prr-prod\b|\beoc\.psd401\.net\b|\bnet\.psd401\.eoc\b|@psd401\.net\b|\bpsd401\.net\b|\bus-west-2\b)/iu.test(
+    // Any 12-digit run reads as an AWS account ID; only the reserved
+    // unconfigured account from infra/src/tenant-context.ts is documented.
+    /(?:\b(?!0{12}\b)\d{12}\b|\bpsd401-prr-prod\b|\beoc\.psd401\.net\b|\bnet\.psd401\.eoc\b|@psd401\.net\b|\bpsd401\.net\b|\bus-west-2\b)/iu.test(
       contents,
     )
   ) {

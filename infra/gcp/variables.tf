@@ -134,3 +134,9 @@ variable "mobile_application_id" {
     error_message = "PSD EOC mobile clients use net.psd401.eoc."
   }
 }
+
+variable "aws_account_id" {
+  description = "AWS account that receives the handed-off credentials. Set it in terraform.tfvars, which git ignores; it is reported, never used to create resources."
+  type        = string
+  default     = ""
+}

@@ -10,6 +10,8 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
+import { tenantAwsAccount } from '../../src/tenant-context';
+
 export const gcpRoot = fileURLToPath(new URL('..', import.meta.url));
 
 const trustedHome = '/Users/hagelk';
@@ -22,7 +24,8 @@ const commandPaths = {
 } as const;
 type CloudCommand = keyof typeof commandPaths;
 
-const AWS_ACCOUNT_ID = '<aws-account-id>';
+/** From infra/cdk.local.json; the reserved unconfigured account matches nothing. */
+export const AWS_ACCOUNT_ID = tenantAwsAccount();
 const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const AWS_SSO_SESSION = 'macbookpro';

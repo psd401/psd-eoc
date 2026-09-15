@@ -65,8 +65,10 @@ Follow these unless Kris says otherwise:
   Group addresses, AWS account IDs, regions, bundle identifiers, store IDs,
   OAuth client IDs, and stack names are **configuration** — environment
   variables, deployment parameters, or database rows. Never literals in source.
-  If you are about to type `psd401`, `<aws-account-id>`, `us-west-2`, or
-  `eoc.psd401.net` into a `.ts` file, stop: it belongs in config.
+  If you are about to type `psd401`, an AWS account ID, `us-west-2`, or
+  `eoc.psd401.net` into a `.ts` file, stop: it belongs in config. The account
+  ID and the SMS support phone never enter the repository at all; they live in
+  git-ignored `infra/cdk.local.json` (see `docs/CONFIGURATION.md`).
 - **Simple and working beats clever and complete.** This runs for a decade in
   a school district. No new datastores, queues, services, or abstractions
   without a measured need.

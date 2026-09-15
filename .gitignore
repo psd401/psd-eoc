@@ -24,3 +24,9 @@ cdk.out/
 .verification/**/debug/
 .verification/**/artifacts/
 .verification/**/playwright-artifacts/
+
+# Tenant values kept out of the public repository (see docs/CONFIGURATION.md)
+# and the availability-zone cache CDK writes next to them, whose keys embed
+# the account ID.
+infra/cdk.local.json
+infra/cdk.context.json

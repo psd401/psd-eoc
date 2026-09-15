@@ -20,7 +20,10 @@ import {
   sep,
 } from 'node:path';
 
-export const TARGET_ACCOUNT = '<aws-account-id>';
+import { tenantAwsAccount } from '../../../infra/src/tenant-context';
+
+/** From infra/cdk.local.json; the reserved unconfigured account refuses every call. */
+export const TARGET_ACCOUNT = tenantAwsAccount();
 export const TARGET_REGION = 'us-west-2';
 export const STS_CLIENT_CONFIG = {
   ignoreConfiguredEndpointUrls: true,

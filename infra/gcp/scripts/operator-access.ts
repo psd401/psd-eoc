@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { readGroupsReaderContract } from './groups-contract';
 import {
+  AWS_ACCOUNT_ID,
   APPLICATION_DEFAULT_IDENTITY_SCOPES,
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
@@ -16,7 +17,6 @@ import {
 import { readSecureFileBytes } from './store-oauth-client';
 
 const ADMIN_EMAIL = 'kjh_admin@psd401.net';
-const AWS_ACCOUNT_ID = '<aws-account-id>';
 const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const WORKSPACE_ROLE_SCOPE =
