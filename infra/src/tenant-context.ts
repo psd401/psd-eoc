@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
  * Tenant context lives in two files next to each other. `cdk.json` is the
  * checked-in manifest. `cdk.local.json`, which git ignores, carries the keys a
  * district keeps out of a public repository: today its AWS account ID and the
- * support phone number printed in SMS consent copy. The CDK app hands the
- * local file to `App` as default context, so `cdk.json` and the CLI still win
- * when they define the same key; operator scripts read the merged view.
+ * support phone number printed in SMS consent copy. Each key lives in exactly
+ * one of the two files: the CDK app hands the local file to `App` as default
+ * context and refuses to run when `cdk.json` or a `-c` flag overrides one of
+ * its keys, and `readTenantContext` refuses a key that both files define, so
+ * the deployed stack and the operator scripts can never disagree.
  */
 export const TENANT_MANIFEST_FILE = 'cdk.json';
 export const LOCAL_TENANT_CONTEXT_FILE = 'cdk.local.json';
@@ -67,7 +69,10 @@ export function readLocalTenantContext(
   );
 }
 
-/** The manifest's `psdEoc:*` context with the local context merged over it. */
+/**
+ * The manifest's `psdEoc:*` context plus the local context. A key defined in
+ * both files is an error rather than a precedence question.
+ */
 export function readTenantContext(
   directory: string = infraRoot,
 ): TenantContext {
@@ -84,10 +89,15 @@ export function readTenantContext(
           ),
         )
       : {};
-  return Object.freeze({
-    ...manifestContext,
-    ...readLocalTenantContext(directory),
-  });
+  const localContext = readLocalTenantContext(directory);
+  for (const key of Object.keys(localContext)) {
+    if (key in manifestContext) {
+      throw new Error(
+        `${LOCAL_TENANT_CONTEXT_FILE} and ${TENANT_MANIFEST_FILE} both define ${key}; keep each key in exactly one file.`,
+      );
+    }
+  }
+  return Object.freeze({ ...manifestContext, ...localContext });
 }
 
 /**

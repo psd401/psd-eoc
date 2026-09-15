@@ -144,6 +144,7 @@ describe('server image contents', () => {
     expect(dockerfile).toContain(
       'org.psd-eoc.data-classification="staff-minimized"',
     );
+    // Any 12-digit run reads as an AWS account ID.
     expect(dockerfile).not.toMatch(/psd401|\b\d{12}\b/iu);
   });
 
