@@ -24,11 +24,10 @@ current sources; the subdirectories below hold guides, runbooks, and history.
 - [`learnings/`](learnings/) — dated, tagged notes on failure patterns and
   fixes, grouped by category (database, security, test-failures, ui,
   workflow).
-- [`archive/`](archive/) — planning records and preserved one-off evidence;
-  see [`archive/README.md`](archive/README.md).
 
-## The archive rule
+## History
 
-`docs/archive` is history, not a current instruction. Its commands, status
-labels, paths, and design claims may be superseded. If a current document and
-an archived document disagree, the current document governs.
+Planning records, decision logs, and one-off deployment evidence from before
+the public release are retained in the maintaining district's private
+operations records, not in this repository. Current documents are the only
+instruction source.

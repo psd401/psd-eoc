@@ -1,9 +1,8 @@
 # Architecture and contributing
 
 This document is the current repository architecture and contributor guide.
-Historical plans and decision ledgers are preserved in the
-[archive](archive/README.md), but they do not override current code, contracts,
-tests, or this guide.
+Historical plans and decision ledgers are retained outside the repository;
+current code, contracts, tests, and this guide are the only authority.
 
 ## Package ownership
 

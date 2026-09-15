@@ -36,7 +36,3 @@ tenant, and direct deployment parameters are indexed in
    guarded store/readback completes.
 5. Record only bounded, non-secret evidence. Update the readiness register
    only for the boundary actually proved.
-
-The prior tenant-specific setup transcript, phase assumptions, and provider
-readbacks are preserved in the
-[historical archive](../../docs/archive/infrastructure/gcp-README-2026-08-25.md).
