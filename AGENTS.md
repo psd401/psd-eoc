@@ -112,9 +112,10 @@ These are real failure patterns from this repo's history. Avoid them.
   the deploy for no safety benefit. Verify what matters; let the rest be logs.
 - **Don't hedge documentation into uselessness.** Write what is true and
   current. If `eoc.psd401.net` resolves and serves, the doc says it works.
-- **Don't bake the tenant into the code.** The repository currently carries
-  roughly 1,100 hardcoded PSD-specific values across ~200 files. Do not add to
-  that number, and remove them where you touch them.
+- **Don't bake the tenant into the code.** A few dozen district-specific
+  literals remain in operator tooling and test fixtures
+  (`git grep psd401 -- '*.ts' '*.tsx'` lists them). Do not add to that number,
+  and remove them where you touch them.
 - **Don't leave worktrees and branches behind.** Delete the branch when the PR
   merges. Remove the worktree when you're done.
 - **Don't argue with Kris about scope.** State a concern once, in a sentence,

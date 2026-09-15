@@ -1,0 +1,52 @@
+PSD EOC third-party notices
+============================
+
+PSD EOC is licensed under the MIT license (see LICENSE). This file lists
+third-party software and assets bundled or referenced in this repository
+under a different license, why each is included, and where to find the
+governing license text.
+
+axe-core (test-only, vendored)
+-------------------------------
+- Version: 4.12.1
+- License: Mozilla Public License 2.0 (MPL-2.0)
+- Path: packages/server/app/(app)/start/test/vendor/axe-core-4.12.1/
+- License text: LICENSE and LICENSE-3RD-PARTY.txt in that directory; full
+  provenance in NOTICE.md in that directory.
+- Why included: an unmodified upstream browser bundle used only by Playwright
+  accessibility tests. It is not a production runtime dependency.
+
+Noto Sans Regular (font asset)
+-------------------------------
+- Version: source commit ffebf8c1ee449e544955a7e813c54f9b73848eac from
+  notofonts/noto-fonts, path hinted/ttf/NotoSans/NotoSans-Regular.ttf
+- License: SIL Open Font License 1.1
+- Copyright: Copyright 2018 The Noto Project Authors
+  (github.com/googlei18n/noto-fonts), per the copyright statement in the
+  license file below.
+- Path: packages/server/lib/capabilities/records/assets/NotoSans-Regular.ttf
+- License text: packages/server/lib/capabilities/records/assets/OFL.txt
+- Why included: embedded into generated event-summary PDFs so retained
+  Unicode text renders consistently without depending on a host font.
+
+postgres (patched npm dependency)
+-----------------------------------
+- Package: postgres@3.4.8
+- License: Unlicense, per the "license" field in the package's own
+  package.json (node_modules/postgres/package.json); the package does not
+  ship a separate LICENSE file in this tree.
+- Patch path: patches/postgres@3.4.8.patch
+- Why included: the patch adds connection-resilience tracking (reconnect and
+  closed-transport bookkeeping) to the vendored driver's connection module;
+  it is applied automatically by the package manager from the patch file
+  above and does not replace or relicense the underlying package.
+
+OpenStreetMap map tiles
+-------------------------
+- License: Open Database License (ODbL), for the map data served by
+  OpenStreetMap's tile service.
+- Path: packages/server/lib/map/geometry.ts (OSM_RASTER_TILE_TEMPLATE,
+  OSM_ATTRIBUTION, OSM_ATTRIBUTION_URL)
+- Why included: the application renders OpenStreetMap raster tiles for
+  facility and event location display and shows the required attribution
+  alongside them: "Map data © OpenStreetMap contributors".

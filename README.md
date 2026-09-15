@@ -72,6 +72,16 @@ bun run test:db:stop
 - [Historical archive](docs/archive/README.md) — planning records and preserved
   one-off evidence; never a current instruction source
 
+## Deploy for your district
+
+PSD EOC is built to be run by any school district on its own AWS account and
+Google Workspace. Start with the
+[first administrator guide](docs/guides/first-administrator.md), then follow
+the [first-run runbook](docs/runbooks/first-run.md). The
+[configuration index](docs/CONFIGURATION.md) lists every value a district
+supplies: identity, facilities, notification providers, and the mobile app
+identifiers for its own store listings.
+
 ## Repository layout
 
 ```text
@@ -83,8 +93,26 @@ workers              Notification routing and channel workers
 infra                AWS CDK and Google Cloud configuration
 scripts              Repository verification and operator tooling
 docs                 Current guides, runbooks, readiness, and history
+patches              Dependency patches applied by bun install
+.verification        Retained synthetic-only test evidence for closed issues
 ```
 
 Read [AGENTS.md](AGENTS.md) before making a change. In particular, automation
 must never start a real incident, send a real notification, issue a real
 all-clear, or close a real event.
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the
+workflow, the repository gate, and what reviewers look for; the
+[Code of Conduct](CODE_OF_CONDUCT.md) applies to every project space.
+
+## Security
+
+Report vulnerabilities privately as described in the
+[security policy](SECURITY.md). Do not open public issues for them.
+
+## License
+
+PSD EOC is released under the [MIT License](LICENSE). Third-party components
+and their licenses are listed in [NOTICE](NOTICE).
