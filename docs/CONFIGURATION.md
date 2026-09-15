@@ -43,8 +43,12 @@ over `cdk.json` for the CDK app and for the operator scripts under
 - `psdEoc:awsAccount` — the 12-digit deployment account
 - `psdEoc:smsSupportPhone` — the E.164 support number in SMS consent copy
 
-Synthesis and deployment fail without it because `readDeploymentTarget` and
-`readDeploymentIdentity` require both keys. CI never has it: it synthesizes the
+Each key lives in exactly one file: the CDK app refuses to run when `cdk.json`
+or a `-c` flag overrides a local key, and the merged reader refuses a key
+defined in both, so the deployed stack and the operator scripts cannot
+disagree. Synthesis and deployment fail without the file because
+`readDeploymentTarget` and `readDeploymentIdentity` require both keys. CI
+never has it: it synthesizes the
 second-district fixture instead. Operator scripts treat a missing file as the
 reserved account `000000000000`, which matches no live credential, so they
 refuse every AWS mutation until the file exists. `infra/cdk.context.json`, the

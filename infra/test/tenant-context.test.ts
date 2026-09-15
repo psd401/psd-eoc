@@ -59,7 +59,7 @@ describe('local tenant context', () => {
 });
 
 describe('merged tenant context', () => {
-  it('keeps only the manifest psdEoc keys and lets the local file win', () => {
+  it('keeps only the manifest psdEoc keys and adds the local file', () => {
     writeManifest({
       '@aws-cdk/core:checkSecretUsage': true,
       'psdEoc:awsRegion': 'us-east-1',
@@ -69,17 +69,25 @@ describe('merged tenant context', () => {
       'psdEoc:awsRegion': 'us-east-1',
       'psdEoc:organizationName': 'Example School District',
     });
+    writeLocal(JSON.stringify({ 'psdEoc:awsAccount': '123456789012' }));
+    expect(readTenantContext(directory)).toEqual({
+      'psdEoc:awsAccount': '123456789012',
+      'psdEoc:awsRegion': 'us-east-1',
+      'psdEoc:organizationName': 'Example School District',
+    });
+  });
+
+  it('refuses a key that both files define instead of picking a side', () => {
+    writeManifest({ 'psdEoc:organizationName': 'Example School District' });
     writeLocal(
       JSON.stringify({
         'psdEoc:awsAccount': '123456789012',
         'psdEoc:organizationName': 'Local Override District',
       }),
     );
-    expect(readTenantContext(directory)).toEqual({
-      'psdEoc:awsAccount': '123456789012',
-      'psdEoc:awsRegion': 'us-east-1',
-      'psdEoc:organizationName': 'Local Override District',
-    });
+    expect(() => readTenantContext(directory)).toThrow(
+      `${LOCAL_TENANT_CONTEXT_FILE} and ${TENANT_MANIFEST_FILE} both define psdEoc:organizationName; keep each key in exactly one file.`,
+    );
   });
 
   it('reports the reserved account until the local file defines a valid one', () => {

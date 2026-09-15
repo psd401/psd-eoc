@@ -10,11 +10,24 @@ import {
 } from '../src/stack/config';
 import { PsdEocStack } from '../src/stack/psd-eoc-stack';
 import { readSourceRevision } from '../src/source-revision';
-import { readLocalTenantContext } from '../src/tenant-context';
+import {
+  LOCAL_TENANT_CONTEXT_FILE,
+  readLocalTenantContext,
+} from '../src/tenant-context';
 
-// cdk.local.json supplies the tenant keys kept out of the repository; the CLI
-// context from cdk.json and -c still overrides anything it defines.
-const app = new App({ context: { ...readLocalTenantContext() } });
+// cdk.local.json supplies the tenant keys kept out of the repository. CDK
+// applies cdk.json and -c context over these defaults, so refuse to continue
+// when either overrides a local key: the operator scripts read the local
+// file directly and would otherwise disagree with the deployed stack.
+const localContext = readLocalTenantContext();
+const app = new App({ context: { ...localContext } });
+for (const [key, value] of Object.entries(localContext)) {
+  if (JSON.stringify(app.node.tryGetContext(key)) !== JSON.stringify(value)) {
+    throw new Error(
+      `CDK context ${key} from cdk.json or -c overrides ${LOCAL_TENANT_CONTEXT_FILE}; keep the key in exactly one place.`,
+    );
+  }
+}
 const deploymentTarget = readDeploymentTarget(app.node);
 const enforceProtectedTarget =
   process.env.PSD_EOC_ENFORCE_DEPLOYMENT_TARGET === 'true';
