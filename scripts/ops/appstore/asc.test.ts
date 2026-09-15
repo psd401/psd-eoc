@@ -8918,145 +8918,16 @@ describe('operator documentation and reproducibility', () => {
     expect(ascEntry.AppStoreConnectClient).toBe(AppStoreConnectClient);
   });
 
-  test('preserves the exact historical operator procedure', async () => {
-    const runbook = await Bun.file(
-      join(
-        import.meta.dir,
-        '../../../docs/archive/runbooks/appstore-setup-2026-08-25.md',
-      ),
-    ).text();
-    expect(runbook).toContain('--confirm-plan');
-    expect(runbook).toContain('planDigest');
-    for (const configurationName of [
-      'ASC_APP_NAME',
-      'ASC_APP_SKU',
-      'ASC_BUNDLE_ID',
-      'ASC_INTERNAL_GROUP_NAME',
-      'ASC_EXTERNAL_GROUP_NAME',
-    ]) {
-      expect(runbook).toContain(`export ${configurationName}=`);
-    }
-    expect(runbook).toContain('--confirm-apply "$ASC_BUNDLE_ID"');
-    expect(runbook).not.toMatch(/--confirm-apply net\.psd401\.eoc/u);
-    expect(runbook).toContain(
-      'cd packages/mobile\neas build:list --platform ios --build-profile production --status finished',
-    );
-    expect(runbook).not.toContain(
-      'eas build:list --platform ios --profile production',
-    );
-    expect(runbook).toContain("--id 'EXACT_REVIEWED_EAS_BUILD_ID'");
-    expect(runbook).not.toContain(
-      'eas submit --platform ios --profile production --latest',
-    );
-    expect(runbook).toContain('autoNotifyEnabled: false');
-    expect(runbook).toContain(
-      'external-distribution **Notify Testers** decision remain human actions',
-    );
-
-    const commandMarker = 'bun run scripts/ops/appstore/asc.ts sync';
-    const syncCommands = runbook
-      .split(commandMarker)
-      .slice(1)
-      .map((tail) => `${commandMarker}${tail.split(/\n(?:\n|```)/u)[0]}`);
-    expect(syncCommands.length).toBeGreaterThan(0);
-    expect(
-      syncCommands.every(
-        (command) =>
-          command.includes('--internal-testers') &&
-          command.includes('--external-testers'),
-      ),
-    ).toBe(true);
-    expect(runbook).toMatch(
-      /internal `District\s+Technology` group may\s+immediately cause Apple to send real TestFlight\s+invitation email/u,
-    );
-    expect(runbook).toMatch(
-      /external TestFlight flow,[\s\S]*autoNotifyEnabled: false[\s\S]*external-distribution \*\*Notify Testers\*\* decision remain human actions/u,
-    );
-    expect(runbook).toMatch(
-      /Multiple memberships are permitted only when they are all internal\s+or all external/u,
-    );
-    expect(runbook).toMatch(
-      /exact, case-sensitive TestFlight locale\s+identifiers:[\s\S]*`da`[\s\S]*`zh-Hant`/u,
-    );
-    expect(runbook).toMatch(
-      /Omitting `locale` selects `en-US`; explicit `null`, blank,\s+whitespace-padded, or differently cased values fail before any provider\s+request/u,
-    );
-    expect(runbook).toMatch(
-      /When `notes`, `demoAccountName`, or\s+`demoAccountPassword` is omitted, the reviewed plan explicitly clears any\s+stale value already stored by Apple/u,
-    );
-    expect(runbook).toMatch(
-      /selectedBuild\.id[\s\S]*proven `IOS`\s+platform[\s\S]*prerelease-version relationship/u,
-    );
-    expect(runbook).toMatch(
-      /Adding any tester may cause Apple to send a real TestFlight invitation now or\s+after a build is attached, even when the target group currently has no build/u,
-    );
-    expect(runbook).toMatch(
-      /explicit product-owner approval for the exact live-provider write\s+before running Fastlane `produce`, EAS Submit, or any ASC `--apply`/u,
-    );
-    expect(runbook).toMatch(
-      /Development and CI use fail-closed mocks and synthetic data only; they never\s+authenticate to Apple or apply/u,
-    );
-    expect(runbook).toMatch(
-      /verified least-privilege\s+credentials, a product-owner-approved synthetic target list/u,
-    );
-    expect(runbook).toMatch(
-      /`submit\.production\.ios` profile must not contain a `groups` field,[\s\S]*must not use EAS `testflight`, `--auto-submit`,\s+or any other automatic TestFlight distribution/u,
-    );
-    expect(runbook).toMatch(
-      /`headless` describes non-interactive CLI transport; it never authorizes an\s+unattended or CI submission, and CI must not execute this write/u,
-    );
-    expect(runbook).toMatch(
-      /Immediately before EAS Submit, the\s+human must inspect \*\*every\*\* beta group for the exact `PSD EOC` app/u,
-    );
-    expect(runbook).toMatch(
-      /Every group must use manual build\s+assignment with automatic distribution disabled, every existing membership\s+must be within the exact product-owner-approved synthetic target list/u,
-    );
-    expect(runbook).toMatch(
-      /Recheck the same complete group\/settings\/membership inventory\s+immediately after upload and before any distribution or review step/u,
-    );
-    expect(runbook).toMatch(
-      /This runbook does not authorize a later\s+transition to real staff recipients/u,
-    );
-    expect(runbook).toMatch(
-      /must never contain student or guardian rosters, contacts,\s+schedules, locations, or other student-level data/u,
-    );
-    expect(runbook).toMatch(
-      /Before a tester-write batch, the script comprehensively rechecks the target\s+group plus the complete app-wide tester identity, typed-audience,\s+individual-build assignment, and capacity inventory/u,
-    );
-    expect(runbook).toMatch(
-      /adjacent bounded\s+reads of the target group's exact settings, app parent, build set, and both\s+official roster-page totals/u,
-    );
-    expect(runbook).toMatch(
-      /After the\s+selected prefix, final verification re-enumerates the exact related-resource\s+and relationship-linkage rosters and repeats the complete target-group and\s+app-wide audits/u,
-    );
-    expect(runbook).toMatch(
-      /Count-changing drift stops before the next write; final-audit drift stops the\s+batch and is reported as partial or indeterminate if Apple already accepted an\s+earlier mutation/u,
-    );
-    expect(runbook).toMatch(
-      /complete localization inventories are also rechecked before\s+each build is attached to either group/u,
-    );
-  });
-
   test('locks the production-writing fastlane toolchain', async () => {
     const rubyVersion = await Bun.file(
       join(import.meta.dir, '.ruby-version'),
     ).text();
     const lock = await Bun.file(join(import.meta.dir, 'Gemfile.lock')).text();
-    const runbook = await Bun.file(
-      join(
-        import.meta.dir,
-        '../../../docs/archive/runbooks/appstore-setup-2026-08-25.md',
-      ),
-    ).text();
     expect(rubyVersion.trim()).toBe('3.3.12');
     expect(lock).toContain('fastlane (2.237.0)');
     expect(lock).toMatch(
       /CHECKSUMS[\s\S]*fastlane \(2\.237\.0\) sha256=[0-9a-f]{64}/u,
     );
     expect(lock).toMatch(/BUNDLED WITH\s+2\.6\.9\s*$/u);
-    expect(runbook).toContain('Ruby 3.3.12');
-    expect(runbook).toContain('Bundler 2.6.9');
-    expect(runbook).toContain('bundle _2.6.9_ --version');
-    expect(runbook).toContain('bundle _2.6.9_ install');
   });
 });

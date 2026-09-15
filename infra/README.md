@@ -91,7 +91,3 @@ procedure.
 ### Runbook: Shallow canary
 
 Use the [shallow canary](../docs/runbooks/alarm-canary-failure.md) procedure.
-
-The superseded infrastructure design and obsolete manual deployment command
-are preserved as history in
-[docs/archive/infrastructure/README-2026-08-25.md](../docs/archive/infrastructure/README-2026-08-25.md).

@@ -1,6 +1,7 @@
 {
   "name": "@psd-eoc/contracts",
   "version": "0.0.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "types": "./src/index.ts",

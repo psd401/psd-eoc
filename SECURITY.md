@@ -39,7 +39,15 @@ human-only for critical actions.
   never appears in test paths. A test configuration can never reach real
   recipients.
 
-## Reporting
+## Reporting a vulnerability
 
-Security issues: report privately to the district technology department
-(product owner: Kris Hagel). Do not open public issues for vulnerabilities.
+Report vulnerabilities in this software privately through GitHub's
+[private vulnerability reporting](https://github.com/psd401/psd-eoc/security/advisories/new)
+for this repository. Include the affected component, reproduction steps, and
+the impact you observed. The maintainers acknowledge each report, work with
+you on a fix, and agree a disclosure timeline before anything is published.
+Do not open public issues or pull requests for vulnerabilities.
+
+A district that runs its own deployment owns the security of that deployment.
+Report problems with a specific district's instance to that district's
+technology department; report problems with the software here.

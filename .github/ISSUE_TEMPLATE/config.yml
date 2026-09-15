@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/psd401/psd-eoc/security/advisories/new
+    about: Use private reporting for vulnerabilities. Do not open a public issue.
+  - name: Read the documentation
+    url: https://github.com/psd401/psd-eoc/tree/main/docs
+    about: Architecture, configuration, operational readiness, and runbooks.

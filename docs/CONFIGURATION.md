@@ -2,7 +2,10 @@
 
 This is the current index of portable tenant configuration and direct CDK
 deployment parameters. `infra/cdk.json` is the checked-in tenant manifest for this
-deployment. `infra/bin/synthesize-example.ts` replaces its identity with a
+deployment, Peninsula School District's. A district that forks the repository
+replaces every `psdEoc:*` value in it, from the application origin and hosted
+zone to the facility list, before its first synthesis; nothing in the
+manifest is generic. `infra/bin/synthesize-example.ts` replaces its identity with a
 reserved second-district fixture to prove the stack is portable without cloud
 credentials or provider calls.
 
@@ -203,6 +206,25 @@ composition: `MonitoringCanaryCredentialSecretArn`,
 `MonitoringCanaryFacilityId`, and `MonitoringCanaryEventTypeVersionId`. The
 current stack calls `configureInfrastructureMonitoring`, not the full canary
 composition, so they are not current stack parameters.
+
+## Mobile app identifiers
+
+The mobile client is published by each district under its own store
+identities. These values in `packages/mobile/app.json` and
+`packages/mobile/eas.json` belong to this deployment and are replaced when a
+district forks the repository:
+
+- `expo.name`, `expo.slug`, and `expo.scheme` — the app name and URL scheme
+- `expo.ios.bundleIdentifier` and `expo.android.package` — the store bundle
+  identifier, which must match `psdEoc:iosBundleId` in the tenant manifest
+- `expo.extra.eas.projectId` and `expo.owner` — the district's own Expo
+  Application Services project and account
+- `submit.production.ios.ascAppId` — the App Store Connect app record
+
+`EXPO_PUBLIC_PSD_EOC_API_BASE_URL` is set per EAS build profile and points the
+client at that district's server origin. The
+[App Store setup runbook](runbooks/appstore-setup.md) covers the store records
+themselves.
 
 ## Expo push activation boundary
 

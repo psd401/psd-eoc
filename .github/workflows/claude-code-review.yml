@@ -10,7 +10,9 @@ jobs:
       issues: read
       id-token: write # reusable's claude-code-action OIDC exchange; caller must grant (org default is read-only)
     # Dependabot cannot grant id-token: write to the reusable (startup_failure).
-    if: github.actor != 'dependabot[bot]'
+    # Forks have neither the private reusable workflow nor its token, so the
+    # job runs only in the upstream repository.
+    if: github.repository == 'psd401/psd-eoc' && github.actor != 'dependabot[bot]'
     uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@main
     with:
       max_turns: 40

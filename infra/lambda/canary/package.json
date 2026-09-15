@@ -1,5 +1,6 @@
 {
   "name": "psd-eoc-one-minute-canary",
+  "license": "MIT",
   "private": true,
   "type": "module"
 }
