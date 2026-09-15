@@ -103,16 +103,16 @@ describe('mobile distribution configuration', () => {
 
   test('pins the complete current Expo SDK 57 compatibility patch set', () => {
     expect(packageManifest.dependencies).toMatchObject({
-      expo: '~57.0.22',
+      expo: '~57.0.23',
       'expo-auth-session': '~57.0.12',
       'expo-constants': '~57.0.18',
       'expo-crypto': '~57.0.3',
       'expo-dev-client': '~57.0.19',
       'expo-file-system': '~57.0.7',
-      'expo-image-picker': '~57.0.17',
+      'expo-image-picker': '~57.0.18',
       'expo-linking': '~57.0.10',
-      'expo-location': '~57.0.17',
-      'expo-notifications': '~57.0.18',
+      'expo-location': '~57.0.18',
+      'expo-notifications': '~57.0.19',
       'expo-router': '~57.0.21',
       'expo-splash-screen': '~57.0.9',
       'expo-updates': '~57.0.22',
