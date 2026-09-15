@@ -143,6 +143,13 @@ bun run --cwd packages/mobile prebuild:check
 bun run check
 ```
 
+`expo:check` wraps `expo install --check`. Expo publishes patch releases of
+the SDK packages several times a month; a package that is only a patch behind
+is reported and does not fail the check, while a major or minor mismatch does,
+because that can diverge from the SDK's native code. Bump with
+`bunx expo install --fix` and update the pinned set in
+`scripts/distribution-config.test.ts`.
+
 `prebuild:check` runs `expo prebuild --no-install`, then normalizes generated
 iOS JSON so the repository format gate remains usable while native artifacts
 exist. The generated `ios/` and `android/` directories are local sanity-check
