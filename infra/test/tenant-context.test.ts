@@ -10,6 +10,7 @@ import {
   readLocalTenantContext,
   readTenantContext,
   tenantAwsAccount,
+  tenantGcpBillingAccount,
 } from '../src/tenant-context';
 
 let directory: string;
@@ -88,6 +89,23 @@ describe('merged tenant context', () => {
     expect(() => readTenantContext(directory)).toThrow(
       `${LOCAL_TENANT_CONTEXT_FILE} and ${TENANT_MANIFEST_FILE} both define psdEoc:organizationName; keep each key in exactly one file.`,
     );
+  });
+
+  it('requires a canonical billing account with no fallback', () => {
+    writeManifest({ 'psdEoc:awsRegion': 'us-east-1' });
+    expect(() => tenantGcpBillingAccount(directory)).toThrow(
+      `${LOCAL_TENANT_CONTEXT_FILE} must define psdEoc:gcpBillingAccount`,
+    );
+    writeLocal(
+      JSON.stringify({ 'psdEoc:gcpBillingAccount': 'abcdef-123456-abcdef' }),
+    );
+    expect(() => tenantGcpBillingAccount(directory)).toThrow(
+      'canonical 6-6-6 uppercase form',
+    );
+    writeLocal(
+      JSON.stringify({ 'psdEoc:gcpBillingAccount': 'ABCDEF-123456-ABCDEF' }),
+    );
+    expect(tenantGcpBillingAccount(directory)).toBe('ABCDEF-123456-ABCDEF');
   });
 
   it('reports the reserved account until the local file defines a valid one', () => {

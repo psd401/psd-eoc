@@ -101,6 +101,24 @@ export function readTenantContext(
 }
 
 /**
+ * The tenant's Google Cloud billing account in the canonical 6-6-6 form. It
+ * has no unconfigured fallback: the GCP operator tooling that needs it must
+ * not run without cdk.local.json.
+ */
+export function tenantGcpBillingAccount(directory: string = infraRoot): string {
+  const value = readTenantContext(directory)['psdEoc:gcpBillingAccount'];
+  if (
+    typeof value !== 'string' ||
+    !/^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$/u.test(value)
+  ) {
+    throw new Error(
+      `${LOCAL_TENANT_CONTEXT_FILE} must define psdEoc:gcpBillingAccount in the canonical 6-6-6 uppercase form.`,
+    );
+  }
+  return value;
+}
+
+/**
  * The tenant's 12-digit AWS account ID, or `UNCONFIGURED_AWS_ACCOUNT` when
  * neither file defines `psdEoc:awsAccount`.
  */
