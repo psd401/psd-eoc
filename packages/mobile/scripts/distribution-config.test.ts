@@ -118,7 +118,9 @@ describe('mobile distribution configuration', () => {
       'expo-updates': '~57.0.22',
     });
     expect(packageManifest.dependencies['expo-application']).toBe('~57.0.3');
-    expect(packageManifest.scripts['expo:check']).toBe('expo install --check');
+    expect(packageManifest.scripts['expo:check']).toBe(
+      'bun scripts/check-expo-compatibility.ts',
+    );
     expect(JSON.stringify(packageManifest)).not.toContain('EXPO_OFFLINE');
     expect(JSON.stringify(packageManifest)).not.toContain('install.exclude');
   });
