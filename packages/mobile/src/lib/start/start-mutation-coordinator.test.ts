@@ -977,4 +977,52 @@ describe('mapStartMutationError', () => {
       outcomeUnknown: true,
     });
   });
+
+  test('clears an unresolved fence on explicit acknowledgement and admits the next start', async () => {
+    const persistence = new MemoryPersistence();
+    const coordinator = new StartMutationCoordinator(persistence);
+    online(coordinator);
+    const admission = coordinator.submit(
+      activationSubmission(() =>
+        Promise.reject(new Error('private uncertain transport state')),
+      ),
+    );
+    if (admission.accepted) await admission.completion;
+    expect(coordinator.getSnapshot().phase).toBe('unresolved');
+    // Terminal acknowledgement still refuses an unknown outcome, so without
+    // the explicit clear the device would refuse every later emergency.
+    expect(coordinator.acknowledge(OWNER)).toBe(false);
+    expect(coordinator.getSnapshot().phase).toBe('unresolved');
+
+    expect(coordinator.acknowledgeUnresolved(OWNER)).toBe(true);
+    expect(coordinator.getSnapshot().phase).toBe('idle');
+    expect(persistence.record).toBeNull();
+
+    const next = coordinator.submit(
+      activationSubmission(() => Promise.resolve(activationResult())),
+    );
+    expect(next.accepted).toBe(true);
+    if (next.accepted) await next.completion;
+    expect(coordinator.getSnapshot().phase).toBe('succeeded');
+  });
+
+  test('refuses an unresolved clear from another owner and after it is already idle', async () => {
+    const persistence = new MemoryPersistence();
+    const coordinator = new StartMutationCoordinator(persistence);
+    online(coordinator);
+    const admission = coordinator.submit(
+      activationSubmission(() =>
+        Promise.reject(new Error('private uncertain transport state')),
+      ),
+    );
+    if (admission.accepted) await admission.completion;
+
+    expect(coordinator.acknowledgeUnresolved(OTHER_OWNER)).toBe(false);
+    expect(coordinator.getSnapshot().phase).toBe('unresolved');
+    expect(persistence.record).not.toBeNull();
+
+    expect(coordinator.acknowledgeUnresolved(OWNER)).toBe(true);
+    expect(coordinator.acknowledgeUnresolved(OWNER)).toBe(false);
+    expect(coordinator.getSnapshot().phase).toBe('idle');
+  });
 });

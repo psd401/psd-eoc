@@ -395,6 +395,11 @@ export default function HomeScreen() {
                       },
                     );
                   },
+                  onAcknowledgeUnresolved: () => {
+                    if (!startMutation.acknowledgeUnresolved()) return;
+                    setOutcomeActiveEvents(null);
+                    setOutcomeCheckError(null);
+                  },
                   outcomeMessage: mutationSnapshot.error.message,
                   status: 'unresolved' as const,
                 }

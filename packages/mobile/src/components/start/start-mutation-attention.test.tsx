@@ -143,6 +143,7 @@ describe('start mutation attention presentation', () => {
           eventKind: mode === 'real' ? 'incident' : 'drill',
           eventTypeName: 'Synthetic earthquake',
           mode,
+          onAcknowledgeUnresolved: () => {},
           onCheckActiveEvents: () => {},
           operation,
           outcomeMessage:
@@ -193,6 +194,7 @@ describe('start mutation attention presentation', () => {
       eventKind: 'drill',
       eventTypeName: 'Synthetic medical response',
       mode: 'drill',
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {
         checks += 1;
       },
@@ -240,6 +242,7 @@ describe('start mutation attention presentation', () => {
       eventKind: 'drill',
       eventTypeName: 'Synthetic medical response',
       mode: 'drill',
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {},
       operation: 'activate',
       outcomeMessage: 'The server outcome is unknown.',
@@ -269,7 +272,13 @@ describe('start mutation attention presentation', () => {
         ),
       ),
     ).toBe(true);
-    expect(nodes.filter((node) => node.type === 'Pressable')).toHaveLength(1);
+    // The read-only summaries carry no controls: the only pressables are the
+    // two explicit actions, so nothing in the list can resolve the outcome.
+    expect(
+      nodes
+        .filter((node) => node.type === 'Pressable')
+        .map((node) => String(node.props.accessibilityLabel)),
+    ).toEqual(['Check active events', 'Clear and allow new decisions']);
   });
 
   test('renders an empty refreshed list without claiming prior failure', () => {
@@ -278,6 +287,7 @@ describe('start mutation attention presentation', () => {
       eventKind: 'drill',
       eventTypeName: 'Synthetic medical response',
       mode: 'drill',
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {},
       operation: 'activate',
       outcomeMessage: 'The server outcome is unknown.',
@@ -296,6 +306,7 @@ describe('start mutation attention presentation', () => {
       eventKind: 'incident',
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {},
       operation: 'join',
       outcomeMessage: 'The server outcome is unknown.',
@@ -315,6 +326,7 @@ describe('start mutation attention presentation', () => {
       eventKind: 'incident',
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {},
       operation: 'join',
       outcomeMessage: 'The server outcome is unknown.',
@@ -341,6 +353,7 @@ describe('start mutation attention presentation', () => {
       eventKind: 'drill',
       eventTypeName: 'Synthetic wildlife response with a long localized name',
       mode: 'drill',
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {},
       operation: 'activate',
       outcomeMessage: 'The server outcome is unknown.',
@@ -490,6 +503,7 @@ describe('start mutation attention presentation', () => {
       eventTypeName: 'Synthetic earthquake',
       mode: 'drill',
       online: false,
+      onAcknowledgeUnresolved: () => {},
       onCheckActiveEvents: () => {},
       operation: 'activate',
       outcomeMessage: 'The outcome remains unknown.',
@@ -543,5 +557,67 @@ describe('start mutation attention presentation', () => {
         'TEST — NOT A REAL INCIDENT: Synthetic delivery test',
       ),
     });
+  });
+
+  test('offers an explicit unresolved clear that never claims the earlier outcome', () => {
+    let cleared = 0;
+    const result = StartMutationAttentionContent({
+      eventKind: 'drill',
+      eventTypeName: 'Synthetic investigation',
+      mode: 'drill',
+      onAcknowledgeUnresolved: () => {
+        cleared += 1;
+      },
+      onCheckActiveEvents: () => {},
+      operation: 'activate',
+      outcomeMessage: 'The server outcome is unknown.',
+      status: 'unresolved',
+    }) as Element;
+    const nodes = renderedElements(result);
+    const clear = nodes.find(
+      (node) =>
+        node.type === 'Pressable' &&
+        node.props.accessibilityLabel === 'Clear and allow new decisions',
+    );
+
+    if (clear === undefined) {
+      throw new Error('The unresolved clear action is missing.');
+    }
+    expect(clear.props.accessibilityState).toEqual({ disabled: false });
+    press(clear);
+    expect(cleared).toBe(1);
+
+    const text = normalizedText(result);
+    expect(text).toContain('does not resolve the earlier request');
+    expect(text).toContain('makes no claim that it succeeded or failed');
+    expect(text).toContain('so a new emergency can be raised');
+    expect(text).toContain('does not claim that an event was started');
+  });
+
+  test('disables the unresolved clear while the device is offline', () => {
+    const result = StartMutationAttentionContent({
+      eventKind: 'drill',
+      eventTypeName: 'Synthetic investigation',
+      mode: 'drill',
+      online: false,
+      onAcknowledgeUnresolved: () => {
+        throw new Error('An offline clear must never fire.');
+      },
+      onCheckActiveEvents: () => {},
+      operation: 'activate',
+      outcomeMessage: 'The server outcome is unknown.',
+      status: 'unresolved',
+    }) as Element;
+    const clear = renderedElements(result).find(
+      (node) =>
+        node.type === 'Pressable' &&
+        node.props.accessibilityLabel === 'Clear and allow new decisions',
+    );
+
+    if (clear === undefined) {
+      throw new Error('The unresolved clear action is missing.');
+    }
+    expect(clear.props.accessibilityState).toEqual({ disabled: true });
+    expect(clear.props.disabled).toBe(true);
   });
 });

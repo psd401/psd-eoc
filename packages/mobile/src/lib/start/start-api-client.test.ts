@@ -71,6 +71,31 @@ const IDEMPOTENCY_KEY = 'mobile-start-idempotency-0001';
 
 type RecordedAuthenticatedRequest = AuthenticatedRequestOptions<unknown>;
 
+function reRenderedAtConfirmation(
+  channel: ActivationPreview['channels'][number],
+): ActivationPreview['channels'][number] {
+  const message = channel.renderedMessage;
+  if (message.channel === 'push') {
+    return {
+      ...channel,
+      renderedMessage: {
+        ...message,
+        body: `${message.body} Confirmed 6:54 PM.`,
+      },
+    };
+  }
+  if (message.channel === 'email') {
+    return {
+      ...channel,
+      renderedMessage: {
+        ...message,
+        textBody: `${message.textBody} Confirmed 6:54 PM.`,
+      },
+    };
+  }
+  return channel;
+}
+
 function parseResponse<Output>(
   input: AuthenticatedRequestOptions<Output>,
   payload: unknown,
@@ -396,7 +421,11 @@ function activationResultFixture(
       source: 'mobile',
       requestId: IDS.request,
       authorization,
-      channels: preview.channels,
+      // The real server re-renders the copy at confirmation with the actual
+      // start time, so the intent's wording differs from the preview's. The
+      // fixture used to reuse preview.channels, which made the client's
+      // strictest check compare the preview to itself and pass for free.
+      channels: preview.channels.map(reRenderedAtConfirmation),
       createdAt: NOW,
     },
     preparedActivationConsumption: null,
@@ -1303,5 +1332,62 @@ describe('mobile start API client', () => {
         IDEMPOTENCY_KEY,
       ),
     ).rejects.toBeInstanceOf(StartClientError);
+  });
+
+  test('still refuses an activation whose channel authorization changed', async () => {
+    const preview = previewFixture(selectionFixture());
+    const base = activationResultFixture(preview, 'f'.repeat(64));
+    const intent = base.notificationIntent;
+
+    if (intent === null) {
+      throw new Error(
+        'The activation fixture must carry a notification intent.',
+      );
+    }
+
+    const variants: readonly (typeof intent.channels)[] = [
+      // A drill's copy must never go out marked as a real incident.
+      intent.channels.map((channel, index) =>
+        index === 0
+          ? {
+              ...channel,
+              renderedMessage: {
+                ...channel.renderedMessage,
+                classificationMarker: 'INCIDENT',
+              },
+            }
+          : channel,
+      ),
+      // More endpoints than the operator was shown.
+      intent.channels.map((channel, index) =>
+        index === 0
+          ? { ...channel, endpointCount: channel.endpointCount + 1 }
+          : channel,
+      ),
+      // A different sender than the one previewed.
+      intent.channels.map((channel, index) =>
+        index === 0 ? { ...channel, integrationId: 'ses-email' } : channel,
+      ),
+      // A channel dropped from the authorized set.
+      intent.channels.slice(0, 1),
+      // The authorized set reordered.
+      [...intent.channels].reverse(),
+    ];
+
+    for (const channels of variants) {
+      await expect(
+        activate(
+          oneResponseRequest({
+            ...base,
+            notificationIntent: { ...intent, channels },
+          }),
+          preview,
+          IDEMPOTENCY_KEY,
+        ),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        outcomeUnknown: true,
+      });
+    }
   });
 });

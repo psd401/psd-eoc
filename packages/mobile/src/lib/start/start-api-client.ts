@@ -453,6 +453,44 @@ function structurallyEqual(left: unknown, right: unknown): boolean {
   );
 }
 
+/**
+ * The server re-renders notification copy at confirmation on purpose: the sent
+ * message carries the real start time and the names as they stand at that
+ * moment, not the ones the preview guessed. `buildNotification` says so and
+ * then replaces `renderedMessage` on every channel, so an activation whose
+ * preview and confirmation fall in different clock minutes legitimately
+ * returns different copy.
+ *
+ * Comparing that copy byte for byte therefore made a correct server look like
+ * one that had returned the wrong event: the start was refused as unresolved
+ * after it had already run and notified. What the operator actually authorized
+ * is the channel set and its order, how many endpoints each channel reaches,
+ * which integration sends it, and the classification marker that separates a
+ * drill from a real incident. Those must still match exactly; the wording may
+ * move.
+ */
+function channelAuthorizationMatches(
+  intentChannels: NonNullable<
+    StartEventResult['notificationIntent']
+  >['channels'],
+  previewChannels: ActivationPreview['channels'],
+): boolean {
+  return (
+    intentChannels.length === previewChannels.length &&
+    intentChannels.every((channel, index) => {
+      const expected = previewChannels[index];
+      return (
+        expected !== undefined &&
+        channel.channel === expected.channel &&
+        channel.endpointCount === expected.endpointCount &&
+        channel.integrationId === expected.integrationId &&
+        channel.renderedMessage.classificationMarker ===
+          expected.renderedMessage.classificationMarker
+      );
+    })
+  );
+}
+
 function activationMatchesPreview(
   result: StartEventResult,
   preview: ActivationPreview,
@@ -482,7 +520,7 @@ function activationMatchesPreview(
     sameVersion(intent.eventTypeVersion, preview.eventTypeVersion) &&
     intent.rosterSnapshotId === preview.rosterSnapshotId &&
     intent.rosterPopulation === preview.rosterPopulation &&
-    structurallyEqual(intent.channels, preview.channels)
+    channelAuthorizationMatches(intent.channels, preview.channels)
   );
 }
 

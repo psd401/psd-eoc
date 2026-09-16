@@ -683,6 +683,12 @@ export default function StartEventScreen() {
                       },
                     );
                   },
+                  onAcknowledgeUnresolved: () => {
+                    if (!startMutation.acknowledgeUnresolved()) return;
+                    setOutcomeActiveEvents(null);
+                    setOutcomeCheckError(null);
+                    returnHome();
+                  },
                   outcomeMessage: mutationSnapshot.error.message,
                   status: 'unresolved' as const,
                 }
