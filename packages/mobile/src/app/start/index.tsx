@@ -42,6 +42,7 @@ import {
   StartMutationAttention,
   StartMutationRecoveryBlockedAttention,
   StartMutationRecoveryCheckingAttention,
+  UnresolvedOutcomeNotice,
   SyntheticModeBanner,
   ThreatChoice,
 } from '../../components/start';
@@ -88,10 +89,6 @@ function previewFailureMessage(error: unknown): string {
   return 'PSD EOC could not check who would be notified. No event was started and nothing was sent.';
 }
 
-export function unresolvedOutcomeRefreshError(): string {
-  return 'PSD EOC could not load fresh active events. This refresh did not determine the earlier request outcome. That outcome remains unresolved, and nothing retried automatically.';
-}
-
 function startedLabel(choice: StartHomeActiveEvent): string {
   return DATE_FORMATTER.format(
     new Date(choice.event.activatedAt ?? choice.event.createdAt),
@@ -136,9 +133,6 @@ export default function StartEventScreen() {
   const [outcomeCheckError, setOutcomeCheckError] = useState<string | null>(
     null,
   );
-  const [outcomeActiveEvents, setOutcomeActiveEvents] = useState<
-    readonly StartHomeActiveEvent[] | null
-  >(null);
   const previewInFlight = useRef(false);
   const previewRequestGeneration = useRef(0);
   const outcomeRequestGeneration = useRef(0);
@@ -188,7 +182,6 @@ export default function StartEventScreen() {
     outcomeRequestGeneration.current += 1;
     setCheckingOutcome(false);
     setOutcomeCheckError(null);
-    setOutcomeActiveEvents(null);
     return () => {
       outcomeRequestGeneration.current += 1;
     };
@@ -559,32 +552,13 @@ export default function StartEventScreen() {
     );
   }
 
-  if (isFocused && mutationSnapshot.phase === 'unresolved-other-session') {
-    return (
-      <SafeAreaView style={styles.page}>
-        <OtherSessionStartMutationAttention
-          online={state.phase === 'online'}
-          onAcknowledgeUnresolved={() => {
-            if (!startMutation.acknowledgeUnresolved()) return;
-            setOutcomeActiveEvents(null);
-            setOutcomeCheckError(null);
-            returnHome();
-          }}
-          status="unresolved"
-        />
-      </SafeAreaView>
-    );
-  }
-
   if (
     isFocused &&
     (mutationSnapshot.phase === 'failed' ||
-      mutationSnapshot.phase === 'unresolved' ||
       (mutationSnapshot.phase === 'pending' &&
         mutationSnapshot.visibility === 'owner'))
   ) {
     const failed = mutationSnapshot.phase === 'failed';
-    const unresolved = mutationSnapshot.phase === 'unresolved';
     return (
       <SafeAreaView style={styles.page}>
         <StartMutationAttention
@@ -636,76 +610,7 @@ export default function StartEventScreen() {
                 },
                 status: 'failed' as const,
               }
-            : unresolved
-              ? {
-                  ...(outcomeActiveEvents === null
-                    ? {}
-                    : {
-                        activeEvents: outcomeActiveEvents.map((choice) => ({
-                          eventId: choice.event.id,
-                          eventKind: choice.event.kind,
-                          eventTypeName: choice.eventTypeName,
-                          facilityName: choice.facilityName,
-                          mode: choice.event.templateMode,
-                          startedLabel: startedLabel(choice),
-                        })),
-                      }),
-                  checkError: outcomeCheckError,
-                  checking: checkingOutcome,
-                  online: state.phase === 'online',
-                  onCheckActiveEvents: () => {
-                    if (checkingOutcome || state.phase !== 'online') return;
-                    const requestGeneration =
-                      outcomeRequestGeneration.current + 1;
-                    outcomeRequestGeneration.current = requestGeneration;
-                    const requestOwnerKey = outcomeOwnerKeyRef.current;
-                    const operation = mutationSnapshot.operation;
-                    setCheckingOutcome(true);
-                    setOutcomeCheckError(null);
-                    setOutcomeActiveEvents(null);
-                    void loadStartHomeData(requestAuthenticated).then(
-                      (nextData) => {
-                        if (
-                          outcomeRequestGeneration.current !==
-                            requestGeneration ||
-                          requestOwnerKey === null ||
-                          outcomeOwnerKeyRef.current !== requestOwnerKey ||
-                          !outcomeFocusedRef.current
-                        )
-                          return;
-                        setData(nextData);
-                        setOutcomeActiveEvents(nextData.activeEvents);
-                        setCheckingOutcome(false);
-                        setOutcomeCheckError(
-                          operation === 'activate'
-                            ? 'Active events were refreshed, but the list does not carry the request-specific idempotency evidence needed to prove which request created an event. The outcome remains unresolved; contact district technology support before making another start or join decision.'
-                            : 'The active-event list cannot prove participant join membership. The join outcome remains unresolved; contact district technology support before making another start or join decision.',
-                        );
-                      },
-                      () => {
-                        if (
-                          outcomeRequestGeneration.current !==
-                            requestGeneration ||
-                          requestOwnerKey === null ||
-                          outcomeOwnerKeyRef.current !== requestOwnerKey ||
-                          !outcomeFocusedRef.current
-                        )
-                          return;
-                        setOutcomeCheckError(unresolvedOutcomeRefreshError());
-                        setCheckingOutcome(false);
-                      },
-                    );
-                  },
-                  onAcknowledgeUnresolved: () => {
-                    if (!startMutation.acknowledgeUnresolved()) return;
-                    setOutcomeActiveEvents(null);
-                    setOutcomeCheckError(null);
-                    returnHome();
-                  },
-                  outcomeMessage: mutationSnapshot.error.message,
-                  status: 'unresolved' as const,
-                }
-              : { status: 'pending' as const })}
+            : { status: 'pending' as const })}
         />
       </SafeAreaView>
     );
@@ -779,6 +684,15 @@ export default function StartEventScreen() {
         ) : null}
 
         <Call911Affordance />
+        {mutationSnapshot.phase === 'unresolved' ||
+        mutationSnapshot.phase === 'unresolved-other-session' ? (
+          <UnresolvedOutcomeNotice
+            online={state.phase === 'online'}
+            onDismiss={() => {
+              startMutation.acknowledgeUnresolved();
+            }}
+          />
+        ) : null}
 
         {loading ? (
           <View accessibilityRole="progressbar" style={styles.loading}>

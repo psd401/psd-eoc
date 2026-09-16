@@ -473,6 +473,58 @@ export function StartMutationAttentionContent(
   );
 }
 
+export interface UnresolvedOutcomeNoticeProps {
+  readonly online?: boolean;
+  readonly onDismiss: () => void;
+  readonly testID?: string;
+}
+
+/**
+ * Discloses an unknown outcome without taking the screen or blocking anything.
+ * The operator keeps every action; what they gain is the knowledge that an
+ * earlier request was never confirmed, so they can read the active-event list
+ * on the confirmation screen with that in mind.
+ */
+export function UnresolvedOutcomeNotice({
+  online = true,
+  onDismiss,
+  testID,
+}: UnresolvedOutcomeNoticeProps) {
+  return (
+    <View
+      accessibilityLiveRegion="polite"
+      accessibilityRole="alert"
+      style={styles.notice}
+      testID={testID}
+    >
+      <Text accessibilityRole="header" style={styles.noticeHeading}>
+        A previous request outcome is unknown
+      </Text>
+      <Text style={styles.noticeText}>
+        PSD EOC could not confirm what the server did with an earlier start or
+        join request. It makes no claim that an event was or was not created.
+        Starting and joining are not blocked; the confirmation screen lists the
+        events already active at the site.
+      </Text>
+      <Pressable
+        accessibilityHint="Dismisses this notice. It does not retry or resolve the earlier request."
+        accessibilityLabel="Dismiss"
+        accessibilityRole="button"
+        accessibilityState={{ disabled: !online }}
+        disabled={!online}
+        onPress={onDismiss}
+        style={({ pressed }) => [
+          styles.noticeAction,
+          pressed && online && styles.pressed,
+          !online && styles.disabled,
+        ]}
+      >
+        <Text style={styles.noticeActionText}>Dismiss</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 export interface OtherSessionStartMutationAttentionProps {
   readonly status?: 'pending' | 'unresolved';
   readonly online?: boolean;
@@ -699,6 +751,41 @@ const styles = StyleSheet.create({
     minHeight: 52,
     paddingHorizontal: 18,
     paddingVertical: 12,
+  },
+  notice: {
+    backgroundColor: '#FFF8E7',
+    borderColor: '#6B3A05',
+    borderRadius: 14,
+    borderWidth: 2,
+    gap: 8,
+    padding: 14,
+  },
+  noticeAction: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    borderColor: '#6B3A05',
+    borderRadius: 10,
+    borderWidth: 2,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  noticeActionText: {
+    color: '#6B3A05',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  noticeHeading: {
+    color: '#3B2005',
+    fontSize: 18,
+    fontWeight: '900',
+    lineHeight: 24,
+  },
+  noticeText: {
+    color: '#3B2005',
+    fontSize: 15,
+    lineHeight: 21,
   },
   neutralAcknowledgeAction: {
     borderColor: '#6B3A05',

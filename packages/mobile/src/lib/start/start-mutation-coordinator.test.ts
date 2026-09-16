@@ -545,7 +545,7 @@ describe('StartMutationCoordinator durable recovery', () => {
     });
   });
 
-  test('hydrates an abandoned request without replay and keeps every other owner fenced', () => {
+  test('hydrates an abandoned request without replay and exposes nothing to another session', () => {
     const persistence = new MemoryPersistence();
     const original = new StartMutationCoordinator(persistence);
     const operation = deferred<StartEventResult>();
@@ -563,27 +563,23 @@ describe('StartMutationCoordinator durable recovery', () => {
     const restarted = new StartMutationCoordinator(persistence);
     online(restarted, OTHER_OWNER);
     expect(restarted.hydrate()).toBe(true);
+    // No event identity from the first session reaches this one.
     expect(restarted.getSnapshot()).toEqual({
       phase: 'unresolved-other-session',
     });
-    expect(
-      restarted.submit(
-        activationSubmission(() => {
-          calls += 1;
-          return Promise.resolve(activationResult());
-        }, OTHER_OWNER),
-      ),
-    ).toEqual({ accepted: false });
+    // Hydration never replays the abandoned request.
     expect(calls).toBe(1);
 
-    online(restarted, OWNER);
-    expect(restarted.getSnapshot()).toMatchObject({
-      phase: 'unresolved',
-      operation: 'activate',
-      mode: 'drill',
-      error: { outcomeUnknown: true },
-    });
-    expect(calls).toBe(1);
+    // The record is disclosed, not enforced: an unknown outcome left by another
+    // session must never stop this one raising a new emergency.
+    const next = restarted.submit(
+      activationSubmission(() => {
+        calls += 1;
+        return Promise.resolve(activationResult());
+      }, OTHER_OWNER),
+    );
+    expect(next.accepted).toBe(true);
+    expect(calls).toBe(2);
   });
 
   test('retains the exact activation request fence after an uncertain transport outcome', async () => {

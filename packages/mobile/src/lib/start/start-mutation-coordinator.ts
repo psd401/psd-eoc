@@ -720,7 +720,16 @@ export class StartMutationCoordinator {
    */
   public submit(submission: StartMutationSubmission): StartMutationAdmission {
     const owner = validatedOwner(submission.owner);
-    if (this.state.phase !== 'idle' || !sameOwner(owner, this.onlineOwner)) {
+    // An unknown outcome is disclosed, not enforced. Refusing the next start
+    // made a stale record from an earlier request able to stop an operator
+    // raising a new emergency, and it bought nothing: the duplicate it guarded
+    // against is already prevented on live data by the confirmation screen,
+    // which lists the events active at the site and sends `activeEventIdsSeen`
+    // with the start. This submission supersedes the old record.
+    if (
+      (this.state.phase !== 'idle' && this.state.phase !== 'unresolved') ||
+      !sameOwner(owner, this.onlineOwner)
+    ) {
       return REJECTED_ADMISSION;
     }
 
