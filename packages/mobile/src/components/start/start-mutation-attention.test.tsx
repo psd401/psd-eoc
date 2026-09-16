@@ -620,4 +620,56 @@ describe('start mutation attention presentation', () => {
     expect(clear.props.accessibilityState).toEqual({ disabled: true });
     expect(clear.props.disabled).toBe(true);
   });
+
+  test('gives an orphaned previous-session fence a way out and drops the impossible instruction', () => {
+    let cleared = 0;
+    const result = OtherSessionStartMutationAttention({
+      onAcknowledgeUnresolved: () => {
+        cleared += 1;
+      },
+      status: 'unresolved',
+    }) as Element;
+    const text = normalizedText(result);
+    const clear = renderedElements(result).find(
+      (node) =>
+        node.type === 'Pressable' &&
+        node.props.accessibilityLabel === 'Clear and allow new decisions',
+    );
+
+    if (clear === undefined) {
+      throw new Error('The previous-session fence still has no way out.');
+    }
+    press(clear);
+    expect(cleared).toBe(1);
+
+    // A session cannot be re-entered, so this must never be the instruction.
+    expect(text).not.toContain('Sign back into the session that made the');
+    expect(text).toContain('cannot be signed back into');
+    expect(text).toContain('does not resolve the earlier request');
+    expect(text).toContain('does not claim that an event was started');
+    // Another person's classified event details must still never appear here.
+    expect(text).not.toContain('Synthetic earthquake');
+    expect(text).not.toContain('REAL INCIDENT');
+  });
+
+  test('disables the previous-session clear while the device is offline', () => {
+    const result = OtherSessionStartMutationAttention({
+      online: false,
+      onAcknowledgeUnresolved: () => {
+        throw new Error('An offline clear must never fire.');
+      },
+      status: 'unresolved',
+    }) as Element;
+    const clear = renderedElements(result).find(
+      (node) =>
+        node.type === 'Pressable' &&
+        node.props.accessibilityLabel === 'Clear and allow new decisions',
+    );
+
+    if (clear === undefined) {
+      throw new Error('The previous-session fence still has no way out.');
+    }
+    expect(clear.props.accessibilityState).toEqual({ disabled: true });
+    expect(clear.props.disabled).toBe(true);
+  });
 });

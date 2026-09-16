@@ -558,7 +558,16 @@ export default function StartEventScreen() {
   if (isFocused && mutationSnapshot.phase === 'unresolved-other-session') {
     return (
       <SafeAreaView style={styles.page}>
-        <OtherSessionStartMutationAttention status="unresolved" />
+        <OtherSessionStartMutationAttention
+          online={state.phase === 'online'}
+          onAcknowledgeUnresolved={() => {
+            if (!startMutation.acknowledgeUnresolved()) return;
+            setOutcomeActiveEvents(null);
+            setOutcomeCheckError(null);
+            returnHome();
+          }}
+          status="unresolved"
+        />
       </SafeAreaView>
     );
   }

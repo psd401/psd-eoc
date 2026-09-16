@@ -1025,4 +1025,49 @@ describe('mapStartMutationError', () => {
     expect(coordinator.acknowledgeUnresolved(OWNER)).toBe(false);
     expect(coordinator.getSnapshot().phase).toBe('idle');
   });
+
+  test('lets the signed-in session clear a fence a previous session left behind', () => {
+    const persistence = new MemoryPersistence();
+    const original = new StartMutationCoordinator(persistence);
+    const operation = deferred<StartEventResult>();
+    online(original);
+    original.submit(activationSubmission(() => operation.promise));
+    expect(persistence.record?.phase).toBe('unresolved');
+
+    // The same person on the same device signing in again mints a new session
+    // id, which is what orphaned the record and left the device with a screen
+    // carrying no controls at all.
+    const nextSession = { ...OWNER, sessionId: OTHER_OWNER.sessionId };
+    const restarted = new StartMutationCoordinator(persistence);
+    online(restarted, nextSession);
+    expect(restarted.hydrate()).toBe(true);
+    expect(restarted.getSnapshot()).toEqual({
+      phase: 'unresolved-other-session',
+    });
+
+    expect(restarted.acknowledgeUnresolved(nextSession)).toBe(true);
+    expect(restarted.getSnapshot().phase).toBe('idle');
+    expect(persistence.record).toBeNull();
+
+    const next = restarted.submit(
+      activationSubmission(
+        () => Promise.resolve(activationResult()),
+        nextSession,
+      ),
+    );
+    expect(next.accepted).toBe(true);
+  });
+
+  test('refuses to clear a fence when nobody is signed in on the device', () => {
+    const persistence = new MemoryPersistence();
+    const original = new StartMutationCoordinator(persistence);
+    const operation = deferred<StartEventResult>();
+    online(original);
+    original.submit(activationSubmission(() => operation.promise));
+
+    const signedOut = new StartMutationCoordinator(persistence);
+    expect(signedOut.hydrate()).toBe(true);
+    expect(signedOut.acknowledgeUnresolved(OWNER)).toBe(false);
+    expect(persistence.record).not.toBeNull();
+  });
 });
