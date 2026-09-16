@@ -191,8 +191,20 @@ export class EventRoomSyncController {
     });
   }
 
+  /**
+   * A closed event's timeline is final. The only transition out of `closed` is
+   * `reopen-as-correction`, and by contract that creates a distinct event, so
+   * no further entry can ever arrive on this one. Polling it forever produced
+   * the worst possible message on a blip: that updates were "not arriving",
+   * about updates that were never coming, with a Refresh control that could
+   * not produce any.
+   */
+  private isFinalized(): boolean {
+    return this.snapshotValue.model.event?.status === 'closed';
+  }
+
   private scheduleNextPoll(): void {
-    if (!this.active || this.timerHandle !== null) return;
+    if (!this.active || this.timerHandle !== null || this.isFinalized()) return;
     this.timerHandle = this.scheduler.schedule(() => {
       this.timerHandle = null;
       const initialCatchUp = !this.snapshotValue.model.historyComplete;
@@ -279,10 +291,12 @@ export class EventRoomSyncController {
         ...this.snapshotValue,
         phase: 'error',
         refreshing: false,
-        error: timelineErrorMessage(
-          error,
-          this.snapshotValue.model.entries.length > 0,
-        ),
+        error: this.isFinalized()
+          ? null
+          : timelineErrorMessage(
+              error,
+              this.snapshotValue.model.entries.length > 0,
+            ),
       });
     } finally {
       if (this.abortController === controller) this.abortController = null;

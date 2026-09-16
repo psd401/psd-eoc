@@ -449,4 +449,43 @@ describe('event-room sync controller', () => {
     ]);
     controller.stop();
   });
+
+  test('stops polling and stays quiet once the event is closed', async () => {
+    const closed = {
+      ...EVENT,
+      status: 'closed' as const,
+      allClearAt: '2026-08-11T18:30:00.000Z',
+      closedAt: '2026-08-11T18:31:00.000Z',
+    };
+    let calls = 0;
+    const api: EventRoomSyncPort = {
+      async sync() {
+        calls += 1;
+        if (calls === 1) return page([entry(1)], 'cursor_1', false, closed);
+        throw new AuthenticatedRequestFailure('network', 'Network failure.');
+      },
+    };
+    const timer = manualScheduler();
+    const controller = new EventRoomSyncController(
+      IDS.event,
+      api,
+      () => {},
+      timer.scheduler,
+    );
+
+    await controller.start();
+    expect(controller.getSnapshot().model.event?.status).toBe('closed');
+
+    // A closed event can never gain another entry, so nothing is scheduled to
+    // go looking for one.
+    expect(timer.callbacks).toHaveLength(0);
+    expect(controller.getSnapshot().error).toBeNull();
+
+    // And a failed refresh must never claim updates are "not arriving" when
+    // none were ever coming.
+    await controller.refresh();
+    expect(calls).toBe(2);
+    expect(controller.getSnapshot().error).toBeNull();
+    controller.stop();
+  });
 });

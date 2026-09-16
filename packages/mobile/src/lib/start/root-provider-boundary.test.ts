@@ -275,23 +275,27 @@ describe('root layout provider placement', () => {
     }
   });
 
-  test('keeps unresolved refresh errors truthful and exposes refreshed events read-only', async () => {
+  test('discloses an unknown outcome without blocking start or join', async () => {
     for (const path of OUTCOME_CHECK_SCREEN_PATHS) {
       const source = await Bun.file(path).text();
 
-      expect(source).toContain('unresolvedOutcomeRefreshError()');
+      // The notice renders inside the ordinary screen, so every action stays.
+      expect(source).toContain('<UnresolvedOutcomeNotice');
+      expect(source).toContain("mutationSnapshot.phase === 'unresolved' ||");
       expect(source).toContain(
-        'This refresh did not determine the earlier request outcome.',
+        "mutationSnapshot.phase === 'unresolved-other-session' ? (",
       );
-      expect(source).toContain('activeEvents:');
-      expect(source).toContain('outcomeActiveEvents.map((choice) => ({');
-      expect(source).toContain('setOutcomeActiveEvents(nextData.activeEvents)');
-      expect(source).toContain('setOutcomeActiveEvents(null)');
-      expect(source).toContain(
-        "return 'PSD EOC could not load fresh active events.",
+      expect(source).toContain('startMutation.acknowledgeUnresolved()');
+
+      // An unknown outcome must never take the screen or gate the actions.
+      expect(source).not.toContain(
+        "mutationSnapshot.phase === 'unresolved' ||\n      (mutationSnapshot.phase === 'pending'",
       );
-      expect(source).not.toContain('unresolvedOutcomeRefreshError(error)');
-      expect(source).not.toContain('return `${detail} This refresh');
+      expect(source).not.toContain(
+        "const unresolved = mutationSnapshot.phase === 'unresolved';",
+      );
+      expect(source).not.toContain('onCheckActiveEvents:');
+      expect(source).not.toContain('unresolvedOutcomeRefreshError');
     }
   });
 
