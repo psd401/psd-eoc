@@ -38,6 +38,7 @@ export interface PendingStartMutationAttentionProps
   readonly checking?: never;
   readonly checkError?: never;
   readonly onCheckActiveEvents?: never;
+  readonly onAcknowledgeUnresolved?: never;
 }
 
 export interface FailedStartMutationAttentionProps
@@ -49,6 +50,7 @@ export interface FailedStartMutationAttentionProps
   readonly checkError?: string | null;
   readonly onRefreshActiveEvents: () => void;
   readonly onCheckActiveEvents?: never;
+  readonly onAcknowledgeUnresolved?: never;
 }
 
 export interface UnresolvedStartMutationAttentionProps
@@ -60,6 +62,7 @@ export interface UnresolvedStartMutationAttentionProps
   readonly online?: boolean;
   readonly checkError?: string | null;
   readonly onCheckActiveEvents: () => void;
+  readonly onAcknowledgeUnresolved: () => void;
 }
 
 export type StartMutationAttentionProps =
@@ -362,6 +365,40 @@ export function StartMutationAttentionContent(
               {checking ? 'Checking active events…' : 'Check active events'}
             </Text>
           </Pressable>
+          <Text
+            style={[styles.acknowledgeNote, { color: theme.colors.textMuted }]}
+          >
+            Clearing this does not resolve the earlier request and makes no
+            claim that it succeeded or failed. It restores start and join on
+            this device so a new emergency can be raised.
+          </Text>
+          <Pressable
+            accessibilityHint={
+              operation === 'activate'
+                ? 'Clears this unresolved start so start and join work again. It does not retry or resolve the earlier request.'
+                : 'Clears this unresolved join so start and join work again. It does not retry or resolve the earlier request.'
+            }
+            accessibilityLabel="Clear and allow new decisions"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !online }}
+            disabled={!online}
+            onPress={props.onAcknowledgeUnresolved}
+            style={({ pressed }) => [
+              styles.acknowledgeAction,
+              { borderColor: theme.colors.border },
+              pressed && online && styles.pressed,
+              !online && styles.disabled,
+            ]}
+          >
+            <Text
+              style={[
+                styles.acknowledgeActionText,
+                { color: theme.colors.textPrimary },
+              ]}
+            >
+              Clear and allow new decisions
+            </Text>
+          </Pressable>
         </View>
       ) : failed ? (
         <View style={styles.actions}>
@@ -589,6 +626,25 @@ export function OtherSessionStartMutationAttention({
 }
 
 const styles = StyleSheet.create({
+  acknowledgeAction: {
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 2,
+    justifyContent: 'center',
+    minHeight: 52,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+  },
+  acknowledgeActionText: {
+    fontSize: 17,
+    fontWeight: '800',
+    lineHeight: 24,
+    textAlign: 'center',
+  },
+  acknowledgeNote: {
+    fontSize: 15,
+    lineHeight: 21,
+  },
   activeEventSummary: {
     borderRadius: 16,
     borderWidth: 2,

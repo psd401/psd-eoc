@@ -866,6 +866,34 @@ export class StartMutationCoordinator {
     return true;
   }
 
+  /**
+   * Clears an unknown-outcome record for its exact owner on an explicit human
+   * decision. The earlier request stays unproven: this restores the ability to
+   * start or join and never claims the prior outcome was one thing or another.
+   *
+   * `resolveActivationFromFreshEvents` was removed because the active-event
+   * list carries no request-specific idempotency correlation, so the machine
+   * must not infer a resolution from it. That reasoning does not extend to
+   * leaving the operator with no exit at all: an unresolved fence that can
+   * never be cleared makes the device refuse every later start and join, and
+   * being unable to raise a new emergency is worse than an unproven old one.
+   * The inference stays removed; the decision returns to the human.
+   */
+  public acknowledgeUnresolved(ownerInput: StartMutationOwner): boolean {
+    const owner = validatedOwner(ownerInput);
+    if (
+      this.state.phase !== 'unresolved' ||
+      !sameOwner(this.state.owner, owner) ||
+      !sameOwner(this.onlineOwner, owner)
+    ) {
+      return false;
+    }
+    if (!this.clearDurableRecordOrBlock()) return false;
+    this.state = IDLE_INTERNAL_STATE;
+    this.refreshSnapshot(true);
+    return true;
+  }
+
   /** Publishes a pre-transport denial without creating a key or running work. */
   public reportDeniedSubmission(
     ownerInput: StartMutationOwner,
