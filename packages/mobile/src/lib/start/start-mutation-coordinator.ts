@@ -881,9 +881,15 @@ export class StartMutationCoordinator {
    */
   public acknowledgeUnresolved(ownerInput: StartMutationOwner): boolean {
     const owner = validatedOwner(ownerInput);
+    // Whoever is signed in on this device may clear it, including when another
+    // session wrote it. `sameOwner` includes the session id, so signing in
+    // again mints a new one and orphans the record against an owner that can
+    // never return: a session is not re-enterable, and the screen that asked
+    // the operator to "sign back into the session that made the request" was
+    // asking for something impossible while blocking every start and join.
+    // Nothing about the record is verifiable by the original session anyway.
     if (
       this.state.phase !== 'unresolved' ||
-      !sameOwner(this.state.owner, owner) ||
       !sameOwner(this.onlineOwner, owner)
     ) {
       return false;

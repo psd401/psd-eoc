@@ -475,6 +475,8 @@ export function StartMutationAttentionContent(
 
 export interface OtherSessionStartMutationAttentionProps {
   readonly status?: 'pending' | 'unresolved';
+  readonly online?: boolean;
+  readonly onAcknowledgeUnresolved?: () => void;
   readonly testID?: string;
 }
 
@@ -568,6 +570,8 @@ export function StartMutationRecoveryBlockedAttention({
  */
 export function OtherSessionStartMutationAttention({
   status = 'pending',
+  online = true,
+  onAcknowledgeUnresolved,
   testID,
 }: OtherSessionStartMutationAttentionProps) {
   const unresolved = status === 'unresolved';
@@ -612,7 +616,7 @@ export function OtherSessionStartMutationAttention({
         </Text>
         <Text style={[styles.guidance, styles.neutralHeading]}>
           {unresolved
-            ? 'New start and join actions are blocked. Sign back into the session that made the request to review fresh active events or contact district technology support.'
+            ? 'New start and join actions are blocked until this is cleared. The session that made the request has ended and cannot be signed back into, so its outcome cannot be checked from here.'
             : 'Do not make a new start or join decision while it resolves. Sign back into the session that made the request to see its classified event details.'}
         </Text>
         <Text style={[styles.truth, styles.neutralText]}>
@@ -621,6 +625,34 @@ export function OtherSessionStartMutationAttention({
           not claim either one.
         </Text>
       </View>
+
+      {unresolved && onAcknowledgeUnresolved !== undefined ? (
+        <View style={styles.actions}>
+          <Text style={[styles.acknowledgeNote, styles.neutralText]}>
+            Clearing this does not resolve the earlier request and makes no
+            claim that it succeeded or failed. It restores start and join on
+            this device so a new emergency can be raised.
+          </Text>
+          <Pressable
+            accessibilityHint="Clears the unresolved request left by a previous sign-in so start and join work again. It does not retry or resolve that request."
+            accessibilityLabel="Clear and allow new decisions"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !online }}
+            disabled={!online}
+            onPress={onAcknowledgeUnresolved}
+            style={({ pressed }) => [
+              styles.acknowledgeAction,
+              styles.neutralAcknowledgeAction,
+              pressed && online && styles.pressed,
+              !online && styles.disabled,
+            ]}
+          >
+            <Text style={[styles.acknowledgeActionText, styles.neutralHeading]}>
+              Clear and allow new decisions
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
     </ScrollView>
   );
 }
@@ -634,6 +666,9 @@ const styles = StyleSheet.create({
     minHeight: 52,
     paddingHorizontal: 18,
     paddingVertical: 12,
+  },
+  neutralAcknowledgeAction: {
+    borderColor: '#6B3A05',
   },
   acknowledgeActionText: {
     fontSize: 17,
