@@ -51,6 +51,7 @@ export interface StartMutationContextValue {
   readonly submitJoin: (input: SubmitStartJoinInput) => StartMutationAdmission;
   readonly acknowledge: () => boolean;
   readonly acknowledgeUnresolved: () => boolean;
+  readonly continueWithoutRecovery: () => boolean;
   readonly claimSuccessFeedback: () => StartMutationCompletion | null;
 }
 
@@ -319,6 +320,13 @@ export class StartMutationProviderController {
       : this.coordinator.acknowledgeUnresolved(owner);
   };
 
+  public continueWithoutRecovery = (): boolean => {
+    const owner = this.exactLiveOwner();
+    return owner === null
+      ? false
+      : this.coordinator.continueWithoutRecovery(owner);
+  };
+
   public claimSuccessFeedback = (): StartMutationCompletion | null => {
     const owner = this.exactLiveOwner();
     return owner === null ? null : this.coordinator.claimSuccessFeedback(owner);
@@ -381,6 +389,9 @@ export function StartMutationProvider({ children }: PropsWithChildren) {
       acknowledgeUnresolved: () =>
         snapshot.phase !== 'checking-recovery' &&
         controller.acknowledgeUnresolved(),
+      continueWithoutRecovery: () =>
+        snapshot.phase !== 'checking-recovery' &&
+        controller.continueWithoutRecovery(),
       claimSuccessFeedback: () =>
         snapshot.phase === 'checking-recovery'
           ? null

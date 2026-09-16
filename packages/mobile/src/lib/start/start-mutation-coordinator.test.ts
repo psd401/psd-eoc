@@ -1070,4 +1070,43 @@ describe('mapStartMutationError', () => {
     expect(signedOut.acknowledgeUnresolved(OWNER)).toBe(false);
     expect(persistence.record).not.toBeNull();
   });
+
+  test('lets the operator carry on when the device store cannot be written', async () => {
+    const persistence = new MemoryPersistence();
+    persistence.failWrite = true;
+    const coordinator = new StartMutationCoordinator(persistence);
+    online(coordinator);
+    const blocked = coordinator.submit(
+      activationSubmission(() => Promise.resolve(activationResult())),
+    );
+    expect(blocked.accepted).toBe(false);
+    expect(coordinator.getSnapshot().phase).toBe('recovery-blocked');
+
+    expect(coordinator.continueWithoutRecovery(OWNER)).toBe(true);
+    expect(coordinator.getSnapshot().phase).toBe('idle');
+
+    // The broken store is no longer consulted, so a new emergency can be
+    // raised instead of the device refusing every start until it heals.
+    const next = coordinator.submit(
+      activationSubmission(() => Promise.resolve(activationResult())),
+    );
+    expect(next.accepted).toBe(true);
+    if (next.accepted) await next.completion;
+    expect(coordinator.getSnapshot().phase).toBe('succeeded');
+  });
+
+  test('refuses to carry on without recovery unless blocked and signed in', () => {
+    const persistence = new MemoryPersistence();
+    persistence.failWrite = true;
+    const coordinator = new StartMutationCoordinator(persistence);
+    online(coordinator);
+    expect(coordinator.continueWithoutRecovery(OWNER)).toBe(false);
+
+    coordinator.submit(
+      activationSubmission(() => Promise.resolve(activationResult())),
+    );
+    expect(coordinator.getSnapshot().phase).toBe('recovery-blocked');
+    expect(coordinator.continueWithoutRecovery(OTHER_OWNER)).toBe(false);
+    expect(coordinator.getSnapshot().phase).toBe('recovery-blocked');
+  });
 });

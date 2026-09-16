@@ -482,6 +482,8 @@ export interface OtherSessionStartMutationAttentionProps {
 
 export interface StartMutationRecoveryBlockedAttentionProps {
   readonly message: string;
+  readonly online?: boolean;
+  readonly onContinueWithoutRecovery?: () => void;
   readonly testID?: string;
 }
 
@@ -534,6 +536,8 @@ export function StartMutationRecoveryCheckingAttention({
 /** Identity-free hard stop when durable recovery storage cannot be trusted. */
 export function StartMutationRecoveryBlockedAttention({
   message,
+  online = true,
+  onContinueWithoutRecovery,
   testID,
 }: StartMutationRecoveryBlockedAttentionProps) {
   return (
@@ -560,6 +564,35 @@ export function StartMutationRecoveryBlockedAttention({
           No request will be sent or queued while recovery is unavailable.
         </Text>
       </View>
+
+      {onContinueWithoutRecovery === undefined ? null : (
+        <View style={styles.actions}>
+          <Text style={[styles.acknowledgeNote, styles.neutralText]}>
+            You can carry on without recovery on this device. Start and join
+            work again, and nothing already stored is deleted. If the app closes
+            while a request is in flight, its outcome will not be recoverable
+            here.
+          </Text>
+          <Pressable
+            accessibilityHint="Restores start and join on this device without durable recovery. Nothing already stored is deleted."
+            accessibilityLabel="Continue without recovery"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !online }}
+            disabled={!online}
+            onPress={onContinueWithoutRecovery}
+            style={({ pressed }) => [
+              styles.acknowledgeAction,
+              styles.neutralAcknowledgeAction,
+              pressed && online && styles.pressed,
+              !online && styles.disabled,
+            ]}
+          >
+            <Text style={[styles.acknowledgeActionText, styles.neutralHeading]}>
+              Continue without recovery
+            </Text>
+          </Pressable>
+        </View>
+      )}
     </ScrollView>
   );
 }

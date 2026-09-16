@@ -672,4 +672,28 @@ describe('start mutation attention presentation', () => {
     expect(clear.props.accessibilityState).toEqual({ disabled: true });
     expect(clear.props.disabled).toBe(true);
   });
+
+  test('gives the recovery-blocked screen a way out', () => {
+    let continued = 0;
+    const result = StartMutationRecoveryBlockedAttention({
+      message: 'PSD EOC cannot safely read or retain the prior start request.',
+      onContinueWithoutRecovery: () => {
+        continued += 1;
+      },
+    }) as Element;
+    const text = normalizedText(result);
+    const action = renderedElements(result).find(
+      (node) =>
+        node.type === 'Pressable' &&
+        node.props.accessibilityLabel === 'Continue without recovery',
+    );
+
+    if (action === undefined) {
+      throw new Error('The recovery-blocked screen still has no way out.');
+    }
+    press(action);
+    expect(continued).toBe(1);
+    expect(text).toContain('nothing already stored is deleted');
+    expect(text).toContain('will not be recoverable here');
+  });
 });
