@@ -491,6 +491,18 @@ export class StartMutationCoordinator {
     private readonly persistence: StartMutationPersistence | null = null,
   ) {}
 
+  private persistenceSuspended = false;
+
+  /**
+   * The durable store, or nothing once the operator has chosen to carry on
+   * without device recovery. Suspension lasts for this process only and never
+   * rewrites or deletes what is already stored; it stops this coordinator
+   * depending on a store that has proven it cannot be read or written.
+   */
+  private get store(): StartMutationPersistence | null {
+    return this.persistenceSuspended ? null : this.persistence;
+  }
+
   public getSnapshot = (): StartMutationSnapshot => this.snapshot;
 
   public subscribe = (listener: StartMutationListener): (() => void) => {
@@ -569,9 +581,9 @@ export class StartMutationCoordinator {
 
   private persistCurrentStateOrBlock(): boolean {
     const record = this.recoveryRecord();
-    if (record === null || this.persistence === null) return true;
+    if (record === null || this.store === null) return true;
     try {
-      this.persistence.write(record);
+      this.store.write(record);
       return true;
     } catch {
       this.state = RECOVERY_BLOCKED_INTERNAL_STATE;
@@ -581,9 +593,9 @@ export class StartMutationCoordinator {
   }
 
   private clearDurableRecordOrBlock(): boolean {
-    if (this.persistence === null) return true;
+    if (this.store === null) return true;
     try {
-      this.persistence.clear();
+      this.store.clear();
       return true;
     } catch {
       this.state = RECOVERY_BLOCKED_INTERNAL_STATE;
@@ -594,10 +606,10 @@ export class StartMutationCoordinator {
 
   /** Hydrates retained mutation truth after local authentication succeeds. */
   public hydrate(notify = true): boolean {
-    if (this.persistence === null || this.state.phase !== 'idle') return false;
+    if (this.store === null || this.state.phase !== 'idle') return false;
     let record: StartMutationRecoveryRecord | null;
     try {
-      record = this.persistence.read();
+      record = this.store.read();
     } catch {
       this.state = RECOVERY_BLOCKED_INTERNAL_STATE;
       this.refreshSnapshot(notify);
@@ -719,9 +731,9 @@ export class StartMutationCoordinator {
         ? submission.activationEvidence
         : null;
 
-    if (this.persistence !== null) {
+    if (this.store !== null) {
       try {
-        this.persistence.write(
+        this.store.write(
           Object.freeze({
             phase: 'unresolved',
             owner,
@@ -895,6 +907,28 @@ export class StartMutationCoordinator {
       return false;
     }
     if (!this.clearDurableRecordOrBlock()) return false;
+    this.state = IDLE_INTERNAL_STATE;
+    this.refreshSnapshot(true);
+    return true;
+  }
+
+  /**
+   * Leaves the blocked state on an explicit human decision, carrying on with
+   * no durable recovery for the rest of this process. The store has already
+   * failed a read or a write here, so there is nothing trustworthy to keep;
+   * the alternative was a device that refused every start and join until the
+   * keychain healed, which for an emergency tool is the worse failure. What
+   * is already stored is left untouched rather than deleted.
+   */
+  public continueWithoutRecovery(ownerInput: StartMutationOwner): boolean {
+    const owner = validatedOwner(ownerInput);
+    if (
+      this.state.phase !== 'recovery-blocked' ||
+      !sameOwner(this.onlineOwner, owner)
+    ) {
+      return false;
+    }
+    this.persistenceSuspended = true;
     this.state = IDLE_INTERNAL_STATE;
     this.refreshSnapshot(true);
     return true;

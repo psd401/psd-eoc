@@ -506,6 +506,10 @@ export default function StartEventScreen() {
       <SafeAreaView style={styles.page}>
         <StartMutationRecoveryBlockedAttention
           message={mutationSnapshot.message}
+          online={state.phase === 'online'}
+          onContinueWithoutRecovery={() => {
+            startMutation.continueWithoutRecovery();
+          }}
         />
       </SafeAreaView>
     );
