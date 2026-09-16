@@ -96,7 +96,7 @@ function page(
   entries: readonly ReturnType<typeof entry>[],
   cursor: string,
   hasMore: boolean,
-  event: typeof EVENT | null,
+  event: EventRoomSyncResult['event'] | null,
 ): EventRoomSyncResult {
   return EventRoomSyncResultSchema.parse({
     eventId: IDS.event,
