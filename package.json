@@ -58,7 +58,7 @@
     "check": "bun run format:check && bun run lint && bun run verify:config && bun run verify:docs && bun run typecheck && bun run build && bun run test:full"
   },
   "devDependencies": {
-    "@eslint/js": "9.35.0",
+    "@eslint/js": "10.0.1",
     "@next/eslint-plugin-next": "15.5.21",
     "@playwright/test": "1.55.0",
     "@types/bun": "1.2.23",
