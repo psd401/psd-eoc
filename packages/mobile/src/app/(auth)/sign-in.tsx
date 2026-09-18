@@ -21,12 +21,21 @@ export default function SignInScreen() {
     useMobileAuth();
   const [localError, setLocalError] = useState<string | null>(null);
   const [isRetryingStorage, setIsRetryingStorage] = useState(false);
+  // A failed attempt has to be visible where the press happened. The notice
+  // above the card can already be on screen before anyone taps, so a sign-in
+  // that fails fast repaints nothing near the button and reads as a dead
+  // control. That is what an app reviewer reported as an unresponsive button.
+  const [attempted, setAttempted] = useState(false);
   const storageBlocked = state.phase === 'blocked';
   const busy = isSigningIn || isRetryingStorage;
   const visibleError = localError ?? signInError ?? state.message;
+  // When a press just failed, the message belongs at the button and nowhere
+  // else. Showing it in both places says the same thing twice and buries it.
+  const attemptFailure = attempted && !busy && visibleError !== null;
 
   async function handleSignIn(): Promise<void> {
     setLocalError(null);
+    setAttempted(true);
     try {
       await beginGoogleSignIn();
     } catch {
@@ -82,7 +91,7 @@ export default function SignInScreen() {
           </Text>
         </View>
 
-        {visibleError !== null ? (
+        {visibleError !== null && !attemptFailure ? (
           <View
             accessibilityLiveRegion="assertive"
             accessibilityRole="alert"
@@ -150,6 +159,33 @@ export default function SignInScreen() {
               </Text>
             </Pressable>
           )}
+
+          {attemptFailure ? (
+            <View
+              accessibilityLiveRegion="assertive"
+              accessibilityRole="alert"
+              style={styles.attemptFailure}
+            >
+              <Text style={styles.attemptFailureTitle}>
+                Sign-in did not start
+              </Text>
+              <Text style={styles.attemptFailureBody}>{visibleError}</Text>
+              <Pressable
+                accessibilityHint="Starts Google sign-in again"
+                accessibilityLabel="Try signing in again"
+                accessibilityRole="button"
+                onPress={() => {
+                  void handleSignIn();
+                }}
+                style={({ pressed }) => [
+                  styles.retryButton,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.retryButtonText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : null}
         </View>
 
         <View accessibilityRole="summary" style={styles.deviceSecurityNotice}>
@@ -275,6 +311,43 @@ const styles = StyleSheet.create({
   },
   buttonPressed: {
     opacity: 0.76,
+  },
+  attemptFailure: {
+    backgroundColor: '#FFF0F1',
+    borderColor: '#B42332',
+    borderRadius: 14,
+    borderWidth: 2,
+    gap: 9,
+    marginTop: 14,
+    padding: 14,
+  },
+  attemptFailureBody: {
+    color: '#6B101B',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  attemptFailureTitle: {
+    color: '#6B101B',
+    fontSize: 17,
+    fontWeight: '900',
+    lineHeight: 23,
+  },
+  retryButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    borderColor: '#B42332',
+    borderRadius: 12,
+    borderWidth: 2,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+  },
+  retryButtonText: {
+    color: '#6B101B',
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 22,
   },
   buttonDisabled: {
     opacity: 0.6,
