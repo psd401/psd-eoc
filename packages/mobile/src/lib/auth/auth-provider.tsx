@@ -41,6 +41,7 @@ import {
 } from './issue-32-synthetic-authenticator';
 import { createLocalAuthenticator } from './local-authenticator';
 import { MobileOidcClient } from './oidc-client';
+import { OidcRedirectNotCapturedError } from './oidc-client';
 import { createSecurePendingOidcFlowStore } from './secure-pending-oidc-flow';
 import { createSecureSessionStore } from './secure-session-store';
 import {
@@ -54,6 +55,11 @@ export interface MobileAuthContextValue {
   readonly hasCachedShell: boolean;
   readonly isSigningIn: boolean;
   readonly signInError: string | null;
+  /**
+   * The last attempt ended without the browser handing back a redirect, so a
+   * code delivered to the deep-link route may still complete it.
+   */
+  readonly signInRedirectUncaptured: boolean;
   readonly beginGoogleSignIn: () => Promise<void>;
   /** Resumes an attempt whose redirect arrived outside `promptAsync`. */
   readonly completeGoogleSignIn: (
@@ -188,6 +194,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   );
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [signInError, setSignInError] = useState<string | null>(null);
+  const [signInRedirectUncaptured, setSignInRedirectUncaptured] =
+    useState(false);
   const signingInRef = useRef(false);
 
   useEffect(() => {
@@ -226,6 +234,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       signingInRef.current = true;
       setIsSigningIn(true);
       setSignInError(null);
+      setSignInRedirectUncaptured(false);
       try {
         if (runtime.oidc === null) {
           throw new MobileAuthError(
@@ -248,6 +257,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         }
       } catch (error) {
         setSignInError(publicSignInError(error));
+        setSignInRedirectUncaptured(
+          error instanceof OidcRedirectNotCapturedError,
+        );
       } finally {
         signingInRef.current = false;
         setIsSigningIn(false);
@@ -297,6 +309,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       hasCachedShell: shellAvailable(state),
       isSigningIn,
       signInError,
+      signInRedirectUncaptured,
       beginGoogleSignIn,
       completeGoogleSignIn,
       unlock: () => runtime.controller.foreground(),
@@ -306,6 +319,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       requestAuthenticated: runtime.controller.requestAuthenticated,
       signOut: async () => {
         setSignInError(null);
+        setSignInRedirectUncaptured(false);
         await runtime.controller.signOut();
       },
       assertMutationAllowed: () => runtime.controller.assertMutationAllowed(),
@@ -317,6 +331,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       isSigningIn,
       runtime,
       signInError,
+      signInRedirectUncaptured,
       state,
       subscribeState,
     ],

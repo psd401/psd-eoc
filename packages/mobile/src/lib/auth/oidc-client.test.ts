@@ -11,6 +11,7 @@ import {
   createPkcePair,
   encodeBase64Url,
   MobileOidcClient,
+  OidcRedirectNotCapturedError,
   type OidcBrowser,
   type OidcTransport,
 } from './oidc-client';
@@ -252,7 +253,11 @@ describe('native OIDC cold-start resume', () => {
     expect(flows.peek()).toBeNull();
   });
 
-  test('clears the attempt when the person cancels', async () => {
+  test('keeps the attempt when the browser hands back no redirect', async () => {
+    // On Android this is routinely not a cancellation: the OS can route the
+    // redirect to the app, which dismisses the custom tab. Discarding the
+    // verifier here is what stranded the authorization code on the callback
+    // route with nothing able to spend it.
     const flows = memoryFlowStore();
     const client = new MobileOidcClient(
       exchangingTransport([]),
@@ -264,7 +269,42 @@ describe('native OIDC cold-start resume', () => {
 
     await expect(
       client.signIn('android', 'synthetic-installation-0001'),
-    ).rejects.toThrow('cancelled');
+    ).rejects.toThrow(OidcRedirectNotCapturedError);
+    expect(flows.peek()).not.toBeNull();
+  });
+
+  test('completes the redirect the browser session never captured', async () => {
+    // The whole Android race, end to end: the prompt reports a cancellation
+    // while the deep-link route is holding the code, and the resume spends it.
+    const exchanges: unknown[] = [];
+    const flows = memoryFlowStore();
+    const client = new MobileOidcClient(
+      exchangingTransport(exchanges),
+      { authorize: async () => ({ kind: 'cancelled' }) },
+      pkceSource,
+      () => new Date('2026-08-10T18:00:00.000Z'),
+      flows.store,
+    );
+
+    await expect(
+      client.signIn('android', 'synthetic-installation-0001'),
+    ).rejects.toThrow(OidcRedirectNotCapturedError);
+
+    const resumed = await client.completeSignIn(
+      'synthetic-authorization-code',
+      OIDC_STATE,
+    );
+
+    expect(resumed.refreshToken).toBe(TEST_TOKEN);
+    expect(exchanges).toEqual([
+      {
+        authorizationCode: 'synthetic-authorization-code',
+        state: OIDC_STATE,
+        codeVerifier: CODE_VERIFIER,
+        flowToken: startResponse.flowToken,
+      },
+    ]);
+    // Still single-use: the record is gone once it has been spent.
     expect(flows.peek()).toBeNull();
   });
 
