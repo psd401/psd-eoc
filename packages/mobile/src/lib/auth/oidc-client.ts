@@ -11,6 +11,27 @@ import type { PendingOidcFlowStore } from './pending-oidc-flow';
 const BASE64_ALPHABET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+/**
+ * The browser session ended without handing back a redirect.
+ *
+ * On Android that is routinely not a cancellation at all: the OS can deliver
+ * `psdeoc://auth/callback` straight to the app as an intent, which dismisses
+ * the custom tab, and `promptAsync` then resolves as dismissed even though the
+ * authorization code arrived safely on the deep-link route. The distinct type
+ * is what lets the resume path tell "the person backed out" apart from "the
+ * redirect went somewhere else", because only the second one may be retried
+ * with a code this device is already holding.
+ */
+export class OidcRedirectNotCapturedError extends MobileAuthError {
+  public constructor() {
+    super(
+      'rejected',
+      'Google sign-in was cancelled. No device session was created.',
+    );
+    this.name = 'OidcRedirectNotCapturedError';
+  }
+}
+
 export interface PkceSource {
   randomBytes(length: number): Promise<Uint8Array>;
   sha256Base64(value: string): Promise<string>;
@@ -105,13 +126,12 @@ export class MobileOidcClient {
       flowToken: start.flowToken,
       expiresAt: start.expiresAt,
     });
+    let redirectMayBeElsewhere = false;
     try {
       const authorization = await this.browser.authorize(start);
       if (authorization.kind === 'cancelled') {
-        throw new MobileAuthError(
-          'rejected',
-          'Google sign-in was cancelled. No device session was created.',
-        );
+        redirectMayBeElsewhere = true;
+        throw new OidcRedirectNotCapturedError();
       }
       if (authorization.state !== start.state) {
         throw new MobileAuthError(
@@ -132,9 +152,16 @@ export class MobileOidcClient {
         flowToken: start.flowToken,
       });
     } finally {
-      // This attempt is over either way. Leaving the record behind would let a
-      // later redelivery of the same deep link start a second exchange.
-      await this.pendingFlowStore?.clear();
+      // An attempt that reached the browser's answer is finished, and leaving
+      // the record behind would let a later redelivery of the same deep link
+      // start a second exchange. An attempt whose redirect was never captured
+      // is not finished: the code may be sitting on the deep-link route right
+      // now, and this record is the only copy of the verifier and flow token
+      // that can spend it. It stays single-use through `take` and stops being
+      // usable at `expiresAt` either way.
+      if (!redirectMayBeElsewhere) {
+        await this.pendingFlowStore?.clear();
+      }
     }
   }
 

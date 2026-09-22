@@ -16,6 +16,7 @@ let mockParams: Record<string, string | string[] | undefined> = {};
 let mockIsSigningIn = false;
 let mockHasCachedShell = false;
 let mockSignInError: string | null = null;
+let mockSignInRedirectUncaptured = false;
 
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
@@ -28,6 +29,7 @@ jest.mock('../src/lib/auth', () => ({
     hasCachedShell: mockHasCachedShell,
     isSigningIn: mockIsSigningIn,
     signInError: mockSignInError,
+    signInRedirectUncaptured: mockSignInRedirectUncaptured,
   }),
 }));
 
@@ -41,6 +43,7 @@ beforeEach(() => {
   mockIsSigningIn = false;
   mockHasCachedShell = false;
   mockSignInError = null;
+  mockSignInRedirectUncaptured = false;
   mockCompleteGoogleSignIn.mockClear();
   mockReplace.mockClear();
 });
@@ -93,6 +96,69 @@ describe('android OIDC callback route', () => {
     await act(async () => {});
     expect(mockCompleteGoogleSignIn).not.toHaveBeenCalled();
     expect(screen.getByText('Completing sign-in')).toBeTruthy();
+  });
+
+  test('resumes once the prompt ends without ever seeing the redirect', async () => {
+    // The Android race a Play reviewer hit twice: the OS routed the redirect
+    // to this screen, dismissing the custom tab, so promptAsync reported a
+    // cancellation while the authorization code was sitting right here.
+    mockIsSigningIn = true;
+    mockParams = { code: CODE, state: STATE };
+
+    const view = render(<AuthCallbackScreen />);
+    await act(async () => {});
+    expect(mockCompleteGoogleSignIn).not.toHaveBeenCalled();
+
+    mockIsSigningIn = false;
+    mockSignInRedirectUncaptured = true;
+    mockSignInError =
+      'Google sign-in was cancelled. No device session was created.';
+    view.rerender(<AuthCallbackScreen />);
+
+    await waitFor(() => {
+      expect(mockCompleteGoogleSignIn).toHaveBeenCalledTimes(1);
+    });
+    expect(mockCompleteGoogleSignIn).toHaveBeenCalledWith(CODE, STATE);
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  test('lets a prompt that reached its own answer stand', async () => {
+    // A refusal is the real outcome. Spending the code again would replace it
+    // with a worse message and tell the person nothing true.
+    mockIsSigningIn = true;
+    mockParams = { code: CODE, state: STATE };
+
+    const view = render(<AuthCallbackScreen />);
+    await act(async () => {});
+
+    mockIsSigningIn = false;
+    mockSignInRedirectUncaptured = false;
+    mockSignInError = 'Your district account is not in a designated group.';
+    view.rerender(<AuthCallbackScreen />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Your district account is not in a designated group.'),
+      ).toBeTruthy();
+    });
+    expect(mockCompleteGoogleSignIn).not.toHaveBeenCalled();
+  });
+
+  test('gets out of the way when the prompt captured the redirect itself', async () => {
+    mockIsSigningIn = true;
+    mockParams = { code: CODE, state: STATE };
+
+    const view = render(<AuthCallbackScreen />);
+    await act(async () => {});
+
+    mockIsSigningIn = false;
+    mockHasCachedShell = true;
+    view.rerender(<AuthCallbackScreen />);
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith('/');
+    });
+    expect(mockCompleteGoogleSignIn).not.toHaveBeenCalled();
   });
 
   test('shows a sign-in error for a callback with no authorization code', async () => {

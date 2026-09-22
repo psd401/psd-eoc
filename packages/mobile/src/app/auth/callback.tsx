@@ -28,12 +28,21 @@ function singleParam(value: string | string[] | undefined): string | null {
 /**
  * Landing screen for `psdeoc://auth/callback`.
  *
- * Android delivers the OIDC redirect as an OS intent. When `promptAsync` is
- * still listening it resolves the redirect in-process and this screen only has
- * to say so and get out of the way. When it is not — the app was cold-started
- * by the redirect, or the custom tab was handed off after a restart — the
- * authorization code would otherwise land on Expo Router's Unmatched Route and
- * be discarded. Here it is handed to the resume path instead.
+ * Android delivers the OIDC redirect as an OS intent, and the app's own scheme
+ * means the OS can route it here at the same moment `expo-web-browser` is
+ * waiting for it. Both outcomes of that race have to end in a session:
+ *
+ * - The browser session captured it. `promptAsync` exchanges the code, a
+ *   session exists, and this screen only has to get out of the way.
+ * - The OS routed it here first. Dismissing the custom tab resolves
+ *   `promptAsync` as cancelled, so the attempt reports that nothing was
+ *   created — while the authorization code is sitting in this screen's params.
+ *   Waiting for that attempt to finish and then spending the code is what
+ *   makes the outcome the same either way.
+ *
+ * Only an attempt that never saw a redirect may be resumed from here. Any
+ * other failure is the real answer and is shown as it stands, so a second
+ * attempt can never overwrite it with a worse message.
  *
  * iOS never reaches this screen in the normal flow, because
  * `ASWebAuthenticationSession` captures the redirect before the router sees it.
@@ -44,13 +53,18 @@ export default function AuthCallbackScreen() {
     error?: string | string[];
     state?: string | string[];
   }>();
-  const { completeGoogleSignIn, hasCachedShell, isSigningIn, signInError } =
-    useMobileAuth();
+  const {
+    completeGoogleSignIn,
+    hasCachedShell,
+    isSigningIn,
+    signInError,
+    signInRedirectUncaptured,
+  } = useMobileAuth();
   const router = useRouter();
 
   // Decided once, on mount. If a sign-in was already running when this screen
-  // appeared, that attempt owns the redirect and resuming would race it for a
-  // single-use authorization code.
+  // appeared, resuming straight away would race that attempt for a single-use
+  // authorization code, so this screen waits for it to finish first.
   const ownedByPromptRef = useRef<boolean | null>(null);
   ownedByPromptRef.current ??= isSigningIn;
   const ownedByPrompt = ownedByPromptRef.current;
@@ -66,17 +80,33 @@ export default function AuthCallbackScreen() {
   }, [router]);
 
   useEffect(() => {
-    if (ownedByPrompt) {
-      // Nothing to do but wait for the in-flight attempt to resolve.
-      if (!isSigningIn) {
-        leave();
-      }
-      return;
-    }
     if (startedRef.current) {
       return;
     }
-    startedRef.current = true;
+    if (ownedByPrompt) {
+      // Still running: it may yet be the one that captured this redirect.
+      if (isSigningIn) {
+        return;
+      }
+      startedRef.current = true;
+      if (hasCachedShell) {
+        // It captured the redirect and enrolled the device.
+        leave();
+        return;
+      }
+      if (!signInRedirectUncaptured) {
+        // It reached its own answer, so that answer stands.
+        if (signInError === null) {
+          leave();
+          return;
+        }
+        setSettled(true);
+        return;
+      }
+      // It ended without ever seeing a redirect. The code is here.
+    } else {
+      startedRef.current = true;
+    }
 
     const code = singleParam(params.code);
     const state = singleParam(params.state);
@@ -98,12 +128,15 @@ export default function AuthCallbackScreen() {
     });
   }, [
     completeGoogleSignIn,
+    hasCachedShell,
     isSigningIn,
     leave,
     ownedByPrompt,
     params.code,
     params.error,
     params.state,
+    signInError,
+    signInRedirectUncaptured,
   ]);
 
   // A resume that enrolled the device leaves immediately; there is nothing on
