@@ -76,8 +76,8 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('ships app/runtime 1.0.15 as embedded-only with no OTA routing', () => {
-    expect(appConfig.expo.version).toBe('1.0.15');
+  test('ships app/runtime 1.0.16 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.16');
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
       enabled: false,
@@ -173,10 +173,10 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'iOS and Android ship the same app from the same source at the same version.',
     );
-    expect(release).toContain('The current app/runtime is 1.0.15');
+    expect(release).toContain('The current app/runtime is 1.0.16');
     // The store record names the exact last submitted build, which trails the
     // current app/runtime whenever a bump has not yet been built.
-    expect(release).toContain('1.0.14/build 26 on iOS');
+    expect(release).toContain('1.0.16/build 31 on iOS');
     expect(compactRollback).toContain(
       'The current mobile profiles are embedded-only',
     );
@@ -305,7 +305,7 @@ describe('mobile distribution configuration', () => {
     }
     expect(readme).not.toContain('`ota-preview`:');
     expect(readme).toContain(
-      'Remote updates are disabled for app/runtime 1.0.15',
+      'Remote updates are disabled for app/runtime 1.0.16',
     );
     expect(compactReadme).toContain(
       'Ordinary `preview` must never be used for production-environment OTA verification',
@@ -358,14 +358,18 @@ describe('mobile distribution configuration', () => {
     expect(privacy).toContain('Status: `live-verified`');
     expect(privacy).toContain("configured production origin's `/privacy`");
     expect(privacy).toContain('returned HTTP 200');
-    expect(rowFor('Play app content and store record')).toContain(
-      'Status: `blocked`',
+    // The store record left `blocked` on 2026-09-22, when release 23 (1.0.16)
+    // and the staged declarations were sent for review. It stays unverified
+    // until Google answers. Matched against collapsed whitespace, because
+    // Prettier rewraps this prose whenever a sentence changes length.
+    const storeRecord = rowFor('Play app content and store record');
+    const compactStoreRecord = storeRecord.replace(/\s+/gu, ' ');
+    expect(storeRecord).toContain('Status: `configured-unverified`');
+    expect(compactStoreRecord).toContain(
+      'the Publishing overview reads "Changes in review"',
     );
-    expect(rowFor('Play app content and store record')).toContain(
-      '8/11 setup tasks complete',
-    );
-    expect(rowFor('Play app content and store record')).toContain(
-      'Data Safety is fully answered and saved as a draft',
+    expect(compactStoreRecord).toContain(
+      'Prior evidence: on 2026-08-26 Play showed 8/11 setup tasks complete',
     );
 
     for (const boundary of ['EAS Build', 'EAS Update', 'EAS Submit']) {
