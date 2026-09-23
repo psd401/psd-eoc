@@ -3779,9 +3779,6 @@ export class PsdEocStack extends Stack {
         'dark-scaled-to-zero',
       ).toString(),
     });
-    new CfnOutput(this, 'PushIntegrationTruth', {
-      value: 'mocked',
-    });
     new CfnOutput(this, 'SesIdentityArn', {
       value: emailIdentityArn,
     });
@@ -3805,20 +3802,6 @@ export class PsdEocStack extends Stack {
     });
     new CfnOutput(this, 'SesEmailEventDestinationManagement', {
       value: 'cloudformation',
-    });
-    new CfnOutput(this, 'SesIntegrationTruth', {
-      value: Fn.conditionIf(
-        shouldRunEmailWorker.logicalId,
-        'configured-awaiting-human-verification',
-        'configured-unverified',
-      ).toString(),
-    });
-    new CfnOutput(this, 'EmailChannelState', {
-      value: Fn.conditionIf(
-        shouldRunEmailWorker.logicalId,
-        'awaiting-human-verification',
-        'disabled',
-      ).toString(),
     });
     new CfnOutput(this, 'RuntimeRoleArn', {
       value: runtimeRole.roleArn,

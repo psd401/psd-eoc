@@ -3461,7 +3461,6 @@ describe('configured-unverified provider readiness boundary', () => {
         'DeploymentAccount',
         'DeploymentRegion',
         'DeploymentSourceSha',
-        'EmailChannelState',
         'EmailCallbackDeadLetterQueueArn',
         'EmailCallbackQueueArn',
         'EmailCallbackQueueUrl',
@@ -3486,7 +3485,6 @@ describe('configured-unverified provider readiness boundary', () => {
         'MonitoringDashboardName',
         'MonitoringDashboardUrl',
         'PushDeadLetterQueueArn',
-        'PushIntegrationTruth',
         'PushQueueArn',
         'PushQueueUrl',
         'PushWorkerDeploymentState',
@@ -3504,7 +3502,6 @@ describe('configured-unverified provider readiness boundary', () => {
         'SesFromAddress',
         'SesIdentityArn',
         'SesIdentityDomain',
-        'SesIntegrationTruth',
       ].sort(),
     );
     const serializedOutputs = JSON.stringify(outputs);
@@ -3521,20 +3518,13 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(asRecord(outputs.SesEmailEventDestinationManagement).Value).toBe(
       'cloudformation',
     );
-    expect(asRecord(outputs.SesIntegrationTruth).Value).toEqual({
-      'Fn::If': [
-        'ShouldRunEmailWorker',
-        'configured-awaiting-human-verification',
-        'configured-unverified',
-      ],
-    });
-    expect(asRecord(outputs.EmailChannelState).Value).toEqual({
-      'Fn::If': [
-        'ShouldRunEmailWorker',
-        'awaiting-human-verification',
-        'disabled',
-      ],
-    });
+    for (const retired of [
+      'EmailChannelState',
+      'PushIntegrationTruth',
+      'SesIntegrationTruth',
+    ]) {
+      expect(outputs).not.toHaveProperty(retired);
+    }
     expect(
       JSON.stringify(asRecord(outputs.DeploymentBootstrapImageDigest).Value),
     ).toContain('ApplicationImageDigestLookup');
