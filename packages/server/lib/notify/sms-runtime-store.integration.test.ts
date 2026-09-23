@@ -71,6 +71,7 @@ const describeWithDatabase =
 setDefaultTimeout(60_000);
 
 const FACILITY_ID = '00000000-0000-4000-8000-000000000001';
+const OTHER_FACILITY_ID = '00000000-0000-4000-8000-000000000002';
 const EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const CREATED_AT = '2026-08-26T12:00:00.000Z';
 const BATCH_CREATED_AT = '2026-08-26T12:00:00.500Z';
@@ -87,6 +88,12 @@ const fixture = Object.freeze({
   pagedSnapshotId: randomUUID(),
   smallRecipientId: randomUUID(),
   smallEndpointId: randomUUID(),
+  otherGroupSourceId: randomUUID(),
+  mixedSnapshotId: randomUUID(),
+  mixedRecipientId: randomUUID(),
+  mixedEndpointId: randomUUID(),
+  otherRecipientId: randomUUID(),
+  otherEndpointId: randomUUID(),
 });
 
 const pagedRecipients = Object.freeze(
@@ -109,6 +116,7 @@ let ownedDatabase: DisposableDatabase | undefined;
 let currentTime = Date.parse(CREATED_AT) + 1_000;
 let smallBundle: NotificationBundle | undefined;
 let pagedBundle: NotificationBundle | undefined;
+let mixedBundle: NotificationBundle | undefined;
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -129,6 +137,15 @@ function installedPagedBundle(): NotificationBundle {
     throw new Error('The paged SMS runtime fixture was not installed.');
   }
   return pagedBundle;
+}
+
+function installedMixedBundle(): NotificationBundle {
+  if (mixedBundle === undefined) {
+    throw new Error(
+      'The mixed-facility SMS runtime fixture was not installed.',
+    );
+  }
+  return mixedBundle;
 }
 
 function runtimeStore(
@@ -220,10 +237,18 @@ async function installStaffRoster(
       endpointId: string;
       phoneNumber: string;
       index: number;
+      groupSourceId?: string;
+    }>[];
+    sources?: readonly Readonly<{
+      groupSourceId: string;
+      facilityId: string;
     }>[];
   }>,
 ): Promise<void> {
   const capturedAt = new Date(VERIFIED_AT);
+  const sources = input.sources ?? [
+    { groupSourceId: fixture.groupSourceId, facilityId: FACILITY_ID },
+  ];
   await database.transaction(async (transaction) => {
     await transaction.insert(rosterSnapshots).values({
       id: input.snapshotId,
@@ -235,28 +260,24 @@ async function installStaffRoster(
       syncStartedAt: capturedAt,
       capturedAt,
     });
-    await transaction.insert(rosterSnapshotFacilities).values({
-      rosterSnapshotId: input.snapshotId,
-      facilityId: FACILITY_ID,
-    });
-    await transaction.insert(rosterSnapshotSources).values([
-      {
+    await transaction.insert(rosterSnapshotFacilities).values(
+      sources.map((source) => ({
         rosterSnapshotId: input.snapshotId,
-        population: 'staff',
-        groupSourceId: fixture.groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'building',
-        completionKind: 'expected',
-      },
-      {
-        rosterSnapshotId: input.snapshotId,
-        population: 'staff',
-        groupSourceId: fixture.groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'building',
-        completionKind: 'completed',
-      },
-    ]);
+        facilityId: source.facilityId,
+      })),
+    );
+    await transaction.insert(rosterSnapshotSources).values(
+      sources.flatMap((source) =>
+        (['expected', 'completed'] as const).map((completionKind) => ({
+          rosterSnapshotId: input.snapshotId,
+          population: 'staff' as const,
+          groupSourceId: source.groupSourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'building' as const,
+          completionKind,
+        })),
+      ),
+    );
     await transaction.insert(rosterRecipients).values(
       input.recipients.map((recipient) => ({
         id: recipient.recipientId,
@@ -272,7 +293,7 @@ async function installStaffRoster(
         rosterSnapshotId: input.snapshotId,
         recipientId: recipient.recipientId,
         population: 'staff' as const,
-        groupSourceId: fixture.groupSourceId,
+        groupSourceId: recipient.groupSourceId ?? fixture.groupSourceId,
         groupSourceKind: 'google-group' as const,
         groupPurpose: 'building' as const,
       })),
@@ -705,6 +726,20 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
           fixtureKey: null,
           createdAt: new Date(VERIFIED_AT),
         });
+        await transaction.insert(groupSources).values({
+          id: fixture.otherGroupSourceId,
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: OTHER_FACILITY_ID,
+          displayName: 'Synthetic SMS Runtime Other Staff',
+          active: true,
+          grantedRole: null,
+          membersCapturedAt: new Date(VERIFIED_AT),
+          googleGroupId: `synthetic-sms-runtime-${fixture.otherGroupSourceId}`,
+          email: `sms-runtime-group-${fixture.otherGroupSourceId}@example.invalid`,
+          fixtureKey: null,
+          createdAt: new Date(VERIFIED_AT),
+        });
         await transaction.insert(rosterSourceConfigurations).values({
           id: fixture.rosterConfigurationId,
           version: 1,
@@ -742,6 +777,35 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
         version: 2,
         recipients: pagedRecipients,
       });
+      // One number at this facility and one opted-in number that belongs to
+      // another school only, so this facility's audience holds one of the
+      // snapshot's two SMS endpoints.
+      await installStaffRoster(opened.db, {
+        snapshotId: fixture.mixedSnapshotId,
+        version: 3,
+        sources: [
+          { groupSourceId: fixture.groupSourceId, facilityId: FACILITY_ID },
+          {
+            groupSourceId: fixture.otherGroupSourceId,
+            facilityId: OTHER_FACILITY_ID,
+          },
+        ],
+        recipients: [
+          {
+            recipientId: fixture.mixedRecipientId,
+            endpointId: fixture.mixedEndpointId,
+            phoneNumber: '+12025550200',
+            index: 0,
+          },
+          {
+            recipientId: fixture.otherRecipientId,
+            endpointId: fixture.otherEndpointId,
+            phoneNumber: '+12025550201',
+            index: 1,
+            groupSourceId: fixture.otherGroupSourceId,
+          },
+        ],
+      });
       smallBundle = await installNotificationBundle(
         opened.db,
         fixture.smallSnapshotId,
@@ -751,6 +815,11 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
         opened.db,
         fixture.pagedSnapshotId,
         PAGED_ENDPOINT_COUNT,
+      );
+      mixedBundle = await installNotificationBundle(
+        opened.db,
+        fixture.mixedSnapshotId,
+        1,
       );
     } catch (error) {
       await closeAndDropDisposableDatabase(() => opened.close(), ownedDatabase);
@@ -767,6 +836,7 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     ownedDatabase = undefined;
     smallBundle = undefined;
     pagedBundle = undefined;
+    mixedBundle = undefined;
     await closeAndDropDisposableDatabase(
       opened === undefined ? undefined : () => opened.close(),
       owned,
@@ -1168,6 +1238,26 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
         cursor: 0,
       }),
     ).resolves.toEqual({ kind: 'expired' });
+  });
+
+  test('pages only the facility audience when the snapshot holds numbers outside it', async () => {
+    currentTime = Date.parse(CREATED_AT) + 1_000;
+    const resolution = await runtimeStore().resolveBatch({
+      operation: 'resolve-batch',
+      batch: installedMixedBundle().batch,
+      enqueuedAt: new Date(Date.parse(CREATED_AT) + 1_000).toISOString(),
+      cursor: 0,
+    });
+    if (resolution.kind !== 'ready') {
+      throw new Error('The mixed-facility SMS runtime page was unavailable.');
+    }
+    expect(resolution.nextCursor).toBeNull();
+    expect(
+      resolution.items.map((item) => [
+        item.attempt.recipientId,
+        item.attempt.endpointId,
+      ]),
+    ).toEqual([[fixture.mixedRecipientId, fixture.mixedEndpointId]]);
   });
 
   test('authorizes only the exact destination country and currently eligible endpoint', async () => {

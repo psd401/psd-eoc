@@ -35,6 +35,7 @@ import {
   smsRetrySchedules,
 } from '../../db/schema';
 import { loadRosterSnapshot } from '../capabilities/start';
+import { resolveAudience } from '../roster/resolve';
 import { batchHasCurrentLifecycle } from './batch-lifecycle';
 import {
   createDrizzleSmsPolicyStore,
@@ -280,12 +281,21 @@ async function stableSmsCandidateReferences(
   roster: Awaited<ReturnType<typeof loadRosterSnapshot>>,
 ): Promise<readonly SmsCandidateReference[]> {
   if (roster === null) throw new SmsRuntimeStoreError('BATCH_CONFLICT');
-  const references = roster.recipients.flatMap((recipient) =>
+  // The batch's endpoint count is its facility's audience, not the whole
+  // district snapshot, so the candidates must come from the same audience.
+  // Counting every number in the snapshot refused any batch whose audience
+  // left an opted-in number out: an isolated facility's events, or any school
+  // once a number outside its audience opts in.
+  const audience = resolveAudience({
+    facilityId: batch.facilityId,
+    rosterSnapshot: roster,
+  });
+  const references = audience.recipients.flatMap((recipient) =>
     recipient.endpoints.flatMap((endpoint) =>
       endpoint.channel === 'sms' && endpoint.status === 'active'
         ? [
             Object.freeze({
-              recipientId: recipient.id,
+              recipientId: recipient.recipientId,
               endpointId: endpoint.id,
             }),
           ]
