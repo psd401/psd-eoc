@@ -2961,9 +2961,7 @@ describe('write gates and reconciliation', () => {
 
   test('rejects live managed-group setting drift before a planned group patch', async () => {
     type GroupSettingDrift =
-      | 'hasAccessToAllBuilds'
-      | 'isInternalGroup'
-      | 'name';
+      'hasAccessToAllBuilds' | 'isInternalGroup' | 'name';
 
     class LiveGroupSettingDriftClient extends StatefulClient {
       armed = false;
@@ -3320,8 +3318,7 @@ describe('write gates and reconciliation', () => {
     ).toBe(3);
 
     const internalAttributes = client.groups[0]?.attributes as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     if (internalAttributes === undefined)
       throw new Error('Missing fixture group.');
     internalAttributes.feedbackEnabled = false;
@@ -3511,8 +3508,7 @@ describe('write gates and reconciliation', () => {
     } as const;
     const preview = await syncTestFlight(client, { ...options, apply: false });
     const attributes = client.groups[0]?.attributes as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     if (attributes === undefined) throw new Error('Missing fixture group.');
     attributes.feedbackEnabled = false;
     await expect(
@@ -5145,8 +5141,7 @@ describe('write gates and reconciliation', () => {
     for (const unsafeValue of [true, undefined] as const) {
       const client = new StatefulClient();
       const attributes = client.groups[0]?.attributes as
-        | Record<string, unknown>
-        | undefined;
+        Record<string, unknown> | undefined;
       if (attributes === undefined) throw new Error('Missing fixture group.');
       if (unsafeValue === undefined) delete attributes.hasAccessToAllBuilds;
       else attributes.hasAccessToAllBuilds = unsafeValue;
@@ -5284,8 +5279,7 @@ describe('write gates and reconciliation', () => {
   test('never PATCHes the create-only hasAccessToAllBuilds group attribute', async () => {
     const client = new StatefulClient();
     const internalAttributes = client.groups[0]?.attributes as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     if (internalAttributes === undefined) {
       throw new Error('Missing fixture group.');
     }
@@ -8766,10 +8760,7 @@ describe('write gates and reconciliation', () => {
 
   test('treats missing immediate created-tester related or linkage reciprocals as partial', async () => {
     type ReciprocalDrift =
-      | 'app-linkage'
-      | 'app-related'
-      | 'group-linkage'
-      | 'group-related';
+      'app-linkage' | 'app-related' | 'group-linkage' | 'group-related';
 
     class CreatedTesterReciprocalDriftClient extends StatefulClient {
       accepted = false;

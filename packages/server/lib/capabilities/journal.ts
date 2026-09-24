@@ -121,8 +121,7 @@ export interface LockedJournalEvent {
 }
 
 /** Journal-specific persistence added to the central capability transaction. */
-export interface JournalCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface JournalCapabilityTransaction extends CapabilityEngineTransaction {
   resolveEventFacilityId(eventId: string): Promise<string | null>;
   resolveAuthorDisplayName(actor: unknown): Promise<string | null>;
   lockEventForJournal(eventId: string): Promise<LockedJournalEvent | null>;
@@ -658,8 +657,7 @@ function rememberJournalReplayFacility(entryId: string, facilityId: string) {
   });
   while (journalReplayFacilityEvidence.size > JOURNAL_REPLAY_EVIDENCE_LIMIT) {
     const oldest = journalReplayFacilityEvidence.keys().next().value as
-      | string
-      | undefined;
+      string | undefined;
     if (oldest === undefined) {
       break;
     }
@@ -871,9 +869,7 @@ async function lockedJournalEvent(
 function assertJournalWriteState(
   event: Event,
   capabilityId:
-    | 'append-journal-entry'
-    | 'correct-journal-entry'
-    | 'redact-journal-entry',
+    'append-journal-entry' | 'correct-journal-entry' | 'redact-journal-entry',
 ): void {
   if (event.status === 'draft') {
     throw conflict('Journal posts require an activated event.');
@@ -885,9 +881,7 @@ function assertJournalWriteState(
 
 async function buildJournalEntry(
   capabilityId:
-    | 'append-journal-entry'
-    | 'correct-journal-entry'
-    | 'redact-journal-entry',
+    'append-journal-entry' | 'correct-journal-entry' | 'redact-journal-entry',
   input:
     | CapabilityInput<'append-journal-entry'>
     | CapabilityInput<'correct-journal-entry'>

@@ -107,10 +107,7 @@ function dateIso(value: Date | string): string {
 }
 
 type PaginationCollection =
-  | 'facilities'
-  | 'group-sources'
-  | 'neighborhood-versions'
-  | 'neighborhoods';
+  'facilities' | 'group-sources' | 'neighborhood-versions' | 'neighborhoods';
 
 interface KeysetCursor {
   readonly version: 1;

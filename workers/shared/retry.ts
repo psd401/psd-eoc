@@ -18,9 +18,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = Object.freeze({
 });
 
 export type ProviderFailureDisposition =
-  | 'safe-to-retry'
-  | 'terminal-failure'
-  | 'ambiguous';
+  'safe-to-retry' | 'terminal-failure' | 'ambiguous';
 
 /** Adapter error containing only a bounded code and optional safe digest. */
 export class ProviderDispatchError extends Error {

@@ -880,10 +880,7 @@ function issuedConfirmation(
   input: Readonly<{
     id: string;
     capabilityId:
-      | 'start-event'
-      | 'all-clear-event'
-      | 'reactivate-event'
-      | 'close-event';
+      'start-event' | 'all-clear-event' | 'reactivate-event' | 'close-event';
     actionIds: readonly (
       | 'start-real-incident'
       | 'send-real-notification'

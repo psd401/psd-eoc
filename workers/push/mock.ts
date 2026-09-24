@@ -32,10 +32,7 @@ function mockAccepted(attemptId: string): ExpoProviderOutcome {
 }
 
 export type MockExpoBehavior =
-  | 'accepted'
-  | 'device-not-registered'
-  | 'message-rate-exceeded'
-  | 'unknown';
+  'accepted' | 'device-not-registered' | 'message-rate-exceeded' | 'unknown';
 
 export interface MockExpoPushTransportOptions {
   readonly behaviors?: readonly MockExpoBehavior[];

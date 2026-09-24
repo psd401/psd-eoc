@@ -28,14 +28,13 @@ export const MEDIA_FACILITY_ROLLING_INTENT_LIMIT = 256;
 export const MEDIA_FACILITY_ROLLING_BYTE_LIMIT = 2 * 1_024 * 1_024 * 1_024;
 
 export type MediaUploadIntentStatus =
-  | 'pending-upload'
-  | 'completed'
-  | 'rejected'
-  | 'expired';
+  'pending-upload' | 'completed' | 'rejected' | 'expired';
 
 /** Server-only upload intent; storage keys are never returned to clients. */
-export interface StoredMediaUploadIntent
-  extends Omit<MediaUploadIntent, 'uploadMethod' | 'uploadUrl' | 'status'> {
+export interface StoredMediaUploadIntent extends Omit<
+  MediaUploadIntent,
+  'uploadMethod' | 'uploadUrl' | 'status'
+> {
   readonly storageKey: string;
   readonly status: MediaUploadIntentStatus;
 }

@@ -153,12 +153,7 @@ export interface PrivateReadGrant {
 
 /** Closed GuardDuty result vocabulary. Only `clean` permits completion. */
 export type MalwareScanStatus =
-  | 'pending'
-  | 'clean'
-  | 'threats'
-  | 'unsupported'
-  | 'access-denied'
-  | 'failed';
+  'pending' | 'clean' | 'threats' | 'unsupported' | 'access-denied' | 'failed';
 
 export interface MediaObjectStore {
   createRawUploadGrant(

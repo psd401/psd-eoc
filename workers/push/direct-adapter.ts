@@ -340,9 +340,7 @@ function throwFailure(value: ProviderFailure): never {
  * irreversible ledger claim; live authorization and endpoint eligibility are
  * rechecked after the claim immediately before the prepared provider call.
  */
-export class LedgeredDirectPushAdapter
-  implements AttemptIdempotentProviderAdapter
-{
+export class LedgeredDirectPushAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = DIRECT_PUSH_INTEGRATION_ID;
   public readonly provider: DirectPushProvider;

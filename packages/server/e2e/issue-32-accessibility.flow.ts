@@ -127,8 +127,7 @@ async function installSyntheticPhotoBridge(
   const uploadUrl = 'https://media.example.test/issue-32-upload';
   const readUrl = 'https://media.example.test/issue-32-ready';
   let uploadInput:
-    | ReturnType<typeof CreateMediaUploadIntentInputSchema.parse>
-    | undefined;
+    ReturnType<typeof CreateMediaUploadIntentInputSchema.parse> | undefined;
 
   await page.route('**/api/media/upload-intents', async (route) => {
     uploadIntentRequestCount += 1;

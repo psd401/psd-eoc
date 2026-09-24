@@ -59,9 +59,7 @@ export type EventBridgeRosterSyncEvent = z.infer<
 class RosterSyncRouteRequestError extends Error {
   public readonly status: 400 | 413 | 415;
   public readonly code:
-    | 'INVALID_EVENT'
-    | 'PAYLOAD_TOO_LARGE'
-    | 'UNSUPPORTED_MEDIA_TYPE';
+    'INVALID_EVENT' | 'PAYLOAD_TOO_LARGE' | 'UNSUPPORTED_MEDIA_TYPE';
 
   public constructor(
     status: 400 | 413 | 415,

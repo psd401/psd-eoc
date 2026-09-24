@@ -12,13 +12,13 @@
     "typecheck": "tsc --noEmit --project tsconfig.json && bun run synth:example"
   },
   "dependencies": {
-    "@aws-sdk/client-sesv2": "3.883.0",
-    "@aws-sdk/client-sts": "3.883.0",
+    "@aws-sdk/client-sesv2": "3.1132.0",
+    "@aws-sdk/client-sts": "3.1132.0",
     "@psd-eoc/contracts": "workspace:*",
-    "aws-cdk-lib": "2.263.0",
+    "aws-cdk-lib": "2.269.0",
     "constructs": "10.8.1"
   },
   "devDependencies": {
-    "aws-cdk": "2.1135.0"
+    "aws-cdk": "2.1141.0"
   }
 }

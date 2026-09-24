@@ -96,8 +96,7 @@ export class PushResponseController {
     this.seenResponseIds.add(responseId);
     if (this.seenResponseIds.size <= MAX_SEEN_RESPONSES) return;
     const oldest = this.seenResponseIds.values().next().value as
-      | string
-      | undefined;
+      string | undefined;
     if (oldest !== undefined) this.seenResponseIds.delete(oldest);
   }
 

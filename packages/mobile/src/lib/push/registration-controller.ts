@@ -11,10 +11,7 @@ import {
 } from '@psd-eoc/contracts';
 
 type PushRegistrationStage =
-  | 'assemble'
-  | 'expo-token'
-  | 'server'
-  | 'service-environment';
+  'assemble' | 'expo-token' | 'server' | 'service-environment';
 
 /** At most this much of a provider or transport error is repeated back. */
 const FAILURE_DETAIL_LIMIT = 160;

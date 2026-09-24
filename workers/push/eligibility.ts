@@ -147,8 +147,7 @@ function parseProductionOptions(
     const serviceOrigin = descriptors.serviceOrigin?.value as unknown;
     const bearerToken = descriptors.bearerToken?.value as unknown;
     const timeoutMilliseconds = descriptors.timeoutMilliseconds?.value as
-      | number
-      | undefined;
+      number | undefined;
     if (
       typeof serviceOrigin !== 'string' ||
       typeof bearerToken !== 'string' ||
@@ -218,9 +217,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 }
 
 /** Worker-only client that sends a digest, never the push destination. */
-export class PushEndpointEligibilityClient
-  implements PushEndpointEligibilityChecker
-{
+export class PushEndpointEligibilityClient implements PushEndpointEligibilityChecker {
   readonly #endpoint: string;
   readonly #token: string;
   readonly #fetch: PushEligibilityFetch;

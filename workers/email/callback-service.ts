@@ -37,9 +37,7 @@ export type EmailCallbackFetch = (
 export class EmailCallbackServiceError extends Error {
   public constructor(
     public readonly code:
-      | 'FEATURE_DISABLED'
-      | 'INVALID_CONFIGURATION'
-      | 'QUEUE_MESSAGE_INVALID',
+      'FEATURE_DISABLED' | 'INVALID_CONFIGURATION' | 'QUEUE_MESSAGE_INVALID',
   ) {
     super('The email callback service is unavailable.');
     this.name = 'EmailCallbackServiceError';

@@ -32,8 +32,7 @@ export interface PendingPhotoSelectionOwner {
 }
 
 export type PendingPhotoCleanupResult =
-  | 'discarded-uncommitted'
-  | 'released-committed';
+  'discarded-uncommitted' | 'released-committed';
 
 interface JournalRecord<Value> {
   readonly slot: JournalSlot;
@@ -1237,9 +1236,7 @@ type ParsedPickerResult =
 
 function parsePickerResult(
   result:
-    | ImagePicker.ImagePickerResult
-    | ImagePicker.ImagePickerErrorResult
-    | null,
+    ImagePicker.ImagePickerResult | ImagePicker.ImagePickerErrorResult | null,
 ): ParsedPickerResult {
   if (result === null) return Object.freeze({ kind: 'absent' });
   if ('canceled' in result && result.canceled) {

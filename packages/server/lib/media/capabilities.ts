@@ -170,8 +170,7 @@ async function uploadIntent(
 ): Promise<ResolvedMediaUploadIntent> {
   const key = `${lock ? LOCKED_INTENT_CACHE_PREFIX : INTENT_CACHE_PREFIX}${uploadIntentId}`;
   const cached = context.cache.get(key) as
-    | ResolvedMediaUploadIntent
-    | undefined;
+    ResolvedMediaUploadIntent | undefined;
   if (cached !== undefined) {
     return cached;
   }
@@ -406,8 +405,7 @@ function rememberMediaReplayFacility(
     mediaReplayFacilityEvidence.size > MEDIA_REPLAY_FACILITY_EVIDENCE_LIMIT
   ) {
     const oldest = mediaReplayFacilityEvidence.keys().next().value as
-      | string
-      | undefined;
+      string | undefined;
     if (oldest === undefined) break;
     mediaReplayFacilityEvidence.delete(oldest);
   }

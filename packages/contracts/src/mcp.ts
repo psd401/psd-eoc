@@ -26,21 +26,37 @@ export const McpMessagePhaseSchema = z.enum([
 /** Safe agent-facing message phase inferred from its schema. */
 export type McpMessagePhase = z.infer<typeof McpMessagePhaseSchema>;
 
-const pushWordingSchema = PushMessageTemplateSchema.unwrap()
-  .pick({ title: true, body: true })
-  .extend({ channel: z.literal('push') })
+// Built from each template's field schemas rather than `.pick()`: the
+// templates carry refinements, which `.pick()` would silently drop (and zod
+// 4.6 refuses to drop). The wording fields are validated here exactly as
+// before; the templates' cross-field refinements never applied to a
+// wording-only replacement.
+const pushTemplateShape = PushMessageTemplateSchema.unwrap().shape;
+const pushWordingSchema = z
+  .object({
+    title: pushTemplateShape.title,
+    body: pushTemplateShape.body,
+    channel: z.literal('push'),
+  })
   .strict()
   .readonly();
 
-const emailWordingSchema = EmailMessageTemplateSchema.unwrap()
-  .pick({ subject: true, textBody: true })
-  .extend({ channel: z.literal('email') })
+const emailTemplateShape = EmailMessageTemplateSchema.unwrap().shape;
+const emailWordingSchema = z
+  .object({
+    subject: emailTemplateShape.subject,
+    textBody: emailTemplateShape.textBody,
+    channel: z.literal('email'),
+  })
   .strict()
   .readonly();
 
-const smsWordingSchema = SmsMessageTemplateSchema.unwrap()
-  .pick({ body: true })
-  .extend({ channel: z.literal('sms') })
+const smsTemplateShape = SmsMessageTemplateSchema.unwrap().shape;
+const smsWordingSchema = z
+  .object({
+    body: smsTemplateShape.body,
+    channel: z.literal('sms'),
+  })
   .strict()
   .readonly();
 

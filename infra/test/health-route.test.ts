@@ -1006,8 +1006,7 @@ describe('production deep health reads', () => {
     let adminAttempts = 0;
     let sessionAttempts = 0;
     let releaseQueuedAdmin:
-      | ((result: typeof healthyResult) => void)
-      | undefined;
+      ((result: typeof healthyResult) => void) | undefined;
     const runtimeDependencies = createRuntimeDeepHealthDependencies(
       runtimeEnvironment(),
       {
@@ -1065,8 +1064,7 @@ describe('production deep health reads', () => {
     let adminAttempts = 0;
     let sessionAttempts = 0;
     let releaseQueuedAdmin:
-      | ((result: typeof healthyResult) => void)
-      | undefined;
+      ((result: typeof healthyResult) => void) | undefined;
     const runtimeDependencies = createRuntimeDeepHealthDependencies(
       runtimeEnvironment(),
       {

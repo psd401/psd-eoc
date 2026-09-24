@@ -10,9 +10,8 @@ mock.module('@aws-sdk/client-cloudwatch', () => ({
   PutMetricDataCommand: class PutMetricDataCommand {},
 }));
 
-const { buildMetrics, collectOperationalMetrics, metricBucket } = await import(
-  '../lambda/metrics-collector/index.mjs'
-);
+const { buildMetrics, collectOperationalMetrics, metricBucket } =
+  await import('../lambda/metrics-collector/index.mjs');
 
 const schedule = Object.freeze({
   'detail-type': 'Scheduled Event',
@@ -83,8 +82,7 @@ describe('operational collector runtime boundaries', () => {
       ({ MetricName }) => MetricName === 'DeliveryStateCount',
     );
     const attemptedDimensions = attempted?.Dimensions as
-      | ReadonlyArray<Readonly<{ Name: string; Value: string }>>
-      | undefined;
+      ReadonlyArray<Readonly<{ Name: string; Value: string }>> | undefined;
     expect(
       attemptedDimensions?.[0]?.Value === 'attempted' ? attempted?.Value : null,
     ).toBe(1);

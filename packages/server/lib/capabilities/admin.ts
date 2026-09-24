@@ -68,8 +68,7 @@ export interface AdminQueryMetadata {
  * capability engine and call {@link requireAdminCapabilityAuthorization} from
  * their facility resolver.
  */
-export interface AdminCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface AdminCapabilityTransaction extends CapabilityEngineTransaction {
   readonly database: AdminQueryDatabase;
   assertAuditRequestAvailable(requestId: string): Promise<void>;
   requireAdministrator(actor: Actor): void;

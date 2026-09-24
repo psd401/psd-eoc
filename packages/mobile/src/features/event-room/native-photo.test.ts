@@ -9,10 +9,7 @@ const decoder = new TextDecoder();
 const files = new Map<string, Uint8Array>();
 
 type MoveFault =
-  | 'after-delete'
-  | 'after-move'
-  | 'after-move-source-left'
-  | null;
+  'after-delete' | 'after-move' | 'after-move-source-left' | null;
 let moveFault: MoveFault = null;
 let uuidCounter = 1;
 let launchResult: unknown = { canceled: true, assets: null };
@@ -243,9 +240,8 @@ mock.module('expo-image-picker', () => ({
   },
 }));
 
-const { NativePhotoDraftStorage, uploadPrivatePhoto } = await import(
-  './native-photo'
-);
+const { NativePhotoDraftStorage, uploadPrivatePhoto } =
+  await import('./native-photo');
 
 const ids = {
   draft: '00000000-0000-4000-8000-000000000701',

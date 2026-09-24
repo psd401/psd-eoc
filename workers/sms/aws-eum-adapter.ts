@@ -172,8 +172,7 @@ export interface AwsEumSmsLedgerOutcomeCompletion {
 }
 
 export type AwsEumSmsLedgerCompletion =
-  | AwsEumSmsLedgerErrorCompletion
-  | AwsEumSmsLedgerOutcomeCompletion;
+  AwsEumSmsLedgerErrorCompletion | AwsEumSmsLedgerOutcomeCompletion;
 
 export type AwsEumSmsLedgerClaim =
   | Readonly<{ kind: 'acquired'; leaseToken: string }>
@@ -879,8 +878,7 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
     // awaited work between this decision and the single provider wire attempt.
     const authorizationUnavailable = async (
       code:
-        | 'AWS_EUM_AUTHORIZATION_UNAVAILABLE'
-        | 'AWS_EUM_AUTHORIZATION_EXPIRED',
+        'AWS_EUM_AUTHORIZATION_UNAVAILABLE' | 'AWS_EUM_AUTHORIZATION_EXPIRED',
     ): Promise<never> => {
       const failure = new ProviderDispatchError(code, 'safe-to-retry');
       await complete(errorCompletion(failure));

@@ -51,9 +51,7 @@ export interface EmailServiceConfiguration {
 export class EmailServiceError extends Error {
   public constructor(
     public readonly code:
-      | 'FEATURE_DISABLED'
-      | 'INVALID_CONFIGURATION'
-      | 'QUEUE_MESSAGE_INVALID',
+      'FEATURE_DISABLED' | 'INVALID_CONFIGURATION' | 'QUEUE_MESSAGE_INVALID',
   ) {
     super('The email service is unavailable.');
     this.name = 'EmailServiceError';

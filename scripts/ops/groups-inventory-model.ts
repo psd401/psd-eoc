@@ -383,10 +383,7 @@ export type GoogleBuildingGroupSource = Extract<
 > &
   Readonly<{ googleGroupId: string }>;
 export type ReviewDecision =
-  | 'pending'
-  | 'confirmed'
-  | 'rejected'
-  | 'intentionally-unmapped';
+  'pending' | 'confirmed' | 'rejected' | 'intentionally-unmapped';
 export type MatchOutcome = 'strong-candidate' | 'uncertain' | 'missing';
 
 export interface CloudGroup {

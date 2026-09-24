@@ -342,8 +342,7 @@ async function wrapperCloseProbe(
         readonly connectCallbacksAfterWait: number;
         readonly connectCallbacksAtInvocation: number;
         readonly pendingQueryOutcome:
-          | 'CONNECTION_DESTROYED'
-          | 'CONNECTION_ENDED';
+          'CONNECTION_DESTROYED' | 'CONNECTION_ENDED';
         readonly postCloseCode: 'CONNECTION_ENDED';
         readonly reconnectDurations: readonly number[];
       }

@@ -3025,8 +3025,7 @@ export class PsdEocStack extends Stack {
       }),
     );
     const mediaScanPolicy = mediaScanRole.node.tryFindChild('DefaultPolicy') as
-      | iam.Policy
-      | undefined;
+      iam.Policy | undefined;
     if (mediaScanPolicy !== undefined) {
       (
         mediaScanPolicy.node.defaultChild as iam.CfnPolicy

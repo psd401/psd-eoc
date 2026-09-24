@@ -1062,9 +1062,7 @@ const WHOLE_BUILDING_WORKFORCE_MARKERS = new Set([
 ]);
 
 export type WholeBuildingFieldState =
-  | 'facility'
-  | 'facility-workforce'
-  | 'invalid';
+  'facility' | 'facility-workforce' | 'invalid';
 
 const NON_DISTINCTIVE_AUTOMATIC_FACILITY_ALIASES = new Set([
   ...WHOLE_BUILDING_MARKERS,

@@ -89,8 +89,7 @@ export interface TrustedCapabilityInvocation {
   readonly actor: Actor;
   /** Special authenticated evidence for the two pre-session capabilities. */
   readonly principal?:
-    | PreSessionOidcPrincipal
-    | VerifiedCurrentRefreshCredential;
+    PreSessionOidcPrincipal | VerifiedCurrentRefreshCredential;
   readonly principalKind?: CapabilityPrincipalKind;
   readonly source: InvocationSource;
   readonly scope: CapabilityScope;
@@ -100,9 +99,7 @@ export interface TrustedCapabilityInvocation {
   readonly mutation: Readonly<{
     idempotencyKey: string;
     transport:
-      | MutationTransport
-      | OidcCompletionTransport
-      | SessionRefreshTransport;
+      MutationTransport | OidcCompletionTransport | SessionRefreshTransport;
     humanConfirmationId: string | null;
   }> | null;
 }

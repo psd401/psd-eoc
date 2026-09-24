@@ -18,8 +18,7 @@ import {
 } from '../capabilities/engine';
 
 export type PreparedActivationCapabilityId =
-  | 'prepare-activation'
-  | 'get-prepared-activation';
+  'prepare-activation' | 'get-prepared-activation';
 
 export interface PersistPreparedActivationInput {
   readonly preview: ActivationPreview;
@@ -28,8 +27,7 @@ export interface PersistPreparedActivationInput {
 }
 
 /** Persistence used by the canonical prepared-activation capability handlers. */
-export interface PreparedActivationCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface PreparedActivationCapabilityTransaction extends CapabilityEngineTransaction {
   getActivationPreview(
     activationPreviewId: string,
   ): Promise<ActivationPreview | null>;

@@ -78,8 +78,7 @@ export interface SesSendLedgerClaimRequest {
   readonly workItem: WorkerAttemptWorkItem;
 }
 
-export interface SesSendLedgerCompleteRequest
-  extends SesSendLedgerClaimRequest {
+export interface SesSendLedgerCompleteRequest extends SesSendLedgerClaimRequest {
   readonly leaseToken: string;
   readonly outcome: ProviderSendOutcome;
 }
@@ -111,8 +110,7 @@ export interface SesV2EmailAdapterOptions {
 }
 
 export type SesV2EmailAdapterErrorCode =
-  | 'INVALID_CONFIGURATION'
-  | 'INVALID_LEDGER_CLAIM';
+  'INVALID_CONFIGURATION' | 'INVALID_LEDGER_CLAIM';
 
 /** Safe configuration failure that never includes credentials or addresses. */
 export class SesV2EmailAdapterError extends Error {

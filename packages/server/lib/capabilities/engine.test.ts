@@ -223,9 +223,7 @@ class MemoryCapabilityTransaction implements CapabilityEngineTransaction {
   }
 }
 
-class MemoryCapabilityStore
-  implements CapabilityEngineStore<MemoryCapabilityTransaction>
-{
+class MemoryCapabilityStore implements CapabilityEngineStore<MemoryCapabilityTransaction> {
   private state: MemoryState = {
     idempotency: new Map(),
     confirmations: new Map(),

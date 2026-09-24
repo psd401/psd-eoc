@@ -104,8 +104,7 @@ export type AttemptExecutionRequest = z.infer<
 export interface AttemptExecutionRouteDependencies {
   readonly readExpectedBearerToken: () => string;
   readonly openStore: () =>
-    | AttemptExecutionStore
-    | Promise<AttemptExecutionStore>;
+    AttemptExecutionStore | Promise<AttemptExecutionStore>;
 }
 
 export type AttemptExecutionRouteHandler = (

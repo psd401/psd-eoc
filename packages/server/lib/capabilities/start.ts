@@ -104,8 +104,7 @@ const ROSTER_QUERY_LIMITS = Object.freeze({
 });
 
 /** Persistence boundary for the two query capabilities owned by start flow. */
-export interface StartFlowCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface StartFlowCapabilityTransaction extends CapabilityEngineTransaction {
   listFacilities(
     input: CapabilityInput<'list-facilities'>,
     scope: CapabilityScope,

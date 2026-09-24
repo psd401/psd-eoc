@@ -563,7 +563,7 @@ export function parseSubmitOptions(
   let confirmedRegion: string | undefined;
   let confirmation: string | undefined;
 
-  for (let index = 0; index < args.length; ) {
+  for (let index = 0; index < args.length;) {
     const argument = args[index];
     if (argument === '--submit') {
       submit = true;
@@ -612,7 +612,7 @@ export function parseStatusOptions(
   let definitions: RegistrationKind | undefined;
   let validateData: RegistrationKind | undefined;
 
-  for (let index = 0; index < args.length; ) {
+  for (let index = 0; index < args.length;) {
     const argument = args[index];
     if (argument === '--check') {
       check = true;
@@ -1078,14 +1078,12 @@ async function withExclusiveSubmitLock<T>(
     try {
       await unlink(lockPath);
     } catch (error) {
-      if (
-        !(
-          typeof error === 'object' &&
-          error !== null &&
-          'code' in error &&
-          error.code === 'ENOENT'
-        )
-      ) {
+      if (!(
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'ENOENT'
+      )) {
         failures.push(error);
       }
     }

@@ -1,8 +1,5 @@
 export type AuthFailureKind =
-  | 'configuration'
-  | 'invalid-response'
-  | 'offline'
-  | 'rejected';
+  'configuration' | 'invalid-response' | 'offline' | 'rejected';
 
 /** Bounded, credential-free error safe to render in the native client. */
 export class MobileAuthError extends Error {

@@ -25,10 +25,7 @@ import {
 const ANNOUNCEMENT_BATCH_MILLISECONDS = 5_000;
 
 export type ConnectionState =
-  | 'loading'
-  | 'connected'
-  | 'reconnecting'
-  | 'offline';
+  'loading' | 'connected' | 'reconnecting' | 'offline';
 
 interface EventRoomSyncOptions {
   readonly event: Event;

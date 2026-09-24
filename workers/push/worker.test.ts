@@ -158,13 +158,9 @@ class ConcurrentMutationExecutionStore implements AttemptExecutionStore {
   #releaseBarrier: (() => void) | undefined;
   #markFirstRequestObserved: (() => void) | undefined;
   #firstRequest:
-    | AttemptExecutionLookupRequest
-    | AttemptExecutionClaimRequest
-    | undefined;
+    AttemptExecutionLookupRequest | AttemptExecutionClaimRequest | undefined;
   #secondRequest:
-    | AttemptExecutionLookupRequest
-    | AttemptExecutionClaimRequest
-    | undefined;
+    AttemptExecutionLookupRequest | AttemptExecutionClaimRequest | undefined;
 
   public constructor(private readonly phase: 'lookup' | 'claim') {
     this.#barrier = new Promise((resolve) => {
@@ -368,9 +364,7 @@ class CorruptProviderExpoAdapter implements AttemptIdempotentProviderAdapter {
   }
 }
 
-class CorruptNonSuccessReferenceAdapter
-  implements AttemptIdempotentProviderAdapter
-{
+class CorruptNonSuccessReferenceAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push' as const;
   public readonly provider = MOCK_EXPO_PUSH_PROVIDER;

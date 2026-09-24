@@ -42,8 +42,7 @@ const environment = {
 
 let connection: PostgresDatabaseConnection | undefined;
 let disposable:
-  | Awaited<ReturnType<typeof createDisposableDatabase>>
-  | undefined;
+  Awaited<ReturnType<typeof createDisposableDatabase>> | undefined;
 
 function database(): PostgresDatabaseConnection['db'] {
   if (connection === undefined) throw new Error('no database');

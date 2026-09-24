@@ -168,8 +168,7 @@ export interface EmailEndpointPolicyQuery {
 }
 
 /** Destination-free current lifecycle evidence. */
-export interface EmailEndpointPolicyEvidence
-  extends EmailEndpointPolicyCandidate {
+export interface EmailEndpointPolicyEvidence extends EmailEndpointPolicyCandidate {
   readonly status: EndpointStatus;
 }
 
@@ -467,9 +466,7 @@ export type OutboxClaimResult =
 
 /** Durable outcome after a queue failure is reconciled against the lease. */
 export type OutboxFailureDisposition =
-  | 'retry-scheduled'
-  | 'terminal-failure'
-  | 'stale-claim';
+  'retry-scheduled' | 'terminal-failure' | 'stale-claim';
 
 /** Persistence boundary kept small for deterministic crash and race tests. */
 export interface OutboxDispatcherStore {

@@ -24,8 +24,7 @@ export const EXPO_DRILL_CATEGORY_ID = 'PSD_EOC_DRILL' as const;
 export const EXPO_ANDROID_CHANNEL_ID = 'eoc-alerts' as const;
 
 export type ExpoCategoryId =
-  | typeof EXPO_INCIDENT_CATEGORY_ID
-  | typeof EXPO_DRILL_CATEGORY_ID;
+  typeof EXPO_INCIDENT_CATEGORY_ID | typeof EXPO_DRILL_CATEGORY_ID;
 
 /** Exact provider payload derived only from canonical rendered worker work. */
 export interface ExpoPushMessage {
@@ -233,8 +232,7 @@ function boundedArrayLength(value: unknown, maximum: number): number | null {
 }
 
 type ArrayElement =
-  | Readonly<{ kind: 'value'; value: unknown }>
-  | Readonly<{ kind: 'invalid' }>;
+  Readonly<{ kind: 'value'; value: unknown }> | Readonly<{ kind: 'invalid' }>;
 
 function ownArrayElement(value: unknown, index: number): ArrayElement {
   try {

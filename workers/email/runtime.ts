@@ -47,9 +47,7 @@ export interface SesEmailRuntimeOptions {
 }
 
 export type SesEmailRuntimeErrorCode =
-  | 'INVALID_CONFIGURATION'
-  | 'INVOCATION_UNVERIFIED'
-  | 'FEATURE_DISABLED';
+  'INVALID_CONFIGURATION' | 'INVOCATION_UNVERIFIED' | 'FEATURE_DISABLED';
 
 export class SesEmailRuntimeError extends Error {
   public constructor(public readonly code: SesEmailRuntimeErrorCode) {
