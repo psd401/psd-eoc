@@ -1,15 +1,18 @@
 # Configuration and deployment index
 
 This is the current index of portable tenant configuration and direct CDK
-deployment parameters. `infra/cdk.json` is the checked-in tenant manifest for this
-deployment, Peninsula School District's. A district that forks the repository
-replaces every `psdEoc:*` value in it, from the application origin and hosted
-zone to the facility list, before its first synthesis; nothing in the
-manifest is generic. `infra/bin/synthesize-example.ts` replaces its identity with a
-reserved second-district fixture to prove the stack is portable without cloud
-credentials or provider calls.
+deployment parameters. Tenant configuration is split across two files in
+`infra/`. `cdk.json` is committed and holds only what any district can share:
+CDK feature flags, the threat list, and the synthetic test groups. Everything
+that identifies the operating district lives in git-ignored `cdk.local.json`.
+The committed `cdk.local.example.json` lists every local key with a synthetic
+"Example School District" tenant; a district copies it to `cdk.local.json` and
+replaces every value before its first synthesis. `infra/bin/synthesize-example.ts`
+builds a reserved second-district fixture to prove the stack is portable without
+cloud credentials or provider calls.
 
-The documentation contract compares the marked lists below with the manifest;
+The documentation contract compares the marked lists below with the keys in
+`cdk.json` and `cdk.local.example.json`;
 changing a key in code without updating this index fails `bun run verify:docs`.
 
 ## Tenant manifest: CDK context
@@ -17,10 +20,18 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 <!-- docs-contract:cdk-context:start -->
 
 - `psdEoc:applicationOrigin`
+- `psdEoc:awsAccount`
 - `psdEoc:awsAccountAlias`
+- `psdEoc:awsOperatorProfile`
 - `psdEoc:awsRegion`
+- `psdEoc:awsSsoStartUrl`
 - `psdEoc:displayTimeZone`
 - `psdEoc:facilities`
+- `psdEoc:gcpBillingAccount`
+- `psdEoc:gcpOrganizationId`
+- `psdEoc:gcpProjectId`
+- `psdEoc:gcpTerraformAdminEmail`
+- `psdEoc:gcpTerraformStateBucket`
 - `psdEoc:hostedDomain`
 - `psdEoc:hostedZoneId`
 - `psdEoc:iosBundleId`
@@ -31,6 +42,7 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:sesFromAddress`
 - `psdEoc:sesIdentityDomain`
 - `psdEoc:smsSupportEmail`
+- `psdEoc:smsSupportPhone`
 - `psdEoc:sourceRepositoryUrl`
 - `psdEoc:syntheticGroups`
 - `psdEoc:threats`
@@ -39,30 +51,37 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 
 ### Local tenant context
 
-`infra/cdk.local.json` carries the manifest keys this deployment keeps out of
-the public repository. Git ignores it; `infra/src/tenant-context.ts` merges it
-over `cdk.json` for the CDK app and for the operator scripts under
-`infra/src/ops`, `infra/gcp/scripts`, and `scripts/ops`. It holds:
+`infra/cdk.local.json` carries every key above except `psdEoc:syntheticGroups`
+and `psdEoc:threats`, which stay in `cdk.json`. Git ignores it;
+`infra/src/tenant-context.ts` merges it with `cdk.json` for the CDK app and for
+the operator scripts under `infra/src/ops`, `infra/gcp/scripts`, and
+`scripts/ops`. Start from `infra/cdk.local.example.json`. Besides the stack's
+identity, target, sender, and facility keys, it holds:
 
 - `psdEoc:awsAccount` — the 12-digit deployment account
 - `psdEoc:smsSupportPhone` — the E.164 support number in SMS consent copy
-- `psdEoc:gcpBillingAccount` — the Google Cloud billing account in canonical
-  6-6-6 form; only the GCP operator tooling under `infra/gcp` reads it, and it
-  passes the value to both Terraform roots as a variable
+- `psdEoc:awsOperatorProfile` and `psdEoc:awsSsoStartUrl` — the AWS CLI profile
+  and IAM Identity Center start URL the GCP operator tooling requires
+- `psdEoc:gcpBillingAccount`, `psdEoc:gcpOrganizationId`, `psdEoc:gcpProjectId`,
+  `psdEoc:gcpTerraformStateBucket`, and `psdEoc:gcpTerraformAdminEmail` — the
+  Google Cloud identity only the tooling under `infra/gcp` reads; it passes
+  them to both Terraform roots as variables and the state bucket as
+  `-backend-config`
 
 Each key lives in exactly one file: the CDK app refuses to run when `cdk.json`
 or a `-c` flag overrides a local key, and the merged reader refuses a key
 defined in both, so the deployed stack and the operator scripts cannot
 disagree. Synthesis and deployment fail without the file because
-`readDeploymentTarget` and `readDeploymentIdentity` require both keys. CI
-never has it: it synthesizes the
-second-district fixture instead. Operator scripts treat a missing file as the
+`readDeploymentTarget` and `readDeploymentIdentity` require its keys. CI never
+has it: the stack tests read `cdk.local.example.json` and CI synthesizes the
+second-district fixture. AWS operator scripts treat a missing file as the
 reserved account `000000000000`, which matches no live credential, so they
-refuse every AWS mutation until the file exists. `infra/cdk.context.json`, the
-context cache CDK may write beside it, is ignored for the same reason: its
-keys embed the account. The stack names its availability zones directly, so
-nothing depends on that cache. `infra/gcp/aws.config` follows the same
-pattern; copy `aws.config.example` and fill in the account.
+refuse every AWS mutation until the file exists; the GCP tooling refuses to
+start. `infra/cdk.context.json`, the context cache CDK may write beside it, is
+ignored for the same reason: its keys embed the account. The stack names its
+availability zones directly, so nothing depends on that cache.
+`infra/gcp/aws.config` follows the same pattern; copy `aws.config.example` and
+fill in the account.
 
 Identity, target account/region, facility data, sender identity, and runbook
 base URL are configuration. `readDeploymentTarget` and

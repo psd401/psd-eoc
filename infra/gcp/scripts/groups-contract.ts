@@ -5,10 +5,14 @@ import {
   validateRosterReaderResourcePolicy,
 } from './project-policy';
 import { assertDefaultTerraformWorkspace, runCommand } from './runtime';
+import {
+  HOSTED_DOMAIN,
+  PROJECT_ID,
+  ROSTER_READER_EMAIL,
+  STAFF_EMAIL_PATTERN,
+} from './tenant';
 
-export const PROJECT_ID = 'psd401-eoc';
-export const ROSTER_READER_EMAIL =
-  'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com';
+export { PROJECT_ID, ROSTER_READER_EMAIL };
 export const GROUPS_READER_ROLE = '_GROUPS_READER_ROLE';
 export const READONLY_GROUPS_SCOPE =
   'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
@@ -26,12 +30,9 @@ export interface GroupsReaderContract extends TerraformGroupsReaderContract {
 
 export function normalizeApprovedStaffGroup(value: string | undefined): string {
   const normalized = value?.toLowerCase();
-  if (
-    normalized === undefined ||
-    !/^[a-z0-9._%+-]+@psd401\.net$/u.test(normalized)
-  ) {
+  if (normalized === undefined || !STAFF_EMAIL_PATTERN.test(normalized)) {
     throw new Error(
-      'An approved staff-only psd401.net test group is required.',
+      `An approved staff-only ${HOSTED_DOMAIN} test group is required.`,
     );
   }
   return normalized;

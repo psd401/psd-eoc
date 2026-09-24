@@ -1384,7 +1384,7 @@ describeWithDatabase('event-type database versioning', () => {
         eventKind: drill ? 'drill' : 'incident',
         templates: item.latestVersion.templates.activation,
         variables: {
-          site: 'Harbor Ridge High School',
+          site: 'Cedar Valley High School',
           eventType: item.latestVersion.name,
           threat: 'Intruder',
           startTime: '2026-08-08T16:30:00.000Z',

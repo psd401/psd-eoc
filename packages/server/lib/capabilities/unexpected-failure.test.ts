@@ -43,9 +43,9 @@ describe('unexpected capability failure logging', () => {
       'The capability could not be completed.',
       500,
       true,
-      new Error('recipient hagelk@psd401.net was rejected'),
+      new Error('recipient staff.member@anytownschools.org was rejected'),
     );
-    expect(error.message).not.toContain('psd401.net');
+    expect(error.message).not.toContain('anytownschools.org');
     expect(error.status).toBe(500);
   });
 
@@ -57,7 +57,8 @@ describe('unexpected capability failure logging', () => {
       code: '23503',
       table_name: 'notification_intents',
       constraint_name: 'notification_intents_event_truth_fk',
-      detail: 'Failing row contains (hagelk@psd401.net, ExponentPushToken[x]).',
+      detail:
+        'Failing row contains (staff.member@anytownschools.org, ExponentPushToken[x]).',
     });
     const wrapped = Object.assign(
       new Error('Failed query: insert into "notification_intents" ...'),
@@ -71,7 +72,7 @@ describe('unexpected capability failure logging', () => {
       true,
       wrapped,
     );
-    expect(engineError.message).not.toContain('psd401.net');
+    expect(engineError.message).not.toContain('anytownschools.org');
     expect(engineError.message).not.toContain('ExponentPushToken');
   });
 });

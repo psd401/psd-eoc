@@ -3,7 +3,7 @@
  *
  * The three values the auth setup needs — the staff domain, the public
  * origin, and the bundle identifier — used to be written into source, so
- * tests inherited Peninsula School District's identity and never noticed. They are configuration now, and a
+ * tests inherited the operating district's identity and never noticed. They are configuration now, and a
  * suite that supplies them from here proves that: nothing under test knows
  * which district it is running for.
  *

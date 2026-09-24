@@ -11,6 +11,7 @@ import {
   readTenantContext,
   tenantAwsAccount,
   tenantGcpBillingAccount,
+  tenantString,
 } from '../src/tenant-context';
 
 let directory: string;
@@ -121,5 +122,30 @@ describe('merged tenant context', () => {
     );
     writeLocal(JSON.stringify({ 'psdEoc:awsAccount': '123456789012' }));
     expect(tenantAwsAccount(directory)).toBe('123456789012');
+  });
+
+  it('returns a configured string key, the fallback when absent, and refuses an invalid value', () => {
+    writeManifest({ 'psdEoc:awsRegion': 'us-east-1' });
+    const pattern = /^[a-z-]+$/u;
+    expect(() =>
+      tenantString('psdEoc:gcpProjectId', pattern, { directory }),
+    ).toThrow(`${LOCAL_TENANT_CONTEXT_FILE} must define psdEoc:gcpProjectId`);
+    expect(
+      tenantString('psdEoc:gcpProjectId', pattern, {
+        directory,
+        fallback: 'unconfigured',
+      }),
+    ).toBe('unconfigured');
+    writeLocal(JSON.stringify({ 'psdEoc:gcpProjectId': 'Not Valid' }));
+    expect(() =>
+      tenantString('psdEoc:gcpProjectId', pattern, {
+        directory,
+        fallback: 'unconfigured',
+      }),
+    ).toThrow('psdEoc:gcpProjectId');
+    writeLocal(JSON.stringify({ 'psdEoc:gcpProjectId': 'example-eoc' }));
+    expect(tenantString('psdEoc:gcpProjectId', pattern, { directory })).toBe(
+      'example-eoc',
+    );
   });
 });

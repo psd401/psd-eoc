@@ -765,7 +765,7 @@ function configureAlarmRecipients(
         },
       },
       // Both the identity and a configuration set, because the district's
-      // `psd401.net` identity has a default configuration set attached that SES
+      // sender identity has a default configuration set attached that SES
       // applies to every send through it. Without the second resource the send
       // is refused with AccessDenied naming a configuration set this stack does
       // not own and did not ask for.

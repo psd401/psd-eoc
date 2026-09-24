@@ -33,7 +33,7 @@ output "google_oauth_contract" {
   description = "Non-secret exact contracts for the console-created Google Auth Platform clients."
   value = {
     audience          = "internal"
-    authorized_domain = "psd401.net"
+    authorized_domain = var.authorized_domain
     scopes            = ["openid", "email", "profile"]
     web = {
       application_type   = "web"
@@ -64,6 +64,6 @@ output "aws_secrets_contract" {
     groups_secret_name   = "/psd-eoc/google-groups"
     oauth_secret_name    = "/psd-eoc/google-oauth"
     region               = "us-west-2"
-    required_aws_profile = "psd401-prr-prod"
+    required_aws_profile = var.aws_operator_profile
   }
 }

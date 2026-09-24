@@ -2288,7 +2288,7 @@ const runSelfTest = async (): Promise<void> => {
 
   const genericAliasFacilities = [
     ['ALL', 'North Harbor Elementary'],
-    ['PSD', 'Peninsula School District'],
+    ['PSD', 'Westfield School District'],
     ['GROUP', 'East Harbor Elementary'],
     ['TEAM', 'West Harbor Elementary'],
     ['SCHOOL', 'Central Harbor Elementary'],
@@ -2478,25 +2478,25 @@ const runSelfTest = async (): Promise<void> => {
 
   const shortSingletonSiteFacility = FacilitySchema.parse({
     active: true,
-    code: 'PUR',
+    code: 'PER',
     createdAt: generatedAt,
     id: '00000000-0000-4000-8000-000000000054',
-    name: 'Purdy Elementary',
+    name: 'Perry Elementary',
   });
   for (const shortSingletonGroup of [
     parseCloudGroup(
       rawGroup(
-        'synthetic-purdy-code-staff',
-        'pur.staff@groups.synthetic.invalid',
-        'PUR Staff',
+        'synthetic-perry-code-staff',
+        'per.staff@groups.synthetic.invalid',
+        'PER Staff',
       ),
       parent,
     ),
     parseCloudGroup(
       rawGroup(
-        'synthetic-purdy-name-staff',
-        'purdy.elementary.staff@groups.synthetic.invalid',
-        'Purdy Elementary Staff',
+        'synthetic-perry-name-staff',
+        'perry.elementary.staff@groups.synthetic.invalid',
+        'Perry Elementary Staff',
       ),
       parent,
     ),
@@ -2623,8 +2623,8 @@ const runSelfTest = async (): Promise<void> => {
 
   const kNamedFacilities = (
     [
-      ['KMS', 'Key Peninsula School'],
-      ['MCE', 'Minter Creek Elementary'],
+      ['KMS', 'Kestrel Ridge School'],
+      ['MCE', 'Willow Creek Elementary'],
       ['OHA', 'Oak Harbor Academy'],
     ] as const
   ).map(([code, name], index) =>

@@ -15,9 +15,8 @@ import {
   runInteractive,
 } from './runtime';
 import { readSecureFileBytes } from './store-oauth-client';
+import { AWS_PROFILE, TERRAFORM_ADMIN as ADMIN_EMAIL } from './tenant';
 
-const ADMIN_EMAIL = 'kjh_admin@psd401.net';
-const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const WORKSPACE_ROLE_SCOPE =
   'https://www.googleapis.com/auth/admin.directory.rolemanagement';

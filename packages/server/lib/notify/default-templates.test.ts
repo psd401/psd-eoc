@@ -14,7 +14,7 @@ const STARTED = formatNotificationStartTime('2026-09-09T16:01:00.000Z');
 const COMPLETED = formatNotificationStartTime('2026-09-09T16:06:00.000Z');
 
 const ACTIVATION_VARIABLES = Object.freeze({
-  site: 'Henderson Bay High School',
+  site: 'Riverside Bay High School',
   eventType: 'Lockdown Drill',
   threat: 'Intruder',
   startTime: '2026-09-09T16:01:00.000Z',
@@ -40,17 +40,17 @@ describe('default message templates', () => {
     expect(activation).toMatchObject([
       {
         channel: 'push',
-        title: '[DRILL] Lockdown Drill at Henderson Bay High School',
+        title: '[DRILL] Lockdown Drill at Riverside Bay High School',
         body: `[DRILL] Started by Jordan Rivera at ${STARTED}. Threat: Intruder. Open PSD EOC for current instructions.`,
       },
       {
         channel: 'email',
-        subject: '[DRILL] Lockdown Drill at Henderson Bay High School',
-        textBody: `[DRILL] Lockdown Drill at Henderson Bay High School has been started by Jordan Rivera.\nLocation: Henderson Bay High School\nThreat: Intruder\nTime: ${STARTED}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
+        subject: '[DRILL] Lockdown Drill at Riverside Bay High School',
+        textBody: `[DRILL] Lockdown Drill at Riverside Bay High School has been started by Jordan Rivera.\nLocation: Riverside Bay High School\nThreat: Intruder\nTime: ${STARTED}\n\nOpen PSD EOC for current instructions. Call 911 first when emergency assistance is needed.`,
       },
       {
         channel: 'sms',
-        body: `[DRILL] Lockdown Drill at Henderson Bay High School started by Jordan Rivera, ${STARTED}. Threat: Intruder. Open PSD EOC.`,
+        body: `[DRILL] Lockdown Drill at Riverside Bay High School started by Jordan Rivera, ${STARTED}. Threat: Intruder. Open PSD EOC.`,
       },
     ]);
 
@@ -60,24 +60,24 @@ describe('default message templates', () => {
       variables: {
         ...ACTIVATION_VARIABLES,
         eventType: 'Lockdown',
-        updatedBy: 'Emily Scheutzow',
+        updatedBy: 'Avery Castellan',
         updatedAt: '2026-09-09T16:06:00.000Z',
       },
     });
     expect(allClear).toMatchObject([
       {
         channel: 'push',
-        title: '[INCIDENT] ALL CLEAR: Lockdown at Henderson Bay High School',
-        body: `[INCIDENT] ALL CLEAR: Completed by Emily Scheutzow at ${COMPLETED}. Open PSD EOC for current information.`,
+        title: '[INCIDENT] ALL CLEAR: Lockdown at Riverside Bay High School',
+        body: `[INCIDENT] ALL CLEAR: Completed by Avery Castellan at ${COMPLETED}. Open PSD EOC for current information.`,
       },
       {
         channel: 'email',
-        subject: '[INCIDENT] ALL CLEAR: Lockdown at Henderson Bay High School',
-        textBody: `[INCIDENT] ALL CLEAR: Emily Scheutzow has completed Lockdown at Henderson Bay High School.\nEvent completed: ${COMPLETED}\nLocation: Henderson Bay High School\n\nOpen PSD EOC for current information.`,
+        subject: '[INCIDENT] ALL CLEAR: Lockdown at Riverside Bay High School',
+        textBody: `[INCIDENT] ALL CLEAR: Avery Castellan has completed Lockdown at Riverside Bay High School.\nEvent completed: ${COMPLETED}\nLocation: Riverside Bay High School\n\nOpen PSD EOC for current information.`,
       },
       {
         channel: 'sms',
-        body: `[INCIDENT] ALL CLEAR: Lockdown at Henderson Bay High School completed by Emily Scheutzow, ${COMPLETED}. Open PSD EOC.`,
+        body: `[INCIDENT] ALL CLEAR: Lockdown at Riverside Bay High School completed by Avery Castellan, ${COMPLETED}. Open PSD EOC.`,
       },
     ]);
   });
@@ -102,13 +102,13 @@ describe('default message templates', () => {
         site: 'Educational Service Center',
         eventType: 'Modified Lockdown Drill',
         threat: 'Neighborhood Police Activity',
-        initiator: 'Emily Scheutzow',
+        initiator: 'Avery Castellan',
       },
     }).find((message) => message.channel === 'sms');
     if (long?.channel !== 'sms') throw new Error('Expected an SMS rendering.');
     expect(measureSmsLength(long.body).parts).toBe(1);
     expect(long.body).toStartWith(
-      `[DRILL] Modified Lockdown Drill at Educational Service Center started by Emily Scheutzow, ${STARTED}.`,
+      `[DRILL] Modified Lockdown Drill at Educational Service Center started by Avery Castellan, ${STARTED}.`,
     );
     expect(long.body).toEndWith('...');
   });

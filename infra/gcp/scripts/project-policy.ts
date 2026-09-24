@@ -1,4 +1,6 @@
-export const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
+import { TERRAFORM_ADMIN } from './tenant';
+
+export { TERRAFORM_ADMIN };
 
 export const TERRAFORM_ADMIN_ROLES = [
   'roles/billing.projectManager',

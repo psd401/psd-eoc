@@ -1004,10 +1004,20 @@ function verifyContracts(repositoryRoot: string): DocumentationError[] {
   const cdk = JSON.parse(
     readFileSync(join(repositoryRoot, 'infra', 'cdk.json'), 'utf8'),
   ) as { readonly context?: Readonly<Record<string, unknown>> };
+  // The tenant's own values live in git-ignored cdk.local.json; the committed
+  // example documents every key it holds.
+  const localExample = JSON.parse(
+    readFileSync(
+      join(repositoryRoot, 'infra', 'cdk.local.example.json'),
+      'utf8',
+    ),
+  ) as Readonly<Record<string, unknown>>;
   compareNames(
     errors,
     extractContractList(configuration, 'cdk-context'),
-    Object.keys(cdk.context ?? {}).filter((key) => key.startsWith('psdEoc:')),
+    [...Object.keys(cdk.context ?? {}), ...Object.keys(localExample)].filter(
+      (key) => key.startsWith('psdEoc:'),
+    ),
     'CDK context names',
   );
 

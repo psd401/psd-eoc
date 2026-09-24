@@ -14,6 +14,14 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 import { tenantAwsAccount } from '../../src/tenant-context';
+import {
+  AWS_PROFILE,
+  AWS_SSO_START_URL,
+  escapeRegExp,
+  PROJECT_ID,
+  STAFF_EMAIL_PATTERN,
+  TERRAFORM_ADMIN_USERNAME,
+} from './tenant';
 
 export const gcpRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -29,10 +37,8 @@ type CloudCommand = keyof typeof commandPaths;
 
 /** From infra/cdk.local.json; the reserved unconfigured account matches nothing. */
 export const AWS_ACCOUNT_ID = tenantAwsAccount();
-const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const AWS_SSO_SESSION = 'macbookpro';
-const AWS_SSO_START_URL = 'https://psd401.awsapps.com/start';
 
 export const APPLICATION_DEFAULT_IDENTITY_SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
@@ -1059,7 +1065,7 @@ export function validateApplicationDefaultCredentialMetadata(
     value === null ||
     Array.isArray(value) ||
     !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(expectedQuotaProject) ||
-    !/^[a-z0-9._%+-]+@psd401\.net$/u.test(expectedEmail)
+    !STAFF_EMAIL_PATTERN.test(expectedEmail)
   ) {
     throw new Error('Application Default Credential metadata is invalid.');
   }
@@ -1139,7 +1145,7 @@ export async function assertApplicationDefaultIdentity(
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
   assertNoAmbientTransportOverrides();
-  assertApplicationDefaultCredentialMetadata('psd401-eoc', expectedEmail);
+  assertApplicationDefaultCredentialMetadata(PROJECT_ID, expectedEmail);
   const accessToken = runCommand(
     'gcloud',
     [
@@ -1177,12 +1183,12 @@ export function validateAwsSsoIdentity(
     identity.Account !== expectedAccountId ||
     typeof identity.Arn !== 'string' ||
     !new RegExp(
-      `^arn:aws:sts::${expectedAccountId}:assumed-role/AWSReservedSSO_AWSAdministratorAccess_[a-f0-9]{16}/kjh_admin$`,
+      `^arn:aws:sts::${expectedAccountId}:assumed-role/AWSReservedSSO_AWSAdministratorAccess_[a-f0-9]{16}/${escapeRegExp(TERRAFORM_ADMIN_USERNAME)}$`,
       'u',
     ).test(identity.Arn)
   ) {
     throw new Error(
-      `AWS must use the kjh_admin psd401-prr-prod SSO administrator role in account ${expectedAccountId}.`,
+      `AWS must use the ${TERRAFORM_ADMIN_USERNAME} ${AWS_PROFILE} SSO administrator role in account ${expectedAccountId}.`,
     );
   }
 }
