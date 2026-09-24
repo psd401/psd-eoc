@@ -41,7 +41,6 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:privacyContactUrl`
 - `psdEoc:sesFromAddress`
 - `psdEoc:sesIdentityDomain`
-- `psdEoc:sesOperationsIdentityDomain`
 - `psdEoc:smsSupportEmail`
 - `psdEoc:smsSupportPhone`
 - `psdEoc:sourceRepositoryUrl`
@@ -61,8 +60,6 @@ identity, target, sender, and facility keys, it holds:
 
 - `psdEoc:awsAccount` — the 12-digit deployment account
 - `psdEoc:smsSupportPhone` — the E.164 support number in SMS consent copy
-- `psdEoc:sesOperationsIdentityDomain` — the SES identity the scripts under
-  `infra/src/ops` inspect and send their verification message from
 - `psdEoc:awsOperatorProfile` and `psdEoc:awsSsoStartUrl` — the AWS CLI profile
   and IAM Identity Center start URL the GCP operator tooling requires
 - `psdEoc:gcpBillingAccount`, `psdEoc:gcpOrganizationId`, `psdEoc:gcpProjectId`,

@@ -13,12 +13,12 @@ export { SES_CONFIGURATION_SET_NAME };
 export const TARGET_ACCOUNT_ID = tenantAwsAccount();
 export const TARGET_REGION = tenantAwsRegion();
 /**
- * The SES identity these scripts inspect and send from. It is its own key,
- * not psdEoc:sesIdentityDomain, because the scripts have always addressed a
- * separate identity from the one the stack declares.
+ * The SES identity these scripts inspect and send from: the same
+ * psdEoc:sesIdentityDomain the stack declares. They once named a separate
+ * `alerts.` identity that SES never held, so every readiness check failed.
  */
 export const SES_IDENTITY_DOMAIN = tenantString(
-  'psdEoc:sesOperationsIdentityDomain',
+  'psdEoc:sesIdentityDomain',
   /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
   { fallback: 'unconfigured.invalid' },
 );
