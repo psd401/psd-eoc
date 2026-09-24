@@ -15,7 +15,7 @@ describe('explicit Expo push-token request', () => {
     };
     const token = await requestExplicitExpoPushToken(
       {
-        applicationId: 'net.psd401.eoc',
+        applicationId: 'invalid.example.eoc',
         development: true,
         deviceId: 'SYNTHETIC-INSTALLATION-ID',
         devicePushToken: { type: 'ios', data: 'synthetic-apns-token' },
@@ -58,7 +58,7 @@ describe('explicit Expo push-token request', () => {
       type: 'apns',
       deviceId: 'synthetic-installation-id',
       development: true,
-      appId: 'net.psd401.eoc',
+      appId: 'invalid.example.eoc',
       deviceToken: 'synthetic-apns-token',
       projectId: PROJECT_ID,
     });
@@ -70,7 +70,7 @@ describe('explicit Expo push-token request', () => {
     try {
       await requestExplicitExpoPushToken(
         {
-          applicationId: 'net.psd401.eoc',
+          applicationId: 'invalid.example.eoc',
           development: false,
           deviceId: 'synthetic-installation-id',
           devicePushToken: { type: 'android', data: 'synthetic-fcm-token' },
@@ -103,7 +103,7 @@ describe('explicit Expo push-token request', () => {
     } = { cancelled: null, deadline: null, signal: null };
     const request = requestExplicitExpoPushToken(
       {
-        applicationId: 'net.psd401.eoc',
+        applicationId: 'invalid.example.eoc',
         development: false,
         deviceId: 'synthetic-installation-id',
         devicePushToken: { type: 'android', data: 'synthetic-fcm-token' },
@@ -144,7 +144,7 @@ describe('explicit Expo push-token request', () => {
     let timerCancelled = false;
     const request = requestExplicitExpoPushToken(
       {
-        applicationId: 'net.psd401.eoc',
+        applicationId: 'invalid.example.eoc',
         development: false,
         deviceId: 'synthetic-installation-id',
         devicePushToken: { type: 'android', data: 'synthetic-fcm-token' },
@@ -186,7 +186,7 @@ describe('explicit Expo push-token request', () => {
     await expect(
       requestExplicitExpoPushToken(
         {
-          applicationId: 'net.psd401.eoc',
+          applicationId: 'invalid.example.eoc',
           development: false,
           deviceId: 'synthetic-installation-id',
           devicePushToken: { type: 'android', data: 'synthetic-fcm-token' },

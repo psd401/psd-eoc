@@ -20,14 +20,17 @@ import {
   runCommand,
   secretVersionIsCurrent,
 } from './runtime';
+import {
+  AWS_PROFILE,
+  MOBILE_APPLICATION_ID,
+  ORGANIZATION_ID,
+  PROJECT_ID,
+  WEB_OAUTH_REDIRECT_URI as EXPECTED_REDIRECT,
+  WEB_ORIGIN as EXPECTED_ORIGIN,
+} from './tenant';
 
-const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const SECRET_NAME = '/psd-eoc/google-oauth';
-const PROJECT_ID = 'psd401-eoc';
-const MOBILE_APPLICATION_ID = 'net.psd401.eoc';
-const EXPECTED_ORIGIN = 'https://eoc.psd401.net';
-const EXPECTED_REDIRECT = 'https://eoc.psd401.net/auth/callback';
 const MAX_OAUTH_DOWNLOAD_BYTES = 64 * 1024;
 const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url));
 const standardPlistDoctype =
@@ -49,7 +52,7 @@ export function terraformProjectNumber(value: unknown): string {
   if (
     output.id !== PROJECT_ID ||
     output.name !== 'PSD EOC' ||
-    output.parent !== 'organizations/482073499306' ||
+    output.parent !== `organizations/${ORGANIZATION_ID}` ||
     typeof output.number !== 'string' ||
     !/^\d+$/u.test(output.number)
   ) {
@@ -324,7 +327,7 @@ async function main(): Promise<void> {
     !exactStringArray(downloaded.web.redirect_uris, EXPECTED_REDIRECT)
   ) {
     throw new Error(
-      'Web OAuth client does not match the fixed psd401-eoc production contract.',
+      `Web OAuth client does not match the fixed ${PROJECT_ID} production contract.`,
     );
   }
   const webClientId = requiredString(downloaded.web, 'client_id');
@@ -354,7 +357,7 @@ async function main(): Promise<void> {
     iosClientId === webClientId
   ) {
     throw new Error(
-      'iOS OAuth client does not match the fixed psd401-eoc bundle contract.',
+      `iOS OAuth client does not match the fixed ${PROJECT_ID} bundle contract.`,
     );
   }
 

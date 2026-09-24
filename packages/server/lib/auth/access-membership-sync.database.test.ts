@@ -482,7 +482,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       .values({
         id: '00000000-0000-4000-8000-000000000560',
         code: 'HHE',
-        name: 'Harbor Heights Elementary School',
+        name: 'Summit Heights Elementary School',
         active: true,
       })
       .returning({ id: facilities.id });
@@ -494,7 +494,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       kind: 'google-group',
       purpose: 'building',
       facilityId: facility.id,
-      displayName: 'Harbor Heights staff (waiting)',
+      displayName: 'Summit Heights staff (waiting)',
       grantedRole: null,
       active: true,
       googleGroupId: null,
@@ -599,7 +599,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       .values({
         id: '00000000-0000-4000-8000-000000000570',
         code: 'PHS',
-        name: 'Peninsula High School',
+        name: 'Westfield High School',
         active: true,
       })
       .returning({ id: facilities.id });
@@ -626,7 +626,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
         kind: 'google-group',
         purpose: 'building',
         facilityId: facility.id,
-        displayName: 'Peninsula High staff (waiting)',
+        displayName: 'Westfield High staff (waiting)',
         grantedRole: null,
         active: true,
         googleGroupId: null,

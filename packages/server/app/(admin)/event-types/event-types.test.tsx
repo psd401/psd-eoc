@@ -54,7 +54,7 @@ const IDS = {
 
 const NOW = new Date('2026-08-08T17:00:00.000Z');
 const VARIABLES = {
-  site: 'Harbor Ridge High School',
+  site: 'Cedar Valley High School',
   eventType: 'Lockdown',
   threat: 'Intruder',
   startTime: '2026-08-08T16:30:00.000Z',
@@ -598,7 +598,7 @@ describe('renderer-owned notification frames', () => {
       variables: {
         ...VARIABLES,
         eventType: 'Shelter [North Wing]',
-        site: 'Harbor Ridge [Building A]',
+        site: 'Cedar Valley [Building A]',
       },
     });
     const visible = messages
@@ -610,7 +610,7 @@ describe('renderer-owned notification frames', () => {
     expect(visible).toContain('[north wing]');
     expect(visible).toContain('[2]');
     expect(visible).toContain('Shelter [North Wing]');
-    expect(visible).toContain('Harbor Ridge [Building A]');
+    expect(visible).toContain('Cedar Valley [Building A]');
     for (const field of messages.flatMap(visibleFields)) {
       expect(field.value.startsWith('[INCIDENT] ')).toBe(true);
     }

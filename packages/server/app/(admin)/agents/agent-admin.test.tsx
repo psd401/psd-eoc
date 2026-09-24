@@ -87,7 +87,7 @@ const baseProps: AgentAdminProps = {
     {
       id: ids.facility,
       code: 'HRH',
-      name: 'Harbor Ridge High School',
+      name: 'Cedar Valley High School',
       active: true,
     },
   ],
@@ -189,7 +189,7 @@ describe('agent administration presentation', () => {
   test('shows scoped retained keys and minimized per-agent audit facts', () => {
     const markup = render();
 
-    expect(markup).toContain('Harbor Ridge High School');
+    expect(markup).toContain('Cedar Valley High School');
     expect(markup).toContain('prepare-activation');
     expect(markup).toContain('Agent call audit');
     expect(markup).toContain('get-event');

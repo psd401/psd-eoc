@@ -17,7 +17,7 @@ function wording(
 ): NotificationWording {
   return {
     templates: catalog.activation,
-    facilityName: 'Harbor Ridge High School',
+    facilityName: 'Cedar Valley High School',
     eventTypeName: 'Lockdown Drill',
     initiatorDisplayName: 'Taylor Morgan',
     actorDisplayName: 'Jordan Lee',
@@ -64,7 +64,7 @@ describe('notification variables', () => {
         at: '2026-09-09T16:01:00.000Z',
       }),
     ).toEqual({
-      site: 'Harbor Ridge High School',
+      site: 'Cedar Valley High School',
       eventType: 'Lockdown Drill',
       threat: 'Intruder',
       startTime: '2026-09-09T16:01:00.000Z',
@@ -82,7 +82,7 @@ describe('notification variables', () => {
         at: '2026-09-09T16:06:00.000Z',
       }),
     ).toEqual({
-      site: 'Harbor Ridge High School',
+      site: 'Cedar Valley High School',
       eventType: 'Lockdown Drill - Gym roof',
       threat: 'Intruder',
       startTime: '2026-09-09T16:01:00.000Z',

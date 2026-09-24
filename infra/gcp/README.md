@@ -22,6 +22,35 @@ tenant, and direct deployment parameters are indexed in
 - A successful Terraform plan, credential read, or standalone provider check
   does not prove deployed sign-in or scheduled roster synchronization.
 
+## Tenant values
+
+No district identifier is checked in here. `scripts/tenant.ts` reads these
+keys from the git-ignored `infra/cdk.local.json` and every guarded helper
+refuses to run until each one is present and well formed:
+
+| Key                              | Used as                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| `psdEoc:gcpProjectId`            | Google Cloud project ID; roster reader is `roster-sync-reader@<id>.iam...`     |
+| `psdEoc:gcpOrganizationId`       | Numeric parent organization ID                                                 |
+| `psdEoc:gcpBillingAccount`       | Billing account in the 6-6-6 form                                              |
+| `psdEoc:gcpTerraformStateBucket` | Main-root state bucket, created by the bootstrap root                          |
+| `psdEoc:gcpTerraformAdminEmail`  | The one human Terraform administrator; its local part is the AWS SSO user name |
+| `psdEoc:hostedDomain`            | Workspace domain for staff accounts, test groups, and the OAuth domain         |
+| `psdEoc:applicationOrigin`       | Web OAuth origin; the redirect is `<origin>/auth/callback`                     |
+| `psdEoc:iosBundleId`             | iOS bundle ID and Android package name                                         |
+| `psdEoc:awsOperatorProfile`      | AWS CLI profile name in `aws.config`                                           |
+| `psdEoc:awsSsoStartUrl`          | IAM Identity Center start URL in `aws.config`                                  |
+| `psdEoc:awsAccount`              | AWS account that receives the handed-off credentials                           |
+
+Both Terraform roots declare these as variables without defaults, and
+`scripts/apply.ts` passes them with `-var` on every `plan` and `import`. The
+main root's `versions.tf` names a deliberately unusable backend bucket;
+`scripts/apply.ts` supplies the real one with
+`-backend-config=bucket=<gcpTerraformStateBucket>` on every `terraform init`.
+The bootstrap root keeps local state and has no backend. Copy
+`aws.config.example` to the git-ignored `aws.config` and replace its profile
+name, SSO start URL, and account ID with the tenant's values.
+
 ## Operator workflow
 
 1. Read the readiness register and identify the exact boundary being changed.

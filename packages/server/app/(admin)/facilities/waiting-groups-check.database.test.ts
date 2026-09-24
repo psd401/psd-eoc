@@ -107,7 +107,7 @@ describeWithDatabase('waiting roster groups check', () => {
         kind: 'google-group',
         purpose: 'building',
         facilityId: first.id,
-        displayName: 'Artondale staff (waiting)',
+        displayName: 'Alderwood staff (waiting)',
         grantedRole: null,
         active: true,
         googleGroupId: null,

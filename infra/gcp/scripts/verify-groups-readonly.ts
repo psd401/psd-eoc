@@ -26,11 +26,10 @@ import {
   requiredString,
   type GoogleFetcher,
 } from './runtime';
+import { AWS_PROFILE, TERRAFORM_ADMIN } from './tenant';
 
-const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const SECRET_NAME = '/psd-eoc/google-groups';
-const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const CLOUD_IDENTITY_ENDPOINT = 'https://cloudidentity.googleapis.com/v1';
 

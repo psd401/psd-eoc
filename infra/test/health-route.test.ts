@@ -457,12 +457,12 @@ describe('deep health GET contract', () => {
     // verbatim would put a staff address or a credential into CloudWatch.
     const wrapped = Object.assign(
       new Error(
-        'Failed query: insert into "group_members" ("email") values ($1)\nparams: someone@psd401.net',
+        'Failed query: insert into "group_members" ("email") values ($1)\nparams: someone@anytownschools.org',
       ),
       {
         name: 'DrizzleQueryError',
         query: 'insert into "group_members" ("email") values ($1)',
-        params: ['someone@psd401.net'],
+        params: ['someone@anytownschools.org'],
       },
     );
     const handler = createHealthRouteHandler({
@@ -487,7 +487,7 @@ describe('deep health GET contract', () => {
     expect(all).toContain('health-check-failed');
     expect(all).toContain('database');
     // The whole point: none of the payload survives.
-    expect(all).not.toContain('someone@psd401.net');
+    expect(all).not.toContain('someone@anytownschools.org');
     expect(all).not.toContain('group_members');
     expect(all).not.toContain('insert into');
     expect(all).not.toContain('params:');

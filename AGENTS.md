@@ -115,10 +115,13 @@ These are real failure patterns from this repo's history. Avoid them.
   the deploy for no safety benefit. Verify what matters; let the rest be logs.
 - **Don't hedge documentation into uselessness.** Write what is true and
   current. If the deployed origin resolves and serves, the doc says it works.
-- **Don't bake the tenant into the code.** A few dozen district-specific
-  literals remain in operator tooling and test fixtures
-  (`git grep psd401 -- '*.ts' '*.tsx'` lists them). Do not add to that number,
-  and remove them where you touch them.
+- **Don't bake the tenant into the code.** District values live in
+  git-ignored `infra/cdk.local.json` (shape: `infra/cdk.local.example.json`).
+  The literals that remain are deliberate: the mobile bundle identifier and
+  keychain service names (renaming them signs out every installed device),
+  applied migrations, and leak-detector assertions
+  (`git grep psd401 -- '*.ts' '*.tsx'` lists them). Test fixtures use invented
+  districts, schools, and people. Do not add to that number.
 - **Don't leave worktrees and branches behind.** Delete the branch when the PR
   merges. Remove the worktree when you're done.
 - **Don't argue with the product owner about scope.** State a concern once, in

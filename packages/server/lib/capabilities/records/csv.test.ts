@@ -5,7 +5,7 @@ import { serializeDrillRecordsCsv, type DrillRecordCsvRow } from './csv';
 const textDecoder = new TextDecoder();
 
 const BASE_ROW: DrillRecordCsvRow = Object.freeze({
-  facilityName: 'Harbor Heights Elementary',
+  facilityName: 'Summit Heights Elementary',
   facilityCode: 'HHE',
   eventType: 'Lockdown',
   threatName: 'Wildlife',
@@ -37,8 +37,8 @@ describe('drill-record CSV serialization', () => {
 
     expect(csv).toBe(
       'site,date,time,threat,type,duration,participants_count\r\n' +
-        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,Wildlife,[DRILL] Lockdown,00:10:00,35\r\n' +
-        'Harbor Heights Elementary [HHE],2024-03-10,03:30:00 PDT,Wildlife,[TEST] Evacuation,,0\r\n',
+        'Summit Heights Elementary [HHE],2024-03-10,01:30:00 PST,Wildlife,[DRILL] Lockdown,00:10:00,35\r\n' +
+        'Summit Heights Elementary [HHE],2024-03-10,03:30:00 PDT,Wildlife,[TEST] Evacuation,,0\r\n',
     );
   });
 
@@ -56,8 +56,8 @@ describe('drill-record CSV serialization', () => {
 
     expect(csv).toBe(
       'site,date,time,threat,type,duration,participants_count\r\n' +
-        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,Other — Gas smell in the gym,[DRILL] Other — Move everyone to the field,00:10:00,35\r\n' +
-        'Harbor Heights Elementary [HHE],2024-03-10,01:30:00 PST,,[DRILL] Lockdown,00:10:00,35\r\n',
+        'Summit Heights Elementary [HHE],2024-03-10,01:30:00 PST,Other — Gas smell in the gym,[DRILL] Other — Move everyone to the field,00:10:00,35\r\n' +
+        'Summit Heights Elementary [HHE],2024-03-10,01:30:00 PST,,[DRILL] Lockdown,00:10:00,35\r\n',
     );
   });
 

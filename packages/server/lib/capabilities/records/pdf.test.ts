@@ -225,7 +225,7 @@ function snapshot(
   return {
     generatedAt: '2026-08-11T17:00:00.000Z',
     event: event(options.kind),
-    facility: { code: 'SYN-01', name: 'Synthetic Peninsula School' },
+    facility: { code: 'SYN-01', name: 'Synthetic Westfield School' },
     eventType: {
       id: '10000000-0000-4000-8000-000000000020',
       name: 'Synthetic lockdown drill',

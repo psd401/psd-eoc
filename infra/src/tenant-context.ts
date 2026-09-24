@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 /**
  * Tenant context lives in two files next to each other. `cdk.json` is the
  * checked-in manifest. `cdk.local.json`, which git ignores, carries the keys a
- * district keeps out of a public repository: today its AWS account ID and the
- * support phone number printed in SMS consent copy. Each key lives in exactly
+ * district keeps out of a public repository: its identity (domains, origin,
+ * name, facilities), cloud account, region and hosted zone, and the operator
+ * identities of its GCP tooling. The committed `cdk.local.example.json` shows
+ * every key with a synthetic tenant. Each key lives in exactly
  * one of the two files: the CDK app hands the local file to `App` as default
  * context and refuses to run when `cdk.json` or a `-c` flag overrides one of
  * its keys, and `readTenantContext` refuses a key that both files define, so
@@ -101,6 +103,30 @@ export function readTenantContext(
 }
 
 /**
+ * A string tenant key for operator tooling. Without a fallback the tooling
+ * refuses to run until the key is configured; with one, a checkout without
+ * cdk.local.json still loads the module (tests, typecheck) and gets a
+ * reserved value no real provider call can reach. A configured value that
+ * fails the pattern always refuses.
+ */
+export function tenantString(
+  key: string,
+  pattern: RegExp,
+  options: { readonly fallback?: string; readonly directory?: string } = {},
+): string {
+  const value = readTenantContext(options.directory ?? infraRoot)[key];
+  if (value === undefined && options.fallback !== undefined) {
+    return options.fallback;
+  }
+  if (typeof value !== 'string' || !pattern.test(value)) {
+    throw new Error(
+      `${LOCAL_TENANT_CONTEXT_FILE} must define ${key} matching ${String(pattern)}.`,
+    );
+  }
+  return value;
+}
+
+/**
  * The tenant's Google Cloud billing account in the canonical 6-6-6 form. It
  * has no unconfigured fallback: the GCP operator tooling that needs it must
  * not run without cdk.local.json.
@@ -131,4 +157,19 @@ export function tenantAwsAccount(directory: string = infraRoot): string {
     );
   }
   return value;
+}
+
+/**
+ * Region operator scripts target when neither file defines psdEoc:awsRegion.
+ * Any valid region works: the reserved unconfigured account already refuses
+ * every call, so this only lets an unconfigured checkout load the modules.
+ */
+export const UNCONFIGURED_AWS_REGION = 'ca-central-1';
+
+/** The tenant's AWS region, or `UNCONFIGURED_AWS_REGION` when unset. */
+export function tenantAwsRegion(directory: string = infraRoot): string {
+  return tenantString('psdEoc:awsRegion', /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u, {
+    directory,
+    fallback: UNCONFIGURED_AWS_REGION,
+  });
 }

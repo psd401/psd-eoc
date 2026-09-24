@@ -1,0 +1,36 @@
+{
+  "psdEoc:applicationOrigin": "https://eoc.example.invalid",
+  "psdEoc:awsAccount": "123456789012",
+  "psdEoc:awsAccountAlias": "example-district",
+  "psdEoc:awsOperatorProfile": "example-district-prod",
+  "psdEoc:awsRegion": "us-east-2",
+  "psdEoc:awsSsoStartUrl": "https://example-district.awsapps.com/start",
+  "psdEoc:displayTimeZone": "America/New_York",
+  "psdEoc:facilities": [
+    { "code": "ADM", "name": "Administration Center" },
+    { "code": "EES", "name": "Example Elementary School" },
+    { "code": "EHS", "name": "Example High School" },
+    { "code": "EMS", "name": "Example Middle School" },
+    { "code": "RVW", "name": "App Review", "isolated": true }
+  ],
+  "psdEoc:gcpBillingAccount": "000000-000000-000000",
+  "psdEoc:gcpOrganizationId": "123456789012",
+  "psdEoc:gcpProjectId": "example-district-eoc",
+  "psdEoc:gcpTerraformAdminEmail": "terraform-admin@example.invalid",
+  "psdEoc:gcpTerraformStateBucket": "example-district-eoc-terraform-state",
+  "psdEoc:hostedDomain": "example.invalid",
+  "psdEoc:hostedZoneId": "Z0EXAMPLEZONEID",
+  "psdEoc:iosBundleId": "invalid.example.eoc",
+  "psdEoc:monitoringRunbookBaseUrl": "https://code.example.invalid/example/eoc/blob/main/infra/README.md",
+  "psdEoc:neighborhoods": [
+    { "name": "North Campus", "facilityCodes": ["EES", "EMS"] }
+  ],
+  "psdEoc:organizationName": "Example School District",
+  "psdEoc:privacyContactUrl": "https://www.example.invalid/privacy",
+  "psdEoc:sesFromAddress": "eoc-alerts@example.invalid",
+  "psdEoc:sesIdentityDomain": "example.invalid",
+  "psdEoc:sesOperationsIdentityDomain": "alerts.example.invalid",
+  "psdEoc:smsSupportEmail": "servicecentral@example.invalid",
+  "psdEoc:smsSupportPhone": "+12535550123",
+  "psdEoc:sourceRepositoryUrl": "https://code.example.invalid/example/eoc"
+}

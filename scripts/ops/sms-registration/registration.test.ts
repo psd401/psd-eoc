@@ -74,11 +74,11 @@ async function writeData(directory: string): Promise<string> {
           { fieldPath: 'campaign.required', text: 'District campaign value' },
           {
             fieldPath: 'campaignInfo.termsAndConditionsLink',
-            text: 'https://www.psd401.net/sms-terms',
+            text: 'https://www.anytownschools.org/sms-terms',
           },
           {
             fieldPath: 'campaignInfo.privacyPolicyLink',
-            text: 'https://www.psd401.net/privacy',
+            text: 'https://www.anytownschools.org/privacy',
           },
           {
             attachmentFile: 'attachments/campaign-opt-in.png',

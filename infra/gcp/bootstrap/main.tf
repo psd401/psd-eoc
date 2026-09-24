@@ -20,6 +20,46 @@ variable "billing_account" {
   }
 }
 
+variable "project_id" {
+  description = "Globally unique Google Cloud project ID dedicated to PSD EOC. Supplied by the operator tooling from infra/cdk.local.json."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))
+    error_message = "Project ID must be a valid Google Cloud project ID."
+  }
+}
+
+variable "organization_id" {
+  description = "District Google Cloud organization ID. Supplied by the operator tooling from infra/cdk.local.json."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[1-9][0-9]{0,19}$", var.organization_id))
+    error_message = "Organization ID must be a numeric Google Cloud organization ID."
+  }
+}
+
+variable "terraform_state_bucket" {
+  description = "Globally unique private bucket the main root uses for Terraform state. Supplied by the operator tooling from infra/cdk.local.json."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$", var.terraform_state_bucket))
+    error_message = "State bucket must be a valid Cloud Storage bucket name without dots."
+  }
+}
+
+variable "terraform_admin_email" {
+  description = "District administrator who alone may read and write Terraform state. Supplied by the operator tooling from infra/cdk.local.json."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9._%+-]+@[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+$", var.terraform_admin_email))
+    error_message = "The Terraform administrator must be a lowercase email address."
+  }
+}
+
 provider "google" {
   region          = "us-west1"
   deletion_policy = "PREVENT"
@@ -36,9 +76,9 @@ locals {
 }
 
 resource "google_project" "psd_eoc" {
-  project_id      = "psd401-eoc"
+  project_id      = var.project_id
   name            = "PSD EOC"
-  org_id          = "482073499306"
+  org_id          = var.organization_id
   billing_account = var.billing_account
 
   auto_create_network = false
@@ -93,7 +133,7 @@ resource "google_project_service" "cloud_billing" {
 
 resource "google_storage_bucket" "terraform_state" {
   project                     = google_project.psd_eoc.project_id
-  name                        = "psd401-eoc-terraform-state"
+  name                        = var.terraform_state_bucket
   location                    = "US-WEST1"
   storage_class               = "STANDARD"
   uniform_bucket_level_access = true
@@ -134,7 +174,7 @@ resource "google_storage_bucket" "terraform_state" {
 data "google_iam_policy" "terraform_state" {
   binding {
     role    = "roles/storage.objectAdmin"
-    members = ["user:kjh_admin@psd401.net"]
+    members = ["user:${var.terraform_admin_email}"]
   }
 }
 

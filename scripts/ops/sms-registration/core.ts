@@ -20,11 +20,14 @@ import {
   sep,
 } from 'node:path';
 
-import { tenantAwsAccount } from '../../../infra/src/tenant-context';
+import {
+  tenantAwsAccount,
+  tenantAwsRegion,
+} from '../../../infra/src/tenant-context';
 
 /** From infra/cdk.local.json; the reserved unconfigured account refuses every call. */
 export const TARGET_ACCOUNT = tenantAwsAccount();
-export const TARGET_REGION = 'us-west-2';
+export const TARGET_REGION = tenantAwsRegion();
 export const STS_CLIENT_CONFIG = {
   ignoreConfiguredEndpointUrls: true,
   region: TARGET_REGION,

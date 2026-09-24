@@ -18,12 +18,11 @@ import {
   requireExactConfirmation,
   runCommand,
 } from './runtime';
+import { AWS_PROFILE, TERRAFORM_ADMIN } from './tenant';
 import { validateStoredCredential } from './verify-groups-readonly';
 
-const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const SECRET_NAME = '/psd-eoc/google-groups';
-const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
 
 interface RevocationContract {
   readonly contract: GroupsReaderContract;

@@ -1,11 +1,10 @@
 variable "project_id" {
-  description = "Globally unique Google Cloud project ID dedicated to PSD EOC."
+  description = "Globally unique Google Cloud project ID dedicated to PSD EOC. Supplied by the operator tooling from infra/cdk.local.json."
   type        = string
-  default     = "psd401-eoc"
 
   validation {
-    condition     = var.project_id == "psd401-eoc"
-    error_message = "This root is intentionally bound to the psd401-eoc project."
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))
+    error_message = "Project ID must be a valid Google Cloud project ID."
   }
 }
 
@@ -21,13 +20,12 @@ variable "project_name" {
 }
 
 variable "organization_id" {
-  description = "Peninsula School District Google Cloud organization ID."
+  description = "District Google Cloud organization ID. Supplied by the operator tooling from infra/cdk.local.json."
   type        = string
-  default     = "482073499306"
 
   validation {
-    condition     = var.organization_id == "482073499306"
-    error_message = "This root is intentionally bound to the district organization."
+    condition     = can(regex("^[1-9][0-9]{0,19}$", var.organization_id))
+    error_message = "Organization ID must be a numeric Google Cloud organization ID."
   }
 }
 
@@ -54,24 +52,42 @@ variable "region" {
 }
 
 variable "terraform_state_bucket" {
-  description = "Globally unique private bucket used only for PSD EOC Terraform state."
+  description = "Globally unique private bucket used only for PSD EOC Terraform state. Supplied by the operator tooling from infra/cdk.local.json, which also passes it as the backend bucket."
   type        = string
-  default     = "psd401-eoc-terraform-state"
 
   validation {
-    condition     = var.terraform_state_bucket == "psd401-eoc-terraform-state"
-    error_message = "The checked-in backend and state bucket must remain identical."
+    condition     = can(regex("^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$", var.terraform_state_bucket))
+    error_message = "State bucket must be a valid Cloud Storage bucket name without dots."
   }
 }
 
 variable "terraform_admin_email" {
-  description = "District administrator responsible for this Terraform root."
+  description = "District administrator responsible for this Terraform root. Supplied by the operator tooling from infra/cdk.local.json."
   type        = string
-  default     = "kjh_admin@psd401.net"
 
   validation {
-    condition     = lower(var.terraform_admin_email) == "kjh_admin@psd401.net"
-    error_message = "This root is intentionally bound to the district Terraform administrator."
+    condition     = can(regex("^[a-z0-9._%+-]+@[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+$", var.terraform_admin_email))
+    error_message = "The Terraform administrator must be a lowercase email address."
+  }
+}
+
+variable "authorized_domain" {
+  description = "Google Workspace domain of every staff account, reported as the OAuth consent screen's authorized domain. Supplied by the operator tooling from infra/cdk.local.json."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+$", var.authorized_domain))
+    error_message = "Authorized domain must be a lowercase DNS domain."
+  }
+}
+
+variable "aws_operator_profile" {
+  description = "Named AWS CLI profile the credential handoff requires. Supplied by the operator tooling from infra/cdk.local.json."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", var.aws_operator_profile))
+    error_message = "AWS operator profile must be a valid profile name."
   }
 }
 
@@ -103,35 +119,32 @@ variable "required_services" {
 }
 
 variable "web_origin" {
-  description = "Exact production JavaScript origin for the Google Auth Platform web client."
+  description = "Exact production JavaScript origin for the Google Auth Platform web client. Supplied by the operator tooling from infra/cdk.local.json."
   type        = string
-  default     = "https://eoc.psd401.net"
 
   validation {
-    condition     = var.web_origin == "https://eoc.psd401.net"
-    error_message = "PSD EOC uses one fixed production web origin."
+    condition     = can(regex("^https://[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+$", var.web_origin))
+    error_message = "PSD EOC uses one HTTPS production web origin with no path."
   }
 }
 
 variable "web_oauth_redirect_uri" {
-  description = "Exact production callback for the Google Auth Platform web client."
+  description = "Exact production callback for the Google Auth Platform web client. Supplied by the operator tooling as the web origin plus /auth/callback."
   type        = string
-  default     = "https://eoc.psd401.net/auth/callback"
 
   validation {
-    condition     = var.web_oauth_redirect_uri == "https://eoc.psd401.net/auth/callback"
-    error_message = "PSD EOC uses one fixed production OAuth callback."
+    condition     = can(regex("^https://[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+/auth/callback$", var.web_oauth_redirect_uri))
+    error_message = "PSD EOC uses one fixed production OAuth callback at /auth/callback on the web origin."
   }
 }
 
 variable "mobile_application_id" {
-  description = "Canonical iOS bundle ID and Android package name for PSD EOC."
+  description = "Canonical iOS bundle ID and Android package name for PSD EOC. Supplied by the operator tooling from infra/cdk.local.json."
   type        = string
-  default     = "net.psd401.eoc"
 
   validation {
-    condition     = var.mobile_application_id == "net.psd401.eoc"
-    error_message = "PSD EOC mobile clients use net.psd401.eoc."
+    condition     = can(regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$", var.mobile_application_id))
+    error_message = "PSD EOC mobile clients share one reverse-DNS application ID."
   }
 }
 

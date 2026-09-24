@@ -15,13 +15,13 @@ import {
   runCommand,
   type GoogleFetcher,
 } from './runtime';
+import { TERRAFORM_ADMIN } from './tenant';
 
 export const ROLE_MANAGEMENT_SCOPE =
   'https://www.googleapis.com/auth/admin.directory.rolemanagement';
 const ADMIN_SDK_ROOT =
   'https://admin.googleapis.com/admin/directory/v1/customer/my_customer';
 const CONFIRMATION = 'assign-groups-reader-to-roster-sync-reader';
-const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
 
 interface GroupsReaderRole {
   readonly roleId: string;

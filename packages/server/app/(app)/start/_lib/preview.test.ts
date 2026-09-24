@@ -63,7 +63,7 @@ const ACTOR = Object.freeze({
 const FACILITY = Object.freeze({
   id: IDS.facility,
   code: 'HARBOR',
-  name: 'Harbor Ridge High School',
+  name: 'Cedar Valley High School',
   active: true,
   isolated: false,
   createdAt: CREATED_AT_ISO,
@@ -313,7 +313,7 @@ describe('activation consequence preview threat pinning', () => {
     expect(pushBody).toContain(
       'Synthetic wildlife - {{initiator}} at {{site}}',
     );
-    expect(pushBody).not.toContain('Harbor Ridge High School');
+    expect(pushBody).not.toContain('Cedar Valley High School');
   });
 
   test('renders the threat and both descriptions into the staff wording', () => {

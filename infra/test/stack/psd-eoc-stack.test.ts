@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { App, IgnoreStrategy } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
+import exampleLocalContext from '../../cdk.local.example.json';
 import productionConfiguration from '../../cdk.json';
 import {
   BOOTSTRAP_LOG_GROUP_NAME,
@@ -170,12 +171,12 @@ function tagsByKey(resource: SynthesizedResource): Map<string, unknown> {
   );
 }
 
-// The manifest keeps the account and support phone in git-ignored
-// cdk.local.json, so the synthesized fixture supplies its own values here.
+// The tenant's identity lives in git-ignored cdk.local.json, so the fixture
+// is the committed manifest plus the synthetic example tenant that documents
+// the local file's shape.
 const productionContext: Readonly<Record<string, unknown>> = {
   ...(productionConfiguration.context as Readonly<Record<string, unknown>>),
-  'psdEoc:awsAccount': '123456789012',
-  'psdEoc:smsSupportPhone': '+12535550123',
+  ...(exampleLocalContext as Readonly<Record<string, unknown>>),
 };
 const currentDeploymentTarget = readDeploymentTarget({
   tryGetContext: (key) => productionContext[key],
@@ -291,7 +292,7 @@ describe('deployment boundary', () => {
     ).toThrow(/protected production environment/u);
     expect(() =>
       assertProtectedDeploymentTarget(
-        { ...currentDeploymentTarget, sesIdentityDomain: 'example.invalid' },
+        { ...currentDeploymentTarget, sesIdentityDomain: 'unrelated.test' },
         currentDeploymentIdentity,
         protectedEnvironment,
       ),
@@ -1120,7 +1121,7 @@ describe('App Runner runtime safety boundary', () => {
       },
       {
         Key: 'ExpectedAwsAccountAlias',
-        Value: 'psd401',
+        Value: AWS_ACCOUNT_ALIAS,
       },
       {
         Key: 'ManagedBy',
@@ -1176,7 +1177,7 @@ describe('App Runner runtime safety boundary', () => {
       },
       {
         Key: 'ExpectedAwsAccountAlias',
-        Value: 'psd401',
+        Value: AWS_ACCOUNT_ALIAS,
       },
       {
         Key: 'ManagedBy',
@@ -3508,7 +3509,9 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedOutputs).not.toContain('GoogleOauthSecretArn');
     expect(serializedOutputs).not.toContain('GoogleOidcCookieSecret');
     expect(serializedOutputs).not.toContain('ApiSaltSecret');
-    expect(serializedOutputs).not.toContain('eoc.psd401.net');
+    expect(serializedOutputs).not.toContain(
+      new URL(String(productionContext['psdEoc:applicationOrigin'])).host,
+    );
     expect(serializedOutputs).not.toContain('controlled-recipient');
     expect(asRecord(outputs.SesIdentityDomain).Value).toBe(SES_IDENTITY_DOMAIN);
     expect(asRecord(outputs.SesFromAddress).Value).toBe(SES_FROM_ADDRESS);

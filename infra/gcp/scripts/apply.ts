@@ -32,14 +32,16 @@ import {
   validateProjectIamPolicy,
   validateRosterReaderResourcePolicy,
 } from './project-policy';
-import { tenantGcpBillingAccount } from '../../src/tenant-context';
+import {
+  BILLING_ACCOUNT,
+  ORGANIZATION_ID,
+  PROJECT_ID,
+  STATE_BUCKET,
+  terraformBackendArguments,
+  terraformVariableArguments,
+} from './tenant';
 
-const PROJECT_ID = 'psd401-eoc';
 const PROJECT_NAME = 'PSD EOC';
-const ORGANIZATION_ID = '482073499306';
-/** From infra/cdk.local.json; refuses to run without it. */
-const BILLING_ACCOUNT = tenantGcpBillingAccount();
-const STATE_BUCKET = 'psd401-eoc-terraform-state';
 const ROSTER_READER_ADDRESS = 'google_service_account.roster_reader';
 const ROSTER_READER_RESOURCE = `projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}`;
 const ROSTER_READER_DISPLAY_NAME = 'PSD EOC roster sync reader';
@@ -1173,7 +1175,7 @@ export async function repairMissingBootstrapApis(
 
   await operations.confirm(
     `Bootstrap API repair consequence preview: the fixed ${PROJECT_ID} project (numeric ID ${initialBucket.projectNumber}) owns the exact ${STATE_BUCKET} bucket with ${initialBucket.status}. Persistently enable only ${initiallyMissing.join(', ')} so the helper can inspect the district organization, billing association, and complete project IAM policy before any Terraform backend is initialized. API enablement can permit billable API use. If the post-repair project contract is wrong, the helper stops and leaves these inspection APIs enabled for explicit reconciliation.`,
-    'repair-psd401-eoc-bootstrap-apis',
+    `repair-${PROJECT_ID}-bootstrap-apis`,
   );
 
   await operations.assertOperatorIdentity();
@@ -1294,7 +1296,7 @@ export async function repairInterruptedBootstrapApis(
 
   await operations.confirm(
     `Interrupted-bootstrap API repair consequence preview: the fixed ${PROJECT_ID} project (numeric ID ${initialState.projectNumber}) is anchored by exact local Terraform state and live Service Usage, but ${STATE_BUCKET} does not exist yet. Persistently enable only ${initiallyMissing.join(', ')} so the helper can validate the district organization, billing association, and complete project IAM policy before any import or saved plan. API enablement can permit billable API use. If later validation fails, the helper stops and leaves these inspection APIs enabled for explicit reconciliation.`,
-    'repair-psd401-eoc-interrupted-bootstrap-apis',
+    `repair-${PROJECT_ID}-interrupted-bootstrap-apis`,
   );
 
   await operations.assertOperatorIdentity();
@@ -1647,13 +1649,15 @@ export function parseStateListResult(
 
 function runTerraformInteractive(args: readonly string[], cwd = gcpRoot): void {
   assertDefaultTerraformWorkspace(cwd);
-  // Both roots declare billing_account without a default. plan and import
-  // evaluate the configuration and need it; apply consumes a saved plan,
-  // which refuses -var, and state commands never read variables.
   const [command] = args;
   const withVariables =
     command === 'plan' || command === 'import'
-      ? [...args, `-var=billing_account=${BILLING_ACCOUNT}`]
+      ? [
+          ...args,
+          ...terraformVariableArguments(
+            cwd === bootstrapRoot ? 'bootstrap' : 'main',
+          ),
+        ]
       : args;
   runInteractive('terraform', withVariables, cwd);
 }
@@ -2136,10 +2140,9 @@ async function main(): Promise<void> {
     await applySavedPlan({
       captureBoundary: () =>
         captureApplyBoundary(false, liveApplyBoundaryOperations),
-      confirmation: 'create-psd401-eoc-bootstrap',
+      confirmation: `create-${PROJECT_ID}-bootstrap`,
       cwd: bootstrapRoot,
-      preview:
-        'Bootstrap consequence preview: create or adopt the billed psd401-eoc project directly under the district organization, enable Service Usage, Storage, Cloud Resource Manager, and Cloud Billing before quota is charged to the new project, and create a private versioned state bucket whose authoritative policy grants only the fixed human Terraform administrator Object Admin. No Groups data, OAuth credential, or notification path is touched.',
+      preview: `Bootstrap consequence preview: create or adopt the billed ${PROJECT_ID} project directly under the district organization, enable Service Usage, Storage, Cloud Resource Manager, and Cloud Billing before quota is charged to the new project, and create a private versioned state bucket whose authoritative policy grants only the fixed human Terraform administrator Object Admin. No Groups data, OAuth credential, or notification path is touched.`,
     });
     const repairedBucketStatus = stateBucketStatus(false);
     if (
@@ -2154,7 +2157,12 @@ async function main(): Promise<void> {
     }
   }
 
-  runInteractive('terraform', ['init', '-reconfigure', '-input=false']);
+  runInteractive('terraform', [
+    'init',
+    '-reconfigure',
+    '-input=false',
+    ...terraformBackendArguments(),
+  ]);
   assertDefaultTerraformWorkspace();
 
   const managedResources = stateResources();
@@ -2174,7 +2182,7 @@ async function main(): Promise<void> {
   await applySavedPlan({
     captureBoundary: () =>
       captureApplyBoundary(true, liveApplyBoundaryOperations),
-    confirmation: 'apply-psd401-eoc-gcp',
+    confirmation: `apply-${PROJECT_ID}-gcp`,
     cwd: gcpRoot,
     preview:
       "Apply consequence preview: enable only the declared identity/IAM APIs, retain the single-administrator state-bucket policy, replace the project creator's automatic Owner grant with the named narrower Terraform administrator roles, and create one protected service account with no project IAM roles. This does not authorize Workspace access, create OAuth clients, read Groups, or send notifications.",

@@ -27,7 +27,7 @@ const page = FacilityPageSchema.parse({
     {
       id: ids.facility,
       code: 'HRH',
-      name: 'Harbor Ridge High School',
+      name: 'Cedar Valley High School',
       active: true,
       createdAt: '2026-08-10T20:00:00.000Z',
     },

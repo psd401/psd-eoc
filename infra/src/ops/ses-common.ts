@@ -1,34 +1,48 @@
 import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
 
+import { SES_CONFIGURATION_SET_NAME } from '../config';
 import {
-  DEPLOYMENT_REGION,
-  SES_CONFIGURATION_SET_NAME,
-  SES_IDENTITY_DOMAIN,
-  SES_MAIL_FROM_DOMAIN,
-} from '../config';
-import { tenantAwsAccount } from '../tenant-context';
+  tenantAwsAccount,
+  tenantAwsRegion,
+  tenantString,
+} from '../tenant-context';
 
-export {
-  SES_CONFIGURATION_SET_NAME,
-  SES_IDENTITY_DOMAIN,
-  SES_MAIL_FROM_DOMAIN,
-};
+export { SES_CONFIGURATION_SET_NAME };
 /** From cdk.local.json; the reserved unconfigured account refuses every call. */
 export const TARGET_ACCOUNT_ID = tenantAwsAccount();
-export const TARGET_REGION = DEPLOYMENT_REGION;
+export const TARGET_REGION = tenantAwsRegion();
+/**
+ * The SES identity these scripts inspect and send from. It is its own key,
+ * not psdEoc:sesIdentityDomain, because the scripts have always addressed a
+ * separate identity from the one the stack declares.
+ */
+export const SES_IDENTITY_DOMAIN = tenantString(
+  'psdEoc:sesOperationsIdentityDomain',
+  /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
+  { fallback: 'unconfigured.invalid' },
+);
+export const SES_MAIL_FROM_DOMAIN = `mail.${SES_IDENTITY_DOMAIN}`;
 export const SES_CLIENT_MAX_ATTEMPTS = 1;
-export const SES_TEST_FROM_ADDRESS =
-  `verification@${SES_IDENTITY_DOMAIN}` as const;
-export const DISTRICT_WEBSITE_URL = 'https://www.psd401.net/';
+export const SES_TEST_FROM_ADDRESS = `verification@${SES_IDENTITY_DOMAIN}`;
+/** The district's public website: the origin of its privacy contact page. */
+export const DISTRICT_WEBSITE_URL = `${
+  new URL(
+    tenantString('psdEoc:privacyContactUrl', /^https:\/\/[^\s?#]+$/u, {
+      fallback: 'https://www.unconfigured.invalid/',
+    }),
+  ).origin
+}/`;
+const ORGANIZATION_NAME = tenantString('psdEoc:organizationName', /\S/u, {
+  fallback: 'The district',
+});
 
 export const PRODUCTION_ACCESS_CONFIRMATION =
   'SUBMIT SES PRODUCTION ACCESS REQUEST';
 export const TEST_SEND_CONFIRMATION =
   'SEND TEST ONLY TO APPROVED SYNTHETIC TARGET';
 
-export const PRODUCTION_ACCESS_USE_CASE =
-  'Peninsula School District will send transactional, staff-only emergency notifications to an opt-in roster of approximately 1,200 authorized district staff recipients. Messages are operational safety notices only: no marketing, no purchased lists, and no student data. Bounces and complaints will be published to the encrypted SES configuration-set SNS event destination. An approved consumer and operational handling must be connected and verified before any staff send; this setup creates no SNS subscription.';
+export const PRODUCTION_ACCESS_USE_CASE = `${ORGANIZATION_NAME} will send transactional, staff-only emergency notifications to an opt-in roster of approximately 1,200 authorized district staff recipients. Messages are operational safety notices only: no marketing, no purchased lists, and no student data. Bounces and complaints will be published to the encrypted SES configuration-set SNS event destination. An approved consumer and operational handling must be connected and verified before any staff send; this setup creates no SNS subscription.`;
 
 export const TEST_EMAIL_SUBJECT =
   'TEST ONLY — NO EMERGENCY — PSD EOC SES verification';

@@ -52,7 +52,7 @@ const FACILITIES: readonly Facility[] = Object.freeze([
   {
     id: IDS.facility,
     code: 'AES',
-    name: 'Artondale Elementary',
+    name: 'Alderwood Elementary',
     active: true,
     isolated: false,
     createdAt: CREATED_AT,
@@ -294,11 +294,11 @@ describe('AccessAdminView semantics', () => {
     expect(html).toContain(`name="userId" value="${IDS.disabledUser}"`);
     expect(html).toContain('<legend>Where Alex Staff may act</legend>');
     expect(html).toContain('<legend>Where Casey Staff may act</legend>');
-    expect(html).toContain('AES — Artondale Elementary');
+    expect(html).toContain('AES — Alderwood Elementary');
     expect(html).toContain('RVW — App Review (isolated)');
     expect(html.match(/type="checkbox" name="facilityIds"/gu)).toHaveLength(4);
     // The current scope is pre-selected: Alex is district-wide, Casey is
-    // limited to Artondale.
+    // limited to Alderwood.
     expect(
       html.match(
         /<input type="checkbox" name="facilityIds" checked="" value="[^"]+"/gu,

@@ -39,7 +39,7 @@ describe('synthetic group configuration', () => {
     // real address cannot be configured as a synthetic recipient, so the
     // health check cannot be pointed at a person by editing configuration.
     for (const member of [
-      'someone@psd401.net',
+      'someone@anytownschools.org',
       'someone@gmail.com',
       'someone@example.invalid.co',
       'someone@notexample.com',
@@ -78,14 +78,14 @@ describe('synthetic group configuration', () => {
     try {
       readSyntheticGroupConfiguration(
         configuration([
-          { facilityCode: 'ESC', members: ['realperson@psd401.net'] },
+          { facilityCode: 'ESC', members: ['realperson@anytownschools.org'] },
         ]),
       );
     } catch (error) {
       message = String((error as Error).message);
     }
     expect(message).not.toContain('realperson');
-    expect(message).not.toContain('psd401.net');
+    expect(message).not.toContain('anytownschools.org');
     expect(message).toContain('reserved domain');
   });
 

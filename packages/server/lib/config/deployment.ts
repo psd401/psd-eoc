@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
  * The values that differ between one district's deployment and another's.
  *
  * This repository is meant to be cloned and run by any district, so nothing
- * that identifies Peninsula School District — its domain, its AWS account, its
+ * that identifies the operating district — its domain, its AWS account, its
  * region, its bundle identifier, its public origin — belongs in source. Each of
  * those is read here, from the environment, once.
  *

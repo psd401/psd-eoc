@@ -54,7 +54,7 @@ describe('facility configuration parsing', () => {
   test('reads a list and defaults active to true', () => {
     const parsed = readFacilityConfiguration({
       PSD_EOC_FACILITIES: JSON.stringify([
-        { code: 'AES', name: 'Artondale Elementary' },
+        { code: 'AES', name: 'Alderwood Elementary' },
         { code: 'CLOSED-1', name: 'Former Site', active: false },
       ]),
     });
@@ -62,7 +62,7 @@ describe('facility configuration parsing', () => {
       {
         active: true,
         code: 'AES',
-        name: 'Artondale Elementary',
+        name: 'Alderwood Elementary',
         isolated: false,
       },
       { active: false, code: 'CLOSED-1', name: 'Former Site', isolated: false },
