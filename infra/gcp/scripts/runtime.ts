@@ -1,7 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
+  constants,
   existsSync,
-  lstatSync,
+  fstatSync,
+  openSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -489,22 +492,37 @@ function readLocalConfigurationFile(
   required: boolean,
   requirePrivateMode = false,
 ): string {
-  if (!existsSync(path)) {
-    if (required) {
-      throw new Error(`${label} is missing.`);
+  // Open once, then check and read that descriptor so the file cannot be
+  // swapped in between; O_NOFOLLOW keeps a symlink from being opened at all.
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
+    if (Reflect.get(Object(error), 'code') === 'ENOENT') {
+      if (required) {
+        throw new Error(`${label} is missing.`);
+      }
+      return '';
     }
-    return '';
+    throw new Error(`${label} could not be read safely.`);
   }
   try {
-    const metadata = lstatSync(path);
-    if (
-      !metadata.isFile() ||
-      metadata.size > maximumSize ||
-      (requirePrivateMode && (metadata.mode & 0o077) !== 0)
-    ) {
-      throw new Error('invalid metadata');
+    try {
+      const metadata = fstatSync(descriptor);
+      if (
+        !metadata.isFile() ||
+        metadata.size > maximumSize ||
+        (requirePrivateMode && (metadata.mode & 0o077) !== 0)
+      ) {
+        throw new Error('invalid metadata');
+      }
+      return readFileSync(descriptor, 'utf8');
+    } finally {
+      closeSync(descriptor);
     }
-    return readFileSync(path, 'utf8');
   } catch {
     throw new Error(`${label} could not be read safely.`);
   }

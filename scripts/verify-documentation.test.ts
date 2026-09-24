@@ -627,6 +627,15 @@ describe('documentation contract', () => {
     ).toEqual([
       'current runbook references the removed notification control gate',
     ]);
+    // Whitespace runs that never reach "epoch" once backtracked exponentially.
+    const startedAt = performance.now();
+    expect(
+      currentDocumentationViolations(
+        'docs/runbooks/rollback.md',
+        `current${'\t\n'.repeat(40)}!`,
+      ),
+    ).toEqual([]);
+    expect(performance.now() - startedAt).toBeLessThan(1000);
     expect(
       currentDocumentationViolations(
         'CLAUDE.md',

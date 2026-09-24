@@ -91,16 +91,23 @@ function oauthClientProjectNumber(value: string): string {
   return value.slice(0, value.indexOf('-'));
 }
 
+const XML_ENTITY_TEXT: Readonly<Record<string, string>> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  quot: '"',
+};
+
 function decodeXmlText(value: string): string {
   if (/&(?!(?:amp|apos|gt|lt|quot);)/u.test(value)) {
     throw new Error('iOS OAuth plist contains an unsupported XML entity.');
   }
-  return value
-    .replaceAll('&amp;', '&')
-    .replaceAll('&apos;', "'")
-    .replaceAll('&gt;', '>')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&quot;', '"');
+  // One pass, so a decoded "&" can never begin a second entity.
+  return value.replaceAll(
+    /&(amp|apos|gt|lt|quot);/gu,
+    (_entity, name: string) => XML_ENTITY_TEXT[name] ?? '',
+  );
 }
 
 export function parsePlistStrings(
