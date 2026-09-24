@@ -161,6 +161,86 @@ describe('stdio transport', () => {
     expect(fetchCalls).toBe(0);
   });
 
+  test('awaits each asynchronous write and flush before the next response and before end', async () => {
+    const events: string[] = [];
+    let pending = 0;
+    const settleLater = <T>(value: T, label: string): Promise<T> => {
+      pending += 1;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          pending -= 1;
+          events.push(label);
+          resolve(value);
+        }, 5);
+      });
+    };
+    const output: StdioWriter = {
+      write(value) {
+        expect(pending).toBe(0);
+        events.push('write-start');
+        return settleLater(value.byteLength, 'write-done');
+      },
+      flush() {
+        expect(pending).toBe(0);
+        return settleLater(0, 'flush-done');
+      },
+      end() {
+        expect(pending).toBe(0);
+        events.push('end');
+        return 0;
+      },
+    };
+    await runStdioServer(
+      protocol(),
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('{not json\n{also not\n'),
+          );
+          controller.close();
+        },
+      }),
+      output,
+    );
+
+    expect(events).toEqual([
+      'write-start',
+      'write-done',
+      'flush-done',
+      'write-start',
+      'write-done',
+      'flush-done',
+      'flush-done',
+      'end',
+    ]);
+  });
+
+  test('rejects the server run when a write fails instead of leaking an unhandled rejection', async () => {
+    const output: StdioWriter = {
+      write() {
+        return Promise.reject(new Error('EPIPE'));
+      },
+      flush() {
+        return 0;
+      },
+      end() {
+        return 0;
+      },
+    };
+    await expect(
+      runStdioServer(
+        protocol(),
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{not json\n'));
+            controller.close();
+          },
+        }),
+        output,
+      ),
+    ).rejects.toThrow('EPIPE');
+  });
+
   test('rejects a truncated UTF-8 sequence at end of input', async () => {
     const lines = await runInput(
       new ReadableStream<Uint8Array>({
