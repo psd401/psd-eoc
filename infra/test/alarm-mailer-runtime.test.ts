@@ -7,9 +7,8 @@ mock.module('@aws-sdk/client-sesv2', () => ({
   },
 }));
 
-const { formatAlarmEmail, mailAlarms } = await import(
-  '../lambda/alarm-mailer/index.mjs'
-);
+const { formatAlarmEmail, mailAlarms } =
+  await import('../lambda/alarm-mailer/index.mjs');
 
 const ENVIRONMENT = Object.freeze({
   ALARM_FROM_ADDRESS: 'eoc-alarms@example.invalid',

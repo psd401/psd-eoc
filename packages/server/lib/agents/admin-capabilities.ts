@@ -54,9 +54,7 @@ import {
 import { createDrizzleAgentApiKeyRepository } from './drizzle-key-repository';
 
 export type AgentApiKeyAdministrationCapabilityId =
-  | 'issue-agent-api-key'
-  | 'revoke-agent-api-key'
-  | 'list-agent-api-keys';
+  'issue-agent-api-key' | 'revoke-agent-api-key' | 'list-agent-api-keys';
 
 /** Trusted identity and scope supplied only after an adapter authenticates. */
 export interface AgentApiKeyAdministrationAccess {
@@ -74,8 +72,7 @@ export interface AgentApiKeyAdministrationDependencies {
   readonly capabilityStore: AgentApiKeyCapabilityStore;
 }
 
-export interface AgentApiKeyCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface AgentApiKeyCapabilityTransaction extends CapabilityEngineTransaction {
   readonly keys: Pick<AgentApiKeyService, 'issue' | 'revoke'>;
   setAuditTarget(target: SecurityAuditTarget): void;
 }

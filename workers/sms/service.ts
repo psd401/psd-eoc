@@ -92,9 +92,7 @@ export interface SmsServiceConfiguration {
 }
 
 export type SmsServiceErrorCode =
-  | 'FEATURE_DISABLED'
-  | 'INVALID_CONFIGURATION'
-  | 'QUEUE_MESSAGE_INVALID';
+  'FEATURE_DISABLED' | 'INVALID_CONFIGURATION' | 'QUEUE_MESSAGE_INVALID';
 
 export class SmsServiceError extends Error {
   public constructor(public readonly code: SmsServiceErrorCode) {

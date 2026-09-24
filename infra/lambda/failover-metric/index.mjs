@@ -53,9 +53,8 @@ function assertAuroraFailoverEvent(value, databaseArn) {
 }
 
 async function publish(namespace) {
-  const { CloudWatchClient, PutMetricDataCommand } = await import(
-    '@aws-sdk/client-cloudwatch'
-  );
+  const { CloudWatchClient, PutMetricDataCommand } =
+    await import('@aws-sdk/client-cloudwatch');
   await new CloudWatchClient({}).send(
     new PutMetricDataCommand({
       MetricData: [

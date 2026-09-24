@@ -127,9 +127,7 @@ export interface AwsEumSmsRuntimeOptions {
 }
 
 export type AwsEumSmsRuntimeErrorCode =
-  | 'INVALID_CONFIGURATION'
-  | 'INVOCATION_UNVERIFIED'
-  | 'FEATURE_DISABLED';
+  'INVALID_CONFIGURATION' | 'INVOCATION_UNVERIFIED' | 'FEATURE_DISABLED';
 
 export class AwsEumSmsRuntimeError extends Error {
   public constructor(public readonly code: AwsEumSmsRuntimeErrorCode) {

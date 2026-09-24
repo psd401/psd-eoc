@@ -56,9 +56,7 @@ export interface ParsedSesEvent {
 }
 
 export type SesEventErrorCode =
-  | 'INVALID_MESSAGE'
-  | 'UNSUPPORTED_EVENT'
-  | 'INVALID_CORRELATION';
+  'INVALID_MESSAGE' | 'UNSUPPORTED_EVENT' | 'INVALID_CORRELATION';
 
 export class SesEventError extends Error {
   public constructor(public readonly code: SesEventErrorCode) {

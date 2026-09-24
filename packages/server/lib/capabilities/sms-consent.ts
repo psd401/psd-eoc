@@ -54,8 +54,7 @@ import {
 } from './persistence';
 
 /** Consent-specific persistence added to the canonical capability transaction. */
-export interface SmsConsentCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface SmsConsentCapabilityTransaction extends CapabilityEngineTransaction {
   recordSmsConsent(
     input: CapabilityInput<'record-sms-consent'>,
     actor: Extract<Actor, { kind: 'human' }>,

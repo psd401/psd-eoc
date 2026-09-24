@@ -5,9 +5,8 @@ mock.module('@aws-sdk/client-cloudwatch', () => ({
   PutMetricDataCommand: class PutMetricDataCommand {},
 }));
 
-const { assertDatabaseArn, runFailoverMetric } = await import(
-  '../lambda/failover-metric/index.mjs'
-);
+const { assertDatabaseArn, runFailoverMetric } =
+  await import('../lambda/failover-metric/index.mjs');
 
 const databaseArn =
   'arn:aws:rds:us-east-1:123456789012:cluster:synthetic-example-eoc';

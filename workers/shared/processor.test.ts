@@ -142,8 +142,7 @@ class MemoryEvidenceWriter implements AttemptEvidenceWriter {
   public readonly evidence: DeliveryEvidence[] = [];
   public readonly calls: DeliveryStateWriteRequest[] = [];
   public failOnceForState:
-    | DeliveryStateWriteRequest['evidence']['state']
-    | null = null;
+    DeliveryStateWriteRequest['evidence']['state'] | null = null;
 
   public recordAttemptEvidence(
     value: DeliveryStateWriteRequest | unknown,

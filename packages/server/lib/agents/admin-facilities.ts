@@ -91,9 +91,7 @@ function decodeCursor(
   }
 }
 
-export class DrizzleAgentAdministrationFacilityStore
-  implements AgentAdministrationFacilityStore
-{
+export class DrizzleAgentAdministrationFacilityStore implements AgentAdministrationFacilityStore {
   public constructor(private readonly database: Database) {}
 
   public async list(input: ListFacilitiesInput): Promise<FacilityPage> {

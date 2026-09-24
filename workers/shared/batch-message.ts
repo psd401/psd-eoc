@@ -6,9 +6,7 @@ import { DispatchBatchSchema, type DispatchBatch } from '@psd-eoc/contracts';
 export const MAX_WORKER_MESSAGE_BYTES = 256 * 1024;
 
 export type WorkerBatchMessageErrorCode =
-  | 'MESSAGE_TOO_LARGE'
-  | 'INVALID_JSON'
-  | 'INVALID_BATCH_MESSAGE';
+  'MESSAGE_TOO_LARGE' | 'INVALID_JSON' | 'INVALID_BATCH_MESSAGE';
 
 /** Bounded queue error that never repeats rendered copy or recipient data. */
 export class WorkerBatchMessageError extends Error {

@@ -637,8 +637,7 @@ function commandWasDefinitivelyRejected(
 }
 
 type JsonReadResult =
-  | Readonly<{ parsed: true; value: unknown }>
-  | Readonly<{ parsed: false }>;
+  Readonly<{ parsed: true; value: unknown }> | Readonly<{ parsed: false }>;
 
 async function readJson(response: Response): Promise<JsonReadResult> {
   try {

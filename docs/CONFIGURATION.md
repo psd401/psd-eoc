@@ -34,6 +34,7 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:sourceRepositoryUrl`
 - `psdEoc:syntheticGroups`
 - `psdEoc:threats`
+
 <!-- docs-contract:cdk-context:end -->
 
 ### Local tenant context
@@ -162,6 +163,7 @@ The current synthesized stack contains exactly these parameters:
 - `SmsHelpMessage`
 - `SmsOriginationIdentityArn`
 - `SmsStopMessage`
+
 <!-- docs-contract:template-parameters:end -->
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility

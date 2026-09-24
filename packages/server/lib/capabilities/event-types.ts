@@ -200,8 +200,7 @@ export interface EventTypeStore {
 }
 
 /** Transaction-scoped event-type repository used by the audited engine. */
-export interface EventTypeCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface EventTypeCapabilityTransaction extends CapabilityEngineTransaction {
   readonly eventTypes: EventTypeStore;
 }
 
@@ -1622,8 +1621,7 @@ export interface AuthenticatedEventTypeAgent {
 }
 
 type AuthenticatedEventTypePrincipal =
-  | AuthenticatedSession
-  | AuthenticatedEventTypeAgent;
+  AuthenticatedSession | AuthenticatedEventTypeAgent;
 
 function isAuthenticatedEventTypeAgent(
   authenticated: AuthenticatedEventTypePrincipal,

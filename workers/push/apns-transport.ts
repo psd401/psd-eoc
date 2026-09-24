@@ -24,8 +24,7 @@ export type ApnsEnvironment = 'development' | 'production';
 
 export interface ApnsHttp2Request {
   readonly origin:
-    | typeof APNS_DEVELOPMENT_ORIGIN
-    | typeof APNS_PRODUCTION_ORIGIN;
+    typeof APNS_DEVELOPMENT_ORIGIN | typeof APNS_PRODUCTION_ORIGIN;
   readonly method: 'POST';
   readonly path: string;
   readonly headers: Readonly<Record<string, string>>;
@@ -312,8 +311,7 @@ export class ApnsPushTransport implements DirectPushTransport {
         ? APNS_PRODUCTION_ORIGIN
         : APNS_DEVELOPMENT_ORIGIN;
     const hostname = new URL(origin).hostname as
-      | 'api.sandbox.push.apple.com'
-      | 'api.push.apple.com';
+      'api.sandbox.push.apple.com' | 'api.push.apple.com';
     return Object.freeze({
       kind: 'prepared' as const,
       provider: this.provider,

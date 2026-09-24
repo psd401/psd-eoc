@@ -148,9 +148,7 @@ function parseQueueMessage(
   }
 }
 
-export class ExpoReceiptQueueResendScheduler
-  implements ExpoReceiptResendScheduler
-{
+export class ExpoReceiptQueueResendScheduler implements ExpoReceiptResendScheduler {
   public constructor(
     private readonly state: ExpoPushRuntimeClient,
     private readonly queue: ExpoPushRetryPublisher,

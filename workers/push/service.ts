@@ -97,9 +97,7 @@ export interface DirectPushServiceConfiguration {
 }
 
 export type ExpoPushServiceErrorCode =
-  | 'FEATURE_DISABLED'
-  | 'INVALID_CONFIGURATION'
-  | 'QUEUE_MESSAGE_INVALID';
+  'FEATURE_DISABLED' | 'INVALID_CONFIGURATION' | 'QUEUE_MESSAGE_INVALID';
 
 export class ExpoPushServiceError extends Error {
   public constructor(public readonly code: ExpoPushServiceErrorCode) {

@@ -210,16 +210,14 @@ export function createAwsApi(): SmsRegistrationApi {
         const page = output.PhoneNumbers ?? [];
         assertProviderPageCapacity(phones.length, page.length);
         phones.push(
-          ...page.map(
-            (phone): PhoneNumberRecord => ({
-              phoneNumberId: required(phone.PhoneNumberId, 'PhoneNumberId'),
-              ...(phone.RegistrationId === undefined
-                ? {}
-                : { registrationId: phone.RegistrationId }),
-              numberType: required(phone.NumberType, 'phone number NumberType'),
-              status: required(phone.Status, 'phone number Status'),
-            }),
-          ),
+          ...page.map((phone): PhoneNumberRecord => ({
+            phoneNumberId: required(phone.PhoneNumberId, 'PhoneNumberId'),
+            ...(phone.RegistrationId === undefined
+              ? {}
+              : { registrationId: phone.RegistrationId }),
+            numberType: required(phone.NumberType, 'phone number NumberType'),
+            status: required(phone.Status, 'phone number Status'),
+          })),
         );
         nextToken = nextProviderPageToken(seenTokens, output.NextToken);
       } while (nextToken !== undefined);
@@ -314,27 +312,25 @@ export function createAwsApi(): SmsRegistrationApi {
         const page = output.Registrations ?? [];
         assertProviderPageCapacity(registrations.length, page.length);
         registrations.push(
-          ...page.map(
-            (registration): RegistrationRecord => ({
-              registrationId: required(
-                registration.RegistrationId,
-                'RegistrationId',
-              ),
-              registrationStatus: required(
-                registration.RegistrationStatus,
-                'RegistrationStatus',
-              ),
-              registrationType: required(
-                registration.RegistrationType,
-                'RegistrationType',
-              ),
-              ...(registration.CurrentVersionNumber === undefined
-                ? {}
-                : {
-                    currentVersionNumber: registration.CurrentVersionNumber,
-                  }),
-            }),
-          ),
+          ...page.map((registration): RegistrationRecord => ({
+            registrationId: required(
+              registration.RegistrationId,
+              'RegistrationId',
+            ),
+            registrationStatus: required(
+              registration.RegistrationStatus,
+              'RegistrationStatus',
+            ),
+            registrationType: required(
+              registration.RegistrationType,
+              'RegistrationType',
+            ),
+            ...(registration.CurrentVersionNumber === undefined
+              ? {}
+              : {
+                  currentVersionNumber: registration.CurrentVersionNumber,
+                }),
+          })),
         );
         nextToken = nextProviderPageToken(seenTokens, output.NextToken);
       } while (nextToken !== undefined);

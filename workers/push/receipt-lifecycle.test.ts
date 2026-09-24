@@ -302,9 +302,7 @@ function decisionCompletesPendingAction(
 }
 
 type TransportBehavior =
-  | readonly ExpoProviderOutcome[]
-  | Error
-  | ProviderDispatchError;
+  readonly ExpoProviderOutcome[] | Error | ProviderDispatchError;
 
 class SequenceReceiptTransport implements ExpoPushTransport {
   public readonly queries: string[][] = [];

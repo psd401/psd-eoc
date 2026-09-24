@@ -49,14 +49,15 @@ export interface AgentGatewayAuditAppendOptions {
 }
 
 /** Pre-authentication denial using the canonical minimized principal shape. */
-export interface UnauthenticatedAgentGatewayAuditEvent
-  extends Omit<CapabilityAuditEvent, 'actor'> {
+export interface UnauthenticatedAgentGatewayAuditEvent extends Omit<
+  CapabilityAuditEvent,
+  'actor'
+> {
   readonly principal: UnauthenticatedAuditPrincipal;
 }
 
 export type AgentGatewayAuditEvent =
-  | CapabilityAuditEvent
-  | UnauthenticatedAgentGatewayAuditEvent;
+  CapabilityAuditEvent | UnauthenticatedAgentGatewayAuditEvent;
 
 /** Append-only audit boundary used for denials before capability dispatch. */
 export interface AgentGatewayAuditSink {
@@ -105,8 +106,7 @@ export class AgentGatewayError extends Error {
 
   public constructor(
     public readonly reasonCode:
-      | 'CAPABILITY_NOT_GRANTED'
-      | 'HUMAN_ONLY_REQUIRED',
+      'CAPABILITY_NOT_GRANTED' | 'HUMAN_ONLY_REQUIRED',
     message: string,
   ) {
     super(message);

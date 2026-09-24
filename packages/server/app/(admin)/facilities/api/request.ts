@@ -32,8 +32,7 @@ export interface GoogleGroupIdResolvers {
 }
 /** A lone resolver answers both ways: it never lets a building source wait. */
 export type GoogleGroupIdResolution =
-  | GoogleGroupIdResolver
-  | GoogleGroupIdResolvers;
+  GoogleGroupIdResolver | GoogleGroupIdResolvers;
 function googleGroupIdResolvers(
   resolution: GoogleGroupIdResolution,
 ): GoogleGroupIdResolvers {

@@ -303,18 +303,17 @@ function buildFromParsedEvidence(
       ) ?? [];
   const staleEndpoints =
     snapshot?.staleEndpoints
-      .map(
-        (endpoint): StaleRosterEndpoint =>
-          Object.freeze({
-            recipientId: endpoint.recipientId,
-            endpointId: endpoint.endpointId,
-            channel: endpoint.channel,
-            reason:
-              endpoint.channel === 'sms' &&
-              endpoint.reasonCode === SMS_OPT_OUT_REASON_CODE
-                ? 'sms-opted-out'
-                : endpoint.status,
-          }),
+      .map((endpoint): StaleRosterEndpoint =>
+        Object.freeze({
+          recipientId: endpoint.recipientId,
+          endpointId: endpoint.endpointId,
+          channel: endpoint.channel,
+          reason:
+            endpoint.channel === 'sms' &&
+            endpoint.reasonCode === SMS_OPT_OUT_REASON_CODE
+              ? 'sms-opted-out'
+              : endpoint.status,
+        }),
       )
       .sort(
         (left, right) =>

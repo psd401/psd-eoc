@@ -41,10 +41,7 @@ export type RequestAuthenticated = <Output>(
 ) => Promise<Output>;
 
 export type AuthenticatedRequestFailureKind =
-  | 'configuration'
-  | 'invalid-request'
-  | 'invalid-response'
-  | 'network';
+  'configuration' | 'invalid-request' | 'invalid-response' | 'network';
 
 /** A bounded local failure that never exposes headers, credentials, or bodies. */
 export class AuthenticatedRequestFailure extends Error {

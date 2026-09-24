@@ -27,10 +27,7 @@ const PHOTO_PAYLOAD_VALIDATION_MEDIA_ID =
   '00000000-0000-4000-8000-000000000000';
 
 export type PhotoDraftNetworkStage =
-  | 'create-intent'
-  | 'upload-bytes'
-  | 'complete-upload'
-  | 'append-entry';
+  'create-intent' | 'upload-bytes' | 'complete-upload' | 'append-entry';
 
 export type PhotoDraftStage =
   | 'ready'
@@ -43,8 +40,7 @@ export type PhotoDraftStage =
   | 'cleanup-pending';
 
 export type PhotoDraftCleanupProof =
-  | 'append-response'
-  | 'timeline-reconciliation';
+  'append-response' | 'timeline-reconciliation';
 
 export interface PhotoDraftIdempotencyKeys {
   readonly createIntent: string;
@@ -143,9 +139,7 @@ export interface PhotoDraftNetwork {
 }
 
 export type PhotoDraftIdempotencyPurpose =
-  | 'create-intent'
-  | 'complete-upload'
-  | 'append-entry';
+  'create-intent' | 'complete-upload' | 'append-entry';
 
 export interface PhotoDraftDependencies {
   readonly storage: PhotoDraftStorage;

@@ -32,8 +32,7 @@ interface StartMutationAttentionIdentity {
   readonly testID?: string;
 }
 
-export interface PendingStartMutationAttentionProps
-  extends StartMutationAttentionIdentity {
+export interface PendingStartMutationAttentionProps extends StartMutationAttentionIdentity {
   readonly status: 'pending';
   readonly checking?: never;
   readonly checkError?: never;
@@ -41,8 +40,7 @@ export interface PendingStartMutationAttentionProps
   readonly onAcknowledgeUnresolved?: never;
 }
 
-export interface FailedStartMutationAttentionProps
-  extends StartMutationAttentionIdentity {
+export interface FailedStartMutationAttentionProps extends StartMutationAttentionIdentity {
   readonly status: 'failed';
   readonly failureMessage: string;
   readonly checking?: boolean;
@@ -53,8 +51,7 @@ export interface FailedStartMutationAttentionProps
   readonly onAcknowledgeUnresolved?: never;
 }
 
-export interface UnresolvedStartMutationAttentionProps
-  extends StartMutationAttentionIdentity {
+export interface UnresolvedStartMutationAttentionProps extends StartMutationAttentionIdentity {
   readonly status: 'unresolved';
   readonly activeEvents?: readonly StartMutationActiveEventSummary[];
   readonly outcomeMessage: string;

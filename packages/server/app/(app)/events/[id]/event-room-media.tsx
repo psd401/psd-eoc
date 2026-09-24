@@ -417,10 +417,7 @@ type PrivatePhotoPhase =
   | 'error';
 
 type PrivatePhotoObserverSupport =
-  | 'checking'
-  | 'available'
-  | 'unavailable'
-  | 'disabled';
+  'checking' | 'available' | 'unavailable' | 'disabled';
 
 export function AuthorizedPhoto({
   entryId,
@@ -928,9 +925,7 @@ export function AuthorizedPhoto({
 }
 
 export type PrivatePhotoMountMode =
-  | 'recent'
-  | 'selected-older'
-  | 'deferred-older';
+  'recent' | 'selected-older' | 'deferred-older';
 
 export function DeferredPrivatePhoto({
   entryId,

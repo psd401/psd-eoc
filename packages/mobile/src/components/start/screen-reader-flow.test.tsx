@@ -33,9 +33,8 @@ const {
   activationAudienceLabel,
   publicBlockingMessages,
 } = await import('./activation-confirmation');
-const { ActivationResultContent, announceActivationResult } = await import(
-  './activation-result'
-);
+const { ActivationResultContent, announceActivationResult } =
+  await import('./activation-result');
 const { ActiveEventJoinAction } = await import('./active-event-join-action');
 const { Call911Action, open911Dialer } = await import('./call-911-affordance');
 const { ClassifiedActionButton } = await import('./classified-action-button');

@@ -951,8 +951,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     });
     let writerExecution: Promise<void> | undefined;
     let projectionExecution:
-      | ReturnType<typeof executeRosterHealthProjection>
-      | undefined;
+      ReturnType<typeof executeRosterHealthProjection> | undefined;
 
     try {
       const [baseline] = await observer.db

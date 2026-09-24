@@ -71,16 +71,14 @@ async function runTask(input) {
 }
 
 async function describeTasks(input) {
-  const { DescribeTasksCommand, ECSClient } = await import(
-    '@aws-sdk/client-ecs'
-  );
+  const { DescribeTasksCommand, ECSClient } =
+    await import('@aws-sdk/client-ecs');
   return new ECSClient({}).send(new DescribeTasksCommand(input));
 }
 
 async function describeServices(input) {
-  const { DescribeServicesCommand, ECSClient } = await import(
-    '@aws-sdk/client-ecs'
-  );
+  const { DescribeServicesCommand, ECSClient } =
+    await import('@aws-sdk/client-ecs');
   return new ECSClient({}).send(new DescribeServicesCommand(input));
 }
 
@@ -90,9 +88,8 @@ async function stopTask(input) {
 }
 
 async function readStackStatus(stackId) {
-  const { CloudFormationClient, DescribeStacksCommand } = await import(
-    '@aws-sdk/client-cloudformation'
-  );
+  const { CloudFormationClient, DescribeStacksCommand } =
+    await import('@aws-sdk/client-cloudformation');
   const response = await new CloudFormationClient({}).send(
     new DescribeStacksCommand({ StackName: stackId }),
   );
@@ -100,16 +97,14 @@ async function readStackStatus(stackId) {
 }
 
 async function batchGetImage(input) {
-  const { BatchGetImageCommand, ECRClient } = await import(
-    '@aws-sdk/client-ecr'
-  );
+  const { BatchGetImageCommand, ECRClient } =
+    await import('@aws-sdk/client-ecr');
   return new ECRClient({}).send(new BatchGetImageCommand(input));
 }
 
 async function getDownloadUrlForLayer(input) {
-  const { ECRClient, GetDownloadUrlForLayerCommand } = await import(
-    '@aws-sdk/client-ecr'
-  );
+  const { ECRClient, GetDownloadUrlForLayerCommand } =
+    await import('@aws-sdk/client-ecr');
   return new ECRClient({}).send(new GetDownloadUrlForLayerCommand(input));
 }
 

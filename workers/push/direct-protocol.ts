@@ -15,8 +15,7 @@ export const FCM_DIRECT_PROVIDER = 'fcm-direct' as const;
 export const DIRECT_PUSH_TTL_SECONDS = 60 * 60;
 
 export type DirectPushProvider =
-  | typeof APNS_DIRECT_PROVIDER
-  | typeof FCM_DIRECT_PROVIDER;
+  typeof APNS_DIRECT_PROVIDER | typeof FCM_DIRECT_PROVIDER;
 
 export type DirectPushReasonCode =
   | 'APNS_AUTHENTICATION_FAILED'

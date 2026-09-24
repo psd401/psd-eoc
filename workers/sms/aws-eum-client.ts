@@ -30,8 +30,7 @@ export type AwsEumSingleAttemptClientConfig = Omit<
 
 /** Write-once send boundary plus bounded read-only opt-out reconciliation. */
 export interface AwsEumSingleAttemptClient
-  extends AwsEumSmsClient,
-    AwsEumOptOutTransport {}
+  extends AwsEumSmsClient, AwsEumOptOutTransport {}
 
 /**
  * Builds the only supported live AWS EUM client boundary. `maxAttempts: 1`

@@ -380,14 +380,12 @@ export class SmsRuntimeClient
     const items = value.items.map((item) =>
       SmsWorkerAttemptWorkItemSchema.parse(item),
     );
-    if (
-      !(
-        value.nextCursor === null ||
-        (Number.isSafeInteger(value.nextCursor) &&
-          Number(value.nextCursor) > input.cursor &&
-          Number(value.nextCursor) <= 12_000)
-      )
-    ) {
+    if (!(
+      value.nextCursor === null ||
+      (Number.isSafeInteger(value.nextCursor) &&
+        Number(value.nextCursor) > input.cursor &&
+        Number(value.nextCursor) <= 12_000)
+    )) {
       return fail('INVALID_RESPONSE');
     }
     return Object.freeze({

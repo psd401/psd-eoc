@@ -27,9 +27,8 @@ mock.module('@aws-sdk/client-sqs', () => ({
   SendMessageCommand,
 }));
 
-const { routeDeliveryBatches } = await import(
-  '../lambda/delivery-router/index.mjs'
-);
+const { routeDeliveryBatches } =
+  await import('../lambda/delivery-router/index.mjs');
 
 const ACCOUNT = '123456789012';
 const queue = (name: string) =>

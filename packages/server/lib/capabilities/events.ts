@@ -144,8 +144,7 @@ export interface JoinPersistenceBundle {
 }
 
 /** Event-specific transaction boundary used by handlers and in-memory tests. */
-export interface EventCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface EventCapabilityTransaction extends CapabilityEngineTransaction {
   resolveActivationFacilityId(
     input: CapabilityInput<'start-event'>,
   ): Promise<string | null>;
@@ -488,8 +487,7 @@ function buildNotification(
     event: Event;
     purpose: 'activation' | 'all-clear' | 'reactivation';
     authorization:
-      | Event['activationAuthorization']
-      | LifecycleActionAuthorization;
+      Event['activationAuthorization'] | LifecycleActionAuthorization;
     preview: ActivationPreview | LifecycleConsequencePreview;
     wording: NotificationWording;
     context: CapabilityHandlerContext<EventCapabilityTransaction>;
@@ -903,8 +901,7 @@ async function notifyingLifecycleResult(
   transitionKind: 'all-clear' | 'reactivate',
   purpose: 'all-clear' | 'reactivation',
   input:
-    | CapabilityInput<'all-clear-event'>
-    | CapabilityInput<'reactivate-event'>,
+    CapabilityInput<'all-clear-event'> | CapabilityInput<'reactivate-event'>,
   context: CapabilityHandlerContext<EventCapabilityTransaction>,
 ): Promise<AllClearEventResult | ReactivateEventResult> {
   const locked = await lockedEvent(input.eventId, context);

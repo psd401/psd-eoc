@@ -36,8 +36,7 @@ import {
 const VERIFICATION_PAGE_SIZE = 200;
 
 export type SecurityAuditCapabilityId =
-  | 'query-security-audit'
-  | 'verify-security-audit-chain';
+  'query-security-audit' | 'verify-security-audit-chain';
 
 /** Trusted, server-resolved identity and scope for one audit capability call. */
 export interface SecurityAuditAccessContext {

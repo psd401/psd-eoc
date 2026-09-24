@@ -55,8 +55,7 @@ setDefaultTimeout(30_000);
 
 let connection: PostgresDatabaseConnection | undefined;
 let ownedDatabase:
-  | OwnedEventTypeDatabaseTestDatabase<PostgresDatabaseConnection>
-  | undefined;
+  OwnedEventTypeDatabaseTestDatabase<PostgresDatabaseConnection> | undefined;
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {

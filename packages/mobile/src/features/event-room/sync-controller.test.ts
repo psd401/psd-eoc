@@ -214,8 +214,7 @@ describe('event-room sync controller', () => {
     expect(callCount).toBe(2);
     expect(maximumConcurrent).toBe(1);
     const finishPoll = resolvePoll as
-      | ((value: EventRoomSyncResult) => void)
-      | null;
+      ((value: EventRoomSyncResult) => void) | null;
     if (finishPoll === null) throw new Error('poll did not start');
     finishPoll(page([entry(1)], 'cursor_1', false, null));
     await refresh;

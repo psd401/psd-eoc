@@ -359,8 +359,8 @@ export interface CanonicalCapabilityDefinition<
   InputSchema extends z.ZodType = z.ZodType,
   OutputSchema extends z.ZodType = z.ZodType,
   AuditPolicy extends CapabilityAuditPolicy = CapabilityAuditPolicy,
-  InvocationPolicy extends
-    CapabilityInvocationPolicy = CapabilityInvocationPolicy,
+  InvocationPolicy extends CapabilityInvocationPolicy =
+    CapabilityInvocationPolicy,
 > {
   readonly id: Id;
   readonly operation: Operation;
@@ -386,8 +386,8 @@ function canonicalCapability<
   InputSchema extends z.ZodType,
   OutputSchema extends z.ZodType,
   const AuditPolicy extends CapabilityAuditPolicy = 'all-outcomes',
-  const InvocationPolicy extends
-    CapabilityInvocationPolicy = CapabilityInvocationPolicy,
+  const InvocationPolicy extends CapabilityInvocationPolicy =
+    CapabilityInvocationPolicy,
 >(definition: {
   readonly id: Id;
   readonly operation: Operation;
@@ -1754,23 +1754,31 @@ export type RegisteredCapabilityId = keyof typeof CAPABILITY_CATALOG;
 export type AgentCapabilityGrant = AgentGrantableCapabilityId;
 
 type CanonicalMutationSafetyManifest = Readonly<{
-  [Id in RegisteredCapabilityId as (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'mutation'
-    ? Id
-    : never]: (typeof CAPABILITY_CATALOG)[Id]['safetyEffect'];
+  [
+    Id in RegisteredCapabilityId as (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'mutation'
+      ? Id
+      : never
+  ]: (typeof CAPABILITY_CATALOG)[Id]['safetyEffect'];
 }>;
 
 type CanonicalQueryManifest = Readonly<{
-  [Id in RegisteredCapabilityId as (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'query'
-    ? Id
-    : never]: 'none';
+  [
+    Id in RegisteredCapabilityId as (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'query'
+      ? Id
+      : never
+  ]: 'none';
 }>;
 
 type CanonicalInvocationPolicyMap = Readonly<{
-  [Id in RegisteredCapabilityId]: (typeof CAPABILITY_CATALOG)[Id]['invocationPolicy'];
+  [
+    Id in RegisteredCapabilityId
+  ]: (typeof CAPABILITY_CATALOG)[Id]['invocationPolicy'];
 }>;
 
 type CanonicalAuditPolicyMap = Readonly<{
-  [Id in RegisteredCapabilityId]: (typeof CAPABILITY_CATALOG)[Id]['auditPolicy'];
+  [
+    Id in RegisteredCapabilityId
+  ]: (typeof CAPABILITY_CATALOG)[Id]['auditPolicy'];
 }>;
 
 type AnyCanonicalCapabilityDefinition = CanonicalCapabilityDefinition<
@@ -1814,14 +1822,18 @@ export type CapabilityDerivedViews<
 > = Readonly<{
   registeredCapabilityIds: readonly CatalogKey<Catalog>[];
   mutationSafetyManifest: Readonly<{
-    [Id in CatalogKey<Catalog> as Catalog[Id]['operation'] extends 'mutation'
-      ? Id
-      : never]: Catalog[Id]['safetyEffect'];
+    [
+      Id in CatalogKey<Catalog> as Catalog[Id]['operation'] extends 'mutation'
+        ? Id
+        : never
+    ]: Catalog[Id]['safetyEffect'];
   }>;
   queryManifest: Readonly<{
-    [Id in CatalogKey<Catalog> as Catalog[Id]['operation'] extends 'query'
-      ? Id
-      : never]: 'none';
+    [
+      Id in CatalogKey<Catalog> as Catalog[Id]['operation'] extends 'query'
+        ? Id
+        : never
+    ]: 'none';
   }>;
   invocationPolicy: Readonly<{
     [Id in CatalogKey<Catalog>]: Catalog[Id]['invocationPolicy'];
@@ -1830,7 +1842,9 @@ export type CapabilityDerivedViews<
     [Id in CatalogKey<Catalog>]: Catalog[Id]['auditPolicy'];
   }>;
   agentGrantableCapabilityIds: readonly {
-    [Id in CatalogKey<Catalog>]: Catalog[Id]['invocationPolicy']['agentGrantable'] extends true
+    [
+      Id in CatalogKey<Catalog>
+    ]: Catalog[Id]['invocationPolicy']['agentGrantable'] extends true
       ? Id
       : never;
   }[CatalogKey<Catalog>][];
@@ -1948,14 +1962,16 @@ export const RegisteredCapabilityIdSchema = z.enum(registeredCapabilityIds);
 
 /** Query-only identifier inferred from each catalog entry's operation. */
 export type RegisteredQueryCapabilityId = {
-  [Id in RegisteredCapabilityId]: (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'query'
-    ? Id
-    : never;
+  [
+    Id in RegisteredCapabilityId
+  ]: (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'query' ? Id : never;
 }[RegisteredCapabilityId];
 
 /** Mutation-only identifier inferred from each catalog entry's operation. */
 export type RegisteredMutationCapabilityId = {
-  [Id in RegisteredCapabilityId]: (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'mutation'
+  [
+    Id in RegisteredCapabilityId
+  ]: (typeof CAPABILITY_CATALOG)[Id]['operation'] extends 'mutation'
     ? Id
     : never;
 }[RegisteredCapabilityId];

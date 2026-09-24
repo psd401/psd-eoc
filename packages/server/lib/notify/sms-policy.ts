@@ -262,7 +262,8 @@ export interface SmsOptOutDestinationResolver {
 }
 
 export interface SmsPolicyStore
-  extends SmsEndpointPolicyStore,
+  extends
+    SmsEndpointPolicyStore,
     SmsOptOutStore,
     SmsEndpointStatusStore,
     SmsOptOutDestinationResolver {}

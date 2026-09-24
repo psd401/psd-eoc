@@ -73,8 +73,7 @@ export interface SnsSubscriptionConfirmationEnvelope {
 }
 
 export type SnsVerifiableEnvelope =
-  | SnsNotificationEnvelope
-  | SnsSubscriptionConfirmationEnvelope;
+  SnsNotificationEnvelope | SnsSubscriptionConfirmationEnvelope;
 
 export type SnsSignatureErrorCode =
   | 'INVALID_ENVELOPE'

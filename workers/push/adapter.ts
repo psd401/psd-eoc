@@ -103,8 +103,7 @@ export type ExpoSendLedgerLookup =
   | Readonly<{ kind: 'uncertain' }>
   | Readonly<{ kind: 'conflict' }>;
 
-export interface CompleteExpoProviderIoRequest
-  extends ClaimExpoProviderIoRequest {
+export interface CompleteExpoProviderIoRequest extends ClaimExpoProviderIoRequest {
   readonly claimToken: string;
   readonly completion: ExpoSendLedgerCompletion;
 }
@@ -523,9 +522,7 @@ function endpointEligibilityFailure(
  * Live-capable Expo adapter whose idempotency is supplied by the injected
  * irreversible ledger, not by Expo. It has no default store or runtime wiring.
  */
-export class LedgeredExpoPushAdapter
-  implements AttemptIdempotentProviderAdapter
-{
+export class LedgeredExpoPushAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId: 'expo-push' | 'mobile-push';
   public readonly provider = EXPO_PUSH_PROVIDER;

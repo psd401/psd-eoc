@@ -81,8 +81,7 @@ export interface ResolvedReadyMedia {
 }
 
 /** Media-specific persistence added to the shared capability engine contract. */
-export interface MediaCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface MediaCapabilityTransaction extends CapabilityEngineTransaction {
   resolveEventFacilityId(eventId: string): Promise<string | null>;
   resolveUploadIntent(
     uploadIntentId: string,

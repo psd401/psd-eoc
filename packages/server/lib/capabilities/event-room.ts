@@ -372,8 +372,7 @@ async function syncEventRoom(
 }
 
 /** Read-only transaction surface needed by the canonical room sync. */
-export interface EventRoomCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface EventRoomCapabilityTransaction extends CapabilityEngineTransaction {
   beforeSync(): Promise<void>;
   getEventRoomDescriptor(eventId: string): Promise<EventRoomDescriptor | null>;
   syncEventRoom(

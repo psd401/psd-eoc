@@ -161,9 +161,7 @@ const mainStateAllowedResources = new Set([
 ]);
 
 export type StateBucketStatus =
-  | 'absent'
-  | 'bootstrap-policy'
-  | 'managed-policy';
+  'absent' | 'bootstrap-policy' | 'managed-policy';
 
 export interface StateBucketInspection {
   readonly projectNumber: string;
@@ -197,8 +195,7 @@ export interface InterruptedBootstrapStateInspection {
   readonly serial: number;
 }
 
-export interface InterruptedBootstrapApiRepairOperations
-  extends BootstrapApiRepairOperations {
+export interface InterruptedBootstrapApiRepairOperations extends BootstrapApiRepairOperations {
   readonly inspectState: () => InterruptedBootstrapStateInspection | null;
   readonly validateProject: (expectedProjectNumber: string) => void;
 }

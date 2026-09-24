@@ -123,8 +123,7 @@ const privateConfigurations = new WeakMap<
 const remoteJwkSets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 export type GoogleOidcConfigurationErrorCode =
-  | 'OIDC_CONFIGURATION_INVALID'
-  | 'OIDC_CRYPTO_UNAVAILABLE';
+  'OIDC_CONFIGURATION_INVALID' | 'OIDC_CRYPTO_UNAVAILABLE';
 
 /** A configuration error whose message never contains a supplied secret. */
 export class GoogleOidcConfigurationError extends Error {
@@ -222,8 +221,7 @@ export interface CompleteOidcEnvelopeContext {
   readonly serverTime: string;
 }
 
-export interface BeginGoogleMobileOidcSignInInput
-  extends MobileOidcStartRequest {
+export interface BeginGoogleMobileOidcSignInInput extends MobileOidcStartRequest {
   /** Trusted clock override used only by deterministic tests. */
   readonly now?: Date;
 }
@@ -237,8 +235,7 @@ export interface CompleteGoogleMobileOidcExchangeResult {
   readonly responseDigest: string;
 }
 
-export interface CompleteGoogleMobileOidcExchangeInput
-  extends MobileOidcExchangeRequest {
+export interface CompleteGoogleMobileOidcExchangeInput extends MobileOidcExchangeRequest {
   /** Trusted clock override used only by deterministic tests. */
   readonly now?: Date;
 }

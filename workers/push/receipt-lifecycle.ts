@@ -876,9 +876,9 @@ function retryableReceiptOutcome(
   Readonly<{ reasonCode: ExpoReceiptRescheduleReasonCode }> {
   return Boolean(
     outcome.kind === 'unknown' &&
-      (outcome.reasonCode === 'EXPO_RECEIPT_MISSING' ||
-        outcome.reasonCode === 'EXPO_RECEIPT_RESPONSE_INVALID' ||
-        outcome.reasonCode === 'EXPO_RECEIPT_ERROR_UNKNOWN'),
+    (outcome.reasonCode === 'EXPO_RECEIPT_MISSING' ||
+      outcome.reasonCode === 'EXPO_RECEIPT_RESPONSE_INVALID' ||
+      outcome.reasonCode === 'EXPO_RECEIPT_ERROR_UNKNOWN'),
   );
 }
 

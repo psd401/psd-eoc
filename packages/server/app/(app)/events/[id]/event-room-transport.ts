@@ -52,10 +52,7 @@ export type CommandOperation =
   | 'close';
 
 export type RetainedCommandDispatchOutcome =
-  | 'confirmed'
-  | 'ambiguous'
-  | 'rejected'
-  | 'not-sent';
+  'confirmed' | 'ambiguous' | 'rejected' | 'not-sent';
 
 export type CommandBody =
   | Readonly<{

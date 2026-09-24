@@ -1271,8 +1271,7 @@ export interface HumanActionResolutionContext {
  * their own target as synthetic or choose protected action IDs.
  */
 export type HumanActionPolicy =
-  | Readonly<{ kind: 'none' }>
-  | Readonly<{ kind: 'central' }>;
+  Readonly<{ kind: 'none' }> | Readonly<{ kind: 'central' }>;
 
 /** Typed immutable registration consumed by the shared capability engine. */
 export interface CapabilityRegistration<

@@ -162,8 +162,7 @@ interface NormalizedPushEndpointPolicyQuery extends PushEndpointPolicyQuery {
   readonly endpointCount: number;
 }
 
-export interface PushEndpointPolicyEvidence
-  extends PushEndpointPolicyCandidate {
+export interface PushEndpointPolicyEvidence extends PushEndpointPolicyCandidate {
   readonly status: EndpointStatus;
 }
 
@@ -1393,8 +1392,7 @@ export function createDrizzlePushEndpointSendEligibilityStore(
 }
 
 /** Device-specific persistence added to the canonical capability transaction. */
-export interface DeviceCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface DeviceCapabilityTransaction extends CapabilityEngineTransaction {
   registerPushToken(
     input: CapabilityInput<'register-push-token'>,
     actor: Extract<Actor, { kind: 'human' }>,

@@ -190,8 +190,7 @@ export interface PostgresComponentDatabaseConfig {
 }
 
 export type PostgresDatabaseConfig =
-  | PostgresUrlDatabaseConfig
-  | PostgresComponentDatabaseConfig;
+  PostgresUrlDatabaseConfig | PostgresComponentDatabaseConfig;
 
 /**
  * Explicit configuration for Aurora through the RDS Data API.
@@ -227,8 +226,7 @@ export type Database = PostgresDatabase | AwsDataApiDatabase;
  * the AWS command response envelope and exposes mapped rows on `rows`.
  */
 export type DatabaseExecuteResult<Row extends Record<string, unknown>> =
-  | Row[]
-  | Readonly<{ rows: Row[] }>;
+  Row[] | Readonly<{ rows: Row[] }>;
 
 /**
  * Schema-aware query surface shared by both configured transports.
@@ -279,8 +277,7 @@ export interface AwsDataApiDatabaseConnection {
 
 /** A database connection that must be narrowed by its selected driver. */
 export type DatabaseConnection =
-  | PostgresDatabaseConnection
-  | AwsDataApiDatabaseConnection;
+  PostgresDatabaseConnection | AwsDataApiDatabaseConnection;
 
 /**
  * Configuration failure whose message identifies fields but never includes

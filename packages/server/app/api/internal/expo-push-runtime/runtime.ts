@@ -22,8 +22,7 @@ export const EXPO_PUSH_RUNTIME_MAX_BODY_BYTES = 128 * 1024;
 export interface ExpoPushRuntimeRouteDependencies {
   readonly readExpectedBearerToken: () => string;
   readonly openStore: () =>
-    | ExpoPushRuntimeStore
-    | Promise<ExpoPushRuntimeStore>;
+    ExpoPushRuntimeStore | Promise<ExpoPushRuntimeStore>;
 }
 
 class RouteRequestError extends Error {

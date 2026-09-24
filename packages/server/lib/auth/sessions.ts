@@ -375,9 +375,7 @@ interface UnknownCredential {
 }
 
 export type StoredCredential =
-  | CurrentCredential
-  | RetiredCredential
-  | UnknownCredential;
+  CurrentCredential | RetiredCredential | UnknownCredential;
 
 export interface RotateCredentialInput {
   readonly principal: VerifiedCurrentRefreshCredential;
@@ -456,8 +454,7 @@ export interface SessionStore {
 }
 
 /** Transaction-scoped session service used by authenticated mutations. */
-export interface SessionCapabilityTransaction
-  extends CapabilityEngineTransaction {
+export interface SessionCapabilityTransaction extends CapabilityEngineTransaction {
   readonly sessions: SessionService;
 }
 

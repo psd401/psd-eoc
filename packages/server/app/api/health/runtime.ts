@@ -507,8 +507,7 @@ function signAwsJsonRequest(
   input: Readonly<{
     body: string;
     contentType:
-      | typeof SQS_JSON_CONTENT_TYPE
-      | typeof SECRETS_JSON_CONTENT_TYPE;
+      typeof SQS_JSON_CONTENT_TYPE | typeof SECRETS_JSON_CONTENT_TYPE;
     credentials: Readonly<Required<Omit<HealthAwsCredentials, 'expiration'>>>;
     endpoint: string;
     now: Date;

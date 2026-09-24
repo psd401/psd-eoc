@@ -22,8 +22,7 @@ export interface SecurityAuditVerificationStore {
   ): Promise<SecurityAuditChainPage>;
 }
 
-export interface SecurityAuditRepository
-  extends SecurityAuditVerificationStore {
+export interface SecurityAuditRepository extends SecurityAuditVerificationStore {
   query(
     query: SecurityAuditQuery,
     facilityScope: FacilityScope,

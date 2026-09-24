@@ -318,8 +318,7 @@ describe('ledgered Expo live adapter', () => {
 
   test('allows one concurrent provider call and makes the competing claim unknown', async () => {
     let release:
-      | ((outcomes: readonly ExpoProviderOutcome[]) => void)
-      | undefined;
+      ((outcomes: readonly ExpoProviderOutcome[]) => void) | undefined;
     const response = new Promise<readonly ExpoProviderOutcome[]>((resolve) => {
       release = resolve;
     });

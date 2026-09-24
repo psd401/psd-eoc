@@ -262,8 +262,7 @@ export interface AdministratorRosterSyncContext {
 }
 
 export type RosterSyncCapabilityContext =
-  | ScheduledRosterSyncContext
-  | AdministratorRosterSyncContext;
+  ScheduledRosterSyncContext | AdministratorRosterSyncContext;
 
 export interface RosterSyncDependencies {
   readonly store: RosterSyncStore;
