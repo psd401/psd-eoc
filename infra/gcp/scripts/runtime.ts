@@ -492,19 +492,24 @@ function readLocalConfigurationFile(
   required: boolean,
   requirePrivateMode = false,
 ): string {
-  if (!existsSync(path)) {
-    if (required) {
-      throw new Error(`${label} is missing.`);
-    }
-    return '';
-  }
+  // Open once, then check and read that descriptor so the file cannot be
+  // swapped in between; O_NOFOLLOW keeps a symlink from being opened at all.
+  let descriptor: number;
   try {
-    // Check and read the same open descriptor so the file cannot be swapped
-    // between the two; O_NOFOLLOW keeps a symlink from being opened at all.
-    const descriptor = openSync(
+    descriptor = openSync(
       path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
+  } catch (error) {
+    if (Reflect.get(Object(error), 'code') === 'ENOENT') {
+      if (required) {
+        throw new Error(`${label} is missing.`);
+      }
+      return '';
+    }
+    throw new Error(`${label} could not be read safely.`);
+  }
+  try {
     try {
       const metadata = fstatSync(descriptor);
       if (
