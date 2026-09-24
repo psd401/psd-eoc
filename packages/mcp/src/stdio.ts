@@ -25,13 +25,18 @@ function parseError(): JsonRpcResponse {
   });
 }
 
-function writeResponse(
+/**
+ * Awaits the write and then the flush, so responses leave in order and a
+ * failed write (the client closed stdout) rejects the server run, which
+ * `main` reports, instead of escaping as an unhandled rejection.
+ */
+async function writeResponse(
   writer: Pick<StdioWriter, 'write' | 'flush'>,
   response: JsonRpcResponse,
-): void {
+): Promise<void> {
   const bytes = new TextEncoder().encode(`${JSON.stringify(response)}\n`);
-  void writer.write(bytes);
-  void writer.flush();
+  await writer.write(bytes);
+  await writer.flush();
 }
 
 /** Runs newline-delimited JSON-RPC without ever writing non-protocol data. */
@@ -56,7 +61,7 @@ export async function runStdioServer(
     try {
       value = JSON.parse(line) as unknown;
     } catch {
-      writeResponse(output, parseError());
+      await writeResponse(output, parseError());
       return;
     }
 
@@ -65,7 +70,7 @@ export async function runStdioServer(
         ? {}
         : { protocolVersion: legacyProtocolVersion };
     const response = await protocol.handle(value, context);
-    if (response !== null) writeResponse(output, response);
+    if (response !== null) await writeResponse(output, response);
     if (
       typeof value === 'object' &&
       value !== null &&
@@ -96,7 +101,7 @@ export async function runStdioServer(
         : remaining;
       const fragmentBytes = encoder.encode(fragment).byteLength;
       if (bufferedBytes + fragmentBytes > MAX_MESSAGE_BYTES) {
-        writeResponse(output, parseError());
+        await writeResponse(output, parseError());
         buffered = '';
         bufferedBytes = 0;
         if (!hasCompleteLine) {
@@ -124,7 +129,7 @@ export async function runStdioServer(
     try {
       next = await reader.read();
     } catch {
-      writeResponse(output, parseError());
+      await writeResponse(output, parseError());
       return;
     }
     if (next.done) break;
@@ -132,7 +137,7 @@ export async function runStdioServer(
     try {
       decoded = decoder.decode(next.value, { stream: true });
     } catch {
-      writeResponse(output, parseError());
+      await writeResponse(output, parseError());
       decodingFailed = true;
       break;
     }
@@ -143,12 +148,12 @@ export async function runStdioServer(
     try {
       await consumeDecoded(decoder.decode());
     } catch {
-      writeResponse(output, parseError());
+      await writeResponse(output, parseError());
       decodingFailed = true;
     }
   }
   if (!decodingFailed && !discardUntilNewline && buffered.trim() !== '') {
-    writeResponse(output, parseError());
+    await writeResponse(output, parseError());
   }
   await output.flush();
   output.end();
