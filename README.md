@@ -16,7 +16,7 @@ provider.
 
 Install these prerequisites:
 
-- [Bun 1.2.23](https://bun.sh/docs/installation)
+- [Bun 1.4.2](https://bun.sh/docs/installation)
 - [Docker](https://docs.docker.com/get-docker/) with Compose
 - Poppler's `pdftotext` (`brew install poppler` on macOS or
   `apt-get install poppler-utils` on Debian/Ubuntu)

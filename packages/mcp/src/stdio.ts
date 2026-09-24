@@ -12,7 +12,7 @@ import {
 const MAX_MESSAGE_BYTES = 1024 * 1024;
 
 export interface StdioWriter {
-  write(value: Uint8Array): number;
+  write(value: Uint8Array): number | Promise<number>;
   flush(): number | Promise<number>;
   end(error?: Error): number | Promise<number>;
 }
@@ -30,7 +30,7 @@ function writeResponse(
   response: JsonRpcResponse,
 ): void {
   const bytes = new TextEncoder().encode(`${JSON.stringify(response)}\n`);
-  writer.write(bytes);
+  void writer.write(bytes);
   void writer.flush();
 }
 

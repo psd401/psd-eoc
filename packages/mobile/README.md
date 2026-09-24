@@ -17,7 +17,7 @@ device itself uses dark mode.
 
 ## Local development
 
-Use Bun 1.2.23 from the repository root:
+Use Bun 1.4.2 from the repository root:
 
 ```sh
 bun install
@@ -179,6 +179,9 @@ reviewed rollout and rollback procedure. Ordinary `preview` must never be used
 for production-environment OTA verification.
 
 All profiles pin Bun 1.2.23 and use credentials managed remotely by EAS.
+The repository runs Bun 1.4.2; EAS stays on 1.2.23 until the mobile
+toolchain moves with the next Expo SDK upgrade. Both read the same
+`bun.lock` (lockfile version 1) with `--frozen-lockfile`.
 Never add certificates, provisioning profiles, API keys, push keys,
 `credentials.json`, `google-services.json`, or `GoogleService-Info.plist` to the
 repository. EAS project linking and credential creation require an authorized
