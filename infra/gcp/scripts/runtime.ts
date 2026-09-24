@@ -1,7 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
+  constants,
   existsSync,
-  lstatSync,
+  fstatSync,
+  openSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -496,15 +499,25 @@ function readLocalConfigurationFile(
     return '';
   }
   try {
-    const metadata = lstatSync(path);
-    if (
-      !metadata.isFile() ||
-      metadata.size > maximumSize ||
-      (requirePrivateMode && (metadata.mode & 0o077) !== 0)
-    ) {
-      throw new Error('invalid metadata');
+    // Check and read the same open descriptor so the file cannot be swapped
+    // between the two; O_NOFOLLOW keeps a symlink from being opened at all.
+    const descriptor = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      const metadata = fstatSync(descriptor);
+      if (
+        !metadata.isFile() ||
+        metadata.size > maximumSize ||
+        (requirePrivateMode && (metadata.mode & 0o077) !== 0)
+      ) {
+        throw new Error('invalid metadata');
+      }
+      return readFileSync(descriptor, 'utf8');
+    } finally {
+      closeSync(descriptor);
     }
-    return readFileSync(path, 'utf8');
   } catch {
     throw new Error(`${label} could not be read safely.`);
   }

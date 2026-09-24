@@ -116,7 +116,7 @@ export function currentDocumentationViolations(
   }
   if (
     repositoryPath.startsWith('docs/runbooks/') &&
-    /(?:\b(?:current|old|older|disabled|enable|control)(?:[ \t-]|\r?\n[ \t]*)+epoch\b|\bemergency[ -]re-enable\b|\bemergency control\b|\bcurrent control (?:state|truth)\b|\bcontrol-entry\b|\bdata\/control-epoch\b|\bnew control entry\b)/iu.test(
+    /(?:\b(?:current|old|older|disabled|enable|control)(?:[ \t-]|\r?\n)+epoch\b|\bemergency[ -]re-enable\b|\bemergency control\b|\bcurrent control (?:state|truth)\b|\bcontrol-entry\b|\bdata\/control-epoch\b|\bnew control entry\b)/iu.test(
       contents,
     )
   ) {

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 
 import {
   CompleteOidcSignInInputSchema,
@@ -665,8 +665,7 @@ export function isRetryableSessionTransactionError(error: unknown): boolean {
 
 function sessionTransactionRetryDelayMilliseconds(attempt: number): number {
   const base = Math.min(20 * 2 ** (attempt - 1), 160);
-  const entropy = randomBytes(1)[0] ?? 0;
-  return base + (entropy % base);
+  return base + randomInt(base);
 }
 
 function assertPersistableIdempotency(
