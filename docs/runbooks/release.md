@@ -68,9 +68,8 @@ Release them together: a platform left behind is running different code from
 the one that was verified, and the version alone will not say so.
 
 The current app/runtime is 1.0.17. The last build submitted to both stores is
-1.0.16/build 31 on iOS and 1.0.16/code 23 on Android, on 2026-09-22; 1.0.11
-was never built. 1.0.17 is not installable anywhere until it is built and
-submitted.
+1.0.17/build 32 on iOS and 1.0.17/code 24 on Android, on 2026-09-25; 1.0.11
+was never built.
 Remote updates are disabled,
 so every code or asset change requires another app-version bump and fresh store
 builds. The
