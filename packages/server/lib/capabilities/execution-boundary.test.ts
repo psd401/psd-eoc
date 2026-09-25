@@ -37,6 +37,8 @@ const SESSION_REPLAY_ENGINE_ALLOWLIST = Object.freeze([
 const REPOSITORY_AUDITED_OIDC_ALLOWLIST = Object.freeze([
   'packages/server/app/(auth)/auth/callback/route.ts',
   'packages/server/app/api/auth/mobile/oidc/exchange/route.ts',
+  // App-store review sign-in: same capability, identity from a review code.
+  'packages/server/lib/auth/app-review-sign-in.ts',
   'packages/server/lib/capabilities/engine.ts',
 ] as const);
 

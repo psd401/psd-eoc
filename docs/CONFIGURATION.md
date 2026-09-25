@@ -158,6 +158,7 @@ The current synthesized stack contains exactly these parameters:
 
 <!-- docs-contract:template-parameters:start -->
 
+- `AppReviewSignInSha256`
 - `BootstrapVersion`
 - `EnableAwsEumSmsWorker`
 - `EnableDirectPush`
@@ -184,6 +185,12 @@ The current synthesized stack contains exactly these parameters:
 - `SmsStopMessage`
 
 <!-- docs-contract:template-parameters:end -->
+
+`AppReviewSignInSha256` defaults to `disabled`. Supplying the SHA-256 digest of
+the app-store review account's email and its review code, joined by a newline,
+turns on the review sign-in described in
+[the app store review runbook](runbooks/app-store-review.md); supplying
+`disabled` again turns it off.
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
 parameter and has a default. Push and SMS workers, direct-provider enablement,

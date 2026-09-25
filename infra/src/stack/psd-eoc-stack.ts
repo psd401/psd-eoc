@@ -447,6 +447,22 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    const appReviewSignInSha256 = new CfnParameter(
+      this,
+      'AppReviewSignInSha256',
+      {
+        allowedPattern: '^(disabled|[0-9a-f]{64})$',
+        constraintDescription:
+          'Use "disabled", or one lowercase SHA-256 digest of the review email and code joined by a newline.',
+        default: 'disabled',
+        description:
+          'Turns on the app-store review sign-in for one admitted account. "disabled" leaves it off.',
+        maxLength: 64,
+        minLength: 8,
+        noEcho: true,
+        type: 'String',
+      },
+    );
     const shouldProvisionApplication = new CfnCondition(
       this,
       'ShouldProvisionApplication',
@@ -1035,12 +1051,15 @@ export class PsdEocStack extends Stack {
       'BootstrapIdentitySecret',
       {
         description:
-          'Bootstrap identity material supplied through NoEcho deployment parameters. Holds only the initial mobile transition digest; the approved-staff identity it also carried fed the access fixture, which is gone.',
+          'Bootstrap identity material supplied through NoEcho deployment parameters: the initial mobile transition digest and the app-store review sign-in digest.',
         removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/bootstrap/approved-identity`,
         secretObjectValue: {
           initialMobileTransitionEmailSha256: SecretValue.unsafePlainText(
             initialMobileTransitionEmailSha256.valueAsString,
+          ),
+          appReviewSignInSha256: SecretValue.unsafePlainText(
+            appReviewSignInSha256.valueAsString,
           ),
         },
       },
@@ -3231,6 +3250,13 @@ export class PsdEocStack extends Stack {
                   value: secretJsonKeyArn(
                     bootstrapIdentitySecret,
                     'initialMobileTransitionEmailSha256',
+                  ),
+                },
+                {
+                  name: 'PSD_EOC_APP_REVIEW_SIGN_IN_SHA256',
+                  value: secretJsonKeyArn(
+                    bootstrapIdentitySecret,
+                    'appReviewSignInSha256',
                   ),
                 },
               ],

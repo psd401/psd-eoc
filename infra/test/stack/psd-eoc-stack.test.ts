@@ -1295,6 +1295,7 @@ describe('App Runner runtime safety boundary', () => {
         'GOOGLE_OAUTH_CONFIG',
         'GOOGLE_OIDC_COOKIE_SECRET',
         'GOOGLE_ROSTER_CONFIG',
+        'PSD_EOC_APP_REVIEW_SIGN_IN_SHA256',
         'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
         'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
         'PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN',
@@ -1304,6 +1305,10 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_SMS_RUNTIME_WORKER_TOKEN',
       ].sort(),
     );
+    // Off unless the deployment supplies a digest; see AppReviewSignInSha256.
+    expect(
+      JSON.stringify(secrets.get('PSD_EOC_APP_REVIEW_SIGN_IN_SHA256')),
+    ).toContain(':appReviewSignInSha256::');
     expect(secrets.get('GOOGLE_OAUTH_CONFIG')).toEqual({
       Ref: 'GoogleOauthSecretArn',
     });
