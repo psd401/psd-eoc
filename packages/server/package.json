@@ -24,7 +24,7 @@
     "jose": "6.2.12",
     "libphonenumber-js": "1.13.13",
     "maplibre-gl": "6.9.1",
-    "next": "15.5.24",
+    "next": "16.3.6",
     "pdfkit": "0.20.2",
     "postgres": "3.4.9",
     "react": "19.2.3",
