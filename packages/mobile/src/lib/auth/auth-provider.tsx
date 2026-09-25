@@ -61,6 +61,8 @@ export interface MobileAuthContextValue {
    */
   readonly signInRedirectUncaptured: boolean;
   readonly beginGoogleSignIn: () => Promise<void>;
+  /** Signs in the app-store review account with the code it was given. */
+  readonly beginAppReviewSignIn: (email: string, code: string) => Promise<void>;
   /** Resumes an attempt whose redirect arrived outside `promptAsync`. */
   readonly completeGoogleSignIn: (
     authorizationCode: string,
@@ -87,6 +89,7 @@ export interface MobileAuthContextValue {
 interface AuthRuntime {
   readonly controller: MobileAuthController;
   readonly oidc: MobileOidcClient | null;
+  readonly reviewApi: AuthApiClient | null;
   readonly storage: AuthStorage;
 }
 
@@ -113,6 +116,7 @@ function createRuntime(): AuthRuntime {
       }),
       storage: fixture.storage,
       oidc: null,
+      reviewApi: null,
     });
   }
 
@@ -159,6 +163,7 @@ function createRuntime(): AuthRuntime {
   return Object.freeze({
     controller,
     storage,
+    reviewApi: api,
     oidc: new MobileOidcClient(
       api,
       expoOidcBrowser,
@@ -284,6 +289,27 @@ export function AuthProvider({ children }: PropsWithChildren) {
     [runSignIn],
   );
 
+  const beginAppReviewSignIn = useCallback(
+    (email: string, code: string) =>
+      runSignIn(async (_oidc, platform) => {
+        if (runtime.reviewApi === null) {
+          throw new MobileAuthError(
+            'configuration',
+            'App review sign-in is not available in this build.',
+          );
+        }
+        const installationId =
+          await runtime.storage.getOrCreateInstallationId();
+        return runtime.reviewApi.appReviewSignIn({
+          email: email.trim().toLowerCase(),
+          code: code.trim(),
+          platform,
+          installationId,
+        });
+      }),
+    [runSignIn, runtime],
+  );
+
   const subscribeState = useCallback(
     (listener: () => void) => runtime.controller.subscribe(listener),
     [runtime],
@@ -311,6 +337,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       signInError,
       signInRedirectUncaptured,
       beginGoogleSignIn,
+      beginAppReviewSignIn,
       completeGoogleSignIn,
       unlock: () => runtime.controller.foreground(),
       retryConnection: () => runtime.controller.retryConnection(),
@@ -325,6 +352,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       assertMutationAllowed: () => runtime.controller.assertMutationAllowed(),
     }),
     [
+      beginAppReviewSignIn,
       beginGoogleSignIn,
       completeGoogleSignIn,
       isOnlineSession,

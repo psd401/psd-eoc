@@ -60,17 +60,41 @@ a chat, or a build.
    secret into App Store Connect's review information and the Play Console's
    app access instructions, together with the instructions below.
 
+## Review sign-in
+
+Store reviewers cannot complete district single sign-on on their test devices:
+Google hands the district domain to the identity provider, whose second factor
+wants a device the reviewer does not have. Play refused the app three times on
+that. The app therefore has an **App store review sign-in** at the bottom of its
+sign-in screen, which takes the review account's email and a review code
+instead of Google.
+
+It is off unless the deployment turns it on:
+
+1. Generate a long random code (at least 32 characters) and keep it where only
+   the account owner can read it.
+2. Compute `sha256("<review email>\n<code>")` as lowercase hex, with the email
+   lowercased.
+3. Deploy with `--parameters AppReviewSignInSha256=<digest>`. Deploying with
+   `AppReviewSignInSha256=disabled` turns it off again.
+4. In both store consoles, put the review email in the user name field and the
+   code in the password field.
+
+The code only proves which account is signing in. The account must still be
+admitted on **Access**, keeps its facility limit, and is issued the same
+session a Google sign-in would issue. It cannot sign in any other account.
+
 ## Instructions for the reviewer
 
-Use the text below in both consoles, filling in the address from the account
-owner and the review facility's name.
+Use the text below in both consoles, filling in the review facility's name.
 
-> This app is for school district staff. Sign in with the Google account
-> supplied here; there is no in-app registration. On the home screen choose
-> **Start a drill**, pick the facility named _App Review_, choose any threat
-> and response, and confirm. The drill notifies only this review account. End
-> the drill from the event screen when finished. Real incidents require a
-> district staff account and cannot be started with this one.
+> This app is for school district staff. On the sign-in screen, scroll down and
+> tap **App store review sign-in**. Enter the user name and password supplied
+> here and tap **Sign in for app review**. Do not use **Sign in with Google**:
+> district Google accounts require a second factor tied to staff devices. On
+> the home screen choose **Start a drill**, pick the facility named
+> _App Review_, choose any threat and response, and confirm. The drill notifies
+> only this review account. End the drill from the event screen when finished.
 
 ## Rotation and removal
 

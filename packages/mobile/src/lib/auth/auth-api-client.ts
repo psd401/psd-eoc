@@ -1,11 +1,13 @@
 import {
   ApiErrorSchema,
+  MobileAppReviewSignInRequestSchema,
   MobileOidcExchangeRequestSchema,
   MobileOidcStartRequestSchema,
   MobileOidcStartResponseSchema,
   MobileSessionResponseSchema,
   RevokeSessionInputSchema,
   SessionRevocationSchema,
+  type MobileAppReviewSignInRequest,
   type MobileOidcExchangeRequest,
   type MobileOidcStartRequest,
   type MobileOidcStartResponse,
@@ -195,6 +197,17 @@ export class AuthApiClient implements SessionApi {
     return this.post(
       '/api/auth/mobile/oidc/exchange',
       MobileOidcExchangeRequestSchema.parse(input),
+      MobileSessionResponseSchema,
+    );
+  }
+
+  /** Signs in the deployment's app-store review account with its code. */
+  public appReviewSignIn(
+    input: MobileAppReviewSignInRequest,
+  ): Promise<MobileSessionResponse> {
+    return this.post(
+      '/api/auth/mobile/app-review',
+      MobileAppReviewSignInRequestSchema.parse(input),
       MobileSessionResponseSchema,
     );
   }

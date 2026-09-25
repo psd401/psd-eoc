@@ -885,6 +885,28 @@ export type MobileOidcExchangeRequest = z.infer<
   typeof MobileOidcExchangeRequestSchema
 >;
 
+/**
+ * Signs in the single account a deployment sets aside for app-store review,
+ * with a code instead of Google. Store reviewers cannot complete district
+ * single sign-on or its second factor on their test devices, so this is the
+ * path they use. It is off unless the deployment supplies the code's digest,
+ * and it grants nothing beyond what that account's admission already grants.
+ */
+export const MobileAppReviewSignInRequestSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email().max(320),
+    code: z.string().trim().min(16).max(128),
+    platform: NativeDevicePlatformSchema,
+    installationId: z.string().trim().min(16).max(255),
+  })
+  .strict()
+  .readonly();
+
+/** App-store review sign-in request inferred from its schema. */
+export type MobileAppReviewSignInRequest = z.infer<
+  typeof MobileAppReviewSignInRequestSchema
+>;
+
 /** Opaque application session bearer accepted by the shared session service. */
 export const OpaqueSessionBearerSchema = z
   .string()

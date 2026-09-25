@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,9 +18,21 @@ const UNEXPECTED_SIGN_IN_ERROR =
   'PSD EOC could not start secure sign-in. Try again or contact district technology support.';
 
 export default function SignInScreen() {
-  const { beginGoogleSignIn, isSigningIn, signInError, signOut, state } =
-    useMobileAuth();
+  const {
+    beginAppReviewSignIn,
+    beginGoogleSignIn,
+    isSigningIn,
+    signInError,
+    signOut,
+    state,
+  } = useMobileAuth();
   const [localError, setLocalError] = useState<string | null>(null);
+  // App-store reviewers cannot complete district single sign-on on their test
+  // devices, so they are given one review account and a code instead.
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewEmail, setReviewEmail] = useState('');
+  const [reviewCode, setReviewCode] = useState('');
+  const [reviewAttempted, setReviewAttempted] = useState(false);
   const [isRetryingStorage, setIsRetryingStorage] = useState(false);
   // A failed attempt has to be visible where the press happened. The notice
   // above the card can already be on screen before anyone taps, so a sign-in
@@ -32,9 +45,24 @@ export default function SignInScreen() {
   // When a press just failed, the message belongs at the button and nowhere
   // else. Showing it in both places says the same thing twice and buries it.
   const attemptFailure = attempted && !busy && visibleError !== null;
+  const reviewFailure = reviewAttempted && !busy && visibleError !== null;
+  const reviewReady =
+    reviewEmail.trim().length > 0 && reviewCode.trim().length > 0;
+
+  async function handleReviewSignIn(): Promise<void> {
+    setLocalError(null);
+    setAttempted(false);
+    setReviewAttempted(true);
+    try {
+      await beginAppReviewSignIn(reviewEmail, reviewCode);
+    } catch {
+      setLocalError(UNEXPECTED_SIGN_IN_ERROR);
+    }
+  }
 
   async function handleSignIn(): Promise<void> {
     setLocalError(null);
+    setReviewAttempted(false);
     setAttempted(true);
     try {
       await beginGoogleSignIn();
@@ -91,7 +119,7 @@ export default function SignInScreen() {
           </Text>
         </View>
 
-        {visibleError !== null && !attemptFailure ? (
+        {visibleError !== null && !attemptFailure && !reviewFailure ? (
           <View
             accessibilityLiveRegion="assertive"
             accessibilityRole="alert"
@@ -193,10 +221,113 @@ export default function SignInScreen() {
             Your device protects return access
           </Text>
           <Text style={styles.noticeBody}>
-            After enrollment, use Face ID, your Android biometric, or the device
-            passcode fallback supplied by the operating system. PSD EOC never
-            creates a separate app PIN.
+            If this device has a screen lock, PSD EOC asks for Face ID, your
+            Android biometric, or the device passcode when you return. PSD EOC
+            never creates a separate app PIN.
           </Text>
+        </View>
+
+        <View style={styles.reviewSection}>
+          <Pressable
+            accessibilityHint="Shows the sign-in for the account supplied to app store reviewers"
+            accessibilityLabel="App store review sign-in"
+            accessibilityRole="button"
+            accessibilityState={{ expanded: reviewOpen }}
+            onPress={() => {
+              setReviewOpen((open) => !open);
+            }}
+            style={({ pressed }) => [
+              styles.privacyLink,
+              pressed && styles.buttonPressed,
+            ]}
+          >
+            <Text style={styles.privacyLinkText}>App store review sign-in</Text>
+          </Pressable>
+
+          {reviewOpen ? (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>App store review</Text>
+              <Text style={styles.cardBody}>
+                For Apple and Google reviewers only. Enter the review account
+                email and the password supplied with this submission. District
+                staff sign in with Google above.
+              </Text>
+              <TextInput
+                accessibilityLabel="Review account email"
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect={false}
+                editable={!busy}
+                inputMode="email"
+                keyboardType="email-address"
+                onChangeText={setReviewEmail}
+                placeholder="Review account email"
+                placeholderTextColor="#829AB1"
+                style={styles.reviewInput}
+                testID="app-review-email"
+                textContentType="username"
+                value={reviewEmail}
+              />
+              <TextInput
+                accessibilityLabel="Review password"
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect={false}
+                editable={!busy}
+                onChangeText={setReviewCode}
+                onSubmitEditing={() => {
+                  if (reviewReady && !busy) {
+                    void handleReviewSignIn();
+                  }
+                }}
+                placeholder="Review password"
+                placeholderTextColor="#829AB1"
+                secureTextEntry
+                style={styles.reviewInput}
+                testID="app-review-code"
+                textContentType="password"
+                value={reviewCode}
+              />
+              <Pressable
+                accessibilityLabel="Sign in for app review"
+                accessibilityRole="button"
+                accessibilityState={{
+                  busy,
+                  disabled: busy || !reviewReady,
+                }}
+                disabled={busy || !reviewReady}
+                onPress={() => {
+                  void handleReviewSignIn();
+                }}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  pressed && !busy && styles.buttonPressed,
+                  (busy || !reviewReady) && styles.buttonDisabled,
+                ]}
+              >
+                {isSigningIn && reviewAttempted ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : null}
+                <Text style={styles.primaryButtonText}>
+                  {isSigningIn && reviewAttempted
+                    ? 'Signing in'
+                    : 'Sign in for app review'}
+                </Text>
+              </Pressable>
+              {reviewFailure ? (
+                <View
+                  accessibilityLiveRegion="assertive"
+                  accessibilityRole="alert"
+                  style={styles.attemptFailure}
+                >
+                  <Text style={styles.attemptFailureTitle}>
+                    Review sign-in did not complete
+                  </Text>
+                  <Text style={styles.attemptFailureBody}>{visibleError}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
 
         <Pressable
@@ -377,6 +508,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 10,
+  },
+  reviewSection: {
+    gap: 12,
+  },
+  reviewInput: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#9FB3C8',
+    borderRadius: 12,
+    borderWidth: 1,
+    color: '#102A43',
+    fontSize: 16,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
   privacyLinkText: {
     color: '#175A8E',
