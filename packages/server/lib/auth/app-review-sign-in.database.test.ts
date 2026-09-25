@@ -8,12 +8,18 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { admittedAccounts, users } from '../../db/schema';
+import {
+  admittedAccounts,
+  facilities,
+  userFacilityScopes,
+  users,
+} from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   closeAndDropDisposableDatabase,
@@ -159,6 +165,43 @@ describeWithDatabase('app review sign-in against the database', () => {
     expect(result.session.user.email).toBe(REVIEW_EMAIL);
     expect([...result.session.user.roles]).toEqual(['staff']);
 
+    const service = new SessionService(new DrizzleSessionStore(database()));
+    const authenticated = await service.authenticate(result.bearer, 'mobile');
+    expect([...authenticated.roles]).toEqual(['staff']);
+  });
+
+  test('an account limited to one facility signs in and keeps its limit', async () => {
+    // The review account in production is limited to its isolated review
+    // facility. Sign-in used to hand session issuance a district-wide scope,
+    // the store read the real limit back, and refused: every facility-limited
+    // account was locked out of every sign-in path.
+    const facilityId = randomUUID();
+    await database().insert(facilities).values({
+      id: facilityId,
+      code: 'RVW',
+      name: 'App Review',
+      isolated: true,
+    });
+    const [account] = await database()
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, REVIEW_EMAIL));
+    if (account === undefined) {
+      throw new Error('The review account row is missing.');
+    }
+    await database()
+      .update(users)
+      .set({ facilityScopeKind: 'facilities' })
+      .where(eq(users.id, account.id));
+    await database()
+      .insert(userFacilityScopes)
+      .values({ userId: account.id, facilityId });
+
+    const result = await signIn();
+    expect(result.session.user.facilityScope).toEqual({
+      kind: 'facilities',
+      facilityIds: [facilityId],
+    });
     const service = new SessionService(new DrizzleSessionStore(database()));
     const authenticated = await service.authenticate(result.bearer, 'mobile');
     expect([...authenticated.roles]).toEqual(['staff']);
