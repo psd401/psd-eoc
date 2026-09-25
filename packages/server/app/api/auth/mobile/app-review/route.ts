@@ -23,7 +23,10 @@ import {
   GoogleOidcConfigurationError,
   readGoogleOidcConfiguration,
 } from '../../../../../lib/auth/oidc';
-import { WebSessionIssuanceError } from '../../../../../lib/auth/session-cookie';
+import {
+  WebSessionIssuanceError,
+  describeSessionPersistenceFailure,
+} from '../../../../../lib/auth/session-cookie';
 import { readSessionPolicy } from '../../../../../lib/auth/sessions';
 import { parseInitialMobileTransitionEmailDigest } from '../../../../../lib/auth/sign-in-audit';
 
@@ -135,6 +138,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         requestId,
       );
     }
+    // Credential-free by construction: the helper keeps only structural
+    // fields and the message, never PostgreSQL's row-carrying detail.
+    console.error(
+      JSON.stringify({
+        event: 'app-review-sign-in-failed',
+        requestId,
+        code: error instanceof WebSessionIssuanceError ? error.code : null,
+        failure: describeSessionPersistenceFailure(error),
+      }),
+    );
     return failure(
       500,
       'INTERNAL_ERROR',

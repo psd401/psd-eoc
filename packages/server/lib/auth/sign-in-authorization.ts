@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm';
 import { UserSchema, type User } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
-import { users } from '../../db/schema';
+import { userFacilityScopes, users } from '../../db/schema';
 import {
   defaultLiveMembershipReconciler,
   type LiveMembershipReconciler,
@@ -76,6 +76,7 @@ export async function authorizeSignIn(
         googleSubject: users.googleSubject,
         email: users.email,
         displayName: users.displayName,
+        facilityScopeKind: users.facilityScopeKind,
         disabledAt: users.disabledAt,
       })
       .from(users)
@@ -112,6 +113,24 @@ export async function authorizeSignIn(
       throw new Error('The signing-in account could not be resolved.');
     }
 
+    // The account's own facility limit, as stored. Session issuance reads the
+    // same rows back and refuses a mismatch, so claiming district-wide here
+    // locked every facility-limited account out of every sign-in path.
+    const facilityScope =
+      user.facilityScopeKind === 'district'
+        ? ({ kind: 'district' } as const)
+        : ({
+            kind: 'facilities' as const,
+            facilityIds: (
+              await transaction
+                .select({ facilityId: userFacilityScopes.facilityId })
+                .from(userFacilityScopes)
+                .where(eq(userFacilityScopes.userId, user.id))
+            )
+              .map(({ facilityId }) => facilityId)
+              .sort(),
+          } as const);
+
     // Roles are not stored. They are what the viewer's groups grant, decided
     // fresh at every sign-in, so removing someone from an administrator group
     // removes their authority the next time they arrive rather than leaving a
@@ -129,7 +148,7 @@ export async function authorizeSignIn(
         email: user.email,
         displayName: user.displayName,
         roles: decision.roles,
-        facilityScope: { kind: 'district' },
+        facilityScope,
         createdAt: input.checkedAt.toISOString(),
         disabledAt: null,
       }),
