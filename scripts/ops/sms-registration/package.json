@@ -11,12 +11,12 @@
     "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {
-    "@aws-sdk/client-pinpoint-sms-voice-v2": "3.1106.0",
-    "@aws-sdk/client-sts": "3.1106.0"
+    "@aws-sdk/client-pinpoint-sms-voice-v2": "3.1137.0",
+    "@aws-sdk/client-sts": "3.1137.0"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
-    "prettier": "3.9.6",
+    "prettier": "3.9.8",
     "typescript": "5.9.2"
   }
 }
