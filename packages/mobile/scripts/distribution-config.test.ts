@@ -358,15 +358,15 @@ describe('mobile distribution configuration', () => {
     expect(privacy).toContain('Status: `live-verified`');
     expect(privacy).toContain("configured production origin's `/privacy`");
     expect(privacy).toContain('returned HTTP 200');
-    // The store record left `blocked` on 2026-09-22, when release 23 (1.0.16)
-    // and the staged declarations were sent for review. It stays unverified
-    // until Google answers. Matched against collapsed whitespace, because
-    // Prettier rewraps this prose whenever a sentence changes length.
+    // The store record left `blocked` on 2026-09-22 when the declarations were
+    // sent for review, and became live-verified on 2026-09-26 when Google
+    // published release 24 (1.0.17). Matched against collapsed whitespace,
+    // because Prettier rewraps this prose whenever a sentence changes length.
     const storeRecord = rowFor('Play app content and store record');
     const compactStoreRecord = storeRecord.replace(/\s+/gu, ' ');
-    expect(storeRecord).toContain('Status: `configured-unverified`');
+    expect(storeRecord).toContain('Status: `live-verified`');
     expect(compactStoreRecord).toContain(
-      'the Publishing overview reads "Changes in review"',
+      '"24 (1.0.17) - Available on Google Play - Released on Sep 26 6:09 AM"',
     );
     expect(compactStoreRecord).toContain(
       'Prior evidence: on 2026-08-26 Play showed 8/11 setup tasks complete',
