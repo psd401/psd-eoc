@@ -38,7 +38,7 @@ connected from 1.0.10, so no client diagnostic before that build exists.
 | TestFlight device installation       | `live-verified`         |
 | Google Play device installation      | `configured-unverified` |
 | Public mobile privacy policy         | `live-verified`         |
-| Play app content and store record    | `configured-unverified` |
+| Play app content and store record    | `live-verified`         |
 | Expo Push notification handoff       | `live-verified`         |
 | Direct APNs notification handoff     | `mocked`                |
 | Direct FCM notification handoff      | `mocked`                |
@@ -114,9 +114,9 @@ On 2026-08-26 production deploy run `32975859074` completed from merged commit `
 
 ### Play app content and store record
 
-Status: `configured-unverified`
+Status: `live-verified`
 
-On 2026-09-25 Google refused 1.0.16/code 23 with "Login credentials restricted by device authentication", asking for "a dedicated test bypass or standard login credentials that do not require your account to be linked to our testing devices". The evidence was again this app's sign-in screen reading "Google sign-in was cancelled": the reviewer never got back from Google and district single sign-on. Production release 24 (1.0.17) replaces 23, the reviewer instructions now direct reviewers to the app-store review sign-in, the review account's password field holds the review code, and all 13 staged changes were sent for review the same day; the Publishing overview reads "Changes in review". Before submitting, the review sign-in was exercised on production with the real review code: a wrong code was refused with 401, the real code signed in as a staff session limited to the review facility, and that session was revoked. Android developer verification was confirmed complete for all Play apps the same day. Prior evidence: On 2026-09-22 the production track carries release 23 (1.0.16) and all 13
+On 2026-09-26 Google approved the submission and published it: the production track reads "24 (1.0.17) - Available on Google Play - Released on Sep 26 6:09 AM" with 1 country/region, Policy status reads "No issues found", and the public store listing for the configured Android package loads under the configured organization name with an Install control. IARC issued the Google Play content rating the same morning (Global Rating ID `9c6fa1d6-c0ef-8282-86f0-3f9bd969d173`, live 6:10 AM). No installation from the public listing is retained yet. Prior evidence: On 2026-09-25 Google refused 1.0.16/code 23 with "Login credentials restricted by device authentication", asking for "a dedicated test bypass or standard login credentials that do not require your account to be linked to our testing devices". The evidence was again this app's sign-in screen reading "Google sign-in was cancelled": the reviewer never got back from Google and district single sign-on. Production release 24 (1.0.17) replaces 23, the reviewer instructions now direct reviewers to the app-store review sign-in, the review account's password field holds the review code, and all 13 staged changes were sent for review the same day; the Publishing overview reads "Changes in review". Before submitting, the review sign-in was exercised on production with the real review code: a wrong code was refused with 401, the real code signed in as a staff session limited to the review facility, and that session was revoked. Android developer verification was confirmed complete for all Play apps the same day. Prior evidence: On 2026-09-22 the production track carries release 23 (1.0.16) and all 13
 staged changes were sent for review; the Publishing overview reads "Changes in
 review". That release replaces 22 (1.0.15), which Google refused on 2026-09-22
 under Play Console Requirements with "Login credentials are incorrect". The
