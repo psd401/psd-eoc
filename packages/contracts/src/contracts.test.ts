@@ -3726,6 +3726,35 @@ describe('roster, facility, and identity boundaries', () => {
     }
   });
 
+  test('keeps the email sender display name header-safe ASCII', () => {
+    for (const valid of [
+      'EOC Alerts',
+      'A',
+      "St. Mary's (EOC) Alerts",
+      'x'.repeat(64),
+    ]) {
+      expect(Contracts.SenderDisplayNameSchema.safeParse(valid).success).toBe(
+        true,
+      );
+    }
+    for (const invalid of [
+      '',
+      ' EOC Alerts',
+      'EOC Alerts ',
+      'x'.repeat(65),
+      'EOC "Alerts"',
+      'EOC \\ Alerts',
+      'EOC <Alerts>',
+      'EOC Alerts\r\nBcc: x@example.invalid',
+      'Alértes',
+      'EOC; Alerts',
+    ]) {
+      expect(Contracts.SenderDisplayNameSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+    }
+  });
+
   const staffBuildingGroupRef = {
     id: ids.group,
     kind: 'google-group',

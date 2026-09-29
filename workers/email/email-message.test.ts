@@ -1,6 +1,23 @@
 import { describe, expect, test } from 'bun:test';
 
-import { EmailMessageError, buildEmailMessageContent } from './email-message';
+import { EMAIL_LOGO_PNG_BASE64 } from './email-logo';
+import {
+  EMAIL_LOGO_CONTENT_ID,
+  EmailBrandingError,
+  EmailMessageError,
+  buildEmailMessageContent as buildWithBranding,
+  parseEmailBranding,
+} from './email-message';
+
+const BRANDING = parseEmailBranding({
+  organizationName: 'Example School District',
+  applicationOrigin: 'https://eoc.example.invalid',
+  senderDisplayName: 'PSD EOC Alerts',
+});
+
+function buildEmailMessageContent(value: unknown) {
+  return buildWithBranding(value, BRANDING);
+}
 
 type EmailEventKind = 'incident' | 'drill' | 'test';
 type EmailPurpose = 'activation' | 'all-clear' | 'reactivation';
@@ -110,8 +127,97 @@ describe('email message content', () => {
     );
     expect(content.htmlBody).toContain('<br>Second line [DRILL]');
     expect(content.htmlBody).not.toContain('<script>');
-    expect(content.htmlBody).not.toContain('<img');
+    // The only image is the embedded logo, never administrator content.
+    expect(content.htmlBody.match(/<img /gu)).toHaveLength(1);
     expect(content.htmlBody).not.toContain('<table');
+  });
+
+  test('brands the HTML alternative without touching canonical copy', () => {
+    for (const eventKind of ['incident', 'drill'] as const) {
+      const message = renderedEmail(eventKind);
+      const content = buildEmailMessageContent(message);
+
+      expect(content.subject).toBe(message.subject);
+      expect(content.textBody).toBe(message.textBody);
+      expect(content.textBody).not.toContain('Example School District');
+      expect(content.htmlBody).toContain(
+        `<img src="cid:${EMAIL_LOGO_CONTENT_ID}" width="48" height="48" alt=""`,
+      );
+      expect(content.htmlBody).toContain('>PSD EOC</span>');
+      expect(content.htmlBody).toContain(
+        'Emergency notification from Example School District',
+      );
+      expect(content.htmlBody).toContain(
+        "Sent by PSD EOC, Example School District's staff emergency notification system.",
+      );
+      expect(content.htmlBody).toContain(
+        'You are receiving this because you are on the emergency notification roster.',
+      );
+      expect(content.htmlBody).toContain(
+        '<a href="https://eoc.example.invalid" ',
+      );
+      // Brand bar, then mode banner, then details, then footer.
+      const order = [
+        'cid:psd-eoc-logo',
+        '</h1>',
+        'aria-label="Notification details"',
+        '<footer ',
+      ].map((marker) => content.htmlBody.indexOf(marker));
+      expect(order.every((index) => index >= 0)).toBe(true);
+      expect([...order].sort((a, b) => a - b)).toEqual(order);
+      expect(content.inlineImages).toEqual([
+        {
+          contentId: EMAIL_LOGO_CONTENT_ID,
+          fileName: 'psd-eoc-logo.png',
+          contentType: 'image/png',
+          base64Content: EMAIL_LOGO_PNG_BASE64,
+        },
+      ]);
+    }
+  });
+
+  test('embeds a real PNG logo', () => {
+    const bytes = Buffer.from(EMAIL_LOGO_PNG_BASE64, 'base64');
+    expect([...bytes.subarray(0, 8)]).toEqual([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    // IHDR width and height.
+    expect(bytes.readUInt32BE(16)).toBe(128);
+    expect(bytes.readUInt32BE(20)).toBe(128);
+    expect(bytes.byteLength).toBeLessThan(16_384);
+  });
+
+  test('escapes the organization name in the brand bar and footer', () => {
+    const content = buildWithBranding(
+      renderedEmail('drill'),
+      parseEmailBranding({
+        organizationName: 'A & B <School> District',
+        applicationOrigin: 'https://eoc.example.invalid',
+        senderDisplayName: null,
+      }),
+    );
+
+    expect(content.htmlBody).toContain('A &amp; B &lt;School&gt; District');
+    expect(content.htmlBody).not.toContain('<School>');
+  });
+
+  test('rejects unsafe branding before any message is built', () => {
+    for (const invalid of [
+      null,
+      { ...BRANDING, organizationName: '  Padded  ' },
+      { ...BRANDING, applicationOrigin: 'https://eoc.example.invalid/' },
+      { ...BRANDING, applicationOrigin: 'javascript:alert(1)' },
+      { ...BRANDING, senderDisplayName: 'Alerts\\' },
+      { ...BRANDING, senderDisplayName: ' Alerts' },
+      { ...BRANDING, senderDisplayName: 'x'.repeat(65) },
+      { ...BRANDING, senderDisplayName: undefined },
+    ]) {
+      expect(() => parseEmailBranding(invalid)).toThrow(EmailBrandingError);
+    }
+    expect(
+      parseEmailBranding({ ...BRANDING, senderDisplayName: 'x'.repeat(64) })
+        .senderDisplayName,
+    ).toHaveLength(64);
   });
 
   test('rejects non-email and classification-drift payloads safely', () => {

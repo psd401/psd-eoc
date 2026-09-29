@@ -51,6 +51,7 @@ COPY workers/shared/index.ts workers/shared/index.ts
 COPY workers/email/aws-arn.ts workers/email/aws-arn.ts
 COPY workers/email/aws-client.ts workers/email/aws-client.ts
 COPY workers/email/callback-service.ts workers/email/callback-service.ts
+COPY workers/email/email-logo.ts workers/email/email-logo.ts
 COPY workers/email/email-message.ts workers/email/email-message.ts
 COPY workers/email/queue-runtime.ts workers/email/queue-runtime.ts
 COPY workers/email/runtime.ts workers/email/runtime.ts

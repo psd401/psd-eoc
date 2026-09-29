@@ -38,6 +38,16 @@ export const OrganizationNameSchema = z
 /** Human-readable organization identity inferred from its canonical schema. */
 export type OrganizationName = z.infer<typeof OrganizationNameSchema>;
 
+/**
+ * Inbox sender name for notification email, such as "EOC Alerts". An ASCII
+ * allowlist (letters, digits, space, and . , & ' ( ) -), so the From header
+ * needs no RFC 2047 encoding and no character can escape the quoted display
+ * name.
+ */
+export const SenderDisplayNameSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9 .,&'()-]{0,62}[A-Za-z0-9.)])?$/u);
+
 const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
   `${source.id}:${source.kind}:${source.purpose}:${source.facilityId ?? ''}`;
 

@@ -32,7 +32,13 @@ import {
 
 const SES_EMAIL_QUEUE_ARN =
   'arn:aws:sqs:us-east-1:000000000000:example-eoc-email';
+const BRANDING = Object.freeze({
+  organizationName: 'Example School District',
+  applicationOrigin: 'https://eoc.example.invalid',
+  senderDisplayName: 'PSD EOC Alerts',
+});
 const RUNTIME_CONFIGURATION = Object.freeze({
+  branding: BRANDING,
   fromEmailAddress: 'eoc-alerts@example.invalid',
   queueArn: SES_EMAIL_QUEUE_ARN,
 });
@@ -208,6 +214,7 @@ describe('SES email live-pilot runtime', () => {
         () =>
           new SesEmailRuntime({
             authorizeQueueInvocation: () => true,
+            branding: BRANDING,
             fromEmailAddress: 'alerts@second-district.invalid',
             queueArn,
           }),

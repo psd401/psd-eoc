@@ -299,6 +299,21 @@ describe('deployment boundary', () => {
     ).toThrow(/protected hosted domain/u);
   });
 
+  it('treats the email sender display name as optional, header-safe config', () => {
+    const targetWith = (displayName: unknown) =>
+      readDeploymentTarget({
+        tryGetContext: (key) =>
+          key === 'psdEoc:sesFromDisplayName'
+            ? displayName
+            : productionContext[key],
+      });
+    expect(targetWith(undefined).sesFromDisplayName).toBeNull();
+    expect(targetWith('EOC Alerts').sesFromDisplayName).toBe('EOC Alerts');
+    for (const invalid of ['', 'Alerts <x@example.invalid>', 'Alértes', 7]) {
+      expect(() => targetWith(invalid)).toThrow(/sesFromDisplayName/u);
+    }
+  });
+
   it('uses the canonical organization identity contract at synth time', () => {
     const identityFor = (organizationName: string) =>
       readDeploymentIdentity({
@@ -466,6 +481,7 @@ describe('deployment boundary', () => {
               'https://operations.example.invalid/runbooks',
             region,
             sesFromAddress: 'eoc-alerts@example.invalid',
+            sesFromDisplayName: null,
             sesIdentityDomain: 'example.invalid',
             sourceRepositoryUrl: 'https://code.example.invalid/example/psd-eoc',
           },
@@ -1783,6 +1799,14 @@ describe('App Runner runtime safety boundary', () => {
     expect(environment.get('PSD_EOC_SES_CREDENTIAL_STATUS')).toEqual({
       'Fn::If': ['ShouldRunEmailWorker', 'verified', 'unverified'],
     });
+    expect(environment.get('PSD_EOC_SES_FROM_ADDRESS')).toBe(SES_FROM_ADDRESS);
+    expect(environment.get('PSD_EOC_SES_FROM_DISPLAY_NAME')).toBe(
+      currentDeploymentTarget.sesFromDisplayName,
+    );
+    expect(currentDeploymentTarget.sesFromDisplayName).toBe('EOC Alerts');
+    expect(environment.get('PSD_EOC_ORGANIZATION_NAME')).toBe(
+      currentDeploymentIdentity.organizationName,
+    );
     const injectedSecrets = new Map(
       asArray(container.Secrets).map((item) => {
         const pair = asRecord(item);

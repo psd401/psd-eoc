@@ -50,7 +50,18 @@ export class AwsSesV2Client implements SesV2Client {
         new SendEmailCommand({
           FromEmailAddress: input.FromEmailAddress,
           Destination: { ToAddresses: [...input.Destination.ToAddresses] },
-          Content: input.Content,
+          Content: {
+            Simple: {
+              Subject: input.Content.Simple.Subject,
+              Body: input.Content.Simple.Body,
+              Attachments: input.Content.Simple.Attachments.map(
+                ({ RawContentBase64, ...attachment }) => ({
+                  ...attachment,
+                  RawContent: Buffer.from(RawContentBase64, 'base64'),
+                }),
+              ),
+            },
+          },
           ConfigurationSetName: input.ConfigurationSetName,
           EmailTags: [...input.EmailTags],
         }),

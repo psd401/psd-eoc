@@ -6,6 +6,7 @@ import {
   type WorkerAttemptProcessResult,
 } from '../shared';
 import { awsPartitionSupportsRegion } from './aws-arn';
+import type { EmailBranding } from './email-message';
 import {
   SesV2EmailAdapter,
   validSesFromEmailAddress,
@@ -41,6 +42,7 @@ export type SesEmailRuntimeMode =
 
 export interface SesEmailRuntimeOptions {
   readonly authorizeQueueInvocation: SesEmailQueueInvocationAuthorizer;
+  readonly branding: EmailBranding;
   readonly fromEmailAddress: string;
   readonly mode?: SesEmailRuntimeMode;
   readonly queueArn: string;
@@ -152,6 +154,7 @@ export class SesEmailRuntime {
               client: mode.client,
               sendLedger: mode.sendLedger,
               fromEmailAddress: options.fromEmailAddress,
+              branding: options.branding,
             }),
             executionStore: mode.executionStore,
             evidenceWriter: mode.evidenceWriter,
