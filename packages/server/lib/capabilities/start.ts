@@ -447,7 +447,13 @@ export async function loadRosterSnapshot(
           })
           .from(neighborhoodFacilities)
           .where(
-            sql`(${neighborhoodFacilities.neighborhoodId}, ${neighborhoodFacilities.neighborhoodVersion}) in (select ${neighborhoodVersions.id}, max(${neighborhoodVersions.version}) from ${neighborhoodVersions} group by ${neighborhoodVersions.id})`,
+            and(
+              inArray(
+                neighborhoodFacilities.facilityId,
+                facilityRows.map((row) => row.facilityId),
+              ),
+              sql`(${neighborhoodFacilities.neighborhoodId}, ${neighborhoodFacilities.neighborhoodVersion}) in (select ${neighborhoodVersions.id}, max(${neighborhoodVersions.version}) from ${neighborhoodVersions} group by ${neighborhoodVersions.id})`,
+            ),
           )
           .orderBy(
             asc(neighborhoodFacilities.neighborhoodId),

@@ -259,8 +259,9 @@ describeWithDatabase('start-flow roster hydration', () => {
     ]);
     expect(hydrated?.campusFacilityIds).toEqual([]);
 
-    // A campus is read from the current version of each neighborhood: the
-    // first version named this school alone, the second added a neighbor.
+    // A campus is read from the current version of each neighborhood, and only
+    // the facilities this snapshot covers are carried: the first version named
+    // an uncovered neighbor alone, the second added this school.
     const neighborId = randomUUID();
     const neighborhoodId = randomUUID();
     await database.insert(facilities).values({
@@ -278,7 +279,7 @@ describeWithDatabase('start-flow roster hydration', () => {
       await transaction.insert(neighborhoodFacilities).values({
         neighborhoodId,
         neighborhoodVersion: 1,
-        facilityId,
+        facilityId: neighborId,
       });
     });
     await database.transaction(async (transaction) => {
@@ -302,8 +303,6 @@ describeWithDatabase('start-flow roster hydration', () => {
       facilityId,
       snapshotId,
     );
-    expect(withCampus?.campusFacilityIds).toEqual([
-      [facilityId, neighborId].sort(),
-    ]);
+    expect(withCampus?.campusFacilityIds).toEqual([[facilityId]]);
   });
 });

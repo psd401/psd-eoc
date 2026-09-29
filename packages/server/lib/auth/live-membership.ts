@@ -34,11 +34,11 @@ class LastAdministratorError extends Error {
 }
 
 /**
- * Brings one person's stored membership in every active sign-in group, and
- * every connected school staff group (which admits its members as staff at
- * that school), up to
- * what Google says right now, so the access decision that follows reads the
- * present rather than the last scheduled sync.
+ * Brings one person's stored membership up to what Google says right now,
+ * so the access decision that follows reads the present rather than the last
+ * scheduled sync. It covers every active sign-in group and every connected
+ * school staff group, since a school group admits its members as staff at
+ * that school.
  *
  * A membership Google confirms is written with this instant as its capture
  * time; one Google denies is removed. Nothing else in the table is touched:
