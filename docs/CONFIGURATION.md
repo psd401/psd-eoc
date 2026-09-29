@@ -92,7 +92,8 @@ bootstrap.
 
 `psdEoc:sesFromDisplayName` is optional: the inbox sender name on
 notification email, sent as `"<name>" <psdEoc:sesFromAddress>`. It must be 1-64
-printable ASCII characters without quotes, backslashes, or angle brackets.
+characters of ASCII letters, digits, spaces, and `. , & ' ( ) -`, starting with
+a letter or digit and ending with a letter, digit, `.`, or `)`.
 Without it, email comes from the bare address. The email's HTML part also shows
 the app logo, `psdEoc:organizationName`, and a link to
 `psdEoc:applicationOrigin`; the plain-text part stays exactly the rendered

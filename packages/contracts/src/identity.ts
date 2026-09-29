@@ -39,9 +39,10 @@ export const OrganizationNameSchema = z
 export type OrganizationName = z.infer<typeof OrganizationNameSchema>;
 
 /**
- * Inbox sender name for notification email, such as "EOC Alerts". Printable
- * ASCII only, so the From header needs no RFC 2047 encoding, and no quote,
- * backslash, or angle bracket, so it cannot escape the quoted display name.
+ * Inbox sender name for notification email, such as "EOC Alerts". An ASCII
+ * allowlist (letters, digits, space, and . , & ' ( ) -), so the From header
+ * needs no RFC 2047 encoding and no character can escape the quoted display
+ * name.
  */
 export const SenderDisplayNameSchema = z
   .string()

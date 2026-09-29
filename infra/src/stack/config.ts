@@ -115,7 +115,7 @@ export function readDeploymentTarget(node: {
     !SenderDisplayNameSchema.safeParse(sesFromDisplayName).success
   ) {
     throw new Error(
-      'CDK context psdEoc:sesFromDisplayName must be 1-64 printable ASCII characters without quotes, backslashes, or angle brackets.',
+      "CDK context psdEoc:sesFromDisplayName must be 1-64 characters of ASCII letters, digits, spaces, and . , & ' ( ) -",
     );
   }
   return Object.freeze({
