@@ -1375,6 +1375,8 @@ async function loadDrizzleFannedOutPushEndpointSendEligibility(
     published.map(({ endpointId }) => endpointId),
     unclaimed.get(input.recipientId) ?? [],
     resolved,
+    // Only the endpoint's identity is compared below; capturedAt is required
+    // to build a PushEndpoint and is otherwise unused here.
     new Date().toISOString(),
     cutover,
   ).find((candidate) => candidate.id === input.endpointId);

@@ -2852,7 +2852,9 @@ describeWithDatabase('device push-token persistence', () => {
     // A batch is built now and holds the tablet's endpoint. Before the worker
     // sends, the tablet registers again, so it has a newer registration.
     const batchCreatedAt = new Date().toISOString();
-    await Bun.sleep(5);
+    // Keep the new registration clearly after the batch instant, even on a
+    // loaded runner.
+    await Bun.sleep(50);
     await executeDeviceCapability(
       'register-push-token',
       {
