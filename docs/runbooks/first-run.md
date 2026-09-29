@@ -121,15 +121,26 @@ staff can be assigned to and events can be started at. A facility marked
 the only one a district normally needs is the site an app store reviewer runs
 a drill at (see the [app store review account](app-store-review.md) runbook).
 
-Then group them into neighborhoods — the set of schools notified together when
-an event at one of them reaches beyond its own building.
+Then group them into neighborhoods — the campuses whose schools are notified
+together. An event at a school reaches the building sources of every school
+sharing a neighborhood with it, read from the neighborhood's current version,
+as well as its own. An isolated facility is never reached through a
+neighborhood, and a school in no neighborhood reaches its own staff only.
 
 ## 4. Give each facility a building group
 
 There is no audience to configure. The retired `audience_configurations` and
 `audience_targets` tables no longer control delivery: an event at a school
-reaches that school's staff, and that rule is enforced by current code rather
-than a configuration row.
+reaches that school's staff and its campus's, and that rule is enforced by
+current code rather than a configuration row.
+
+A connected Google building group is also a sign-in group for its members:
+each may sign in as staff, limited to the schools whose groups hold them, so
+the people a school's alerts reach can sign in and opt in to text alerts
+without a separate access group. The limit follows the group at every sign-in.
+Someone a sign-in group on the Access page or a direct admission admits is
+district-wide unless an administrator limits them there. A waiting group and a
+manual list admit nobody.
 
 What decides whether an activation reaches anybody is the school's **building
 group source** — an active Google group, `purpose = building`, bound to the

@@ -924,14 +924,20 @@ describeWithDatabase('access-membership atomic database publication', () => {
       .where(eq(groupSources.id, buildingSourceId));
     expect(source?.capturedAt).not.toBeNull();
 
-    // And it grants nobody sign-in, which is the property that lets one
-    // membership table serve both purposes.
+    // And it admits its members as staff at that school only: the people a
+    // school's alerts reach are the people who must sign in to opt in to
+    // text alerts. It grants nothing district-wide and no administrator.
     expect(
       await decideAccess(database, {
         email: 'schoolstaff@example.invalid',
         checkedAt: new Date(SYNC_TIME),
       }),
-    ).toMatchObject({ granted: false });
+    ).toMatchObject({
+      granted: true,
+      roles: ['staff'],
+      groupSourceIds: [buildingSourceId],
+      admittedAccountId: null,
+    });
   });
 
   test('reads and publishes a Google others group so a district list has members', async () => {

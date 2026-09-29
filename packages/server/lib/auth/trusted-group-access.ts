@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 
 import { RoleSchema, type Role } from '@psd-eoc/contracts';
 
@@ -36,6 +36,13 @@ export type AccessDecision =
       /** The admission that granted this sign-in without a group, if any. */
       admittedAccountId: string | null;
       /**
+       * The schools this person may act at when the only thing admitting
+       * them is their school's own staff group, or null when a sign-in
+       * group or an admission grants them the district. A school group
+       * admits its members as staff at that school and nowhere else.
+       */
+      schoolFacilityIds: readonly string[] | null;
+      /**
        * When the granting membership was last read from the provider — the
        * freshest capture among the groups that granted it. Callers that need
        * to say how old their evidence is report this rather than the instant
@@ -52,7 +59,10 @@ export type AccessDecision =
  * The whole rule: they are in at least one active access group whose
  * membership was read recently enough, and they receive the roles those groups
  * grant; or an administrator admitted their address directly, which grants
- * staff. Membership in one trusted group is sufficient — requiring membership
+ * staff; or they are in a school's own connected Google staff group (a
+ * building roster source), which grants staff at that school only. The
+ * people a school's alerts reach are the people who must be able to sign in
+ * and opt in to text alerts, so the group that names one names the other. Membership in one trusted group is sufficient — requiring membership
  * in every configured group is what made a second group impossible to add.
  *
  * There is deliberately no snapshot, version, generation, or baseline here.
@@ -85,12 +95,28 @@ export async function decideAccess(
   const active = await database
     .select({
       id: groupSources.id,
+      purpose: groupSources.purpose,
+      facilityId: groupSources.facilityId,
       grantedRole: groupSources.grantedRole,
       membersCapturedAt: groupSources.membersCapturedAt,
     })
     .from(groupSources)
     .where(
-      and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
+      and(
+        eq(groupSources.active, true),
+        or(
+          eq(groupSources.purpose, 'access'),
+          // A school's staff group admits only once Google holds it: a
+          // waiting group names nobody, and a manual list is an address
+          // book for alerts, not a sign-in authority.
+          and(
+            eq(groupSources.purpose, 'building'),
+            eq(groupSources.kind, 'google-group'),
+            isNotNull(groupSources.googleGroupId),
+            isNotNull(groupSources.facilityId),
+          ),
+        ),
+      ),
     );
   if (active.length === 0 && admittedAccountId === null) {
     return Object.freeze({
@@ -154,7 +180,15 @@ export async function decideAccess(
     ) {
       return [];
     }
-    return [{ id: group.id, grantedRole: group.grantedRole, capturedAt }];
+    return [
+      {
+        id: group.id,
+        purpose: group.purpose,
+        facilityId: group.facilityId,
+        grantedRole: group.grantedRole,
+        capturedAt,
+      },
+    ];
   });
   if (usable.length === 0 && admittedAccountId === null) {
     return Object.freeze({
@@ -164,9 +198,27 @@ export async function decideAccess(
   }
 
   const roles = new Set(
-    usable.map((group) => RoleSchema.parse(group.grantedRole)),
+    usable.map((group) =>
+      group.purpose === 'building'
+        ? ('staff' as const)
+        : RoleSchema.parse(group.grantedRole),
+    ),
   );
   if (admittedAccountId !== null) roles.add('staff');
+  const districtWide =
+    admittedAccountId !== null ||
+    usable.some((group) => group.purpose === 'access');
+  const schoolFacilityIds = districtWide
+    ? null
+    : Object.freeze(
+        [
+          ...new Set(
+            usable.flatMap(({ facilityId }) =>
+              facilityId === null ? [] : [facilityId],
+            ),
+          ),
+        ].sort(),
+      );
   const capturedAt = new Date(
     Math.max(
       ...usable.map((group) => group.capturedAt.getTime()),
@@ -178,6 +230,7 @@ export async function decideAccess(
     roles: Object.freeze([...roles].sort()),
     groupSourceIds: Object.freeze(usable.map(({ id }) => id).sort()),
     admittedAccountId,
+    schoolFacilityIds,
     capturedAt,
   });
 }

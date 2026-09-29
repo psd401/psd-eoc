@@ -46,6 +46,8 @@ import {
   eventTypeVersions,
   facilities,
   groupSources,
+  neighborhoodFacilities,
+  neighborhoodVersions,
   rosterEndpoints,
   rosterRecipientGroupSources,
   rosterRecipients,
@@ -433,6 +435,30 @@ export async function loadRosterSnapshot(
             ),
           )
           .orderBy(asc(facilities.id));
+  // Campuses, read the same way: the current version of each neighborhood,
+  // so an event reaches whatever campus its school is in now.
+  const campusRows =
+    facilityRows.length === 0
+      ? []
+      : await database
+          .select({
+            neighborhoodId: neighborhoodFacilities.neighborhoodId,
+            facilityId: neighborhoodFacilities.facilityId,
+          })
+          .from(neighborhoodFacilities)
+          .where(
+            sql`(${neighborhoodFacilities.neighborhoodId}, ${neighborhoodFacilities.neighborhoodVersion}) in (select ${neighborhoodVersions.id}, max(${neighborhoodVersions.version}) from ${neighborhoodVersions} group by ${neighborhoodVersions.id})`,
+          )
+          .orderBy(
+            asc(neighborhoodFacilities.neighborhoodId),
+            asc(neighborhoodFacilities.facilityId),
+          );
+  const campuses = new Map<string, string[]>();
+  for (const { neighborhoodId, facilityId: member } of campusRows) {
+    const campus = campuses.get(neighborhoodId) ?? [];
+    campus.push(member);
+    campuses.set(neighborhoodId, campus);
+  }
   const sourceRows = await collectBoundedDatabaseRows(
     (offset, limit) =>
       database
@@ -612,6 +638,7 @@ export async function loadRosterSnapshot(
     },
     facilityIds: facilityRows.map((row) => row.facilityId),
     isolatedFacilityIds: isolatedRows.map((row) => row.facilityId),
+    campusFacilityIds: [...campuses.values()],
     expectedSourceGroupRefs: parsedSources
       .filter((source) => source.completionKind === 'expected')
       .map((source) => source.reference),

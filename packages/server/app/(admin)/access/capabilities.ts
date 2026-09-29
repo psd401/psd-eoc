@@ -15,7 +15,18 @@ import {
   type User,
   type UserPage,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   admittedAccounts,
@@ -197,12 +208,21 @@ const ROLE_DISPLAY_ORDER: readonly Role[] = ['admin', 'staff'];
  * A membership read recently enough to authorize a sign-in, by the same rule
  * `decideAccess` applies: the fresher of the row's own capture and the
  * group's bulk read. The page lists who can sign in now, not who was once
- * on a list the sync stopped refreshing.
+ * on a list the sync stopped refreshing. A connected school staff group
+ * admits its members as staff, exactly as `decideAccess` reads it.
  */
 function freshAccessMembership(now: Date) {
   const cutoff = new Date(now.getTime() - MEMBERSHIP_FRESHNESS_MS);
   return and(
-    eq(groupSources.purpose, 'access'),
+    or(
+      eq(groupSources.purpose, 'access'),
+      and(
+        eq(groupSources.purpose, 'building'),
+        eq(groupSources.kind, 'google-group'),
+        isNotNull(groupSources.googleGroupId),
+        isNotNull(groupSources.facilityId),
+      ),
+    ),
     eq(groupSources.active, true),
     // An SQL expression has no column type for the driver to map a Date
     // through, so the bound is passed as text and Postgres reads it as the
@@ -295,9 +315,9 @@ async function projectUserPage(
     );
   const grantedRolesByEmail = new Map<string, Set<Role>>();
   for (const { email, role } of groupGrantRows) {
-    if (role === null) continue;
     const roles = grantedRolesByEmail.get(email) ?? new Set<Role>();
-    roles.add(RoleSchema.parse(role));
+    // Only a school staff group carries no role of its own; it grants staff.
+    roles.add(role === null ? 'staff' : RoleSchema.parse(role));
     grantedRolesByEmail.set(email, roles);
   }
   for (const { email } of admittedRows) {

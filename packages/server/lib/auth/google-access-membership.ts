@@ -21,6 +21,8 @@ const MAX_GOOGLE_RESPONSE_BYTES = 512 * 1024;
 const MAX_GROUP_PAGES = 100;
 const MAX_EVALUATED_MEMBERS = 1_200;
 const PAGE_SIZE = 200;
+/** How many groups one sign-in's live membership check asks Google at once. */
+const LIVE_CHECK_CONCURRENCY = 6;
 
 const GoogleTokenResponseSchema = z
   .object({
@@ -580,7 +582,9 @@ export interface GoogleGroupReference {
 export interface GoogleMembershipChecker {
   /**
    * For each group, whether the address is a direct member of it right now,
-   * keyed by group source ID. One token, one lookup per group.
+   * keyed by group source ID. One token, one lookup per group. A group Google
+   * could not answer for is absent, never false, so one broken group costs
+   * only its own answer; when no group could be answered the check fails.
    */
   check(
     email: string,
@@ -621,12 +625,21 @@ export function createGoogleMembershipChecker(
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
       };
-      for (const group of groups) {
+      // Every school's staff group is asked as well as the sign-in groups,
+      // two calls each, so the groups are asked a few at a time: one after
+      // another made each sign-in wait on some forty round trips.
+      const held: (boolean | undefined)[] = groups.map(() => undefined);
+      let firstFailure: unknown = null;
+      const checkOne = async (
+        group: GoogleGroupReference,
+        index: number,
+      ): Promise<void> => {
         // Ask Google which group the address names now, and require it to
         // be the group that was registered. A group deleted and recreated,
         // or re-keyed, answers 404 to a membership lookup on the old ID for
         // everyone; read as "not a member" that would remove each person
-        // as they arrived. Here it is a failure, and nothing is written.
+        // as they arrived. Here it is a failure for this group, and nothing
+        // is written for it.
         const identity = await client.resolveGroupIdentity(
           group.email.trim().toLowerCase(),
           authorization,
@@ -637,15 +650,41 @@ export function createGoogleMembershipChecker(
             'A configured access group no longer resolves to its recorded Google Group ID.',
           );
         }
-        answers.set(
-          group.groupSourceId,
-          await client.lookupDirectMembership(
-            identity.name,
-            address.data,
-            authorization,
-          ),
+        held[index] = await client.lookupDirectMembership(
+          identity.name,
+          address.data,
+          authorization,
         );
+      };
+      let next = 0;
+      await Promise.all(
+        Array.from(
+          { length: Math.min(LIVE_CHECK_CONCURRENCY, groups.length) },
+          async () => {
+            while (next < groups.length) {
+              const index = next;
+              next += 1;
+              const group = groups[index];
+              if (group === undefined) continue;
+              try {
+                await checkOne(group, index);
+              } catch (error) {
+                // One school's recreated or unreadable group must not stop
+                // everyone else's answer: it is left unanswered, alone.
+                firstFailure ??= error;
+              }
+            }
+          },
+        ),
+      );
+      if (held.every((answer) => answer === undefined)) {
+        throw firstFailure;
       }
+      // Answered in the order asked, whatever order Google replied in.
+      groups.forEach((group, index) => {
+        const answer = held[index];
+        if (answer !== undefined) answers.set(group.groupSourceId, answer);
+      });
       return answers;
     },
   });

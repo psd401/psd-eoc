@@ -840,20 +840,30 @@ describe('direct Google membership checker for sign-in', () => {
       ['source-a', true],
       ['source-b', false],
     ]);
-    // One token, then per group: lookup by address, read, membership.
+    // One token, then per group: lookup by address, read, membership. The
+    // groups are asked a few at a time, so only each group's own calls are
+    // in order.
     const urls = harness.calls.map(({ url }) => url);
     expect(urls).toHaveLength(7);
     expect(urls[0]).toBe(TOKEN_ENDPOINT);
-    expect(urls[1]).toContain(
+    const groupA = urls.filter(
+      (url) =>
+        url.includes('group-a%40example.invalid') ||
+        url.includes('/groups/01a'),
+    );
+    expect(groupA).toHaveLength(3);
+    expect(groupA[0]).toContain(
       'groups:lookup?groupKey.id=group-a%40example.invalid',
     );
-    expect(urls[2]?.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups/01a?`)).toBe(
-      true,
-    );
-    expect(urls[3]).toContain(
+    expect(
+      groupA[1]?.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups/01a?`),
+    ).toBe(true);
+    expect(groupA[2]).toContain(
       '/groups/01a/memberships:lookup?memberKey.id=person%40example.invalid',
     );
-    expect(urls[6]).toContain('/groups/01b/memberships:lookup?');
+    expect(
+      urls.filter((url) => url.includes('/groups/01b/memberships:lookup?')),
+    ).toHaveLength(1);
   });
 
   test('asks nothing when no sign-in group is configured', async () => {
@@ -867,18 +877,29 @@ describe('direct Google membership checker for sign-in', () => {
   test('refuses to answer for a group whose recorded ID Google no longer holds', async () => {
     // The group was deleted and recreated under the same address, so its
     // membership lookup on the old ID would answer 404 for everyone. The
-    // mismatch is a failure before any membership is asked, so nothing is
-    // read as a removal.
+    // mismatch is a failure before that group's membership is asked: the
+    // group is left unanswered, never read as a removal, and the other group
+    // is still answered. Alone, it fails the whole check.
     const harness = lookupHarness(
       { '01a': 200 },
       { ...RESOLVES_TO, 'group-a@example.invalid': '01a-recreated' },
     );
+    expect([
+      ...(await checker(harness).check('person@example.invalid', GROUPS)),
+    ]).toEqual([['source-b', false]]);
     await expectEvaluationError(
-      checker(harness).check('person@example.invalid', GROUPS),
+      checker(harness).check('person@example.invalid', GROUPS.slice(0, 1)),
       'DESIGNATED_GROUP_IDENTITY_INVALID',
     );
     expect(
-      harness.calls.some(({ url }) => url.includes('memberships:lookup')),
+      harness.calls.some(({ url }) =>
+        url.includes('/groups/01a-recreated/memberships:lookup'),
+      ),
+    ).toBe(false);
+    expect(
+      harness.calls.some(({ url }) =>
+        url.includes('/groups/01a/memberships:lookup'),
+      ),
     ).toBe(false);
   });
 
@@ -900,8 +921,11 @@ describe('direct Google membership checker for sign-in', () => {
   test('treats any answer other than a membership or a 404 as a failure', async () => {
     for (const status of [403, 500]) {
       const harness = lookupHarness({ '01a': status });
+      expect([
+        ...(await checker(harness).check('person@example.invalid', GROUPS)),
+      ]).toEqual([['source-b', false]]);
       await expectEvaluationError(
-        checker(harness).check('person@example.invalid', GROUPS),
+        checker(harness).check('person@example.invalid', GROUPS.slice(0, 1)),
         'GOOGLE_REQUEST_REJECTED',
       );
     }
@@ -909,8 +933,11 @@ describe('direct Google membership checker for sign-in', () => {
 
   test('refuses a membership Google names under another group', async () => {
     const harness = lookupHarness({ '01a': 'foreign' });
+    expect([
+      ...(await checker(harness).check('person@example.invalid', GROUPS)),
+    ]).toEqual([['source-b', false]]);
     await expectEvaluationError(
-      checker(harness).check('person@example.invalid', GROUPS),
+      checker(harness).check('person@example.invalid', GROUPS.slice(0, 1)),
       'GOOGLE_RESPONSE_INVALID',
     );
   });

@@ -10,6 +10,7 @@ import {
   defaultLiveMembershipReconciler,
   type LiveMembershipReconciler,
 } from './live-membership';
+import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 import { decideAccess, type AccessRefusal } from './trusted-group-access';
 
 export type SignInAuthorization =
@@ -113,11 +114,39 @@ export async function authorizeSignIn(
       throw new Error('The signing-in account could not be resolved.');
     }
 
+    // Someone admitted only by their school's staff group acts at that
+    // school and nowhere else, and their limit follows the group: moving to
+    // another school's group moves them at their next sign-in. Anyone a
+    // sign-in group or an admission admits keeps the limit an administrator
+    // set on the Access page, which this never touches.
+    let facilityScopeKind = user.facilityScopeKind;
+    if (decision.schoolFacilityIds !== null) {
+      // The order every writer of a person's facility limit takes: the
+      // administrator-availability lock first, then the rows.
+      await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+      await transaction
+        .delete(userFacilityScopes)
+        .where(eq(userFacilityScopes.userId, user.id));
+      await transaction.insert(userFacilityScopes).values(
+        decision.schoolFacilityIds.map((facilityId) => ({
+          userId: user.id,
+          facilityId,
+        })),
+      );
+      if (facilityScopeKind !== 'facilities') {
+        await transaction
+          .update(users)
+          .set({ facilityScopeKind: 'facilities' })
+          .where(eq(users.id, user.id));
+        facilityScopeKind = 'facilities';
+      }
+    }
+
     // The account's own facility limit, as stored. Session issuance reads the
     // same rows back and refuses a mismatch, so claiming district-wide here
     // locked every facility-limited account out of every sign-in path.
     const facilityScope =
-      user.facilityScopeKind === 'district'
+      facilityScopeKind === 'district'
         ? ({ kind: 'district' } as const)
         : ({
             kind: 'facilities' as const,
