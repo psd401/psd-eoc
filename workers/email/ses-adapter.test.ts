@@ -9,6 +9,8 @@ import {
 import type { WorkerAttemptWorkItem } from '../shared/attempt';
 import type { ProviderSendOutcome } from '../shared/processor';
 import { ProviderDispatchError } from '../shared/retry';
+import { EMAIL_LOGO_PNG_BASE64 } from './email-logo';
+import { EMAIL_LOGO_CONTENT_ID } from './email-message';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_CORRELATION_TAG_NAMES,
@@ -24,6 +26,11 @@ import {
 } from './ses-adapter';
 
 const SES_FROM_EMAIL_ADDRESS = 'eoc-alerts@example.invalid';
+const BRANDING = Object.freeze({
+  organizationName: 'Example School District',
+  applicationOrigin: 'https://eoc.example.invalid',
+  senderDisplayName: 'PSD EOC Alerts',
+});
 
 const IDS = Object.freeze({
   actor: '10000000-0000-4000-8000-000000000001',
@@ -222,6 +229,7 @@ function adapter(
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+      branding: BRANDING,
     }),
   };
 }
@@ -246,7 +254,7 @@ describe('SES v2 live adapter', () => {
     const input = app.client.inputs[0];
     expect(input).toEqual(
       expect.objectContaining({
-        FromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+        FromEmailAddress: `"PSD EOC Alerts" <${SES_FROM_EMAIL_ADDRESS}>`,
         ConfigurationSetName: SES_CONFIGURATION_SET_NAME,
         Destination: {
           ToAddresses: ['authorized-staff@example.invalid'],
@@ -271,6 +279,19 @@ describe('SES v2 live adapter', () => {
       '>[INCIDENT] REAL INCIDENT</h1>',
     );
     expect(input?.Content.Simple.Body.Html.Data).not.toContain('[DRILL]');
+    expect(input?.Content.Simple.Body.Html.Data).toContain(
+      `src="cid:${EMAIL_LOGO_CONTENT_ID}"`,
+    );
+    expect(input?.Content.Simple.Attachments).toEqual([
+      {
+        FileName: 'psd-eoc-logo.png',
+        ContentType: 'image/png',
+        ContentId: EMAIL_LOGO_CONTENT_ID,
+        ContentDisposition: 'INLINE',
+        ContentTransferEncoding: 'BASE64',
+        RawContentBase64: EMAIL_LOGO_PNG_BASE64,
+      },
+    ]);
     expect(input?.EmailTags).toEqual([
       { Name: SES_CORRELATION_TAG_NAMES.attemptId, Value: IDS.attempt },
       { Name: SES_CORRELATION_TAG_NAMES.endpointId, Value: IDS.endpoint },
@@ -284,6 +305,23 @@ describe('SES v2 live adapter', () => {
       },
     ]);
     expect(app.ledger.completeCalls).toBe(1);
+  });
+
+  test('sends from the bare address when no display name is configured', async () => {
+    const client = new CapturingSesClient();
+    const emailAdapter = new SesV2EmailAdapter({
+      client,
+      sendLedger: new MemoryDurableLedger(),
+      fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+      branding: { ...BRANDING, senderDisplayName: null },
+    });
+
+    await emailAdapter.send({
+      workItem: workItem(),
+      idempotencyKey: IDS.attempt,
+    });
+
+    expect(client.inputs[0]?.FromEmailAddress).toBe(SES_FROM_EMAIL_ADDRESS);
   });
 
   test('durable completion replays the provider result without a second SES send', async () => {
@@ -453,6 +491,7 @@ describe('SES v2 live adapter', () => {
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+      branding: BRANDING,
     });
 
     await expect(
@@ -480,6 +519,7 @@ describe('SES v2 live adapter', () => {
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+      branding: BRANDING,
     });
 
     await expect(
@@ -503,6 +543,7 @@ describe('SES v2 live adapter', () => {
       client,
       sendLedger: ledger,
       fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
+      branding: BRANDING,
     };
 
     expect(
@@ -536,6 +577,25 @@ describe('SES v2 live adapter', () => {
     ]) {
       expect(
         () => new SesV2EmailAdapter({ ...base, fromEmailAddress }),
+      ).toThrow(SesV2EmailAdapterError);
+    }
+    for (const branding of [
+      undefined,
+      { ...BRANDING, organizationName: '' },
+      { ...BRANDING, organizationName: 'District\u202eName' },
+      { ...BRANDING, applicationOrigin: 'http://eoc.example.invalid' },
+      { ...BRANDING, applicationOrigin: 'https://eoc.example.invalid/path' },
+      { ...BRANDING, senderDisplayName: 'Alerts" <attacker@example.invalid>' },
+      { ...BRANDING, senderDisplayName: 'Alerts\r\nBcc: x@example.invalid' },
+      { ...BRANDING, senderDisplayName: 'Alértes' },
+      { ...BRANDING, senderDisplayName: '' },
+    ]) {
+      expect(
+        () =>
+          new SesV2EmailAdapter({
+            ...base,
+            branding: branding as typeof BRANDING,
+          }),
       ).toThrow(SesV2EmailAdapterError);
     }
     expect(

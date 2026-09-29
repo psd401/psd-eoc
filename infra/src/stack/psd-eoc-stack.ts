@@ -166,6 +166,7 @@ export class PsdEocStack extends Stack {
       monitoringRunbookBaseUrl,
       region,
       sesFromAddress,
+      sesFromDisplayName,
       sesIdentityDomain,
       sourceRepositoryUrl,
     } = props.deploymentTarget;
@@ -2367,7 +2368,11 @@ export class PsdEocStack extends Stack {
             'verified',
             'unverified',
           ).toString(),
+          PSD_EOC_ORGANIZATION_NAME: deploymentIdentity.organizationName,
           PSD_EOC_SES_FROM_ADDRESS: sesFromAddress,
+          ...(sesFromDisplayName === null
+            ? {}
+            : { PSD_EOC_SES_FROM_DISPLAY_NAME: sesFromDisplayName }),
           PSD_EOC_SES_PROVIDER_AUTHORIZED: Fn.conditionIf(
             shouldRunEmailWorker.logicalId,
             'true',

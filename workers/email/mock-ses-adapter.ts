@@ -10,8 +10,15 @@ import {
   type ProviderSendRequest,
 } from '../shared/processor';
 import { ProviderDispatchError } from '../shared/retry';
-import { buildEmailMessageContent } from './email-message';
+import { buildEmailMessageContent, parseEmailBranding } from './email-message';
 import { SES_EMAIL_INTEGRATION_ID } from './ses-adapter';
+
+/** Synthetic sends never leave the process, so branding only has to parse. */
+const SYNTHETIC_BRANDING = parseEmailBranding({
+  organizationName: 'Synthetic District',
+  applicationOrigin: 'https://eoc.example.invalid',
+  senderDisplayName: null,
+});
 
 export const MOCK_SES_PROVIDER = 'mock-ses' as const;
 
@@ -73,7 +80,10 @@ export class MockSesEmailAdapter implements AttemptIdempotentProviderAdapter {
     }
 
     // Validate the canonical copy through the same renderer used by live SES.
-    buildEmailMessageContent(workItem.batch.renderedMessage);
+    buildEmailMessageContent(
+      workItem.batch.renderedMessage,
+      SYNTHETIC_BRANDING,
+    );
     const currentFingerprint = fingerprint(workItem);
     const existing = this.#sends.get(workItem.attempt.id);
     if (existing !== undefined) {

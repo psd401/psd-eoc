@@ -1,4 +1,7 @@
-import { OrganizationNameSchema } from '@psd-eoc/contracts';
+import {
+  OrganizationNameSchema,
+  SenderDisplayNameSchema,
+} from '@psd-eoc/contracts';
 import { isIP } from 'node:net';
 
 /**
@@ -74,6 +77,8 @@ export interface DeploymentTarget {
   readonly monitoringRunbookBaseUrl: string;
   readonly region: string;
   readonly sesFromAddress: string;
+  /** Inbox sender name; null sends notification email from the bare address. */
+  readonly sesFromDisplayName: string | null;
   readonly sesIdentityDomain: string;
   readonly sourceRepositoryUrl: string;
 }
@@ -102,6 +107,17 @@ export function readDeploymentTarget(node: {
       'CDK context psdEoc:sesFromAddress must use psdEoc:sesIdentityDomain.',
     );
   }
+  const sesFromDisplayName: unknown = node.tryGetContext(
+    'psdEoc:sesFromDisplayName',
+  );
+  if (
+    sesFromDisplayName !== undefined &&
+    !SenderDisplayNameSchema.safeParse(sesFromDisplayName).success
+  ) {
+    throw new Error(
+      "CDK context psdEoc:sesFromDisplayName must be 1-64 characters of ASCII letters, digits, spaces, and . , & ' ( ) -",
+    );
+  }
   return Object.freeze({
     account: read('psdEoc:awsAccount', /^\d{12}$/u),
     accountAlias: read('psdEoc:awsAccountAlias', /^[a-z0-9][a-z0-9-]{1,62}$/u),
@@ -111,6 +127,8 @@ export function readDeploymentTarget(node: {
     ),
     region: read('psdEoc:awsRegion', /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u),
     sesFromAddress,
+    sesFromDisplayName:
+      sesFromDisplayName === undefined ? null : (sesFromDisplayName as string),
     sesIdentityDomain,
     sourceRepositoryUrl: read(
       'psdEoc:sourceRepositoryUrl',

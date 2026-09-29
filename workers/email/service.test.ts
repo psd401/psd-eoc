@@ -21,6 +21,8 @@ const ENABLED_ENV = Object.freeze({
     'arn:aws:sqs:us-east-1:000000000000:example-email-dlq',
   PSD_EOC_SERVICE_ORIGIN: 'https://eoc.example.invalid',
   PSD_EOC_SES_FROM_ADDRESS: 'alerts@example.invalid',
+  PSD_EOC_SES_FROM_DISPLAY_NAME: 'PSD EOC Alerts',
+  PSD_EOC_ORGANIZATION_NAME: 'Example School District',
   PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN: TOKEN,
   PSD_EOC_DELIVERY_STATE_WORKER_TOKEN: TOKEN,
   PSD_EOC_EMAIL_RUNTIME_WORKER_TOKEN: TOKEN,
@@ -42,6 +44,31 @@ describe('email service configuration', () => {
         fromEmailAddress: 'alerts@example.invalid',
       }),
     );
+  });
+
+  test('reads email branding and treats the display name as optional', () => {
+    expect(readEmailServiceConfiguration(ENABLED_ENV).branding).toEqual({
+      organizationName: 'Example School District',
+      applicationOrigin: 'https://eoc.example.invalid',
+      senderDisplayName: 'PSD EOC Alerts',
+    });
+    for (const displayName of [undefined, '']) {
+      expect(
+        readEmailServiceConfiguration({
+          ...ENABLED_ENV,
+          PSD_EOC_SES_FROM_DISPLAY_NAME: displayName,
+        }).branding.senderDisplayName,
+      ).toBeNull();
+    }
+    for (const invalid of [
+      { PSD_EOC_ORGANIZATION_NAME: undefined },
+      { PSD_EOC_ORGANIZATION_NAME: ' Padded District ' },
+      { PSD_EOC_SES_FROM_DISPLAY_NAME: 'Alerts <x@example.invalid>' },
+    ]) {
+      expect(() =>
+        readEmailServiceConfiguration({ ...ENABLED_ENV, ...invalid }),
+      ).toThrow(EmailServiceError);
+    }
   });
 
   test('rejects non-HTTPS origins', () => {
