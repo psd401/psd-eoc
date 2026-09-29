@@ -17,6 +17,9 @@ import {
 import { ProviderDispatchError } from '../shared/retry';
 import {
   buildEmailMessageContent,
+  EmailBrandingError,
+  parseEmailBranding,
+  type EmailBranding,
   type EmailMessageContent,
 } from './email-message';
 import { SES_CONFIGURATION_SET_NAME } from './ses-events';
@@ -42,6 +45,19 @@ export interface SesV2MessagePart {
   readonly Data: string;
 }
 
+/**
+ * SDK-independent inline attachment. The content stays base64 here so the
+ * request fingerprint is a plain JSON digest; the SDK boundary decodes it.
+ */
+export interface SesV2InlineAttachment {
+  readonly FileName: string;
+  readonly ContentType: string;
+  readonly ContentId: string;
+  readonly ContentDisposition: 'INLINE';
+  readonly ContentTransferEncoding: 'BASE64';
+  readonly RawContentBase64: string;
+}
+
 export interface SesV2SendEmailInput {
   readonly FromEmailAddress: string;
   readonly Destination: Readonly<{
@@ -54,6 +70,7 @@ export interface SesV2SendEmailInput {
         Text: SesV2MessagePart;
         Html: SesV2MessagePart;
       }>;
+      Attachments: readonly SesV2InlineAttachment[];
     }>;
   }>;
   readonly ConfigurationSetName: typeof SES_CONFIGURATION_SET_NAME;
@@ -107,6 +124,7 @@ export interface SesV2EmailAdapterOptions {
   readonly client: SesV2Client;
   readonly sendLedger: DurableSesSendLedger;
   readonly fromEmailAddress: string;
+  readonly branding: EmailBranding;
 }
 
 export type SesV2EmailAdapterErrorCode =
@@ -159,6 +177,7 @@ function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
   client: SesV2Client;
   sendLedger: DurableSesSendLedger;
   fromEmailAddress: string;
+  branding: EmailBranding;
 }> {
   if (
     options === null ||
@@ -175,14 +194,27 @@ function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
   ) {
     throw new SesV2EmailAdapterError('INVALID_CONFIGURATION');
   }
+  let branding: EmailBranding;
+  try {
+    branding = parseEmailBranding(options.branding);
+  } catch (error) {
+    if (error instanceof EmailBrandingError) {
+      throw new SesV2EmailAdapterError('INVALID_CONFIGURATION');
+    }
+    throw error;
+  }
   return Object.freeze({
     client: options.client,
     sendLedger: options.sendLedger,
     fromEmailAddress: options.fromEmailAddress,
+    branding,
   });
 }
 
-function parseWork(request: ProviderSendRequest): Readonly<{
+function parseWork(
+  request: ProviderSendRequest,
+  branding: EmailBranding,
+): Readonly<{
   workItem: WorkerAttemptWorkItem &
     Readonly<{
       endpoint: WorkerAttemptWorkItem['endpoint'] &
@@ -210,7 +242,7 @@ function parseWork(request: ProviderSendRequest): Readonly<{
         endpoint: WorkerAttemptWorkItem['endpoint'] &
           Readonly<{ channel: 'email'; email: string }>;
       }>,
-    message: buildEmailMessageContent(workItem.batch.renderedMessage),
+    message: buildEmailMessageContent(workItem.batch.renderedMessage, branding),
   });
 }
 
@@ -250,8 +282,18 @@ function correlationTags(
   ]);
 }
 
-function buildSendInput(
+/** `"Name" <address>`; the display name is validated quote-free ASCII. */
+export function formatSesFromAddress(
   fromEmailAddress: string,
+  senderDisplayName: string | null,
+): string {
+  return senderDisplayName === null
+    ? fromEmailAddress
+    : `"${senderDisplayName}" <${fromEmailAddress}>`;
+}
+
+function buildSendInput(
+  fromAddress: string,
   workItem: WorkerAttemptWorkItem &
     Readonly<{
       endpoint: WorkerAttemptWorkItem['endpoint'] &
@@ -260,7 +302,7 @@ function buildSendInput(
   message: EmailMessageContent,
 ): SesV2SendEmailInput {
   return Object.freeze({
-    FromEmailAddress: fromEmailAddress,
+    FromEmailAddress: fromAddress,
     Destination: Object.freeze({
       ToAddresses: Object.freeze([workItem.endpoint.email]) as readonly [
         string,
@@ -273,6 +315,18 @@ function buildSendInput(
           Text: part(message.textBody),
           Html: part(message.htmlBody),
         }),
+        Attachments: Object.freeze(
+          message.inlineImages.map((image) =>
+            Object.freeze({
+              FileName: image.fileName,
+              ContentType: image.contentType,
+              ContentId: image.contentId,
+              ContentDisposition: 'INLINE' as const,
+              ContentTransferEncoding: 'BASE64' as const,
+              RawContentBase64: image.base64Content,
+            }),
+          ),
+        ),
       }),
     }),
     ConfigurationSetName: SES_CONFIGURATION_SET_NAME,
@@ -426,20 +480,25 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
 
   readonly #client: SesV2Client;
   readonly #ledger: DurableSesSendLedger;
-  readonly #fromEmailAddress: string;
+  readonly #fromAddress: string;
+  readonly #branding: EmailBranding;
 
   public constructor(options: SesV2EmailAdapterOptions) {
     const parsed = parseOptions(options);
     this.#client = parsed.client;
     this.#ledger = parsed.sendLedger;
-    this.#fromEmailAddress = parsed.fromEmailAddress;
+    this.#branding = parsed.branding;
+    this.#fromAddress = formatSesFromAddress(
+      parsed.fromEmailAddress,
+      parsed.branding.senderDisplayName,
+    );
   }
 
   public async send(
     request: ProviderSendRequest,
   ): Promise<ProviderSendOutcome> {
-    const { workItem, message } = parseWork(request);
-    const input = buildSendInput(this.#fromEmailAddress, workItem, message);
+    const { workItem, message } = parseWork(request, this.#branding);
+    const input = buildSendInput(this.#fromAddress, workItem, message);
     const claimRequest = Object.freeze({
       attemptId: workItem.attempt.id,
       requestFingerprint: requestFingerprint(input),

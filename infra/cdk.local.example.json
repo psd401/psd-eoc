@@ -47,6 +47,7 @@
   "psdEoc:organizationName": "Example School District",
   "psdEoc:privacyContactUrl": "https://www.example.invalid/privacy",
   "psdEoc:sesFromAddress": "eoc-alerts@example.invalid",
+  "psdEoc:sesFromDisplayName": "EOC Alerts",
   "psdEoc:sesIdentityDomain": "example.invalid",
   "psdEoc:smsSupportEmail": "servicecentral@example.invalid",
   "psdEoc:smsSupportPhone": "+12535550123",

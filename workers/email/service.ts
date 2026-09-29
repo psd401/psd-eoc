@@ -14,6 +14,7 @@ import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
 import { AwsSesV2Client } from './aws-client';
 import { sqsQueueUrlForArn } from './aws-arn';
+import { parseEmailBranding, type EmailBranding } from './email-message';
 import { EmailQueueRuntime, type EmailRetryPublisher } from './queue-runtime';
 import { SesEmailRuntime } from './runtime';
 import { EmailRuntimeClient } from './state-client';
@@ -43,6 +44,7 @@ export interface EmailServiceConfiguration {
   readonly deadLetterQueueUrl: string;
   readonly serviceOrigin: string;
   readonly fromEmailAddress: string;
+  readonly branding: EmailBranding;
   readonly attemptExecutionToken: string;
   readonly deliveryStateToken: string;
   readonly emailRuntimeToken: string;
@@ -132,14 +134,30 @@ export function readEmailServiceConfiguration(
   } catch {
     throw new EmailServiceError('INVALID_CONFIGURATION');
   }
+  const serviceOrigin = exactHttpsOrigin(
+    required(environment, 'PSD_EOC_SERVICE_ORIGIN', 2_048),
+  );
+  const senderDisplayName = environment.PSD_EOC_SES_FROM_DISPLAY_NAME;
+  let branding: EmailBranding;
+  try {
+    branding = parseEmailBranding({
+      organizationName: required(environment, 'PSD_EOC_ORGANIZATION_NAME', 160),
+      applicationOrigin: serviceOrigin,
+      senderDisplayName:
+        senderDisplayName === undefined || senderDisplayName === ''
+          ? null
+          : senderDisplayName,
+    });
+  } catch {
+    throw new EmailServiceError('INVALID_CONFIGURATION');
+  }
   return Object.freeze({
     queueUrl,
     queueArn,
     deadLetterQueueUrl,
-    serviceOrigin: exactHttpsOrigin(
-      required(environment, 'PSD_EOC_SERVICE_ORIGIN', 2_048),
-    ),
+    serviceOrigin,
     fromEmailAddress: required(environment, 'PSD_EOC_SES_FROM_ADDRESS', 320),
+    branding,
     attemptExecutionToken: token(
       environment,
       'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
@@ -198,6 +216,7 @@ function buildRuntime(
   const worker = new SesEmailRuntime({
     queueArn: configuration.queueArn,
     fromEmailAddress: configuration.fromEmailAddress,
+    branding: configuration.branding,
     authorizeQueueInvocation: (invocation) =>
       invocation.sourceArn === configuration.queueArn &&
       (invocation.authorization as Readonly<{ kind?: unknown }>).kind ===

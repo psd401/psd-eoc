@@ -40,6 +40,7 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 - `psdEoc:organizationName`
 - `psdEoc:privacyContactUrl`
 - `psdEoc:sesFromAddress`
+- `psdEoc:sesFromDisplayName`
 - `psdEoc:sesIdentityDomain`
 - `psdEoc:smsSupportEmail`
 - `psdEoc:smsSupportPhone`
@@ -88,6 +89,14 @@ base URL are configuration. `readDeploymentTarget` and
 `readDeploymentIdentity` validate these values during synthesis. Facilities,
 neighborhoods, synthetic groups, and threats are validated again before
 bootstrap.
+
+`psdEoc:sesFromDisplayName` is optional: the inbox sender name on
+notification email, sent as `"<name>" <psdEoc:sesFromAddress>`. It must be 1-64
+printable ASCII characters without quotes, backslashes, or angle brackets.
+Without it, email comes from the bare address. The email's HTML part also shows
+the app logo, `psdEoc:organizationName`, and a link to
+`psdEoc:applicationOrigin`; the plain-text part stays exactly the rendered
+copy.
 
 `psdEoc:facilities` lists the district's schools: each entry has a `code`
 (upper-case letters, digits, and hyphens), a `name`, optionally

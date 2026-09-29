@@ -15,6 +15,16 @@ const INPUT: SesV2SendEmailInput = {
         Text: { Charset: 'UTF-8', Data: '[DRILL] No emergency.' },
         Html: { Charset: 'UTF-8', Data: '<p>[DRILL] No emergency.</p>' },
       },
+      Attachments: [
+        {
+          FileName: 'logo.png',
+          ContentType: 'image/png',
+          ContentId: 'logo',
+          ContentDisposition: 'INLINE',
+          ContentTransferEncoding: 'BASE64',
+          RawContentBase64: Buffer.from('synthetic image').toString('base64'),
+        },
+      ],
     },
   },
   ConfigurationSetName: 'psd-eoc-transactional',
@@ -34,6 +44,21 @@ describe('AWS SES v2 client boundary', () => {
       MessageId: 'synthetic-provider-id',
     });
     expect(commands[0]).toBeInstanceOf(SendEmailCommand);
+    const attachments = (commands[0] as SendEmailCommand).input.Content?.Simple
+      ?.Attachments;
+    expect(attachments).toHaveLength(1);
+    expect(attachments?.[0]).toEqual(
+      expect.objectContaining({
+        FileName: 'logo.png',
+        ContentId: 'logo',
+        ContentDisposition: 'INLINE',
+        ContentTransferEncoding: 'BASE64',
+      }),
+    );
+    expect(attachments?.[0]).not.toHaveProperty('RawContentBase64');
+    expect(
+      Buffer.from(attachments?.[0]?.RawContent ?? new Uint8Array()).toString(),
+    ).toBe('synthetic image');
   });
 
   test('distinguishes explicit throttling from an ambiguous network loss', async () => {
