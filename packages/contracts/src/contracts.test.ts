@@ -3343,6 +3343,18 @@ describe('notification and outbox classification continuity', () => {
     } as const;
 
     expect(PushEndpointSendEligibilityInputSchema.parse(input)).toEqual(input);
+    // The batch's creation instant is optional so adjacent releases interoperate,
+    // and must be a real timestamp when present.
+    const pinned = { ...input, batchCreatedAt: '2026-09-29T03:31:26.243Z' };
+    expect(PushEndpointSendEligibilityInputSchema.parse(pinned)).toEqual(
+      pinned,
+    );
+    expect(
+      PushEndpointSendEligibilityInputSchema.safeParse({
+        ...input,
+        batchCreatedAt: 'yesterday',
+      }).success,
+    ).toBe(false);
     expect(
       PushEndpointSendEligibilityInputSchema.safeParse({
         ...input,
