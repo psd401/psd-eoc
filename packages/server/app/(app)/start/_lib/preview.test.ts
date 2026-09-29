@@ -91,6 +91,7 @@ function roster(population: RosterPopulation): RosterSnapshot {
     },
     facilityIds: Object.freeze([IDS.facility]),
     isolatedFacilityIds: [],
+    campusFacilityIds: [],
     expectedSourceGroupRefs: Object.freeze([source]),
     sourceGroupRefs: Object.freeze([source]),
     recipients: Object.freeze([

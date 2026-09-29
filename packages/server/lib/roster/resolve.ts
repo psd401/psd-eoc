@@ -64,10 +64,9 @@ export interface ResolveAudienceInput {
    * carried no information.
    *
    * Every `others` source in the snapshot is selected as well: it names the
-   * people who belong at every event at every school. `neighborhood` targeting
-   * was never configured, and the domain-based resolver that replaces this
-   * pipeline supports neighborhood reach directly, from
-   * `neighborhood_facilities` rather than from a pinned target list.
+   * people who belong at every event at every school. So is every building
+   * source of a facility sharing a campus (a neighborhood) with this one,
+   * from the snapshot's `campusFacilityIds`.
    */
   readonly facilityId: string;
   readonly rosterSnapshot: RosterSnapshot;
@@ -209,8 +208,9 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
     sources.forEach((source) => addSelectedSource(selectedSources, source));
   };
 
-  // The selection rule: an event at a school reaches that school's staff and
-  // everyone an others source names, at every school. An others source is the
+  // The selection rule: an event at a school reaches that school's staff, the
+  // staff of every school on the same campus, and everyone an others source
+  // names, at every school. An others source is the
   // district-level list, the responders who belong at every event. Every
   // snapshot carried them and nothing ever selected them, so a person on one
   // was reached nowhere.
@@ -218,8 +218,24 @@ export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
   // An isolated facility is the exception: its events reach its own lists
   // only. It exists so a store reviewer's drill at the App Review site
   // reaches the review account and nobody on the district list.
+  //
+  // A campus mate is reached only through lists it actually has: a school
+  // the snapshot does not cover or that has no building list yet adds nobody
+  // rather than refusing the event at the school that does. An isolated
+  // facility is never pulled in by a campus either.
   selectBuildingFacility(facilityId);
   if (!rosterSnapshot.isolatedFacilityIds.includes(facilityId)) {
+    const isolated = new Set(rosterSnapshot.isolatedFacilityIds);
+    for (const campus of rosterSnapshot.campusFacilityIds) {
+      if (!campus.includes(facilityId)) continue;
+      for (const mate of campus) {
+        if (mate === facilityId || isolated.has(mate)) continue;
+        if (!snapshotFacilityIds.has(mate)) continue;
+        for (const source of buildingSourcesByFacility.get(mate) ?? []) {
+          addSelectedSource(selectedSources, source);
+        }
+      }
+    }
     for (const source of rosterSnapshot.sourceGroupRefs) {
       if (source.purpose === 'others') {
         addSelectedSource(selectedSources, source);

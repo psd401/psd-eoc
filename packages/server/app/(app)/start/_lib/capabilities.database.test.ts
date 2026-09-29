@@ -17,6 +17,8 @@ import {
 import {
   facilities,
   groupSources,
+  neighborhoodFacilities,
+  neighborhoodVersions,
   rosterRecipientGroupSources,
   rosterRecipients,
   rosterSnapshotFacilities,
@@ -255,5 +257,52 @@ describeWithDatabase('start-flow roster hydration', () => {
         endpoints: [],
       },
     ]);
+    expect(hydrated?.campusFacilityIds).toEqual([]);
+
+    // A campus is read from the current version of each neighborhood, and only
+    // the facilities this snapshot covers are carried: the first version named
+    // an uncovered neighbor alone, the second added this school.
+    const neighborId = randomUUID();
+    const neighborhoodId = randomUUID();
+    await database.insert(facilities).values({
+      id: neighborId,
+      code: `NB-${randomBytes(4).toString('hex').toUpperCase()}`,
+      name: 'Synthetic campus neighbor',
+      active: true,
+    });
+    await database.transaction(async (transaction) => {
+      await transaction.insert(neighborhoodVersions).values({
+        id: neighborhoodId,
+        version: 1,
+        name: 'Synthetic campus',
+      });
+      await transaction.insert(neighborhoodFacilities).values({
+        neighborhoodId,
+        neighborhoodVersion: 1,
+        facilityId: neighborId,
+      });
+    });
+    await database.transaction(async (transaction) => {
+      await transaction.insert(neighborhoodVersions).values({
+        id: neighborhoodId,
+        version: 2,
+        name: 'Synthetic campus',
+      });
+      await transaction.insert(neighborhoodFacilities).values(
+        [facilityId, neighborId].map((member) => ({
+          neighborhoodId,
+          neighborhoodVersion: 2,
+          facilityId: member,
+        })),
+      );
+    });
+
+    const withCampus = await loadRosterSnapshot(
+      database as unknown as DatabaseQuery,
+      'staff',
+      facilityId,
+      snapshotId,
+    );
+    expect(withCampus?.campusFacilityIds).toEqual([[facilityId]]);
   });
 });

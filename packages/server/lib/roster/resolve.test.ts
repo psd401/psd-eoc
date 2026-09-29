@@ -325,6 +325,93 @@ describe('roster audience resolution for one school', () => {
     expect(recipientIds(south)).toContain(IDS.recipientOthers);
   });
 
+  test('an event reaches every school on its campus', () => {
+    // A campus is a neighborhood: the schools notified together. North and
+    // South share one, so an event at either reaches both schools' staff.
+    // West is on the campus too but the snapshot does not cover it; it adds
+    // nobody rather than refusing the event.
+    const campus = snapshot({
+      campusFacilityIds: [
+        [IDS.facilityNorth, IDS.facilitySouth, IDS.facilityWest],
+      ],
+    });
+    const north = resolveAudience(
+      input(IDS.facilityNorth, { rosterSnapshot: campus }),
+    );
+    const south = resolveAudience(
+      input(IDS.facilitySouth, { rosterSnapshot: campus }),
+    );
+
+    expect(north.sourceGroupRefs).toEqual([
+      NORTH_GROUP,
+      SOUTH_GROUP,
+      OTHERS_GROUP,
+    ]);
+    expect(recipientIds(north)).toContain(IDS.recipientSouth);
+    expect(south.sourceGroupRefs).toEqual([
+      NORTH_GROUP,
+      SOUTH_GROUP,
+      OTHERS_GROUP,
+    ]);
+    expect(recipientIds(south)).toContain(IDS.recipientNorth);
+    // The plan names the event's own school, not the campus.
+    expect(north.facilityId).toBe(IDS.facilityNorth);
+  });
+
+  test('a campus the school is not on changes nothing', () => {
+    const result = resolveAudience(
+      input(IDS.facilityNorth, {
+        rosterSnapshot: snapshot({
+          campusFacilityIds: [[IDS.facilitySouth, IDS.facilityWest]],
+        }),
+      }),
+    );
+
+    expect(result.sourceGroupRefs).toEqual([NORTH_GROUP, OTHERS_GROUP]);
+    expect(recipientIds(result)).not.toContain(IDS.recipientSouth);
+  });
+
+  test('a campus mate with no building source adds nobody and refuses nothing', () => {
+    const result = resolveAudience(
+      input(IDS.facilityNorth, {
+        rosterSnapshot: snapshot({
+          facilityIds: [IDS.facilityNorth, IDS.facilitySouth, IDS.facilityWest],
+          campusFacilityIds: [[IDS.facilityNorth, IDS.facilityWest]],
+        }),
+      }),
+    );
+
+    expect(result.sourceGroupRefs).toEqual([NORTH_GROUP, OTHERS_GROUP]);
+  });
+
+  test('isolation outranks a campus in both directions', () => {
+    // An isolated facility is never pulled into a campus event, and its own
+    // events stay its own even when a campus lists it.
+    const isolatedSouth = snapshot({
+      isolatedFacilityIds: [IDS.facilitySouth],
+      campusFacilityIds: [[IDS.facilityNorth, IDS.facilitySouth]],
+    });
+    const north = resolveAudience(
+      input(IDS.facilityNorth, { rosterSnapshot: isolatedSouth }),
+    );
+    const south = resolveAudience(
+      input(IDS.facilitySouth, { rosterSnapshot: isolatedSouth }),
+    );
+
+    expect(north.sourceGroupRefs).toEqual([NORTH_GROUP, OTHERS_GROUP]);
+    expect(recipientIds(north)).not.toContain(IDS.recipientSouth);
+    expect(south.sourceGroupRefs).toEqual([SOUTH_GROUP]);
+  });
+
+  test('recorded snapshots without campuses still parse and reach one school', () => {
+    const recorded = snapshot();
+    expect(recorded.campusFacilityIds).toEqual([]);
+    expect(
+      resolveAudience(input(IDS.facilityNorth, { rosterSnapshot: recorded }))
+        .sourceGroupRefs,
+    ).toEqual([NORTH_GROUP, OTHERS_GROUP]);
+  });
+
   test('a recipient at both schools resolves under either', () => {
     expect(recipientIds(resolveAudience(input(IDS.facilityNorth)))).toContain(
       IDS.recipientShared,

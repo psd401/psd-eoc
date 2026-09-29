@@ -191,6 +191,7 @@ describeWithDatabase('trusted group access', () => {
       roles: ['staff'],
       groupSourceIds: [],
       admittedAccountId: ADMISSION,
+      schoolFacilityIds: null,
       // Read from this database now, so the evidence is as fresh as the ask.
       capturedAt: NOW,
     });

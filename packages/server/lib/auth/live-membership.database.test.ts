@@ -14,7 +14,7 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { groupMembers, groupSources } from '../../db/schema';
+import { facilities, groupMembers, groupSources } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   closeAndDropDisposableDatabase,
@@ -276,6 +276,34 @@ describeWithDatabase('live membership at sign-in', () => {
     ).toMatchObject({ granted: true, roles: ['admin'] });
   });
 
+  test('a group Google could not answer for keeps its stored rows', async () => {
+    // One broken group costs only its own answer: the admin group is left
+    // unanswered, so the stored membership stands, while the staff group
+    // Google did answer is written down.
+    await database().insert(groupMembers).values({
+      groupSourceId: ADMIN_GROUP,
+      email: 'partial@example.invalid',
+      capturedAt: NOW,
+    });
+    const outcome = await createLiveMembershipReconciler(() => ({
+      check: async (_email, groups) =>
+        new Map(
+          groups
+            .filter(({ googleGroupId }) => googleGroupId === 'provider-staff')
+            .map(({ groupSourceId }) => [groupSourceId, true]),
+        ),
+    })).reconcile(database(), {
+      email: 'partial@example.invalid',
+      checkedAt: NOW,
+    });
+    expect(outcome).toBe('reconciled');
+    expect(
+      (await rowsFor('partial@example.invalid')).map(
+        ({ groupSourceId }) => groupSourceId,
+      ),
+    ).toEqual([ADMIN_GROUP, STAFF_GROUP].sort());
+  });
+
   test('with no Google sign-in group active, nothing is asked', async () => {
     await database()
       .update(groupSources)
@@ -290,5 +318,70 @@ describeWithDatabase('live membership at sign-in', () => {
     });
     expect(outcome).toBe('no-groups');
     expect(asked).toEqual([]);
+  });
+
+  test("a school's connected staff group is asked too, and admits at once", async () => {
+    // A school's staff group admits its members as staff at that school, so
+    // someone IT added a minute ago signs in now rather than after the next
+    // scheduled sync. A group registered before Google holds it is not asked.
+    const school = randomUUID();
+    const schoolGroup = randomUUID();
+    await database().insert(facilities).values({
+      id: school,
+      code: 'LIVE',
+      name: 'Live School',
+    });
+    await database()
+      .insert(groupSources)
+      .values([
+        {
+          id: schoolGroup,
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: school,
+          displayName: 'Live School staff',
+          active: true,
+          grantedRole: null,
+          membersCapturedAt: null,
+          googleGroupId: 'provider-school',
+          email: 'live-eoc@example.invalid',
+          fixtureKey: null,
+        },
+        {
+          id: randomUUID(),
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: school,
+          displayName: 'Waiting staff group',
+          active: true,
+          grantedRole: null,
+          membersCapturedAt: null,
+          googleGroupId: null,
+          email: 'waiting-eoc@example.invalid',
+          fixtureKey: null,
+        },
+      ]);
+    const asked: Asked[] = [];
+    const outcome = await createLiveMembershipReconciler(
+      googleAnswering({ 'provider-school': true }, asked),
+    ).reconcile(database(), {
+      email: 'teacher@example.invalid',
+      checkedAt: NOW,
+    });
+    expect(outcome).toBe('reconciled');
+    expect(asked).toEqual([
+      { email: 'teacher@example.invalid', googleGroupIds: ['provider-school'] },
+    ]);
+    expect(
+      await decideAccess(database(), {
+        email: 'teacher@example.invalid',
+        checkedAt: NOW,
+      }),
+    ).toMatchObject({
+      granted: true,
+      roles: ['staff'],
+      groupSourceIds: [schoolGroup],
+      schoolFacilityIds: [school],
+    });
   });
 });

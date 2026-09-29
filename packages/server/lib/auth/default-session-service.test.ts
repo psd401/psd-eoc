@@ -356,7 +356,7 @@ describe('session credential read batching', () => {
         case 4:
           return [];
         case 5:
-          return [[IDS.group, 'admin', createdAt]];
+          return [[IDS.group, 'access', null, 'admin', createdAt]];
         case 6:
           return [[IDS.group, createdAt]];
         case 7:

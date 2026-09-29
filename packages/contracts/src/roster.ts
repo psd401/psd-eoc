@@ -488,6 +488,18 @@ export const RosterSnapshotSchema = z
       .max(200)
       .readonly()
       .default([]),
+    /**
+     * The district's campuses as they stand now: each entry is the current
+     * version of one neighborhood, the facilities notified together. An
+     * event at a facility reaches every facility sharing a campus with it.
+     * Read when the snapshot is hydrated, like `isolatedFacilityIds`, and
+     * defaulted so recorded snapshots still parse.
+     */
+    campusFacilityIds: z
+      .array(z.array(FacilityIdSchema).min(1).max(2_000).readonly())
+      .max(500)
+      .readonly()
+      .default([]),
     expectedSourceGroupRefs: z
       .array(RosterGroupSourceRefSchema)
       .min(1)

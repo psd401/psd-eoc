@@ -31,6 +31,8 @@ import {
   events,
   eventTransitions,
   groupSources,
+  neighborhoodFacilities,
+  neighborhoodVersions,
   notificationIntentChannels,
   notificationIntents,
   outbox,
@@ -72,6 +74,8 @@ setDefaultTimeout(60_000);
 
 const FACILITY_ID = '00000000-0000-4000-8000-000000000001';
 const OTHER_FACILITY_ID = '00000000-0000-4000-8000-000000000002';
+/** The seed's one neighborhood, which puts both schools on one campus. */
+const SEED_NEIGHBORHOOD_ID = '00000000-0000-4000-8000-000000000010';
 const EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const CREATED_AT = '2026-08-26T12:00:00.000Z';
 const BATCH_CREATED_AT = '2026-08-26T12:00:00.500Z';
@@ -695,6 +699,21 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     try {
       await migrateDatabase(opened);
       await seedDatabase(opened.db);
+      // The seed puts both schools on one campus, and an event reaches its
+      // whole campus. These fixtures are about one school's audience, so the
+      // campus is split: a newer version names this school alone.
+      await opened.db.transaction(async (transaction) => {
+        await transaction.insert(neighborhoodVersions).values({
+          id: SEED_NEIGHBORHOOD_ID,
+          version: 2,
+          name: 'Synthetic single-school campus',
+        });
+        await transaction.insert(neighborhoodFacilities).values({
+          neighborhoodId: SEED_NEIGHBORHOOD_ID,
+          neighborhoodVersion: 2,
+          facilityId: FACILITY_ID,
+        });
+      });
       await opened.db.transaction(async (transaction) => {
         await transaction.insert(users).values({
           id: fixture.userId,
