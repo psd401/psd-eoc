@@ -49,6 +49,7 @@ describe('push endpoint send eligibility client', () => {
       tokenDigest: createHash('sha256')
         .update(item.endpoint.token, 'utf8')
         .digest('hex'),
+      batchCreatedAt: item.batch.createdAt,
     });
   });
 

@@ -689,13 +689,36 @@ function additionalPushEndpoints(
   capturedAt: string,
   cutover: PushProviderCutover | null,
 ): readonly PushEndpoint[] {
+  return fannedOutPushEndpoints(
+    recipient.endpoints.flatMap((endpoint) =>
+      endpoint.channel === 'push' ? [endpoint.id] : [],
+    ),
+    registrations,
+    resolved,
+    capturedAt,
+    cutover,
+  );
+}
+
+/**
+ * The selection behind `additionalPushEndpoints`, keyed only by the
+ * recipient's published push endpoint ids. Send-time eligibility calls it too,
+ * so the devices a batch fans out to and the devices the eligibility boundary
+ * vouches for are chosen by one rule and cannot drift apart.
+ */
+function fannedOutPushEndpoints(
+  publishedPushEndpointIds: readonly string[],
+  registrations: readonly LivePushRegistration[],
+  resolved: ReadonlyMap<string, LivePushRegistration>,
+  capturedAt: string,
+  cutover: PushProviderCutover | null,
+): readonly PushEndpoint[] {
   if (registrations.length === 0 || cutover === null) return [];
   const publishedIds = new Set<string>();
   const coveredDevices = new Set<string>();
-  for (const endpoint of recipient.endpoints) {
-    if (endpoint.channel !== 'push') continue;
-    publishedIds.add(endpoint.id);
-    const live = resolved.get(endpoint.id);
+  for (const endpointId of publishedPushEndpointIds) {
+    publishedIds.add(endpointId);
+    const live = resolved.get(endpointId);
     if (live !== undefined) coveredDevices.add(live.deviceEnrollmentId);
   }
   // Registrations arrive newest first, so the first one a device offers on the
@@ -1299,9 +1322,103 @@ export function createDrizzlePushEndpointPolicyStore(
   });
 }
 
+/**
+ * Send-time evidence for a device the snapshot never published.
+ *
+ * Resolution fans a batch out to a recipient's live devices that no published
+ * endpoint covers, so a phone installed after the roster was published is
+ * reached without a republish. Those endpoints have no `roster_endpoints` row,
+ * and answering them from that table alone refused every one of them at send
+ * time: the worker retried each notification until the queue dead-lettered it,
+ * and the device never received anything.
+ *
+ * The device is vouched for only if the selection resolution applies would
+ * have handed it out, under the snapshot's own recipient binding and the
+ * deployment's provider cutover, as of the batch's creation instant when the
+ * worker supplies it -- the same instant resolution pinned. Without that pin a
+ * device registering again mid-batch would change which of its registrations
+ * is newest and orphan the endpoint the batch already holds. A registration
+ * unregistered by that instant, a second registration of a device already
+ * reached, a provider the cutover does not send on, or a recipient claim the
+ * live binding does not back all answer null, which the caller reports as
+ * ineligible.
+ *
+ * The per-recipient endpoint cap is not reapplied: this answers only for an
+ * endpoint a resolved batch already carries, and the cap decided that at
+ * resolution.
+ */
+async function loadDrizzleFannedOutPushEndpointSendEligibility(
+  database: DeviceQueryDatabase,
+  input: PushEndpointSendEligibilityInput,
+  cutover: PushProviderCutover | null,
+): Promise<PushEndpointSendEligibilityEvidence | null> {
+  if (input.rosterPopulation !== 'staff') return null;
+  const { resolved, unclaimed } = await loadLivePushRegistrations(
+    database,
+    input.rosterSnapshotId,
+    input.rosterPopulation,
+    [input.recipientId],
+    input.batchCreatedAt,
+  );
+  const published = await database
+    .select({ endpointId: rosterEndpoints.id })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, input.rosterSnapshotId),
+        eq(rosterEndpoints.population, input.rosterPopulation),
+        eq(rosterEndpoints.recipientId, input.recipientId),
+        eq(rosterEndpoints.channel, 'push'),
+      ),
+    );
+  const endpoint = fannedOutPushEndpoints(
+    published.map(({ endpointId }) => endpointId),
+    unclaimed.get(input.recipientId) ?? [],
+    resolved,
+    // Only the endpoint's identity is compared below; capturedAt is required
+    // to build a PushEndpoint and is otherwise unused here.
+    new Date().toISOString(),
+    cutover,
+  ).find((candidate) => candidate.id === input.endpointId);
+  if (endpoint === undefined) return null;
+  const policy = await loadDrizzlePushEndpointPolicy(database, {
+    rosterSnapshotId: input.rosterSnapshotId,
+    rosterPopulation: input.rosterPopulation,
+    candidates: [
+      { recipientId: input.recipientId, endpointId: input.endpointId },
+    ],
+    ...(input.batchCreatedAt === undefined
+      ? {}
+      : { asOf: input.batchCreatedAt }),
+  });
+  if (policy.length !== 1) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  return Object.freeze({
+    rosterSnapshotId: input.rosterSnapshotId,
+    rosterPopulation: input.rosterPopulation,
+    recipientId: policy[0]!.recipientId,
+    endpointId: endpoint.id,
+    platform: endpoint.platform,
+    provider: endpoint.provider,
+    serviceEnvironment: endpoint.serviceEnvironment,
+    tokenDigest: createHash('sha256')
+      .update(endpoint.token, 'utf8')
+      .digest('hex'),
+    // No published row carries a lifecycle status for this device; the live
+    // selection above is what makes it active. Invalidation recorded against
+    // it still reaches the caller through the effective status.
+    endpointStatus: 'active',
+    effectiveStatus: policy[0]!.status,
+  });
+}
+
 async function loadDrizzlePushEndpointSendEligibility(
   database: DeviceQueryDatabase,
   input: PushEndpointSendEligibilityInput,
+  cutover: PushProviderCutover | null = parsePushProviderCutover(
+    process.env[PUSH_PROVIDER_CUTOVER_ENV],
+  ),
 ): Promise<PushEndpointSendEligibilityEvidence | null> {
   const rows = await database
     .select({
@@ -1325,7 +1442,13 @@ async function loadDrizzlePushEndpointSendEligibility(
         eq(rosterEndpoints.channel, 'push'),
       ),
     );
-  if (rows.length === 0) return null;
+  if (rows.length === 0) {
+    return loadDrizzleFannedOutPushEndpointSendEligibility(
+      database,
+      input,
+      cutover,
+    );
+  }
   if (rows.length !== 1) {
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }

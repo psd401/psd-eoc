@@ -172,6 +172,15 @@ export const PushEndpointSendEligibilityInputSchema = z
     provider: PushProviderSchema,
     serviceEnvironment: PushServiceEnvironmentSchema,
     tokenDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    /**
+     * The batch's creation instant. Resolution fans a batch out to devices
+     * enrolled after the roster was published as of this instant, and a
+     * fanned-out endpoint is re-derived at send time as of the same instant, so
+     * a device that registers again mid-batch does not orphan the endpoint the
+     * batch already holds. Optional so a worker and server from adjacent
+     * releases still interoperate during a rolling deploy.
+     */
+    batchCreatedAt: TimestampSchema.optional(),
   })
   .strict()
   .superRefine((input, context) => {

@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 
 import {
   afterAll,
@@ -63,8 +63,10 @@ import {
 } from '../internal/delivery-state/runtime';
 import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engine';
 import {
+  checkPushEndpointSendEligibility,
   createDrizzleDeviceCapabilityStore,
   createDrizzlePushEndpointPolicyStore,
+  createDrizzlePushEndpointSendEligibilityStore,
   EXPO_DEVICE_NOT_REGISTERED_REASON,
   executeDeviceCapability,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
@@ -144,6 +146,43 @@ const registrationIdentity = Object.freeze({
   build: pushBuild,
 });
 const facilityId = '00000000-0000-4000-8000-000000000001';
+
+/**
+ * Asks the send-time eligibility boundary the exact question the push worker
+ * asks immediately before provider I/O.
+ */
+function sendEligible(
+  database: Parameters<typeof createDrizzlePushEndpointSendEligibilityStore>[0],
+  endpoint: Readonly<{
+    rosterSnapshotId: string;
+    recipientId: string;
+    endpointId: string;
+    platform: 'ios' | 'android';
+    provider: 'expo' | 'apns' | 'fcm';
+    token: string;
+    batchCreatedAt?: string;
+  }>,
+): Promise<boolean> {
+  return checkPushEndpointSendEligibility(
+    {
+      version: 1,
+      rosterSnapshotId: endpoint.rosterSnapshotId,
+      rosterPopulation: 'staff',
+      recipientId: endpoint.recipientId,
+      endpointId: endpoint.endpointId,
+      platform: endpoint.platform,
+      provider: endpoint.provider,
+      serviceEnvironment: 'production',
+      tokenDigest: createHash('sha256')
+        .update(endpoint.token, 'utf8')
+        .digest('hex'),
+      ...(endpoint.batchCreatedAt === undefined
+        ? {}
+        : { batchCreatedAt: endpoint.batchCreatedAt }),
+    },
+    createDrizzlePushEndpointSendEligibilityStore(database),
+  );
+}
 const SEEDED = Object.freeze({
   audienceId: '00000000-0000-4000-8000-000000000020',
   facilitySouthId: '00000000-0000-4000-8000-000000000002',
@@ -2753,6 +2792,28 @@ describeWithDatabase('device push-token persistence', () => {
       evidence.map((candidate) => ({ ...candidate, status: 'active' })),
     );
 
+    // The worker re-asks the send-time eligibility boundary immediately before
+    // provider I/O. It must vouch for the same devices resolution handed out:
+    // a device resolution reaches but eligibility refuses is retried until the
+    // queue gives up, and never receives the notification.
+    const eligible = {
+      phone: await sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: phone.id,
+        platform: 'ios',
+        provider: registrationIdentity.provider,
+        token: phoneToken,
+      }),
+      tablet: await sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: tablet.id,
+        platform: 'ios',
+        provider: registrationIdentity.provider,
+        token: tabletToken,
+      }),
+    };
+    expect(eligible).toEqual({ phone: true, tablet: true });
+
     // A claimed binding the live query does not back is answered as disabled,
     // never active, so a caller cannot smuggle a device in under someone
     // else's recipient. It is answered rather than omitted so that every
@@ -2776,6 +2837,62 @@ describeWithDatabase('device push-token persistence', () => {
         status: 'disabled',
       },
     ]);
+    // The send-time boundary refuses the same smuggled claim.
+    await expect(
+      sendEligible(database, {
+        ...snapshotIdentity,
+        recipientId: fabricatedRecipientId,
+        endpointId: tablet.id,
+        platform: 'ios',
+        provider: registrationIdentity.provider,
+        token: tabletToken,
+      }),
+    ).resolves.toBe(false);
+
+    // A batch is built now and holds the tablet's endpoint. Before the worker
+    // sends, the tablet registers again, so it has a newer registration.
+    const batchCreatedAt = new Date().toISOString();
+    // Keep the new registration clearly after the batch instant, even on a
+    // loaded runner.
+    await Bun.sleep(50);
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.otherDeviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: `ExponentPushToken[synthetic-${fixtureSuffix}-tablet-again]`,
+      },
+      humanInvocation(
+        'second-device-tablet-again',
+        fixture.otherSessionId,
+        fixture.otherConnectivityEpochId,
+      ),
+      store,
+    );
+    // Read as of the batch's creation instant, the endpoint the batch holds is
+    // still the one resolution handed out, so the send goes ahead. Read as of
+    // now, the newer registration displaces it, which is why the worker sends
+    // that instant with every check.
+    await expect(
+      sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: tablet.id,
+        platform: 'ios',
+        provider: registrationIdentity.provider,
+        token: tabletToken,
+        batchCreatedAt,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: tablet.id,
+        platform: 'ios',
+        provider: registrationIdentity.provider,
+        token: tabletToken,
+      }),
+    ).resolves.toBe(false);
   });
 
   test('does not fan a dual-provider device out to a provider the snapshot never used', async () => {
@@ -2857,6 +2974,41 @@ describeWithDatabase('device push-token persistence', () => {
     expect(pushEndpoints.some((endpoint) => endpoint.provider === 'apns')).toBe(
       false,
     );
+
+    // Send-time eligibility applies the same selection: the device's Expo
+    // endpoint is vouched for, and its APNs registration is not, even though
+    // that registration is live and bound to this recipient.
+    const [apnsRegistration] = await database
+      .select({ id: devicePushTokenRegistrations.id })
+      .from(devicePushTokenRegistrations)
+      .where(
+        and(
+          eq(devicePushTokenRegistrations.deviceEnrollmentId, fixture.deviceId),
+          eq(devicePushTokenRegistrations.provider, 'apns'),
+          eq(devicePushTokenRegistrations.token, apnsToken),
+        ),
+      );
+    if (apnsRegistration === undefined) {
+      throw new Error('The APNs registration was not retained.');
+    }
+    await expect(
+      sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: expoRegistration.id,
+        platform: 'ios',
+        provider: 'expo',
+        token: expoToken,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: apnsRegistration.id,
+        platform: 'ios',
+        provider: 'apns',
+        token: apnsToken,
+      }),
+    ).resolves.toBe(false);
   });
 
   test('reaches a recipient the snapshot holds no push endpoint for', async () => {
@@ -2931,6 +3083,26 @@ describeWithDatabase('device push-token persistence', () => {
         .filter((endpoint) => endpoint.channel === 'push')
         .map((endpoint) => endpoint.token),
     ).toContain(phoneToken);
+
+    // Resolution reaching the phone was only half of that incident's fix: the
+    // worker re-checks eligibility before sending, and that check once knew only
+    // published endpoints, so the phone was refused on every attempt.
+    const phoneEndpoint = recipient.endpoints.find(
+      (endpoint) =>
+        endpoint.channel === 'push' && endpoint.token === phoneToken,
+    );
+    if (phoneEndpoint === undefined) {
+      throw new Error('The phone endpoint was not in the live audience.');
+    }
+    await expect(
+      sendEligible(database, {
+        ...snapshotIdentity,
+        endpointId: phoneEndpoint.id,
+        platform: 'ios',
+        provider: registrationIdentity.provider,
+        token: phoneToken,
+      }),
+    ).resolves.toBe(true);
   });
 
   test('reaches an Android device for a recipient published only on iOS', async () => {

@@ -250,6 +250,7 @@ export class PushEndpointEligibilityClient implements PushEndpointEligibilityChe
       tokenDigest: createHash('sha256')
         .update(workItem.endpoint.token, 'utf8')
         .digest('hex'),
+      batchCreatedAt: workItem.batch.createdAt,
     });
     const controller = new AbortController();
     const timeout = setTimeout(
