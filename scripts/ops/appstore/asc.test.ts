@@ -8915,9 +8915,9 @@ describe('operator documentation and reproducibility', () => {
     ).text();
     const lock = await Bun.file(join(import.meta.dir, 'Gemfile.lock')).text();
     expect(rubyVersion.trim()).toBe('3.3.12');
-    expect(lock).toContain('fastlane (2.237.0)');
+    expect(lock).toContain('fastlane (2.240.1)');
     expect(lock).toMatch(
-      /CHECKSUMS[\s\S]*fastlane \(2\.237\.0\) sha256=[0-9a-f]{64}/u,
+      /CHECKSUMS[\s\S]*fastlane \(2\.240\.1\) sha256=[0-9a-f]{64}/u,
     );
     expect(lock).toMatch(/BUNDLED WITH\s+2\.6\.9\s*$/u);
   });
