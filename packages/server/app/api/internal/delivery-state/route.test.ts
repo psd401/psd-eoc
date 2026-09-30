@@ -81,6 +81,8 @@ function attemptRow(
     rosterPopulation: attempt.rosterPopulation,
     recipientId: attempt.recipientId,
     endpointId: attempt.endpointId,
+    publishedEndpointId: attempt.endpointId,
+    fannedOutRegistrationId: null,
     channel: attempt.channel,
     attemptNumber: attempt.attemptNumber,
     attemptedAt: new Date(attempt.attemptedAt),

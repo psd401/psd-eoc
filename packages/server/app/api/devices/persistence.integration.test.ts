@@ -75,6 +75,7 @@ import {
 } from '../../../lib/capabilities/devices';
 import { createDrizzleRosterSyncStore } from '../../../lib/roster/groups-sync';
 import { loadRosterSnapshot } from '../../../lib/capabilities/start';
+import { loadEventSummarySnapshot } from '../../../lib/capabilities/records/snapshot';
 import { createDrizzleExpoPushRuntimeStore } from '../../../lib/notify/expo-push-runtime-store';
 import { createDrizzleAttemptExecutionStore } from '../../../lib/notify/attempt-execution-store';
 import { createPersistedExpoReceiptTarget } from '../../../../../workers/push/receipt-lifecycle';
@@ -863,7 +864,22 @@ async function installDeviceNotRegisteredAttemptFixture(
     rosterSnapshotId: fixture.syntheticRosterSnapshotId,
     recipientId: fixture.syntheticRecipientId,
   },
+  population: 'synthetic' | 'staff' = 'synthetic',
 ) {
+  // Fan-out to devices the snapshot never published is staff-only, so the
+  // staff variant is a human-confirmed drill rather than a synthetic test.
+  const eventKind = population === 'staff' ? 'drill' : 'test';
+  const createdBy =
+    population === 'staff'
+      ? {
+          kind: 'human' as const,
+          userId: fixture.userId,
+          sessionId: fixture.sessionId,
+        }
+      : {
+          kind: 'system' as const,
+          serviceId: 'device-invalidation-database-test',
+        };
   const ids = Object.freeze({
     event: randomUUID(),
     intent: randomUUID(),
@@ -875,14 +891,24 @@ async function installDeviceNotRegisteredAttemptFixture(
   });
   const createdAt = new Date();
   const attemptedAt = new Date();
-  const authorization = Object.freeze({
-    kind: 'synthetic-training' as const,
-    activationPreviewId: ids.preview,
-    consequenceDigest: 'd'.repeat(64),
-    requestId: ids.request,
-  });
+  const authorization =
+    population === 'staff'
+      ? Object.freeze({
+          kind: 'human-confirmed' as const,
+          activationPreviewId: ids.preview,
+          preparedActivationId: null,
+          confirmationId: randomUUID(),
+          consequenceDigest: 'd'.repeat(64),
+          requestId: ids.request,
+        })
+      : Object.freeze({
+          kind: 'synthetic-training' as const,
+          activationPreviewId: ids.preview,
+          consequenceDigest: 'd'.repeat(64),
+          requestId: ids.request,
+        });
   const pushMessage = Object.freeze({
-    eventKind: 'test' as const,
+    eventKind,
     templateMode: 'drill' as const,
     purpose: 'activation' as const,
     classificationMarker: 'DRILL' as const,
@@ -891,7 +917,7 @@ async function installDeviceNotRegisteredAttemptFixture(
     body: '[DRILL] Synthetic and unroutable test only.',
   });
   const emailMessage = Object.freeze({
-    eventKind: 'test' as const,
+    eventKind,
     templateMode: 'drill' as const,
     purpose: 'activation' as const,
     classificationMarker: 'DRILL' as const,
@@ -919,7 +945,7 @@ async function installDeviceNotRegisteredAttemptFixture(
     intentId: ids.intent,
     eventId: ids.event,
     facilityId,
-    eventKind: 'test',
+    eventKind,
     templateMode: 'drill',
     purpose: 'activation',
     eventTypeVersion: {
@@ -927,7 +953,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
     },
     rosterSnapshotId: identity.rosterSnapshotId,
-    rosterPopulation: 'synthetic',
+    rosterPopulation: population,
     requestId: ids.request,
     authorization,
     channels,
@@ -938,7 +964,7 @@ async function installDeviceNotRegisteredAttemptFixture(
     intentId: ids.intent,
     eventId: ids.event,
     facilityId,
-    eventKind: 'test',
+    eventKind,
     templateMode: 'drill',
     purpose: 'activation',
     eventTypeVersion: {
@@ -946,7 +972,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
     },
     rosterSnapshotId: identity.rosterSnapshotId,
-    rosterPopulation: 'synthetic',
+    rosterPopulation: population,
     requestId: ids.request,
     authorization,
     channel: 'push',
@@ -961,16 +987,13 @@ async function installDeviceNotRegisteredAttemptFixture(
     await transaction.insert(events).values({
       id: ids.event,
       facilityId,
-      kind: 'test',
+      kind: eventKind,
       templateMode: 'drill',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       status: 'active',
       rosterSnapshotId: identity.rosterSnapshotId,
-      rosterPopulation: 'synthetic',
-      createdBy: {
-        kind: 'system',
-        serviceId: 'device-invalidation-database-test',
-      },
+      rosterPopulation: population,
+      createdBy,
       createdAt,
       activatedAt: createdAt,
       allClearAt: null,
@@ -983,17 +1006,14 @@ async function installDeviceNotRegisteredAttemptFixture(
     await transaction.insert(notificationIntents).values({
       id: ids.intent,
       eventId: ids.event,
-      eventKind: 'test',
+      eventKind,
       templateMode: 'drill',
       purpose: 'activation',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       rosterSnapshotId: identity.rosterSnapshotId,
-      rosterPopulation: 'synthetic',
-      createdBy: {
-        kind: 'system',
-        serviceId: 'device-invalidation-database-test',
-      },
-      source: 'scheduled-job',
+      rosterPopulation: population,
+      createdBy,
+      source: population === 'staff' ? 'mobile' : 'scheduled-job',
       requestId: ids.request,
       authorization,
       createdAt,
@@ -1003,10 +1023,10 @@ async function installDeviceNotRegisteredAttemptFixture(
         intentId: ids.intent,
         sequence: 1,
         channel: 'push',
-        eventKind: 'test',
+        eventKind,
         templateMode: 'drill',
         purpose: 'activation',
-        rosterPopulation: 'synthetic',
+        rosterPopulation: population,
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: pushMessage,
@@ -1016,10 +1036,10 @@ async function installDeviceNotRegisteredAttemptFixture(
         intentId: ids.intent,
         sequence: 2,
         channel: 'email',
-        eventKind: 'test',
+        eventKind,
         templateMode: 'drill',
         purpose: 'activation',
-        rosterPopulation: 'synthetic',
+        rosterPopulation: population,
         classificationMarker: 'DRILL',
         endpointCount: 1,
         renderedMessage: emailMessage,
@@ -1031,12 +1051,12 @@ async function installDeviceNotRegisteredAttemptFixture(
       messageVersion: 2,
       intentId: ids.intent,
       eventId: ids.event,
-      eventKind: 'test',
+      eventKind,
       templateMode: 'drill',
       purpose: 'activation',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       rosterSnapshotId: identity.rosterSnapshotId,
-      rosterPopulation: 'synthetic',
+      rosterPopulation: population,
       requestId: ids.request,
       authorization,
       channels,
@@ -1055,12 +1075,12 @@ async function installDeviceNotRegisteredAttemptFixture(
       outboxId: ids.outbox,
       intentId: ids.intent,
       eventId: ids.event,
-      eventKind: 'test',
+      eventKind,
       templateMode: 'drill',
       purpose: 'activation',
       eventTypeVersionId: SEEDED.eventTypeVersionId,
       rosterSnapshotId: identity.rosterSnapshotId,
-      rosterPopulation: 'synthetic',
+      rosterPopulation: population,
       requestId: ids.request,
       authorization,
       channel: 'push',
@@ -1077,7 +1097,7 @@ async function installDeviceNotRegisteredAttemptFixture(
     batchId: ids.batch,
     intentId: ids.intent,
     eventId: ids.event,
-    eventKind: 'test',
+    eventKind,
     templateMode: 'drill',
     purpose: 'activation',
     eventTypeVersion: {
@@ -1085,7 +1105,7 @@ async function installDeviceNotRegisteredAttemptFixture(
       templateMode: 'drill',
     },
     rosterSnapshotId: identity.rosterSnapshotId,
-    rosterPopulation: 'synthetic',
+    rosterPopulation: population,
     recipientId: identity.recipientId,
     endpointId,
     channel: 'push',
@@ -2895,6 +2915,157 @@ describeWithDatabase('device push-token persistence', () => {
     ).resolves.toBe(false);
   });
 
+  test('records delivery and invalidation for a device enrolled after the roster was published', async () => {
+    const database = databaseConnection().db;
+    const store = deviceCapabilityStore(database);
+    const phoneToken = `ExponentPushToken[synthetic-${fixtureSuffix}-fanout-phone]`;
+    const tabletToken = `ExponentPushToken[synthetic-${fixtureSuffix}-fanout-tablet]`;
+
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: phoneToken,
+      },
+      humanInvocation('fanout-phone'),
+      store,
+    );
+    const [phone] = await activeRegistrationsForToken(database, phoneToken);
+    if (phone === undefined) {
+      throw new Error('The phone registration was not retained.');
+    }
+    const snapshotIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 4,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      { id: phone.id, token: phoneToken },
+      snapshotIdentity,
+    );
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.otherDeviceId,
+        platform: 'ios' as const,
+        ...registrationIdentity,
+        token: tabletToken,
+      },
+      humanInvocation(
+        'fanout-tablet',
+        fixture.otherSessionId,
+        fixture.otherConnectivityEpochId,
+      ),
+      store,
+    );
+    const [tablet] = await activeRegistrationsForToken(database, tabletToken);
+    if (tablet === undefined) {
+      throw new Error('The tablet registration was not retained.');
+    }
+
+    // Production, 2026-09-30: resolution fanned a staff drill out to the
+    // tablet and send-time eligibility vouched for it, but its first
+    // delivery-state write named an endpoint the snapshot never published.
+    // The attempt insert failed its roster-endpoint foreign key, the route
+    // answered 503, and the worker retried until the batch dead-lettered.
+    const published = await installDeviceNotRegisteredAttemptFixture(
+      database,
+      phone.id,
+      null,
+      snapshotIdentity,
+      'staff',
+    );
+    const fannedOut = await installDeviceNotRegisteredAttemptFixture(
+      database,
+      tablet.id,
+      'expo-push',
+      snapshotIdentity,
+      'staff',
+    );
+    expect(fannedOut.attemptedEvidence.state).toBe('attempted');
+    expect(published.attemptedEvidence.state).toBe('attempted');
+
+    // In production both devices sit in one batch planned for one endpoint.
+    // The event record must still account for the plan rather than refuse
+    // because the batch holds more attempts than published endpoints.
+    const sameBatchTablet = ChannelAttemptSchema.parse({
+      ...published.attempt,
+      id: randomUUID(),
+      endpointId: tablet.id,
+    });
+    await createDrizzleDeliveryEvidenceStore(database).recordAttemptEvidence({
+      attempt: sameBatchTablet,
+      evidence: {
+        subject: { kind: 'attempt', attemptId: sameBatchTablet.id },
+        state: 'attempted',
+        provider: null,
+        providerReference: null,
+        proof: null,
+        reasonCode: null,
+        diagnosticDigest: null,
+      },
+    });
+    const summary = await loadEventSummarySnapshot(
+      database as unknown as Parameters<typeof loadEventSummarySnapshot>[0],
+      published.attempt.eventId,
+      new Date().toISOString(),
+    );
+    expect(
+      summary.delivery
+        .flatMap((intent) => intent.channels)
+        .filter((channel) => channel.channel === 'push')
+        .map((channel) => [
+          channel.plannedEndpointCount,
+          channel.noAttemptRecordCount,
+        ]),
+    ).toEqual([[1, 0]]);
+
+    // Expo reports the tablet's token dead. Invalidation must reach the
+    // tablet's own registration and leave the published phone alone.
+    await expect(
+      executeDeviceCapability(
+        'record-endpoint-status',
+        {
+          rosterSnapshotId: snapshotIdentity.rosterSnapshotId,
+          recipientId: snapshotIdentity.recipientId,
+          endpointId: tablet.id,
+          status: 'invalid' as const,
+          reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
+        },
+        workerInvocation('fanout-tablet-dnr'),
+        store,
+      ),
+    ).resolves.toMatchObject({
+      endpointId: tablet.id,
+      status: 'invalid',
+      reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
+    });
+    expect(
+      await database
+        .select()
+        .from(devicePushTokenUnregistrations)
+        .where(eq(devicePushTokenUnregistrations.registrationId, tablet.id)),
+    ).toHaveLength(1);
+    expect(
+      await activeRegistrationsForToken(database, phoneToken),
+    ).toHaveLength(1);
+
+    // A registration the snapshot's recipient does not own is still refused:
+    // the attempt row cannot name somebody else's device.
+    await expect(
+      installDeviceNotRegisteredAttemptFixture(
+        database,
+        tablet.id,
+        null,
+        { ...snapshotIdentity, recipientId: randomUUID() },
+        'staff',
+      ),
+    ).rejects.toMatchObject({ code: 'ATTEMPT_ENDPOINT_UNBOUND', status: 409 });
+  });
+
   test('does not fan a dual-provider device out to a provider the snapshot never used', async () => {
     const database = databaseConnection().db;
     const store = deviceCapabilityStore(database);
@@ -2935,7 +3106,7 @@ describeWithDatabase('device push-token persistence', () => {
     // device's Expo endpoint and not its APNs one.
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 4,
+      rosterVersion: fixture.rosterVersion + 5,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -3024,7 +3195,7 @@ describeWithDatabase('device push-token persistence', () => {
     // dropped -- silently, and until somebody happened to republish.
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 5,
+      rosterVersion: fixture.rosterVersion + 6,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -3130,7 +3301,7 @@ describeWithDatabase('device push-token persistence', () => {
     // The snapshot captured the iPhone, profiled ios|expo|production.
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 6,
+      rosterVersion: fixture.rosterVersion + 7,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -3221,7 +3392,7 @@ describeWithDatabase('device push-token persistence', () => {
 
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 7,
+      rosterVersion: fixture.rosterVersion + 8,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -3301,7 +3472,7 @@ describeWithDatabase('device push-token persistence', () => {
     }));
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 8,
+      rosterVersion: fixture.rosterVersion + 9,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(
@@ -3388,7 +3559,7 @@ describeWithDatabase('device push-token persistence', () => {
     }
     const snapshotIdentity = Object.freeze({
       rosterSnapshotId: randomUUID(),
-      rosterVersion: fixture.rosterVersion + 9,
+      rosterVersion: fixture.rosterVersion + 10,
       recipientId: randomUUID(),
     });
     await publishRosterEndpointFixture(

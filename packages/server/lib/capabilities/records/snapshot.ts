@@ -293,6 +293,11 @@ async function loadDeliveryAggregates(
           attempt.batch_id
         from channel_attempts as attempt
         where attempt.event_id = ${eventId}::uuid
+          -- The record accounts for the endpoints the roster planned. A
+          -- device enrolled after publication is reached in addition to them
+          -- (migration 0057); counting its attempt against the plan reported
+          -- more attempts than endpoints and refused the whole record.
+          and attempt.fanned_out_registration_id is null
         order by
           attempt.batch_id,
           attempt.endpoint_id,

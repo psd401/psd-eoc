@@ -35,6 +35,8 @@ import { rosterSnapshots, rosterEndpoints } from './roster';
 import { eventTypeVersions } from './event-types';
 
 import { events } from './events';
+
+import { devicePushTokenRegistrations } from './identity';
 /** Immutable, transactionally recorded notification send intents. */
 export const notificationIntents = pgTable(
   'notification_intents',
@@ -664,6 +666,16 @@ export const channelAttempts = pgTable(
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
     recipientId: uuid('recipient_id').notNull(),
     endpointId: uuid('endpoint_id').notNull(),
+    /**
+     * Exactly one of these names what `endpoint_id` is, and neither is ever
+     * written by the application: a trigger (migration 0057) derives both
+     * from `endpoint_id` on insert. A published endpoint is bound to its
+     * snapshot row; a staff push device enrolled after the snapshot was
+     * published -- which resolution fans a batch out to -- is bound to its
+     * own registration, owned by the snapshot recipient.
+     */
+    publishedEndpointId: uuid('published_endpoint_id'),
+    fannedOutRegistrationId: uuid('fanned_out_registration_id'),
     channel: notificationChannelEnum('channel').notNull(),
     attemptNumber: integer('attempt_number').notNull(),
     attemptedAt: occurredAt('attempted_at').defaultNow().notNull(),
@@ -753,7 +765,7 @@ export const channelAttempts = pgTable(
       columns: [
         table.rosterSnapshotId,
         table.recipientId,
-        table.endpointId,
+        table.publishedEndpointId,
         table.rosterPopulation,
         table.channel,
       ],
@@ -764,8 +776,24 @@ export const channelAttempts = pgTable(
         rosterEndpoints.population,
         rosterEndpoints.channel,
       ],
-      name: 'channel_attempts_endpoint_fk',
+      name: 'channel_attempts_published_endpoint_fk',
     }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.fannedOutRegistrationId],
+      foreignColumns: [devicePushTokenRegistrations.id],
+      name: 'channel_attempts_fanned_out_registration_fk',
+    }).onDelete('restrict'),
+    index('channel_attempts_fanned_out_registration_idx').on(
+      table.fannedOutRegistrationId,
+    ),
+    check(
+      'channel_attempts_endpoint_identity',
+      sql`num_nonnulls(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = 1
+        and coalesce(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = ${table.endpointId}
+        and (${table.fannedOutRegistrationId} is null or (
+          ${table.channel} = 'push' and ${table.rosterPopulation} = 'staff'
+        ))`,
+    ),
     index('channel_attempts_intent_idx').on(table.intentId),
     check('channel_attempts_attempt_positive', sql`${table.attemptNumber} > 0`),
     check(
@@ -1177,6 +1205,9 @@ export const endpointStatusRecords = pgTable(
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
     endpointId: uuid('endpoint_id').notNull(),
+    /** Derived by the migration-0057 trigger; see `channelAttempts`. */
+    publishedEndpointId: uuid('published_endpoint_id'),
+    fannedOutRegistrationId: uuid('fanned_out_registration_id'),
     population: rosterPopulationEnum('population').notNull(),
     channel: notificationChannelEnum('channel').notNull(),
     status: endpointStatusEnum('status').notNull(),
@@ -1191,7 +1222,7 @@ export const endpointStatusRecords = pgTable(
       columns: [
         table.rosterSnapshotId,
         table.recipientId,
-        table.endpointId,
+        table.publishedEndpointId,
         table.population,
         table.channel,
       ],
@@ -1202,8 +1233,24 @@ export const endpointStatusRecords = pgTable(
         rosterEndpoints.population,
         rosterEndpoints.channel,
       ],
-      name: 'endpoint_status_records_endpoint_fk',
+      name: 'endpoint_status_records_published_endpoint_fk',
     }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.fannedOutRegistrationId],
+      foreignColumns: [devicePushTokenRegistrations.id],
+      name: 'endpoint_status_records_fanned_out_registration_fk',
+    }).onDelete('restrict'),
+    index('endpoint_status_records_fanned_out_registration_idx').on(
+      table.fannedOutRegistrationId,
+    ),
+    check(
+      'endpoint_status_records_endpoint_identity',
+      sql`num_nonnulls(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = 1
+        and coalesce(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = ${table.endpointId}
+        and (${table.fannedOutRegistrationId} is null or (
+          ${table.channel} = 'push' and ${table.population} = 'staff'
+        ))`,
+    ),
     check(
       'endpoint_status_records_lifecycle_status',
       sql`${table.status} in ('active', 'invalid', 'disabled')`,
