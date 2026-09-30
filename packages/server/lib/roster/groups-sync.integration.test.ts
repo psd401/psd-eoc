@@ -33,7 +33,10 @@ import {
   type RosterSyncDependencies,
   type RosterSyncStore,
 } from './groups-sync';
-import { publishScheduledRosterSnapshot } from './scheduled-publish';
+import {
+  publishScheduledRosterSnapshot,
+  smsConsentRosterPublishIdempotencyKey,
+} from './scheduled-publish';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -930,6 +933,110 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
         `)),
       ];
       expect(attribution?.count).toBe(1);
+    } finally {
+      if (priorCutover === undefined) {
+        delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+      } else {
+        process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER = priorCutover;
+      }
+    }
+  });
+
+  test('publishes an SMS opt-in inside the same scheduled interval', async () => {
+    const database = databaseConnection().db;
+    await ensureStaffConfiguration(database);
+
+    // The scheduled key is bucketed to its two-hour interval, so a
+    // publication borrowing it would replay the interval's earlier result and
+    // publish nothing -- exactly the window staff opted in during on the first
+    // school rollout. The consent key must publish anew.
+    const userId = randomUUID();
+    const consentId = randomUUID();
+    const staffEmail = `synthetic-consent-publish-${userId}@example.invalid`;
+    const phoneNumber = '+12025550142';
+    await database.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into users (
+          id, google_subject, email, display_name, facility_scope_kind, created_at
+        ) values (
+          ${userId}::uuid,
+          ${`synthetic-consent-publish-${userId}`},
+          ${staffEmail},
+          'Synthetic Consent Publish Staff',
+          'district'::facility_scope_kind,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into group_members (group_source_id, email, captured_at)
+        values
+          (${STAFF_SOURCE_IDS.north}::uuid, ${staffEmail}, ${SYNC_TIME}::timestamptz),
+          (${STAFF_SOURCE_IDS.south}::uuid, ${staffEmail}, ${SYNC_TIME}::timestamptz)
+        on conflict do nothing
+      `);
+    });
+
+    const priorCutover = process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
+    process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER =
+      '{"version":1,"ios":"expo","android":"expo"}';
+    const smsNumbers = async (snapshotId: string) =>
+      [
+        ...(await database.execute<{ phone_number: string }>(sql`
+          select phone_number from roster_endpoints
+           where roster_snapshot_id = ${snapshotId}::uuid and channel = 'sms'
+        `)),
+      ].map((row) => row.phone_number);
+    try {
+      const scheduled = await publishScheduledRosterSnapshot(database, {
+        now: new Date('2026-09-04T18:00:00.000Z'),
+      });
+      expect(scheduled.kind).toBe('published');
+      if (scheduled.kind !== 'published') return;
+
+      await database.execute(sql`
+        insert into staff_sms_consents (
+          id, user_id, phone_number, disclosure_version, source, consented_at
+        ) values (
+          ${consentId}::uuid,
+          ${userId}::uuid,
+          ${phoneNumber},
+          '2026-08-29',
+          'web'::invocation_source,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+
+      const sameInterval = await publishScheduledRosterSnapshot(database, {
+        now: new Date('2026-09-04T19:30:00.000Z'),
+      });
+      expect(sameInterval).toEqual(scheduled);
+      expect(await smsNumbers(scheduled.snapshotId)).not.toContain(phoneNumber);
+
+      const consented = await publishScheduledRosterSnapshot(database, {
+        idempotencyKey: smsConsentRosterPublishIdempotencyKey({
+          consentId,
+          status: 'consented',
+        }),
+      });
+      expect(consented.kind).toBe('published');
+      if (consented.kind !== 'published') return;
+      expect(consented.snapshotId).not.toBe(scheduled.snapshotId);
+      expect(await smsNumbers(consented.snapshotId)).toContain(phoneNumber);
+
+      await database.execute(sql`
+        update staff_sms_consents
+           set withdrawn_at = ${SYNC_TIME}::timestamptz
+         where id = ${consentId}::uuid
+      `);
+      const withdrawn = await publishScheduledRosterSnapshot(database, {
+        idempotencyKey: smsConsentRosterPublishIdempotencyKey({
+          consentId,
+          status: 'withdrawn',
+        }),
+      });
+      expect(withdrawn.kind).toBe('published');
+      if (withdrawn.kind !== 'published') return;
+      expect(await smsNumbers(withdrawn.snapshotId)).not.toContain(phoneNumber);
     } finally {
       if (priorCutover === undefined) {
         delete process.env.PSD_EOC_PUSH_PROVIDER_CUTOVER;
