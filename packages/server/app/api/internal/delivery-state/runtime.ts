@@ -79,6 +79,7 @@ export interface DeliveryStateWriteRequest {
 
 export type DeliveryStateErrorCode =
   | 'ATTEMPT_CONFLICT'
+  | 'ATTEMPT_ENDPOINT_UNBOUND'
   | 'DELIVERY_STATE_CONFIGURATION_INVALID'
   | 'DELIVERY_STATE_PERSISTENCE_INVALID'
   | 'DELIVERY_STATE_UNAUTHORIZED'
@@ -95,6 +96,34 @@ export class DeliveryStateError extends Error {
     super(message);
     this.name = 'DeliveryStateError';
   }
+}
+
+const ENDPOINT_BINDING_CONSTRAINTS: ReadonlySet<string> = new Set([
+  'channel_attempts_endpoint_binding',
+  'channel_attempts_published_endpoint_fk',
+  'channel_attempts_fanned_out_registration_fk',
+  'channel_attempts_endpoint_identity',
+]);
+
+/**
+ * An attempt whose endpoint the snapshot neither published nor binds to one
+ * of its recipient's push registrations (migration 0057).
+ *
+ * Retrying cannot change that answer, so it is a 409 the worker retires at
+ * once. As an unmapped database error it was a 503, and the worker retried
+ * the whole batch until it dead-lettered -- which is how a device enrolled
+ * after publication silenced its batch on 2026-09-30.
+ */
+function unboundEndpointError(error: unknown): DeliveryStateError | null {
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const constraint = Reflect.get(Object(cause ?? error), 'constraint_name');
+  if (typeof constraint !== 'string') return null;
+  if (!ENDPOINT_BINDING_CONSTRAINTS.has(constraint)) return null;
+  return new DeliveryStateError(
+    'ATTEMPT_ENDPOINT_UNBOUND',
+    409,
+    'The attempt endpoint is not bound to its roster snapshot recipient.',
+  );
 }
 
 export interface DeliveryEvidenceStore {
@@ -498,23 +527,27 @@ export function createDrizzleDeliveryEvidenceStore(
               'An immutable attempt must begin with attempted evidence.',
             );
           }
-          await query.insert(channelAttempts).values({
-            id: request.attempt.id,
-            batchId: request.attempt.batchId,
-            intentId: request.attempt.intentId,
-            eventId: request.attempt.eventId,
-            eventKind: request.attempt.eventKind,
-            templateMode: request.attempt.templateMode,
-            purpose: request.attempt.purpose,
-            eventTypeVersionId: request.attempt.eventTypeVersion.id,
-            rosterSnapshotId: request.attempt.rosterSnapshotId,
-            rosterPopulation: request.attempt.rosterPopulation,
-            recipientId: request.attempt.recipientId,
-            endpointId: request.attempt.endpointId,
-            channel: request.attempt.channel,
-            attemptNumber: request.attempt.attemptNumber,
-            attemptedAt: new Date(request.attempt.attemptedAt),
-          });
+          try {
+            await query.insert(channelAttempts).values({
+              id: request.attempt.id,
+              batchId: request.attempt.batchId,
+              intentId: request.attempt.intentId,
+              eventId: request.attempt.eventId,
+              eventKind: request.attempt.eventKind,
+              templateMode: request.attempt.templateMode,
+              purpose: request.attempt.purpose,
+              eventTypeVersionId: request.attempt.eventTypeVersion.id,
+              rosterSnapshotId: request.attempt.rosterSnapshotId,
+              rosterPopulation: request.attempt.rosterPopulation,
+              recipientId: request.attempt.recipientId,
+              endpointId: request.attempt.endpointId,
+              channel: request.attempt.channel,
+              attemptNumber: request.attempt.attemptNumber,
+              attemptedAt: new Date(request.attempt.attemptedAt),
+            });
+          } catch (error) {
+            throw unboundEndpointError(error) ?? error;
+          }
           return appendEvidence(query, request.evidence, null, uuid);
         }
 

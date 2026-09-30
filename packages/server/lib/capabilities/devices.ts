@@ -2046,27 +2046,43 @@ async function latestPushTokenFailureCutoff(
         eq(deliveryEvidence.attemptId, channelAttempts.id),
       ),
     )
-    .innerJoin(
+    // A published attempt reads its token from the snapshot; a fanned-out
+    // one (migration 0057) from its own registration. Joining only published
+    // endpoints dropped every fanned-out failure, so a token a device had
+    // been told was dead could be registered again as if it were live.
+    .leftJoin(
       rosterEndpoints,
       and(
         eq(rosterEndpoints.rosterSnapshotId, channelAttempts.rosterSnapshotId),
         eq(rosterEndpoints.recipientId, channelAttempts.recipientId),
-        eq(rosterEndpoints.id, channelAttempts.endpointId),
+        eq(rosterEndpoints.id, channelAttempts.publishedEndpointId),
         eq(rosterEndpoints.population, channelAttempts.rosterPopulation),
         eq(rosterEndpoints.channel, channelAttempts.channel),
       ),
     )
     .leftJoin(
       devicePushTokenRegistrations,
-      and(
-        eq(devicePushTokenRegistrations.id, rosterEndpoints.id),
-        eq(devicePushTokenRegistrations.token, rosterEndpoints.token),
+      or(
+        and(
+          eq(devicePushTokenRegistrations.id, rosterEndpoints.id),
+          eq(devicePushTokenRegistrations.token, rosterEndpoints.token),
+        ),
+        eq(
+          devicePushTokenRegistrations.id,
+          channelAttempts.fannedOutRegistrationId,
+        ),
       ),
     )
     .where(
       and(
         eq(channelAttempts.channel, 'push'),
-        eq(rosterEndpoints.token, token),
+        or(
+          eq(rosterEndpoints.token, token),
+          and(
+            isNotNull(channelAttempts.fannedOutRegistrationId),
+            eq(devicePushTokenRegistrations.token, token),
+          ),
+        ),
         eq(deliveryEvidence.state, 'failed'),
         lte(deliveryEvidence.recordedAt, observedThrough),
         providerFailurePredicate,
@@ -2648,12 +2664,57 @@ async function requirePushEndpointInvalidationAttempt(
   });
 }
 
+/**
+ * The endpoint a fanned-out attempt was sent to, shaped like a published one.
+ *
+ * A device enrolled after the roster was published has no `roster_endpoints`
+ * row; its attempts name its own registration, and the database bound that
+ * registration to the snapshot recipient when the attempt was recorded
+ * (migration 0057). Without this, a dead token on such a device could never be
+ * invalidated and would be retried on every later notification.
+ */
+async function loadFannedOutPushEndpoint(
+  database: DeviceQueryDatabase,
+  input: CapabilityInput<'record-endpoint-status'>,
+) {
+  const [row] = await database
+    .select({ registration: devicePushTokenRegistrations })
+    .from(channelAttempts)
+    .innerJoin(
+      devicePushTokenRegistrations,
+      eq(
+        devicePushTokenRegistrations.id,
+        channelAttempts.fannedOutRegistrationId,
+      ),
+    )
+    .where(
+      and(
+        eq(channelAttempts.rosterSnapshotId, input.rosterSnapshotId),
+        eq(channelAttempts.recipientId, input.recipientId),
+        eq(channelAttempts.fannedOutRegistrationId, input.endpointId),
+      ),
+    )
+    .limit(1);
+  if (row === undefined) return undefined;
+  return Object.freeze({
+    id: row.registration.id,
+    rosterSnapshotId: input.rosterSnapshotId,
+    recipientId: input.recipientId,
+    population: 'staff' as const,
+    channel: 'push' as const,
+    platform: row.registration.platform,
+    provider: row.registration.provider,
+    serviceEnvironment: row.registration.serviceEnvironment,
+    token: row.registration.token,
+  });
+}
+
 async function recordEndpointStatusWithDatabase(
   database: DeviceQueryDatabase,
   input: CapabilityInput<'record-endpoint-status'>,
   recordedAt: Date,
 ): Promise<EndpointStatusRecord> {
-  const [endpoint] = await database
+  const [published] = await database
     .select()
     .from(rosterEndpoints)
     .where(
@@ -2664,6 +2725,8 @@ async function recordEndpointStatusWithDatabase(
       ),
     )
     .limit(1);
+  const endpoint =
+    published ?? (await loadFannedOutPushEndpoint(database, input));
   if (endpoint === undefined) {
     throw deviceNotFound('The snapshotted endpoint was not found.');
   }
