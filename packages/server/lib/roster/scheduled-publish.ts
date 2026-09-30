@@ -62,6 +62,23 @@ export function scheduledRosterPublishIdempotencyKey(now: Date): string {
   );
 }
 
+const SMS_CONSENT_PUBLISH_PREFIX = 'roster-publish:sms-consent:';
+
+/**
+ * The key for the publication one SMS consent change triggers.
+ *
+ * A consent row is consented once and withdrawn at most once, so the pair
+ * names exactly one change: a replayed opt-in replays its publication, and a
+ * later withdrawal of the same row publishes anew.
+ */
+export function smsConsentRosterPublishIdempotencyKey(
+  change: Readonly<{ consentId: string; status: 'consented' | 'withdrawn' }>,
+): string {
+  return IdempotencyKeySchema.parse(
+    `${SMS_CONSENT_PUBLISH_PREFIX}${change.status}:${change.consentId}`,
+  );
+}
+
 /** What the scheduled run reports about a publication it attempted. */
 export type ScheduledRosterPublishOutcome =
   | Readonly<{ kind: 'published'; snapshotId: string; completedAt: string }>
@@ -90,10 +107,18 @@ export type ScheduledRosterPublishOutcome =
  * caller reports why. The publication opens its own transaction and takes a
  * per-population advisory lock, so it must never be called from inside another
  * transaction; the scheduled run owns its connection and holds none.
+ *
+ * An SMS consent change publishes through here too, with its own key: a number
+ * is only copied into a snapshot by a publication, so without it a staff
+ * member who opted in stayed unreachable by text for up to two hours.
  */
 export async function publishScheduledRosterSnapshot(
   database: Database,
-  options: Readonly<{ now?: Date; requestId?: string }> = {},
+  options: Readonly<{
+    now?: Date;
+    requestId?: string;
+    idempotencyKey?: string;
+  }> = {},
 ): Promise<ScheduledRosterPublishOutcome> {
   const configuration = await currentStaffRosterConfiguration(database);
   if (configuration === null) {
@@ -111,9 +136,9 @@ export async function publishScheduledRosterSnapshot(
     transport: 'scheduled-execution' as const,
     schedulerAuthenticated: true as const,
     requestId: options.requestId ?? randomUUID(),
-    idempotencyKey: scheduledRosterPublishIdempotencyKey(
-      options.now ?? new Date(),
-    ),
+    idempotencyKey:
+      options.idempotencyKey ??
+      scheduledRosterPublishIdempotencyKey(options.now ?? new Date()),
   });
   const result: RosterSyncResult = await syncRoster(
     { sourceConfiguration: configuration },

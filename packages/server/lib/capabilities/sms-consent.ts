@@ -29,6 +29,11 @@ import { staffSmsConsents } from '../../db/schema';
 
 import type { AuthenticatedSession } from '../auth/sessions';
 import {
+  publishScheduledRosterSnapshot,
+  smsConsentRosterPublishIdempotencyKey,
+  type ScheduledRosterPublishOutcome,
+} from '../roster/scheduled-publish';
+import {
   organizationName,
   privacyContactUrl,
   smsSupportEmail,
@@ -522,17 +527,105 @@ export interface SmsConsentCapabilityRuntime {
   close(): Promise<void>;
 }
 
+type SmsConsentChange = Readonly<{
+  consentId: string;
+  status: 'consented' | 'withdrawn';
+}>;
+
+/** Publishes the roster after one committed consent change. */
+export type SmsConsentRosterPublisher = (
+  change: SmsConsentChange,
+) => Promise<ScheduledRosterPublishOutcome>;
+
+async function publishAfterConsentChange(
+  publish: SmsConsentRosterPublisher,
+  change: SmsConsentChange,
+  log: (value: string) => void,
+): Promise<void> {
+  try {
+    const outcome = await publish(change);
+    if (outcome.kind === 'published') return;
+    log(
+      JSON.stringify({
+        event: 'sms-consent-roster-publish-not-published',
+        consentId: change.consentId,
+        status: change.status,
+        outcome: outcome.kind,
+        ...(outcome.kind === 'refused'
+          ? { rosterOutcome: outcome.outcome, errorCodes: outcome.errorCodes }
+          : { reason: outcome.reason }),
+      }),
+    );
+  } catch (error) {
+    log(
+      JSON.stringify({
+        event: 'sms-consent-roster-publish-failed',
+        consentId: change.consentId,
+        status: change.status,
+        errorName: error instanceof Error ? error.name : 'unknown',
+      }),
+    );
+  }
+}
+
+/**
+ * Publishes the roster after every committed consent change.
+ *
+ * An activation reads a published snapshot, and only a publication copies a
+ * consented number into one. Before this, a staff member who opted in was
+ * unreachable by text until the two-hourly scheduled publication or until an
+ * administrator pressed "Publish the roster": on the first school rollout,
+ * eight people opted in and missed every drill in between.
+ *
+ * Runs after the consent transaction commits, because the publication opens
+ * its own. The consent is already recorded, so a failed or refused publication
+ * never fails the request; it is logged, and the scheduled run still picks the
+ * change up.
+ */
+export function withRosterPublishOnConsentChange(
+  runtime: SmsConsentCapabilityRuntime,
+  publish: SmsConsentRosterPublisher,
+  log: (value: string) => void = console.error,
+): SmsConsentCapabilityRuntime {
+  return {
+    store: runtime.store,
+    async execute(capabilityId, input, invocation) {
+      const output = await runtime.execute(capabilityId, input, invocation);
+      if (
+        capabilityId === 'record-sms-consent' ||
+        capabilityId === 'withdraw-sms-consent'
+      ) {
+        const receipt = output as
+          SmsConsentReceipt | SmsConsentWithdrawalReceipt;
+        await publishAfterConsentChange(
+          publish,
+          { consentId: receipt.consentId, status: receipt.status },
+          log,
+        );
+      }
+      return output;
+    },
+    close: () => runtime.close(),
+  };
+}
+
 /** Builds an SMS consent runtime around one managed DB connection. */
 export function createSmsConsentCapabilityRuntime(
   connection: DatabaseConnection,
 ): SmsConsentCapabilityRuntime {
   const store = createDrizzleSmsConsentCapabilityStore(connection.db);
-  return {
-    store,
-    execute: (capabilityId, input, invocation) =>
-      executeSmsConsentCapability(capabilityId, input, invocation, store),
-    close: () => connection.close(),
-  };
+  return withRosterPublishOnConsentChange(
+    {
+      store,
+      execute: (capabilityId, input, invocation) =>
+        executeSmsConsentCapability(capabilityId, input, invocation, store),
+      close: () => connection.close(),
+    },
+    (change) =>
+      publishScheduledRosterSnapshot(connection.db, {
+        idempotencyKey: smsConsentRosterPublishIdempotencyKey(change),
+      }),
+  );
 }
 
 let defaultSmsConsentCapabilityRuntime: SmsConsentCapabilityRuntime | undefined;
