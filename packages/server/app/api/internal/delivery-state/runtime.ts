@@ -17,6 +17,7 @@ import {
   type RecordDeliveryEvidenceInput,
   type RegisteredCapabilityHandler,
   type RegisteredCapabilityId,
+  isTerminalDeliveryTruthState,
 } from '@psd-eoc/contracts';
 import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -290,7 +291,7 @@ function strongerEvidenceDisposition(
   ) {
     return null;
   }
-  const terminal = ['delivered', 'failed', 'expired'].includes(evidence.state);
+  const terminal = isTerminalDeliveryTruthState(evidence.state);
   if (input.state === 'unknown' && input.providerReference === null) {
     if (evidence.state !== 'provider-accepted' && !terminal) {
       return null;

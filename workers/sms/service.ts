@@ -31,10 +31,17 @@ const VISIBILITY_HEARTBEAT_MILLISECONDS = 30_000;
  * given up as foreign. The send's provider reference is written after AWS
  * has already returned the MessageId, over two further server round trips,
  * and a worker replaced between them rewrites it only after its work message
- * becomes visible again; a receipt for that send can arrive first. Two more
- * receives, each after the visibility timeout, cover that window.
+ * becomes visible again; a receipt for that send can arrive first.
+ *
+ * The waits grow: almost every early receipt matches on its second read,
+ * fifteen seconds later, so it never ages the receipt queue toward its
+ * sixty-second alarm, and the later waits still cover a replaced worker
+ * (about 225 seconds in all, where three reads at the 120-second visibility
+ * timeout covered 240). The last read is the queue's fifth, the most its
+ * redrive policy allows before the dead-letter queue.
  */
-const UNMATCHED_RECEIPT_RECEIVES = 3;
+const UNMATCHED_RECEIPT_RETRY_SECONDS = Object.freeze([15, 30, 60, 120]);
+const UNMATCHED_RECEIPT_RECEIVES = UNMATCHED_RECEIPT_RETRY_SECONDS.length + 1;
 const VISIBILITY_TIMEOUT_SECONDS = 120;
 const MAX_RECONCILIATION_SEGMENTS = 10;
 /**
@@ -348,7 +355,8 @@ export interface SmsServiceDependencies {
   readonly state?: SmsRuntimeClient;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly log?: (event: SafeLogEvent) => void;
-  readonly shouldContinue?: () => boolean;
+  /** Asked before each poll of one queue; tests budget each queue apart. */
+  readonly shouldContinue?: (queueKind: 'work' | 'receipt') => boolean;
   readonly now?: () => number;
 }
 
@@ -547,6 +555,8 @@ async function processBody(
     count: number;
     event: 'attempts' | 'delivery-event' | 'opt-outs';
     code?: string;
+    /** Overrides the visibility timeout a deferred message waits. */
+    retryAfterSeconds?: number;
   }>
 > {
   let value: unknown;
@@ -588,11 +598,18 @@ async function processBody(
       // reference is not written yet. It is retried a bounded number of
       // times for the second case, then logged as ignored and deleted for
       // the first, never toward the dead-letter queue.
+      const retryAfterSeconds =
+        UNMATCHED_RECEIPT_RETRY_SECONDS[receiveCount - 1];
       return Object.freeze({
-        kind: receiveCount < UNMATCHED_RECEIPT_RECEIVES ? 'defer' : 'complete',
+        kind:
+          receiveCount < UNMATCHED_RECEIPT_RECEIVES &&
+          retryAfterSeconds !== undefined
+            ? 'defer'
+            : 'complete',
         count: 0,
         event: 'delivery-event',
         code: 'UNMATCHED_RECEIPT',
+        ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
       });
     } catch (error) {
       if (
@@ -790,7 +807,8 @@ export async function runSmsService(
           new ChangeMessageVisibilityCommand({
             QueueUrl: currentQueueUrl,
             ReceiptHandle: message.receiptHandle,
-            VisibilityTimeout: VISIBILITY_TIMEOUT_SECONDS,
+            VisibilityTimeout:
+              result.retryAfterSeconds ?? VISIBILITY_TIMEOUT_SECONDS,
           }),
         );
       }
@@ -878,7 +896,7 @@ export async function runSmsService(
         ? configuration.queueUrl
         : configuration.receiptQueueUrl;
     try {
-      while (!stopped && shouldContinue()) {
+      while (!stopped && shouldContinue(queueKind)) {
         if (now() - lastHeartbeatAt >= HEARTBEAT_LOG_INTERVAL_MILLISECONDS) {
           log({ event: 'sms-worker-heartbeat' });
           lastHeartbeatAt = now();

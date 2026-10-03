@@ -59,7 +59,12 @@ closed`): the job failed. Sign-in itself still confirms each person with
    external or nested member, or re-register the group by address on the
    Access or Facilities page if it was recreated). For a provider code, check
    Google Workspace status and the roster-reader credential in
-   `docs/INTEGRATIONS.md`.
+   `docs/INTEGRATIONS.md`. The scheduled task already retries a Google 429,
+   5xx, timeout, or network error twice (after 1 and 4 seconds), so a
+   provider code here means Google kept failing for that long; the failure
+   message names the last HTTP status, for example `(HTTP 503)`. A 4xx other
+   than 429 is never retried and usually means a credential or permission
+   change.
 3. Run the task on demand with a pinned key and request ID, or wait for the
    next scheduled run, and confirm both summary lines appear.
 4. For the sign-in leg, check the age of the last fresh read against the
