@@ -313,6 +313,15 @@ describe('fixed-path delivery-state client', () => {
     await expect(
       clientAnswering(delivered).recordAttemptEvidence(attempted),
     ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+    // Delivery proof after expiry is appended, so an expired answer is wrong.
+    await expect(
+      clientAnswering({
+        ...delivered,
+        state: 'expired',
+        proof: null,
+        reasonCode: 'AWS_TTL_EXPIRED',
+      }).recordAttemptEvidence(lateFacts[1]!),
+    ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
   });
 
   test('does not transport intent evidence or mismatched attempts', async () => {

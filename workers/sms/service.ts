@@ -571,10 +571,16 @@ async function processBody(
         authorization: 'eventbridge-sqs-receipt-queue',
       });
       if (result.kind !== 'unmatched') {
+        // A late provider fact for an attempt that already holds a different
+        // terminal state is acknowledged without changing truth (for example
+        // DELIVERED after TTL_EXPIRED). Name it so the discard stays visible.
         return Object.freeze({
           kind: 'complete',
           count: 1,
           event: 'delivery-event',
+          ...(result.kind === 'recorded' && result.retainedEarlierFact
+            ? { code: 'EARLIER_FACT_RETAINED' }
+            : {}),
         });
       }
       // A receipt that names no send this system retained is either foreign
@@ -711,6 +717,7 @@ export async function runSmsService(
   const now = dependencies.now ?? Date.now;
   log({ event: 'sms-worker-started' });
   let lastHeartbeatAt = Number.NEGATIVE_INFINITY;
+  let stopped = false;
 
   // Each queue has its own long-poll loop. They used to take turns, each turn
   // a 20-second long poll, so an idle queue held the other back: on
@@ -870,16 +877,30 @@ export async function runSmsService(
       queueKind === 'work'
         ? configuration.queueUrl
         : configuration.receiptQueueUrl;
-    while (shouldContinue()) {
-      if (now() - lastHeartbeatAt >= HEARTBEAT_LOG_INTERVAL_MILLISECONDS) {
-        log({ event: 'sms-worker-heartbeat' });
-        lastHeartbeatAt = now();
+    try {
+      while (!stopped && shouldContinue()) {
+        if (now() - lastHeartbeatAt >= HEARTBEAT_LOG_INTERVAL_MILLISECONDS) {
+          log({ event: 'sms-worker-heartbeat' });
+          lastHeartbeatAt = now();
+        }
+        await pollOnce(queueKind, queueUrl);
       }
-      await pollOnce(queueKind, queueUrl);
+    } catch (error) {
+      stopped = true;
+      throw error;
     }
   };
 
-  await Promise.all([pollQueue('work'), pollQueue('receipt')]);
+  // A loop that throws (an SQS receive failure, say) stops its sibling too,
+  // and the worker fails only once both have returned, exactly as the single
+  // loop did, so the task restarts whole rather than half alive.
+  const outcomes = await Promise.allSettled([
+    pollQueue('work'),
+    pollQueue('receipt'),
+  ]);
+  for (const outcome of outcomes) {
+    if (outcome.status === 'rejected') throw outcome.reason;
+  }
 }
 
 if (import.meta.main) {

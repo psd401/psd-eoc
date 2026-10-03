@@ -303,16 +303,25 @@ function strongerEvidenceDisposition(
       : 'conflicts';
   }
   if (!terminal) return null;
-  // The first terminal fact is final. Providers keep talking after it: AWS
-  // End User Messaging can publish a second TEXT_DELIVERED for one MessageId,
-  // and SES can report a Transient bounce after its Delivery. Each was refused
-  // with 409 on every redelivery and dead-lettered (2026-10-01, 2026-10-03).
-  // A later fact from the same provider lineage is acknowledged without
-  // changing truth; a fact from another lineage still conflicts.
-  return evidence.provider === input.provider &&
-    evidence.providerReference === input.providerReference
-    ? 'subsumes'
-    : 'conflicts';
+  const sameLineage =
+    evidence.provider === input.provider &&
+    evidence.providerReference === input.providerReference;
+  // Late delivery proof supersedes expiry through the ordinary transition
+  // check, which appends it.
+  if (
+    sameLineage &&
+    evidence.state === 'expired' &&
+    input.state === 'delivered'
+  ) {
+    return null;
+  }
+  // Otherwise the first terminal fact is final. Providers keep talking after
+  // it: AWS End User Messaging can publish a second TEXT_DELIVERED for one
+  // MessageId, and SES can report a Transient bounce after its Delivery. Each
+  // was refused with 409 on every redelivery and dead-lettered (2026-10-01,
+  // 2026-10-03). A later fact from the same provider lineage is acknowledged
+  // without changing truth; a fact from another lineage still conflicts.
+  return sameLineage ? 'subsumes' : 'conflicts';
 }
 
 async function readDatabaseTime(

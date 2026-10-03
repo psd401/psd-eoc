@@ -344,6 +344,58 @@ describe('delivery-state terminal evidence subsumption', () => {
     }
   });
 
+  test('appends late delivery proof after expiry from the same lineage only', async () => {
+    const attempt = attemptWith();
+    const existingAttempt = attemptRow(attempt);
+    const lineage = providerAcceptedEvidence(attempt);
+    const expiredRow = (providerReference: string) => ({
+      ...deliveredEvidenceRow(attempt, { providerReference }),
+      state: 'expired' as const,
+      proof: null,
+      reasonCode: 'AWS_TTL_EXPIRED',
+    });
+    const lateDelivery: AttemptEvidenceInput = {
+      ...lineage,
+      state: 'delivered',
+      proof: {
+        kind: 'provider-delivery-receipt',
+        provider: lineage.provider ?? '',
+        receiptId: 'late-delivery-receipt',
+        deliveredAt: '2026-08-13T16:00:00.500Z',
+      },
+    };
+
+    const fixture = fakeDatabase({
+      existingAttempt,
+      firstEvidence: expiredRow(lineage.providerReference ?? ''),
+    });
+    await expect(
+      createDrizzleDeliveryEvidenceStore(
+        fixture.database,
+      ).recordAttemptEvidence({ attempt, evidence: lateDelivery }),
+    ).resolves.toMatchObject({
+      state: 'delivered',
+      sequence: 4,
+      proof: { receiptId: 'late-delivery-receipt' },
+    });
+    expect(fixture.insertedTables).toEqual([deliveryEvidence]);
+
+    const otherLineage = fakeDatabase({
+      existingAttempt,
+      firstEvidence: expiredRow('different-provider-reference'),
+    });
+    const error = await deliveryStateError(
+      createDrizzleDeliveryEvidenceStore(
+        otherLineage.database,
+      ).recordAttemptEvidence({ attempt, evidence: lateDelivery }),
+    );
+    expect(error).toMatchObject({
+      code: 'INVALID_DELIVERY_TRANSITION',
+      status: 409,
+    });
+    expect(otherLineage.insertedTables).toHaveLength(0);
+  });
+
   test('preserves stronger matching-provider truth for late weaker writes', async () => {
     const attempt = attemptWith();
     const existingAttempt = attemptRow(attempt);

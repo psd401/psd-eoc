@@ -154,6 +154,39 @@ describe('SMS long-poll service', () => {
     expect(recorded).toBe(receiptsToDrain);
   });
 
+  test('stops the receipt loop and fails when the work loop cannot receive', async () => {
+    let receiptPolls = 0;
+    const run = runSmsService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => NOW,
+      shouldContinue: () => true,
+      log: () => undefined,
+      runtime: {
+        processDeliveryEvent: () => Promise.reject(new Error('unused')),
+        processQueueAttempt: () => Promise.reject(new Error('unused')),
+        reconcileOptOuts: () => Promise.reject(new Error('unused')),
+      },
+      state: {} as SmsRuntimeClient,
+      sqs: {
+        send(command) {
+          if (
+            command instanceof ReceiveMessageCommand &&
+            command.input.QueueUrl === ENABLED_ENVIRONMENT.SMS_QUEUE_URL
+          ) {
+            return Promise.reject(new Error('synthetic receive failure'));
+          }
+          receiptPolls += 1;
+          return new Promise((resolve) => setTimeout(() => resolve({}), 5));
+        },
+      },
+    });
+
+    await expect(run).rejects.toThrow('synthetic receive failure');
+    const pollsAtFailure = receiptPolls;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(receiptPolls).toBe(pollsAtFailure);
+  });
+
   test('does not trust a delivery-event body received from the work queue', async () => {
     const commands: unknown[] = [];
     let invocations = 0;
@@ -258,6 +291,55 @@ describe('SMS long-poll service', () => {
     });
     expect(JSON.stringify(logs)).not.toContain('+12025550123');
     expect(JSON.stringify(logs)).not.toContain('synthetic-receipt-handle');
+  });
+
+  test('names a receipt whose fact the store did not keep', async () => {
+    const logs: unknown[] = [];
+    let loopChecks = 0;
+    await runSmsService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => NOW,
+      shouldContinue: () => loopChecks++ < 2,
+      log: (value) => logs.push(value),
+      runtime: {
+        processDeliveryEvent: () =>
+          Promise.resolve({
+            kind: 'recorded',
+            retainedEarlierFact: true,
+          } as never),
+        processQueueAttempt: () => Promise.reject(new Error('unused')),
+        reconcileOptOuts: () => Promise.reject(new Error('unused')),
+      },
+      state: {} as SmsRuntimeClient,
+      sqs: {
+        send(command) {
+          return command instanceof ReceiveMessageCommand &&
+            command.input.QueueUrl === ENABLED_ENVIRONMENT.SMS_RECEIPT_QUEUE_URL
+            ? Promise.resolve({
+                Messages: [
+                  {
+                    Body: JSON.stringify({
+                      source: 'aws.sms-voice',
+                      'detail-type': 'Text Message Delivery Status Updated',
+                    }),
+                    ReceiptHandle: 'synthetic-receipt-handle',
+                    Attributes: {
+                      SentTimestamp: String(NOW - 1_000),
+                      ApproximateReceiveCount: '1',
+                    },
+                  },
+                ],
+              })
+            : Promise.resolve({});
+        },
+      },
+    });
+
+    expect(logs).toContainEqual({
+      event: 'sms-worker-delivery-event-recorded',
+      count: 1,
+      code: 'EARLIER_FACT_RETAINED',
+    });
   });
 
   test('retries a receipt that names no retained send, then deletes it and logs it as ignored', async () => {

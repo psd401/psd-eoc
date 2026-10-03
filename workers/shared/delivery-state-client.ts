@@ -143,10 +143,12 @@ function sameEvidenceInput(
     );
   }
   // Mirrors the server: any later fact from the same provider lineage is
-  // answered with the first terminal fact it arrived after.
+  // answered with the first terminal fact it arrived after, except delivery
+  // proof after expiry, which the server appends instead.
   return (
     terminal &&
     input.state !== 'attempted' &&
+    !(result.state === 'expired' && input.state === 'delivered') &&
     result.provider === input.provider &&
     result.providerReference === input.providerReference
   );

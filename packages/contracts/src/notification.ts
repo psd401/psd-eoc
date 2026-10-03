@@ -772,12 +772,16 @@ const allowedDeliveryTransitions = new Set([
   'attempt:unknown:provider-accepted',
   'attempt:unknown:delivered',
   'attempt:unknown:failed',
+  // Expired means no confirmation arrived in time, not that the message was
+  // lost: a carrier can still confirm the handset received it afterwards.
+  'attempt:expired:delivered',
 ]);
 
 /**
  * Owns the canonical monotonic delivery transition policy. Late provider
- * proof may supersede `unknown`, while delivered, failed, and expired remain
- * terminal; writers append evidence and never rewrite an earlier state.
+ * proof may supersede `unknown`, and late delivery proof may supersede
+ * `expired`; delivered and failed remain terminal. Writers append evidence
+ * and never rewrite an earlier state.
  */
 export const DeliveryTruthTransitionSchema = z
   .object({

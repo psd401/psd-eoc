@@ -171,6 +171,8 @@ export type SmsDeliveryEventProcessResult =
       kind: 'recorded';
       event: ParsedAwsEumSmsDeliveryEvent;
       evidence: DeliveryEvidence;
+      /** The store kept an earlier fact whose state differs from this receipt. */
+      retainedEarlierFact: boolean;
     }>;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -571,6 +573,11 @@ export class SmsDeliveryEventProcessor {
       attempt,
       evidence: mapping.evidence,
     });
-    return Object.freeze({ kind: 'recorded', event, evidence });
+    return Object.freeze({
+      kind: 'recorded',
+      event,
+      evidence,
+      retainedEarlierFact: evidence.state !== mapping.evidence.state,
+    });
   }
 }
