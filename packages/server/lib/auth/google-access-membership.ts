@@ -427,11 +427,13 @@ function googleGroupsClient(
       }
       return result;
     } catch (error) {
-      if (
-        error instanceof AccessMembershipEvaluationError ||
-        error instanceof TransientGoogleFailure
-      ) {
-        throw error;
+      if (error instanceof TransientGoogleFailure) throw error;
+      if (error instanceof AccessMembershipEvaluationError) {
+        // A body that stalls past the timeout is as transient as a
+        // connection that never opened.
+        throw error.code === 'GOOGLE_UNAVAILABLE'
+          ? new TransientGoogleFailure(error)
+          : error;
       }
       throw new TransientGoogleFailure(
         new AccessMembershipEvaluationError(

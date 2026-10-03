@@ -715,6 +715,32 @@ describe('exact Google access-membership evaluator', () => {
     expect(refused.message).toContain('HTTP 400');
     expect(refusedWaits).toEqual([]);
 
+    // A 200 whose body stalls past the timeout is retried like a hang.
+    let stalls = 1;
+    const stalledHarness = providerHarness(() => {
+      if (stalls > 0) {
+        stalls -= 1;
+        return new Response(new ReadableStream({ start() {} }));
+      }
+      return Response.json({
+        memberships: [currentMembership(SYNTHETIC_TRANSITION_EMAIL)],
+      });
+    });
+    const stalledWaits: number[] = [];
+    const recoveredFromStall = await createGoogleAccessMembershipEvaluator(
+      configuration(20),
+      {
+        fetch: stalledHarness.fetch,
+        now: () => new Date(TEST_TIME),
+        transientRetryDelaysMilliseconds: [1_000, 4_000],
+        sleep: async (milliseconds) => {
+          stalledWaits.push(milliseconds);
+        },
+      },
+    ).evaluate(CONFIGURED_GROUPS);
+    expect(recoveredFromStall.groups.length).toBeGreaterThan(0);
+    expect(stalledWaits).toEqual([1_000]);
+
     // Without the option nothing is retried, which keeps sign-in fast.
     await expectEvaluationError(
       evaluator(flaky(1, 503)).evaluate(CONFIGURED_GROUPS),
