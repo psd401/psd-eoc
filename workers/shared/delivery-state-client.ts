@@ -136,16 +136,17 @@ function sameEvidenceInput(
     return false;
   }
   const terminal = ['delivered', 'failed', 'expired'].includes(result.state);
-  if (input.state === 'unknown') {
+  if (input.state === 'unknown' && input.providerReference === null) {
     return (
-      input.providerReference === null &&
       (result.state === 'provider-accepted' || terminal) &&
       (input.provider === null || result.provider === input.provider)
     );
   }
+  // Mirrors the server: any later fact from the same provider lineage is
+  // answered with the first terminal fact it arrived after.
   return (
     terminal &&
-    input.state === 'provider-accepted' &&
+    input.state !== 'attempted' &&
     result.provider === input.provider &&
     result.providerReference === input.providerReference
   );

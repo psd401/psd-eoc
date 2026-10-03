@@ -710,19 +710,17 @@ export async function runSmsService(
   const shouldContinue = dependencies.shouldContinue ?? (() => true);
   const now = dependencies.now ?? Date.now;
   log({ event: 'sms-worker-started' });
-  let pollCount = 0;
   let lastHeartbeatAt = Number.NEGATIVE_INFINITY;
 
-  while (shouldContinue()) {
-    if (now() - lastHeartbeatAt >= HEARTBEAT_LOG_INTERVAL_MILLISECONDS) {
-      log({ event: 'sms-worker-heartbeat' });
-      lastHeartbeatAt = now();
-    }
-    const queueKind = pollCount++ % 2 === 0 ? 'work' : 'receipt';
-    const currentQueueUrl =
-      queueKind === 'work'
-        ? configuration.queueUrl
-        : configuration.receiptQueueUrl;
+  // Each queue has its own long-poll loop. They used to take turns, each turn
+  // a 20-second long poll, so an idle queue held the other back: on
+  // 2026-10-03 a drill's 19 receipts drained one per 20 seconds and tripped
+  // the receipt queue-age alarm, and a send batch waited 20 seconds behind an
+  // empty receipt poll.
+  const pollOnce = async (
+    queueKind: 'work' | 'receipt',
+    currentQueueUrl: string,
+  ): Promise<void> => {
     const response = (await sqs.send(
       new ReceiveMessageCommand({
         QueueUrl: currentQueueUrl,
@@ -736,7 +734,7 @@ export async function runSmsService(
       }),
     )) as Readonly<{ Messages?: readonly unknown[] }>;
     const raw = response.Messages?.[0];
-    if (raw === undefined) continue;
+    if (raw === undefined) return;
 
     let message: ReturnType<typeof parseMessage>;
     try {
@@ -748,7 +746,7 @@ export async function runSmsService(
         stage: 'receive',
         code: safeFailureCode(error),
       });
-      continue;
+      return;
     }
     const heartbeat = setInterval(() => {
       void sqs
@@ -865,7 +863,23 @@ export async function runSmsService(
     } finally {
       clearInterval(heartbeat);
     }
-  }
+  };
+
+  const pollQueue = async (queueKind: 'work' | 'receipt'): Promise<void> => {
+    const queueUrl =
+      queueKind === 'work'
+        ? configuration.queueUrl
+        : configuration.receiptQueueUrl;
+    while (shouldContinue()) {
+      if (now() - lastHeartbeatAt >= HEARTBEAT_LOG_INTERVAL_MILLISECONDS) {
+        log({ event: 'sms-worker-heartbeat' });
+        lastHeartbeatAt = now();
+      }
+      await pollOnce(queueKind, queueUrl);
+    }
+  };
+
+  await Promise.all([pollQueue('work'), pollQueue('receipt')]);
 }
 
 if (import.meta.main) {

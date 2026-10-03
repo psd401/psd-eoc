@@ -97,6 +97,63 @@ describe('SMS service configuration', () => {
 });
 
 describe('SMS long-poll service', () => {
+  test('drains receipts while the work queue is still long-polling', async () => {
+    // The work queue's poll answers only once the receipts are drained. A
+    // worker that waited on it before polling receipts would never finish.
+    const receiptsToDrain = 3;
+    let recorded = 0;
+    let releaseWorkPoll: () => void = () => undefined;
+    const workPoll = new Promise<object>((resolve) => {
+      releaseWorkPoll = () => resolve({});
+    });
+    const receipt = {
+      Body: JSON.stringify({
+        source: 'aws.sms-voice',
+        'detail-type': 'Text Message Delivery Status Updated',
+      }),
+      ReceiptHandle: 'synthetic-receipt-handle',
+      Attributes: {
+        SentTimestamp: String(NOW),
+        ApproximateReceiveCount: '1',
+      },
+    };
+    const run = runSmsService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => NOW,
+      shouldContinue: () => recorded < receiptsToDrain,
+      log: () => undefined,
+      runtime: {
+        processDeliveryEvent() {
+          recorded += 1;
+          if (recorded === receiptsToDrain) releaseWorkPoll();
+          return Promise.resolve({ kind: 'recorded' } as never);
+        },
+        processQueueAttempt: () => Promise.reject(new Error('unused')),
+        reconcileOptOuts: () => Promise.reject(new Error('unused')),
+      },
+      state: {} as SmsRuntimeClient,
+      sqs: {
+        send(command) {
+          if (!(command instanceof ReceiveMessageCommand)) {
+            return Promise.resolve({});
+          }
+          return command.input.QueueUrl ===
+            ENABLED_ENVIRONMENT.SMS_RECEIPT_QUEUE_URL
+            ? Promise.resolve({ Messages: [receipt] })
+            : workPoll;
+        },
+      },
+    });
+    const outcome = await Promise.race([
+      run.then(() => 'finished'),
+      new Promise((resolve) => setTimeout(() => resolve('stalled'), 1_000)),
+    ]);
+    releaseWorkPoll();
+
+    expect(outcome).toBe('finished');
+    expect(recorded).toBe(receiptsToDrain);
+  });
+
   test('does not trust a delivery-event body received from the work queue', async () => {
     const commands: unknown[] = [];
     let invocations = 0;
