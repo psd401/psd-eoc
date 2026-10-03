@@ -50,6 +50,14 @@ const ENABLED_ENVIRONMENT = Object.freeze({
     'https://sqs.us-east-1.amazonaws.com/000000000000/psd-eoc-sms-receipts',
 });
 
+/** Lets each queue loop poll a fixed number of times, independently. */
+function pollsPerQueue(
+  budget: Readonly<Record<'work' | 'receipt', number>>,
+): (queueKind: 'work' | 'receipt') => boolean {
+  const used = { work: 0, receipt: 0 };
+  return (queueKind) => used[queueKind]++ < budget[queueKind];
+}
+
 describe('SMS service configuration', () => {
   test('requires every exact carrier, provider, and runtime opt-in', () => {
     for (const environment of [
@@ -190,11 +198,10 @@ describe('SMS long-poll service', () => {
   test('does not trust a delivery-event body received from the work queue', async () => {
     const commands: unknown[] = [];
     let invocations = 0;
-    let loopChecks = 0;
     await runSmsService({
       environment: ENABLED_ENVIRONMENT,
       now: () => NOW,
-      shouldContinue: () => loopChecks++ === 0,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 0 }),
       log: () => undefined,
       runtime: {
         processDeliveryEvent() {
@@ -239,7 +246,6 @@ describe('SMS long-poll service', () => {
     const commands: unknown[] = [];
     const logs: unknown[] = [];
     const invocations: unknown[] = [];
-    let loopChecks = 0;
     const event = {
       source: 'aws.sms-voice',
       'detail-type': 'Text Message Delivery Status Updated',
@@ -248,7 +254,7 @@ describe('SMS long-poll service', () => {
     await runSmsService({
       environment: ENABLED_ENVIRONMENT,
       now: () => NOW,
-      shouldContinue: () => loopChecks++ < 2,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 1 }),
       log: (value) => logs.push(value),
       runtime: {
         processDeliveryEvent(value, context) {
@@ -295,11 +301,10 @@ describe('SMS long-poll service', () => {
 
   test('names a receipt whose fact the store did not keep', async () => {
     const logs: unknown[] = [];
-    let loopChecks = 0;
     await runSmsService({
       environment: ENABLED_ENVIRONMENT,
       now: () => NOW,
-      shouldContinue: () => loopChecks++ < 2,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 1 }),
       log: (value) => logs.push(value),
       runtime: {
         processDeliveryEvent: () =>
@@ -345,20 +350,22 @@ describe('SMS long-poll service', () => {
   test('retries a receipt that names no retained send, then deletes it and logs it as ignored', async () => {
     // The send's provider reference lands after AWS already holds the
     // MessageId, so an early receipt looks foreign for a moment. It is read
-    // again after the visibility timeout; only a receipt still unmatched on
-    // its third read is given up as foreign.
-    for (const [receiveCount, expectation] of [
-      ['1', 'deferred'],
-      ['2', 'deferred'],
-      ['3', 'ignored'],
+    // again after a growing wait, the first short enough that the receipt
+    // queue's sixty-second age alarm never sees it; only a receipt still
+    // unmatched on its fifth read is given up as foreign.
+    for (const [receiveCount, expectation, retryAfterSeconds] of [
+      ['1', 'deferred', 15],
+      ['2', 'deferred', 30],
+      ['3', 'deferred', 60],
+      ['4', 'deferred', 120],
+      ['5', 'ignored', undefined],
     ] as const) {
       const commands: unknown[] = [];
       const logs: unknown[] = [];
-      let loopChecks = 0;
       await runSmsService({
         environment: ENABLED_ENVIRONMENT,
         now: () => NOW,
-        shouldContinue: () => loopChecks++ < 2,
+        shouldContinue: pollsPerQueue({ work: 1, receipt: 1 }),
         log: (value) => logs.push(value),
         runtime: {
           processDeliveryEvent: () =>
@@ -396,12 +403,16 @@ describe('SMS long-poll service', () => {
       const deleted = commands.some(
         (command) => command instanceof DeleteMessageCommand,
       );
-      const madeVisible = commands.some(
-        (command) => command instanceof ChangeMessageVisibilityCommand,
+      const visibilityChanges = commands.filter(
+        (command): command is ChangeMessageVisibilityCommand =>
+          command instanceof ChangeMessageVisibilityCommand,
       );
       if (expectation === 'deferred') {
         expect(deleted).toBe(false);
-        expect(madeVisible).toBe(true);
+        expect(visibilityChanges).toHaveLength(1);
+        expect(visibilityChanges[0]?.input.VisibilityTimeout).toBe(
+          retryAfterSeconds,
+        );
         expect(logs).toContainEqual({
           event: 'sms-worker-message-deferred',
           count: 0,
@@ -423,11 +434,10 @@ describe('SMS long-poll service', () => {
 
   test('acknowledges an authenticated account event that has no local attempt', async () => {
     const logs: unknown[] = [];
-    let loopChecks = 0;
     await runSmsService({
       environment: ENABLED_ENVIRONMENT,
       now: () => NOW,
-      shouldContinue: () => loopChecks++ < 2,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 1 }),
       log: (value) => logs.push(value),
       runtime: {
         processDeliveryEvent: () =>
@@ -468,11 +478,10 @@ describe('SMS long-poll service', () => {
 
   test('retains a correlated receipt until ambiguous attempt evidence catches up', async () => {
     const commands: unknown[] = [];
-    let loopChecks = 0;
     await runSmsService({
       environment: ENABLED_ENVIRONMENT,
       now: () => NOW,
-      shouldContinue: () => loopChecks++ < 2,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 1 }),
       log: () => undefined,
       runtime: {
         processDeliveryEvent: () =>
@@ -513,11 +522,10 @@ describe('SMS long-poll service', () => {
   test('acknowledges a terminal DLQ attempt without visibility deferral', async () => {
     const commands: unknown[] = [];
     const logs: unknown[] = [];
-    let loopChecks = 0;
     await runSmsService({
       environment: ENABLED_ENVIRONMENT,
       now: () => NOW,
-      shouldContinue: () => loopChecks++ === 0,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 0 }),
       log: (value) => logs.push(value),
       runtime: {
         processDeliveryEvent: () => Promise.reject(new Error('unused')),
@@ -574,10 +582,9 @@ describe('SMS long-poll service', () => {
   test('retains failed work for SQS redrive without logging provider detail', async () => {
     const commands: unknown[] = [];
     const logs: unknown[] = [];
-    let loopChecks = 0;
     const dependencies: SmsServiceDependencies = {
       environment: ENABLED_ENVIRONMENT,
-      shouldContinue: () => loopChecks++ < 2,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 1 }),
       log: (value) => logs.push(value),
       runtime: {
         processDeliveryEvent: () =>

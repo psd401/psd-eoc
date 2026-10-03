@@ -60,6 +60,23 @@ export const DeliveryTruthStateSchema = z.enum([
 export type DeliveryTruthState = z.infer<typeof DeliveryTruthStateSchema>;
 
 /**
+ * The attempt states a provider ends on. The delivery-state store and the
+ * worker that checks its answers must agree on this list exactly, so both
+ * read it from here.
+ */
+export const TERMINAL_DELIVERY_TRUTH_STATES = Object.freeze([
+  'delivered',
+  'failed',
+  'expired',
+] as const satisfies readonly DeliveryTruthState[]);
+
+export function isTerminalDeliveryTruthState(
+  state: DeliveryTruthState,
+): boolean {
+  return (TERMINAL_DELIVERY_TRUTH_STATES as readonly string[]).includes(state);
+}
+
+/**
  * Owns endpoint-attempt states that may appear in latest-state projections.
  * Intent-level accepted/recorded facts remain evidence but are never counted
  * as recipient endpoint outcomes.

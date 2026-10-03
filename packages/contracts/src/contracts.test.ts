@@ -22,6 +22,8 @@ import {
   DeliveryReportSchema,
   DeliveryTruthStateSchema,
   DeliveryTruthTransitionSchema,
+  TERMINAL_DELIVERY_TRUTH_STATES,
+  isTerminalDeliveryTruthState,
   DispatchBatchSchema,
   DispatchOutboxResultSchema,
   DrillRecordSchema,
@@ -3253,6 +3255,27 @@ describe('notification delivery truth', () => {
         providerOccurredAt: undefined,
       }).success,
     ).toBe(false);
+  });
+
+  test('names the terminal attempt states once, with no transition out but late delivery', () => {
+    expect([...TERMINAL_DELIVERY_TRUTH_STATES]).toEqual([
+      'delivered',
+      'failed',
+      'expired',
+    ]);
+    for (const state of DeliveryTruthStateSchema.options) {
+      const leaves = DeliveryTruthStateSchema.options.filter(
+        (to) =>
+          DeliveryTruthTransitionSchema.safeParse({
+            subjectKind: 'attempt',
+            from: state,
+            to,
+          }).success,
+      );
+      if (isTerminalDeliveryTruthState(state)) {
+        expect(leaves).toEqual(state === 'expired' ? ['delivered'] : []);
+      }
+    }
   });
 
   test('allows only monotonic evidence transitions, including late truth', () => {

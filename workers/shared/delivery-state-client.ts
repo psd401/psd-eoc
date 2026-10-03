@@ -5,6 +5,7 @@ import {
   type ChannelAttempt,
   type DeliveryEvidence,
   type RecordDeliveryEvidenceInput,
+  isTerminalDeliveryTruthState,
 } from '@psd-eoc/contracts';
 
 export const DELIVERY_STATE_WRITEBACK_PATH =
@@ -135,7 +136,7 @@ function sameEvidenceInput(
   ) {
     return false;
   }
-  const terminal = ['delivered', 'failed', 'expired'].includes(result.state);
+  const terminal = isTerminalDeliveryTruthState(result.state);
   if (input.state === 'unknown' && input.providerReference === null) {
     return (
       (result.state === 'provider-accepted' || terminal) &&

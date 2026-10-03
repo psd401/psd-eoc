@@ -662,6 +662,65 @@ describe('exact Google access-membership evaluator', () => {
       'GOOGLE_UNAVAILABLE',
     );
   });
+
+  test('retries transient provider failures only when the caller opts in', async () => {
+    function flaky(failures: number, status: number) {
+      let remaining = failures;
+      return providerHarness(() => {
+        if (remaining > 0) {
+          remaining -= 1;
+          return new Response(PROVIDER_SECRET, { status });
+        }
+        return Response.json({
+          memberships: [currentMembership(SYNTHETIC_TRANSITION_EMAIL)],
+        });
+      });
+    }
+    function retrying(harness: ProviderHarness, waits: number[]) {
+      return createGoogleAccessMembershipEvaluator(configuration(), {
+        fetch: harness.fetch,
+        now: () => new Date(TEST_TIME),
+        transientRetryDelaysMilliseconds: [1_000, 4_000],
+        sleep: async (milliseconds) => {
+          waits.push(milliseconds);
+        },
+      });
+    }
+
+    // Google answered one scheduled run's list with a transient error on
+    // 2026-10-01; the next run two hours later succeeded.
+    for (const status of [429, 500, 503]) {
+      const waits: number[] = [];
+      const recovered = await retrying(flaky(2, status), waits).evaluate(
+        CONFIGURED_GROUPS,
+      );
+      expect(recovered.groups.length).toBeGreaterThan(0);
+      expect(waits).toEqual([1_000, 4_000]);
+    }
+
+    const exhaustedWaits: number[] = [];
+    const exhausted = await expectEvaluationError(
+      retrying(flaky(3, 503), exhaustedWaits).evaluate(CONFIGURED_GROUPS),
+      'GOOGLE_REQUEST_REJECTED',
+    );
+    expect(exhausted.message).toContain('HTTP 503');
+    expect(exhaustedWaits).toEqual([1_000, 4_000]);
+
+    // A refusal is an answer, not a blip.
+    const refusedWaits: number[] = [];
+    const refused = await expectEvaluationError(
+      retrying(flaky(1, 400), refusedWaits).evaluate(CONFIGURED_GROUPS),
+      'GOOGLE_REQUEST_REJECTED',
+    );
+    expect(refused.message).toContain('HTTP 400');
+    expect(refusedWaits).toEqual([]);
+
+    // Without the option nothing is retried, which keeps sign-in fast.
+    await expectEvaluationError(
+      evaluator(flaky(1, 503)).evaluate(CONFIGURED_GROUPS),
+      'GOOGLE_REQUEST_REJECTED',
+    );
+  });
 });
 
 describe('exact Google Group resolver for the administration forms', () => {

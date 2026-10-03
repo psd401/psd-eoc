@@ -302,6 +302,25 @@ async function boundedJson(
 export interface GoogleGroupsClientOptions {
   readonly fetch?: typeof fetch;
   readonly now?: () => Date;
+  /**
+   * Waits before each retry of a transient failure (HTTP 429 or 5xx, a
+   * timeout, or a network error). Empty by default, so a sign-in never waits
+   * on a struggling provider; the scheduled sync opts in, because one Google
+   * blip there failed a whole roster run (2026-10-01 20:01Z).
+   */
+  readonly transientRetryDelaysMilliseconds?: readonly number[];
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+/** What the scheduled membership task waits before its two retries. */
+export const SCHEDULED_SYNC_RETRY_DELAYS_MILLISECONDS = Object.freeze([
+  1_000, 4_000,
+]);
+
+class TransientGoogleFailure extends Error {
+  public constructor(public readonly failure: AccessMembershipEvaluationError) {
+    super(failure.message);
+  }
 }
 
 /** One exact Google Group as Cloud Identity resolved it from its address. */
@@ -326,7 +345,40 @@ function googleGroupsClient(
   const fetchImplementation = options.fetch ?? globalThis.fetch;
   const now = options.now ?? (() => new Date());
 
+  const retryDelays = options.transientRetryDelaysMilliseconds ?? [];
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+
   async function providerRequest<Result>(
+    input: URL | string,
+    init: RequestInit,
+    operation: string,
+    parse: (value: unknown) => Result | null,
+    onNotFound?: () => Result,
+    onForbidden?: () => Result,
+  ): Promise<Result> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await providerAttempt(
+          input,
+          init,
+          operation,
+          parse,
+          onNotFound,
+          onForbidden,
+        );
+      } catch (error) {
+        if (!(error instanceof TransientGoogleFailure)) throw error;
+        const delay = retryDelays[attempt];
+        if (delay === undefined) throw error.failure;
+        await sleep(delay);
+      }
+    }
+  }
+
+  async function providerAttempt<Result>(
     input: URL | string,
     init: RequestInit,
     operation: string,
@@ -358,10 +410,13 @@ function googleGroupsClient(
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
-        throw new AccessMembershipEvaluationError(
+        const rejection = new AccessMembershipEvaluationError(
           'GOOGLE_REQUEST_REJECTED',
-          `${operation} was rejected by Google.`,
+          `${operation} was rejected by Google (HTTP ${response.status}).`,
         );
+        throw response.status === 429 || response.status >= 500
+          ? new TransientGoogleFailure(rejection)
+          : rejection;
       }
       const result = parse(await boundedJson(response, controller.signal));
       if (result === null) {
@@ -372,10 +427,17 @@ function googleGroupsClient(
       }
       return result;
     } catch (error) {
-      if (error instanceof AccessMembershipEvaluationError) throw error;
-      throw new AccessMembershipEvaluationError(
-        'GOOGLE_UNAVAILABLE',
-        `${operation} was unavailable.`,
+      if (
+        error instanceof AccessMembershipEvaluationError ||
+        error instanceof TransientGoogleFailure
+      ) {
+        throw error;
+      }
+      throw new TransientGoogleFailure(
+        new AccessMembershipEvaluationError(
+          'GOOGLE_UNAVAILABLE',
+          `${operation} was unavailable.`,
+        ),
       );
     } finally {
       clearTimeout(timeout);

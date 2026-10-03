@@ -16,7 +16,10 @@ import {
   type AccessMembershipSyncCapabilityContext,
   type AccessMembershipSyncScope,
 } from '../../lib/auth/access-membership-sync';
-import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
+import {
+  createGoogleAccessMembershipEvaluator,
+  SCHEDULED_SYNC_RETRY_DELAYS_MILLISECONDS,
+} from '../../lib/auth/google-access-membership';
 import { publishScheduledRosterSnapshot } from '../../lib/roster/scheduled-publish';
 import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/auth/google-roster-config';
 import {
@@ -157,6 +160,10 @@ async function runFromCommandLine(): Promise<void> {
   const dependencies = {
     evaluator: createGoogleAccessMembershipEvaluator(
       readGoogleCloudIdentityRosterConfiguration(),
+      {
+        transientRetryDelaysMilliseconds:
+          SCHEDULED_SYNC_RETRY_DELAYS_MILLISECONDS,
+      },
     ),
     store: createDrizzleAccessMembershipSyncStore(connection.db),
   };
