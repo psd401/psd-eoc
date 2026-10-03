@@ -250,6 +250,80 @@ describe('fixed-path delivery-state client', () => {
     ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
   });
 
+  test('accepts the first terminal fact for a later terminal fact from its lineage', async () => {
+    const attempted = request();
+    const delivered = {
+      ...evidenceResult(),
+      id: '00000000-0000-4000-8000-000000000102',
+      sequence: 3,
+      previousEvidenceId: '00000000-0000-4000-8000-000000000101',
+      state: 'delivered',
+      provider: 'aws-ses-v2',
+      providerReference: 'synthetic-provider-reference',
+      proof: {
+        kind: 'provider-delivery-receipt',
+        provider: 'aws-ses-v2',
+        receiptId: 'synthetic-receipt',
+        deliveredAt: TIMES.recorded,
+      },
+    } as const;
+    const clientAnswering = (result: unknown) =>
+      new DeliveryStateWritebackClient({
+        serviceOrigin: 'https://internal.psd-eoc.invalid',
+        bearerToken: TOKEN,
+        fetch: () =>
+          Promise.resolve(
+            new Response(JSON.stringify({ result }), { status: 200 }),
+          ),
+      });
+    // SES Transient bounce after Delivery, and a second delivery receipt.
+    const lateFacts: readonly DeliveryStateWriteRequest[] = [
+      {
+        attempt: attempted.attempt,
+        evidence: {
+          ...attempted.evidence,
+          state: 'failed',
+          provider: 'aws-ses-v2',
+          providerReference: 'synthetic-provider-reference',
+          reasonCode: 'SES_TRANSIENT_BOUNCE',
+        },
+      },
+      {
+        attempt: attempted.attempt,
+        evidence: {
+          ...attempted.evidence,
+          state: 'delivered',
+          provider: 'aws-ses-v2',
+          providerReference: 'synthetic-provider-reference',
+          proof: { ...delivered.proof, receiptId: 'second-receipt' },
+        },
+      },
+    ];
+    for (const late of lateFacts) {
+      await expect(
+        clientAnswering(delivered).recordAttemptEvidence(late),
+      ).resolves.toEqual(delivered);
+      await expect(
+        clientAnswering({
+          ...delivered,
+          providerReference: 'different-provider-reference',
+        }).recordAttemptEvidence(late),
+      ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+    }
+    await expect(
+      clientAnswering(delivered).recordAttemptEvidence(attempted),
+    ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+    // Delivery proof after expiry is appended, so an expired answer is wrong.
+    await expect(
+      clientAnswering({
+        ...delivered,
+        state: 'expired',
+        proof: null,
+        reasonCode: 'AWS_TTL_EXPIRED',
+      }).recordAttemptEvidence(lateFacts[1]!),
+    ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_RESPONSE' }));
+  });
+
   test('does not transport intent evidence or mismatched attempts', async () => {
     let calls = 0;
     const client = new DeliveryStateWritebackClient({

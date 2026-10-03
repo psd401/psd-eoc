@@ -291,6 +291,111 @@ async function deliveryStateError(
 }
 
 describe('delivery-state terminal evidence subsumption', () => {
+  test('acknowledges later terminal facts from the same provider lineage', async () => {
+    const attempt = attemptWith();
+    const existingAttempt = attemptRow(attempt);
+    const terminal = deliveredEvidenceRow(attempt);
+    const lineage = providerAcceptedEvidence(attempt);
+    const lateFacts: readonly AttemptEvidenceInput[] = [
+      // SES reports a Transient bounce after its Delivery.
+      { ...lineage, state: 'failed', reasonCode: 'SES_TRANSIENT_BOUNCE' },
+      // AWS publishes a second delivery receipt for one MessageId.
+      {
+        ...lineage,
+        state: 'delivered',
+        proof: {
+          kind: 'provider-delivery-receipt',
+          provider: lineage.provider ?? '',
+          receiptId: 'second-delivery-receipt',
+          deliveredAt: COMMITTED_AT,
+        },
+      },
+      { ...lineage, state: 'expired', reasonCode: 'AWS_TTL_EXPIRED' },
+      { ...lineage, state: 'unknown', reasonCode: 'AWS_STATUS_UNKNOWN' },
+    ];
+
+    for (const evidence of lateFacts) {
+      const fixture = fakeDatabase({
+        existingAttempt,
+        firstEvidence: terminal,
+      });
+      const store = createDrizzleDeliveryEvidenceStore(fixture.database);
+      await expect(
+        store.recordAttemptEvidence({ attempt, evidence }),
+      ).resolves.toMatchObject({ id: terminal.id, state: 'delivered' });
+      expect(fixture.insertedTables).toHaveLength(0);
+
+      const otherLineage = fakeDatabase({
+        existingAttempt,
+        firstEvidence: deliveredEvidenceRow(attempt, {
+          providerReference: 'different-provider-reference',
+        }),
+      });
+      const error = await deliveryStateError(
+        createDrizzleDeliveryEvidenceStore(
+          otherLineage.database,
+        ).recordAttemptEvidence({ attempt, evidence }),
+      );
+      expect(error).toMatchObject({
+        code: 'INVALID_DELIVERY_TRANSITION',
+        status: 409,
+      });
+      expect(otherLineage.insertedTables).toHaveLength(0);
+    }
+  });
+
+  test('appends late delivery proof after expiry from the same lineage only', async () => {
+    const attempt = attemptWith();
+    const existingAttempt = attemptRow(attempt);
+    const lineage = providerAcceptedEvidence(attempt);
+    const expiredRow = (providerReference: string) => ({
+      ...deliveredEvidenceRow(attempt, { providerReference }),
+      state: 'expired' as const,
+      proof: null,
+      reasonCode: 'AWS_TTL_EXPIRED',
+    });
+    const lateDelivery: AttemptEvidenceInput = {
+      ...lineage,
+      state: 'delivered',
+      proof: {
+        kind: 'provider-delivery-receipt',
+        provider: lineage.provider ?? '',
+        receiptId: 'late-delivery-receipt',
+        deliveredAt: '2026-08-13T16:00:00.500Z',
+      },
+    };
+
+    const fixture = fakeDatabase({
+      existingAttempt,
+      firstEvidence: expiredRow(lineage.providerReference ?? ''),
+    });
+    await expect(
+      createDrizzleDeliveryEvidenceStore(
+        fixture.database,
+      ).recordAttemptEvidence({ attempt, evidence: lateDelivery }),
+    ).resolves.toMatchObject({
+      state: 'delivered',
+      sequence: 4,
+      proof: { receiptId: 'late-delivery-receipt' },
+    });
+    expect(fixture.insertedTables).toEqual([deliveryEvidence]);
+
+    const otherLineage = fakeDatabase({
+      existingAttempt,
+      firstEvidence: expiredRow('different-provider-reference'),
+    });
+    const error = await deliveryStateError(
+      createDrizzleDeliveryEvidenceStore(
+        otherLineage.database,
+      ).recordAttemptEvidence({ attempt, evidence: lateDelivery }),
+    );
+    expect(error).toMatchObject({
+      code: 'INVALID_DELIVERY_TRANSITION',
+      status: 409,
+    });
+    expect(otherLineage.insertedTables).toHaveLength(0);
+  });
+
   test('preserves stronger matching-provider truth for late weaker writes', async () => {
     const attempt = attemptWith();
     const existingAttempt = attemptRow(attempt);

@@ -291,11 +291,8 @@ function strongerEvidenceDisposition(
     return null;
   }
   const terminal = ['delivered', 'failed', 'expired'].includes(evidence.state);
-  if (input.state === 'unknown') {
-    if (
-      input.providerReference !== null ||
-      (evidence.state !== 'provider-accepted' && !terminal)
-    ) {
+  if (input.state === 'unknown' && input.providerReference === null) {
+    if (evidence.state !== 'provider-accepted' && !terminal) {
       return null;
     }
     // Provider-neutral reconciliation facts may be superseded by any stronger
@@ -305,11 +302,26 @@ function strongerEvidenceDisposition(
       ? 'subsumes'
       : 'conflicts';
   }
-  if (!terminal || input.state !== 'provider-accepted') return null;
-  return evidence.provider === input.provider &&
-    evidence.providerReference === input.providerReference
-    ? 'subsumes'
-    : 'conflicts';
+  if (!terminal) return null;
+  const sameLineage =
+    evidence.provider === input.provider &&
+    evidence.providerReference === input.providerReference;
+  // Late delivery proof supersedes expiry through the ordinary transition
+  // check, which appends it.
+  if (
+    sameLineage &&
+    evidence.state === 'expired' &&
+    input.state === 'delivered'
+  ) {
+    return null;
+  }
+  // Otherwise the first terminal fact is final. Providers keep talking after
+  // it: AWS End User Messaging can publish a second TEXT_DELIVERED for one
+  // MessageId, and SES can report a Transient bounce after its Delivery. Each
+  // was refused with 409 on every redelivery and dead-lettered (2026-10-01,
+  // 2026-10-03). A later fact from the same provider lineage is acknowledged
+  // without changing truth; a fact from another lineage still conflicts.
+  return sameLineage ? 'subsumes' : 'conflicts';
 }
 
 async function readDatabaseTime(

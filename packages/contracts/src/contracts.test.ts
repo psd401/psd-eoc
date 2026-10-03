@@ -3291,6 +3291,20 @@ describe('notification delivery truth', () => {
         to: 'delivered',
       }).success,
     ).toBe(false);
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'expired',
+        to: 'delivered',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'expired',
+        to: 'failed',
+      }).success,
+    ).toBe(false);
   });
 });
 

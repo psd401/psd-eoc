@@ -374,6 +374,35 @@ describe('SMS delivery event processor', () => {
     expect(lookup.unknownAttemptCalls).toBe(0);
   });
 
+  test('reports when the store retained an earlier terminal fact instead', async () => {
+    const retainingWriter: AttemptEvidenceWriter = {
+      async recordAttemptEvidence(value) {
+        return DeliveryEvidenceSchema.parse({
+          ...(await new MemoryWriter().recordAttemptEvidence(value)),
+          state: 'expired',
+          proof: null,
+          reasonCode: 'AWS_TTL_EXPIRED',
+        });
+      },
+    };
+    for (const [evidenceWriter, retainedEarlierFact] of [
+      [retainingWriter, true],
+      [new MemoryWriter(), false],
+    ] as const) {
+      const processor = new SmsDeliveryEventProcessor({
+        configuration: CONFIGURATION,
+        attempts: new MemoryLookup(attempt()),
+        evidenceWriter,
+        authorizeEventBridgeInvocation: authorizeInvocation,
+      });
+      await expect(
+        processor.process(deliveryEvent('DELIVERED'), INVOCATION),
+      ).resolves.toEqual(
+        expect.objectContaining({ kind: 'recorded', retainedEarlierFact }),
+      );
+    }
+  });
+
   test('recovers late proof by authenticated attempt context only after an unknown no-reference send', async () => {
     const writer = new MemoryWriter();
     const lookup = new MemoryLookup(null, attempt());
