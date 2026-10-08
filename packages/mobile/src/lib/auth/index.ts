@@ -3,7 +3,10 @@ export {
   useMobileAuth,
   type MobileAuthContextValue,
 } from './auth-provider';
-export { ConnectivityBanner } from './connectivity-banner';
+export {
+  ConnectivityBanner,
+  connectivityBannerVisible,
+} from './connectivity-banner';
 export {
   OFFLINE_ACTION_MESSAGE,
   type AuthPhase,

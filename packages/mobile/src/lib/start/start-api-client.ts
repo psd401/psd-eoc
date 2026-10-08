@@ -3,6 +3,7 @@ import {
   CreateActivationPreviewInputSchema,
   EventIdSchema,
   EventPageSchema,
+  EventRoomSyncResultSchema,
   EventSchema,
   EventTypePageSchema,
   EventTypeVersionSchema,
@@ -269,6 +270,36 @@ function fallbackEventTypeName(event: Event): string {
   return event.kind === 'test' ? 'Controlled test' : 'Practice drill';
 }
 
+/**
+ * Names the school of an event on this person's campus. Such events are listed
+ * because they notify this person, but the facility list holds only schools
+ * they can start at, so the name comes from the event room's own heading.
+ */
+async function campusFacilityName(
+  request: StartAuthenticatedRequest,
+  event: Event,
+): Promise<string> {
+  try {
+    const room = await requestJson(
+      request,
+      {
+        method: 'GET',
+        path: `/events/${EventIdSchema.parse(event.id)}/api`,
+        schema: tolerantResponseSchema(EventRoomSyncResultSchema),
+      },
+      'query',
+    );
+    return room.header.facility.id === event.facilityId
+      ? room.header.facility.name
+      : 'Authorized facility';
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    return 'Authorized facility';
+  }
+}
+
 async function historicalEventTypeName(
   request: StartAuthenticatedRequest,
   event: Event,
@@ -332,6 +363,20 @@ export async function loadStartHomeData(
 
   const facilityNames = new Map(
     facilities.map((facility) => [facility.id, facility.name] as const),
+  );
+  await Promise.all(
+    [
+      ...new Map(
+        activeEvents
+          .filter((event) => !facilityNames.has(event.facilityId))
+          .map((event) => [event.facilityId, event] as const),
+      ).values(),
+    ].map(async (event) => {
+      facilityNames.set(
+        event.facilityId,
+        await campusFacilityName(request, event),
+      );
+    }),
   );
   const versionNames = new Map(
     eventTypes.map(

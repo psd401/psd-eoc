@@ -431,7 +431,7 @@ export function timelineEntryAccessibilityLabel(
   const supersession =
     projection.entry.supersedes === null
       ? ''
-      : ` ${projection.entry.supersedes.kind === 'correction' ? 'Correction' : 'Redaction'} of timeline entry ${projection.entry.supersedes.entrySequence}.`;
+      : ` ${projection.entry.supersedes.kind === 'correction' ? 'Correction of an earlier update' : 'Redaction of an earlier update'}.`;
   return `${actorLabel(projection)} at ${time}. ${timelineEntryText(projection)}${supersession}`;
 }
 

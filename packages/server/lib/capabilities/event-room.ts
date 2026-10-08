@@ -440,6 +440,7 @@ export const syncEventRoomRegistration: ServerCapabilityRegistration<
   EventRoomCapabilityTransaction
 > = {
   id: 'sync-event-room',
+  campusParticipation: true,
   async resolveFacilityId(input, context) {
     return (await cachedDescriptor(input, context)).event.facilityId;
   },

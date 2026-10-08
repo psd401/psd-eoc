@@ -17,6 +17,7 @@ import {
 } from '../../../../lib/capabilities/event-types';
 import { resolveHumanCapabilityInvocation } from '../../../../lib/capabilities/engine';
 import { getDefaultEventCapabilityRuntime } from '../../../../lib/capabilities/events';
+import { getDefaultJournalCapabilityRuntime } from '../../../../lib/capabilities/journal';
 import { getDefaultStartFlowCapabilityRuntime } from '../../../../lib/capabilities/start';
 
 export interface NamedActiveEvent {
@@ -147,6 +148,30 @@ export async function loadOperationalViewData(
   ]);
 
   const facilityView = prepareAuthorizedFacilities(facilities);
+  // A campus event is listed although its school is not one this person can
+  // start at, so `list-facilities` does not name it. `get-facility` admits
+  // campus schools, so the dashboard reads those names one by one.
+  const facilityNameById = new Map(facilityView.facilityNameById);
+  const campusFacilityIds = [
+    ...new Set(
+      activeEvents
+        .map((event) => event.facilityId)
+        .filter((id) => !facilityNameById.has(id)),
+    ),
+  ];
+  const journalRuntime = getDefaultJournalCapabilityRuntime();
+  // A name that cannot be read falls back to the generic label below; it
+  // must never hide the active events, real incidents included.
+  const campusFacilities = await Promise.all(
+    campusFacilityIds.map((facilityId) =>
+      journalRuntime
+        .execute('get-facility', { facilityId }, queryInvocation(authenticated))
+        .catch(() => null),
+    ),
+  );
+  campusFacilities.forEach((facility) => {
+    if (facility !== null) facilityNameById.set(facility.id, facility.name);
+  });
   const latestNames = new Map(
     eventTypes.map((item) => [item.latestVersion.id, item.latestVersion.name]),
   );
@@ -178,8 +203,7 @@ export async function loadOperationalViewData(
       activeEvents.map((event) => ({
         event,
         facilityName:
-          facilityView.facilityNameById.get(event.facilityId) ??
-          'Authorized facility',
+          facilityNameById.get(event.facilityId) ?? 'Authorized facility',
         eventTypeName:
           latestNames.get(event.eventTypeVersion.id) ??
           (event.templateMode === 'real' ? 'Incident' : 'Drill'),

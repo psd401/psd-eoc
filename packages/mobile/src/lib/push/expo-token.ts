@@ -77,8 +77,16 @@ async function fetchValidatedToken(
         projectId: input.projectId,
       }),
     });
-  } catch {
-    throw new Error('Expo push-token request failed.');
+  } catch (error) {
+    // A transport failure never carries a provider response, so its own
+    // message is safe to show. Without it a redirect, a TLS or DNS failure,
+    // and a filtered network all read the same and cannot be told apart.
+    const cause = error instanceof Error ? error.message.trim() : '';
+    throw new Error(
+      cause.length === 0
+        ? 'Expo push-token request failed.'
+        : `Expo push-token request failed: ${cause.slice(0, 120)}`,
+    );
   }
   if (!response.ok) {
     throw new Error(

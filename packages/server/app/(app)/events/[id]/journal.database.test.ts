@@ -3041,4 +3041,50 @@ describeWithDatabase('event journal database guarantees', () => {
     const authorizedView = await listJournal(journalStore, eventId, null, 200);
     expect(authorizedView.items).toEqual([]);
   });
+
+  test('lets a campus mate read and post, but never correct', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const { northFacilityId, southFacilityId } = syntheticFixtureIds();
+    // A South staff member notified of a North event, because the two schools
+    // share a campus.
+    const campusScope = {
+      facilityScope: {
+        kind: 'facilities' as const,
+        facilityIds: [southFacilityId],
+      },
+      campusFacilityIds: [northFacilityId],
+    };
+
+    const posted = await executeJournalCapability(
+      'append-journal-entry',
+      textInput(eventId, 'South staff are holding in place.', null),
+      humanMutationInvocation(`campus-post-${randomUUID()}`, campusScope),
+      journalStore,
+    );
+    const read = await executeJournalCapability(
+      'list-journal-entries',
+      { eventId, cursor: null, limit: 200 },
+      humanQueryInvocation(campusScope),
+      journalStore,
+    );
+    expect(read.items.map((item) => item.entry.id)).toContain(posted.id);
+
+    await expect(
+      executeJournalCapability(
+        'correct-journal-entry',
+        textInput(eventId, 'Corrected by a campus mate.', null, {
+          entryId: posted.id,
+          entrySequence: posted.sequence,
+          kind: 'correction',
+          reason: 'Campus mates may not correct the record.',
+        }),
+        humanMutationInvocation(`campus-correct-${randomUUID()}`, campusScope),
+        journalStore,
+      ),
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_SCOPE_DENIED',
+    });
+  });
 });

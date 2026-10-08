@@ -97,7 +97,6 @@ function EntryContent({
             altText={entry.payload.altText}
             caption={entry.payload.caption}
             entryId={entry.id}
-            entrySequence={entry.sequence}
             onActivate={onActivateOlderPhoto}
             classificationLabel={classificationLabel}
             realEvent={realEvent}
@@ -109,7 +108,6 @@ function EntryContent({
           altText={entry.payload.altText}
           caption={entry.payload.caption}
           entryId={entry.id}
-          entrySequence={entry.sequence}
           eventId={entry.eventId}
           loadExplicitlyOnMount={photoMountMode === 'selected-older'}
           loadCoordinator={loadCoordinator}
@@ -124,7 +122,6 @@ function EntryContent({
       return (
         <LocationEntryContent
           entryId={entry.id}
-          entrySequence={entry.sequence}
           mapVisible={locationMapVisible}
           onToggleMap={onToggleLocationMap}
           payload={entry.payload}
@@ -188,9 +185,7 @@ export function TimelineEntry({
       id={`entry-${entry.id}`}
     >
       <div className="entry-heading">
-        <h3 id={headingId}>
-          Entry {entry.sequence}: {entryKindLabel(entry)}
-        </h3>
+        <h3 id={headingId}>{entryKindLabel(entry)}</h3>
         <time dateTime={entry.serverTime}>
           {readableDateTime(entry.serverTime, displayTimeZone)}
         </time>
@@ -199,10 +194,8 @@ export function TimelineEntry({
       {ownSupersession === null ? null : (
         <p className="supersession-notice">
           {ownSupersession.kind === 'correction' ? 'Corrects' : 'Hides'}{' '}
-          <a href={`#entry-${ownSupersession.entryId}`}>
-            entry {ownSupersession.entrySequence}
-          </a>
-          . Reason: {ownSupersession.reason}
+          <a href={`#entry-${ownSupersession.entryId}`}>an earlier update</a>.
+          Reason: {ownSupersession.reason}
         </p>
       )}
 
@@ -210,7 +203,9 @@ export function TimelineEntry({
         <p className="supersession-notice">
           Edited later — see{' '}
           <a href={`#entry-${latestSupersession.entry.id}`}>
-            entry {latestSupersession.entry.sequence}
+            {latestSupersession.entry.supersedes?.kind === 'redaction'
+              ? 'the redaction'
+              : 'the correction'}
           </a>
           .
         </p>

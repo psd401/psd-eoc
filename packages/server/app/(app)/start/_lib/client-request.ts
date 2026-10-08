@@ -125,7 +125,20 @@ interface ExpectedActivationSelection {
   readonly threatId: string | null;
 }
 
-function exactChannelConsequencesMatch(
+/**
+ * The server re-renders notification copy at confirmation on purpose: the sent
+ * message carries the real start time and the names as they stand at that
+ * moment (`buildNotification` replaces `renderedMessage` on every channel).
+ * A preview and confirmation that fall in different clock minutes therefore
+ * legitimately return different wording, and comparing it byte for byte
+ * reported a drill that had already started and notified as an unresolved
+ * outcome. What the operator authorized is the channel set, how many
+ * endpoints each reaches, which integration sends it, and the classification
+ * marker that separates a drill from a real incident; those still match
+ * exactly. The mobile client made the same correction in
+ * `channelAuthorizationMatches`.
+ */
+function channelAuthorizationMatches(
   actual: StartEventResult['notificationIntent'],
   expected: ActivationPreview['channels'],
 ): boolean {
@@ -136,7 +149,14 @@ function exactChannelConsequencesMatch(
     const actualChannel = actual.channels.find(
       (candidate) => candidate.channel === expectedChannel.channel,
     );
-    return JSON.stringify(actualChannel) === JSON.stringify(expectedChannel);
+    return (
+      actualChannel !== undefined &&
+      actualChannel.endpointCount === expectedChannel.endpointCount &&
+      actualChannel.integrationId === expectedChannel.integrationId &&
+      actualChannel.renderedMessage.channel === expectedChannel.channel &&
+      actualChannel.renderedMessage.classificationMarker ===
+        expectedChannel.renderedMessage.classificationMarker
+    );
   });
 }
 
@@ -176,7 +196,7 @@ export function requireMatchingActivationResult(
     authorization.consequenceDigest !== preview.consequenceDigest ||
     result.preparedActivationConsumption !== null ||
     notificationIntent === null ||
-    !exactChannelConsequencesMatch(notificationIntent, preview.channels)
+    !channelAuthorizationMatches(notificationIntent, preview.channels)
   ) {
     throw new StartFlowRequestError(
       'PSD EOC returned an event that does not match the confirmed preview. Treat the outcome as unresolved and check the dashboard before making another decision.',

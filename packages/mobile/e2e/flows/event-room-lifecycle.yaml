@@ -13,7 +13,9 @@ tags: [issue-32, synthetic-only, event-room]
 - assertVisible: 'Status: active'
 - tapOn: 'Timeline text update.*'
 - inputText: 'Synthetic mobile issue 32 update.'
-- hideKeyboard
+# Post is tapped with the keyboard still up. A composer left under the
+# keyboard puts the tap on a key instead, and the update never posts.
+- takeScreenshot: event-room-keyboard-up
 - tapOn:
     text: 'Post'
     enabled: true
