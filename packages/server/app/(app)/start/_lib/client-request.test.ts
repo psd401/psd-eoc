@@ -210,6 +210,74 @@ describe('activation response binding', () => {
     );
   });
 
+  test('accepts copy the server re-rendered at confirmation', () => {
+    const result = activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY);
+    if (result.notificationIntent === null) {
+      throw new Error(
+        'Synthetic activation result has no notification intent.',
+      );
+    }
+    // The server renders {{startTime}} again when the operator confirms, so a
+    // confirmation in a later clock minute than the preview returns different
+    // wording on every channel. Comparing that wording refused real starts.
+    const rerendered = StartEventResultSchema.parse({
+      ...result,
+      notificationIntent: {
+        ...result.notificationIntent,
+        channels: result.notificationIntent.channels.map((channel) => {
+          const message = channel.renderedMessage;
+          switch (message.channel) {
+            case 'push':
+              return {
+                ...channel,
+                renderedMessage: { ...message, body: `${message.body} 10:39` },
+              };
+            case 'email':
+              return {
+                ...channel,
+                renderedMessage: {
+                  ...message,
+                  textBody: `${message.textBody} 10:39`,
+                },
+              };
+            case 'sms':
+              return {
+                ...channel,
+                renderedMessage: { ...message, body: `${message.body} 10:39` },
+              };
+          }
+        }),
+      },
+    });
+    expect(JSON.stringify(rerendered.notificationIntent?.channels)).not.toBe(
+      JSON.stringify(preview.channels),
+    );
+
+    expect(
+      requireMatchingActivationResult(rerendered, preview, selection),
+    ).toBe(rerendered.event);
+  });
+
+  test('rejects a result that drops a previewed channel', async () => {
+    const result = activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY);
+    if (result.notificationIntent === null) {
+      throw new Error(
+        'Synthetic activation result has no notification intent.',
+      );
+    }
+    const dropped = {
+      ...result,
+      notificationIntent: {
+        ...result.notificationIntent,
+        channels: result.notificationIntent.channels.slice(1),
+      },
+    } as StartEventResult;
+
+    await expectUnresolved(() =>
+      requireMatchingActivationResult(dropped, preview, selection),
+    );
+  });
+
   test('rejects schema-valid notification consequences that differ from the preview', async () => {
     const result = activationResultFixture(preview, ACTIVATION_IDEMPOTENCY_KEY);
     if (result.notificationIntent === null) {

@@ -268,6 +268,7 @@ function render(
   event: Event,
   entries: readonly JournalEntry[] = ENTRIES,
   initialHasMore = false,
+  viewerManagesLifecycle = true,
 ) {
   return renderToStaticMarkup(
     <EventRoom
@@ -288,11 +289,24 @@ function render(
       initialHasMore={initialHasMore}
       initialSnapshotSequence={entries.at(-1)?.sequence ?? 0}
       sessionId={IDS.session}
+      viewerManagesLifecycle={viewerManagesLifecycle}
     />,
   );
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('lets a campus mate post but leaves ending the event to its school', () => {
+    const own = render(activeEvent('drill'), []);
+    const campus = render(activeEvent('drill'), [], false, false);
+
+    expect(own).toContain('>End event</button>');
+    expect(campus).not.toContain('>End event</button>');
+    expect(campus).toContain(
+      'This event started at Synthetic North Campus. Staff there end it',
+    );
+    expect(campus).toContain('Post an update');
+  });
+
   test('builds web lifecycle requests without typed acknowledgement fields', () => {
     expect(
       webLifecycleCommandBody({
@@ -494,9 +508,8 @@ describe('event room server-rendered safety and history state', () => {
     expect(
       html.match(/Coordinates and accuracy are unavailable\./gu),
     ).toHaveLength(2);
-    expect(html).toContain('Show map for entry 5');
-    expect(html).toContain('Show map for entry 8');
-    expect(html.match(/Show map for entry/gu)).toHaveLength(2);
+    expect(html.match(/>Show map</gu)).toHaveLength(2);
+    expect(html).not.toContain('for entry');
     expect(html).not.toContain('location-map-frame');
     expect(html).not.toContain('Posted location pin and accuracy radius');
   });
@@ -590,9 +603,22 @@ describe('event room server-rendered safety and history state', () => {
   test('renders immutable correction and redaction provenance without deleting originals', () => {
     const html = render(activeEvent('real'));
 
-    expect(html.indexOf('Entry 1:')).toBeLessThan(html.indexOf('Entry 2:'));
-    expect(html.indexOf('Entry 2:')).toBeLessThan(html.indexOf('Entry 3:'));
-    expect(html.indexOf('Entry 3:')).toBeLessThan(html.indexOf('Entry 4:'));
+    const position = (id: string) => html.indexOf(`id="entry-${id}"`);
+    expect(position(IDS.original)).toBeGreaterThan(-1);
+    expect(position(IDS.original)).toBeLessThan(position(IDS.correction));
+    expect(position(IDS.correction)).toBeLessThan(
+      position(IDS.redactedOriginal),
+    );
+    expect(position(IDS.redactedOriginal)).toBeLessThan(
+      position(IDS.redaction),
+    );
+    // The journal sequence counts hidden system entries too (creation,
+    // notification intent, each join), so showing it made readers think
+    // updates were missing. Cards never print it.
+    expect(html).not.toMatch(/\bentry \d/iu);
+    expect(html).toContain('>an earlier update</a>');
+    expect(html).toContain('>the correction</a>');
+    expect(html).toContain('>the redaction</a>');
     expect(html).toContain('Edited later — see');
     expect(html).toContain('Clarified the verified location.');
     expect(html).toContain('Removed unneeded personal information.');
@@ -793,7 +819,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).toContain(
       'This private photo is not loaded. Load it explicitly if it is operationally needed.',
     );
-    expect(html).toContain('Load private photo for entry 5');
+    expect(html).toContain('>Load private photo</button>');
     expect(html.match(/dialog-classification mode-real/gu)).toHaveLength(3);
     expect(html.match(/REAL INCIDENT/gu)?.length ?? 0).toBeGreaterThanOrEqual(
       3,
@@ -815,9 +841,7 @@ describe('event room server-rendered safety and history state', () => {
       10,
     );
     expect(html.match(/data-private-photo-mount="deferred"/gu)).toHaveLength(2);
-    expect(html).toContain('Load older private photo for entry 1');
-    expect(html).toContain('Load older private photo for entry 2');
-    expect(html).not.toContain('Load older private photo for entry 3');
+    expect(html.match(/>Load older private photo</gu)).toHaveLength(2);
     for (let sequence = 1; sequence <= 12; sequence += 1) {
       expect(html).toContain(`Synthetic historical photo ${sequence}`);
       expect(html).toContain(`Retained synthetic caption ${sequence}`);
@@ -846,7 +870,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).not.toContain(
       'Exterior assembly area with staff accountability teams',
     );
-    expect(html).not.toContain('Load private photo for entry 5');
+    expect(html).not.toContain('Load private photo');
     expect(html).not.toContain('<img');
   });
 

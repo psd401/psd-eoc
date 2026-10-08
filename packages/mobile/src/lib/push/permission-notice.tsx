@@ -5,6 +5,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { SafeAreaView, type Edge } from 'react-native-safe-area-context';
 
 import type { PushRegistrationSnapshot } from './registration-controller';
 
@@ -19,6 +20,12 @@ interface PushNotificationNoticeProps {
   readonly onRequestPermission: () => void;
   readonly onRetry: () => void;
   readonly snapshot: PushRegistrationSnapshot;
+  /**
+   * The notice is drawn at the very top of the app shell, above the native
+   * header, so it owns the status-bar inset unless the connectivity banner is
+   * already above it and has taken that inset.
+   */
+  readonly belowTopBanner?: boolean;
 }
 
 export function PushNotificationNotice({
@@ -26,14 +33,19 @@ export function PushNotificationNotice({
   onRequestPermission,
   onRetry,
   snapshot,
+  belowTopBanner = false,
 }: PushNotificationNoticeProps) {
+  const edges: Edge[] = belowTopBanner
+    ? ['left', 'right']
+    : ['top', 'left', 'right'];
   if (snapshot.phase === 'registered') {
     // Registered and delivering. The only thing left worth saying is that this
     // device will present the alert quietly, which the person can undo and the
     // app cannot.
     if (!snapshot.alertsMuted) return null;
     return (
-      <View
+      <SafeAreaView
+        edges={edges}
         accessibilityLiveRegion="polite"
         accessibilityRole="alert"
         style={[styles.notice, styles.mutedNotice]}
@@ -60,13 +72,14 @@ export function PushNotificationNotice({
         >
           <Text style={styles.secondaryButtonText}>Open device settings</Text>
         </Pressable>
-      </View>
+      </SafeAreaView>
     );
   }
   if (snapshot.phase === 'idle') return null;
   if (snapshot.phase === 'registering') {
     return (
-      <View
+      <SafeAreaView
+        edges={edges}
         accessibilityLabel="Confirming push alert registration"
         accessibilityRole="progressbar"
         style={styles.notice}
@@ -75,7 +88,7 @@ export function PushNotificationNotice({
         <Text style={styles.noticeBody}>
           Confirming push alert registration
         </Text>
-      </View>
+      </SafeAreaView>
     );
   }
 
@@ -97,7 +110,8 @@ export function PushNotificationNotice({
         'PSD EOC could not confirm this device for push alerts.');
 
   return (
-    <View
+    <SafeAreaView
+      edges={edges}
       accessibilityLiveRegion="polite"
       accessibilityRole="alert"
       style={[styles.notice, denied && styles.deniedNotice]}
@@ -165,7 +179,7 @@ export function PushNotificationNotice({
           <Text style={styles.secondaryButtonText}>Retry</Text>
         </Pressable>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 

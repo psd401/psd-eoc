@@ -637,6 +637,7 @@ export default function StartEventScreen() {
       ]}
     >
       <ScrollView
+        automaticallyAdjustKeyboardInsets
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
         style={styles.page}

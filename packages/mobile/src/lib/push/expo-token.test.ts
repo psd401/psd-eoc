@@ -201,4 +201,26 @@ describe('explicit Expo push-token request', () => {
     ).rejects.toThrow('cancelled');
     expect(fetchCalls).toBe(0);
   });
+
+  test('names the transport failure so field reports can be diagnosed', async () => {
+    await expect(
+      requestExplicitExpoPushToken(
+        {
+          applicationId: 'invalid.example.eoc',
+          development: false,
+          deviceId: 'synthetic-installation-id',
+          devicePushToken: { type: 'ios', data: 'synthetic-apns-token' },
+          projectId: PROJECT_ID,
+          signal: new AbortController().signal,
+        },
+        async () => {
+          throw new TypeError(
+            'fetch failed: The Internet connection appears to be offline.',
+          );
+        },
+      ),
+    ).rejects.toThrow(
+      'Expo push-token request failed: fetch failed: The Internet connection appears to be offline.',
+    );
+  });
 });

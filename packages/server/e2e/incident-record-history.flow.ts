@@ -69,10 +69,24 @@ test.describe('incident-record-history', () => {
       `/records?facilityId=00000000-0000-4000-8000-000000000002`,
     );
     expect(southRecords?.status()).toBe(404);
+    // The seed puts North and South on one campus. A South event reaches
+    // North staff, so they can open it and post, but ending it stays with
+    // South and its record and export stay out of their records list.
+    const southExport = await context.request.get(
+      `/records/export/events/${fixture.records.southIncidentId}`,
+      { maxRedirects: 0 },
+    );
+    expect(southExport.ok()).toBe(false);
     const southEvent = await page.goto(
       `/events/${fixture.records.southIncidentId}`,
     );
-    expect(southEvent?.status()).toBe(404);
+    expect(southEvent?.status()).toBe(200);
+    await expect(
+      page.getByText('This event is closed. Its timeline is still here.'),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'End event', exact: true }),
+    ).toHaveCount(0);
 
     await page.goto('/records');
     await expectAxeClean(page);

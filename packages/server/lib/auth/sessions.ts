@@ -41,6 +41,7 @@ import {
   type Database,
   type DatabaseConnection,
 } from '../../db/client';
+import { campusMateFacilityIds } from './campus-scope';
 import {
   accessMembershipSnapshots,
   connectivityEpochInvalidations,
@@ -346,6 +347,11 @@ export interface StoredSessionContext {
   readonly membershipSnapshotId: string | null;
   readonly membershipCapturedAt: Date;
   readonly membershipScope: FacilityScope;
+  /**
+   * Schools sharing a campus with the stored facility scope; see
+   * `campusMateFacilityIds`. Absent for district scope.
+   */
+  readonly campusFacilityIds?: readonly string[];
   /** False keeps retained sessions manageable but never authorizes app use. */
   readonly membershipAccessActive: boolean;
   readonly revocation: SessionRevocation | null;
@@ -461,6 +467,19 @@ export interface SessionCapabilityTransaction extends CapabilityEngineTransactio
 /** Atomic session/idempotency/audit persistence boundary. */
 export type SessionCapabilityStore =
   CapabilityEngineStore<SessionCapabilityTransaction>;
+
+/** Campus mates of the effective scope, never the scope's own schools. */
+function campusScopeFor(
+  effectiveScope: FacilityScope,
+  campusFacilityIds: readonly string[] | undefined,
+): { campusFacilityIds?: readonly string[] } {
+  if (effectiveScope.kind === 'district' || campusFacilityIds === undefined) {
+    return {};
+  }
+  const own = new Set(effectiveScope.facilityIds);
+  const mates = campusFacilityIds.filter((id) => !own.has(id));
+  return mates.length === 0 ? {} : { campusFacilityIds: mates };
+}
 
 function intersectScopes(
   current: FacilityScope,
@@ -596,7 +615,10 @@ function authorizeStoredSession(
     source,
     ...(presentedTokenDigest === undefined ? {} : { presentedTokenDigest }),
     roles: result.user.roles,
-    scope: CapabilityScopeSchema.parse({ facilityScope: effectiveScope }),
+    scope: CapabilityScopeSchema.parse({
+      facilityScope: effectiveScope,
+      ...campusScopeFor(effectiveScope, context.campusFacilityIds),
+    }),
     membershipState,
     result,
   });
@@ -1292,6 +1314,7 @@ export class DrizzleSessionStore implements SessionStore {
     sessionId: string,
     expectedConnectivityEpochId?: string,
     now: Date = new Date(),
+    includeCampus = true,
   ): Promise<StoredSessionContext | null> {
     return this.database.transaction(
       (transaction) =>
@@ -1300,6 +1323,7 @@ export class DrizzleSessionStore implements SessionStore {
           sessionId,
           expectedConnectivityEpochId,
           now,
+          includeCampus,
         ),
       { isolationLevel: 'repeatable read', accessMode: 'read only' },
     );
@@ -1310,6 +1334,7 @@ export class DrizzleSessionStore implements SessionStore {
     sessionId: string,
     expectedConnectivityEpochId?: string,
     now: Date = new Date(),
+    includeCampus = true,
   ): Promise<StoredSessionContext | null> {
     const [identityRow] = await database
       .select({
@@ -1422,6 +1447,10 @@ export class DrizzleSessionStore implements SessionStore {
       capturedAt: decision.granted ? decision.capturedAt : now,
       scope: currentScope,
     } as const;
+    const campusFacilityIds =
+      currentScope.kind === 'district' || !includeCampus
+        ? undefined
+        : await campusMateFacilityIds(database, currentScope.facilityIds);
     const [revocationRow] = await database
       .select()
       .from(sessionRevocations)
@@ -1513,6 +1542,7 @@ export class DrizzleSessionStore implements SessionStore {
       membershipSnapshotId: membership.snapshotId,
       membershipCapturedAt: membership.capturedAt,
       membershipScope: membership.scope,
+      ...(campusFacilityIds === undefined ? {} : { campusFacilityIds }),
       membershipAccessActive,
       revocation,
       connectivityEpochActive:
@@ -2592,7 +2622,14 @@ export class DrizzleSessionStore implements SessionStore {
             continue;
           }
           try {
-            contexts[index] = await this.loadSessionContext(row.id);
+            // Listing sessions never authorizes a capability, so it skips
+            // the campus lookup that every other session load performs.
+            contexts[index] = await this.loadSessionContext(
+              row.id,
+              undefined,
+              undefined,
+              false,
+            );
           } catch (error) {
             if (
               error instanceof SessionAccessError &&

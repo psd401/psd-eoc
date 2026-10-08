@@ -16,7 +16,14 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { deviceEnrollments, groupMembers, groupSources } from '../../db/schema';
+import {
+  deviceEnrollments,
+  facilities,
+  groupMembers,
+  groupSources,
+  neighborhoodFacilities,
+  neighborhoodVersions,
+} from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   closeAndDropDisposableDatabase,
@@ -238,5 +245,68 @@ describeWithDatabase('sign-in to session round trip', () => {
       'web',
     );
     expect([...authenticated.roles]).toEqual(['staff']);
+  });
+
+  test('a school-group signer carries the other schools on their campus', async () => {
+    const now = new Date();
+    const capturedAt = new Date(now.getTime() - 60_000);
+    const north = randomUUID();
+    const south = randomUUID();
+    const southGroup = randomUUID();
+    const campus = randomUUID();
+    const email = 'round-trip-south@example.invalid';
+    await database()
+      .insert(facilities)
+      .values([
+        {
+          id: north,
+          code: `N-${north.slice(0, 6)}`.toUpperCase(),
+          name: 'North',
+        },
+        {
+          id: south,
+          code: `S-${south.slice(0, 6)}`.toUpperCase(),
+          name: 'South',
+        },
+      ]);
+    await database().transaction(async (transaction) => {
+      await transaction
+        .insert(neighborhoodVersions)
+        .values({ id: campus, version: 1, name: 'Round-trip campus' });
+      await transaction.insert(neighborhoodFacilities).values([
+        { neighborhoodId: campus, neighborhoodVersion: 1, facilityId: north },
+        { neighborhoodId: campus, neighborhoodVersion: 1, facilityId: south },
+      ]);
+    });
+    await database()
+      .insert(groupSources)
+      .values({
+        id: southGroup,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: south,
+        displayName: 'South staff',
+        active: true,
+        grantedRole: null,
+        membersCapturedAt: capturedAt,
+        googleGroupId: `provider-${southGroup}`,
+        email: `south-${southGroup}@example.invalid`,
+        fixtureKey: null,
+      });
+    await database()
+      .insert(groupMembers)
+      .values({ groupSourceId: southGroup, email, capturedAt });
+
+    const signedIn = await signIn(email, now);
+    const service = new SessionService(new DrizzleSessionStore(database()));
+    const authenticated = await service.authenticate(
+      signedIn.credential,
+      'web',
+    );
+    expect(authenticated.scope.facilityScope).toEqual({
+      kind: 'facilities',
+      facilityIds: [south],
+    });
+    expect(authenticated.scope.campusFacilityIds).toEqual([north]);
   });
 });

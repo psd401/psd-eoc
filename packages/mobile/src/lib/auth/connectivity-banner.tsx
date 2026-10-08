@@ -1,11 +1,17 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import type { AuthPhase } from './auth-controller';
 import { useMobileAuth } from './auth-provider';
+
+/** Whether the banner is drawn, and so owns the status-bar inset. */
+export function connectivityBannerVisible(phase: AuthPhase): boolean {
+  return phase === 'cached-checking' || phase === 'offline-cached';
+}
 
 export function ConnectivityBanner() {
   const { state, retryConnection } = useMobileAuth();
-  if (state.phase !== 'cached-checking' && state.phase !== 'offline-cached') {
+  if (!connectivityBannerVisible(state.phase)) {
     return null;
   }
   const checking = state.phase === 'cached-checking';

@@ -419,13 +419,11 @@ export function LocationEditor({
 
 export function LocationEntryContent({
   entryId,
-  entrySequence,
   mapVisible,
   onToggleMap,
   payload,
 }: Readonly<{
   entryId: string;
-  entrySequence: number;
   mapVisible: boolean;
   onToggleMap: () => void;
   payload: LocationPayload;
@@ -445,12 +443,12 @@ export function LocationEntryContent({
             onClick={onToggleMap}
             type="button"
           >
-            {mapVisible ? 'Hide' : 'Show'} map for entry {entrySequence}
+            {mapVisible ? 'Hide map' : 'Show map'}
           </button>
           <div hidden={!mapVisible} id={mapId}>
             {mapVisible ? (
               <SafeLocationMap
-                ariaLabel={`Posted location pin and accuracy radius for entry ${entrySequence}`}
+                ariaLabel="Posted location pin and accuracy radius"
                 mode="display"
                 payload={payload}
               />

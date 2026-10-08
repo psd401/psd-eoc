@@ -28,7 +28,7 @@ import {
   AppState,
   FlatList,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -42,10 +42,14 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 
 import { ClassificationBanner } from '../../components/classification-banner';
 import { AuthenticatedApiError } from '../../lib/api';
+import { useKeyboardOverlap } from '../../lib/keyboard';
 import {
   OFFLINE_ACTION_MESSAGE,
   useMobileAuth,
@@ -461,13 +465,6 @@ export function TimelineEntryCard({ api, projection }: TimelineEntryCardProps) {
         >
           {timelineEntryText(projection)}
         </Text>
-        <Text
-          accessibilityElementsHidden
-          importantForAccessibility="no"
-          style={styles.timelineSequence}
-        >
-          Timeline entry {entry.sequence}
-        </Text>
       </View>
       {visiblePhoto === null ? null : (
         <TimelinePhoto
@@ -615,19 +612,17 @@ export function JournalActionDialog({
       visible
     >
       <SafeAreaView style={styles.modalPage}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalPage}
-        >
+        <View style={styles.modalPage}>
           <ScrollView
+            automaticallyAdjustKeyboardInsets
             contentContainerStyle={styles.modalContent}
             keyboardShouldPersistTaps="handled"
           >
             <View style={styles.modalTitleRow}>
               <Text accessibilityRole="header" style={styles.modalTitle}>
                 {action === 'correction'
-                  ? `Correct timeline entry ${target.entry.sequence}`
-                  : `Redact timeline entry ${target.entry.sequence}`}
+                  ? 'Correct this update'
+                  : 'Redact this update'}
               </Text>
               <Pressable
                 accessibilityLabel="Cancel entry action"
@@ -777,7 +772,7 @@ export function JournalActionDialog({
               onPress={submit}
             />
           </ScrollView>
-        </KeyboardAvoidingView>
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -848,11 +843,9 @@ export function LifecycleConfirmationDialog({
       visible={visible}
     >
       <SafeAreaView style={styles.modalPage}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalPage}
-        >
+        <View style={styles.modalPage}>
           <ScrollView
+            automaticallyAdjustKeyboardInsets
             contentContainerStyle={styles.modalContent}
             keyboardShouldPersistTaps="handled"
           >
@@ -987,7 +980,7 @@ export function LifecycleConfirmationDialog({
               testID="lifecycle-confirm-button"
             />
           </ScrollView>
-        </KeyboardAvoidingView>
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -1037,11 +1030,9 @@ export function LocationComposerDialog(props: LocationComposerDialogProps) {
       visible={props.visible}
     >
       <SafeAreaView style={styles.modalPage}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalPage}
-        >
+        <View style={styles.modalPage}>
           <ScrollView
+            automaticallyAdjustKeyboardInsets
             contentContainerStyle={styles.modalContent}
             keyboardShouldPersistTaps="handled"
           >
@@ -1256,7 +1247,7 @@ export function LocationComposerDialog(props: LocationComposerDialogProps) {
               </Text>
             ) : null}
           </ScrollView>
-        </KeyboardAvoidingView>
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -1346,11 +1337,9 @@ export function PhotoComposerDialog({
       visible={visible}
     >
       <SafeAreaView style={styles.modalPage}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalPage}
-        >
+        <View style={styles.modalPage}>
           <ScrollView
+            automaticallyAdjustKeyboardInsets
             contentContainerStyle={styles.modalContent}
             keyboardShouldPersistTaps="handled"
           >
@@ -1486,7 +1475,7 @@ export function PhotoComposerDialog({
               </Text>
             ) : null}
           </ScrollView>
-        </KeyboardAvoidingView>
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -1502,6 +1491,9 @@ function AuthenticatedEventRoomScreen({
   sessionId: string;
 }>) {
   const { assertMutationAllowed, requestAuthenticated, state } = auth;
+  const keyboardOverlap = useKeyboardOverlap();
+  const keyboardOpen = keyboardOverlap > 0;
+  const safeAreaInsets = useSafeAreaInsets();
   const api = useMemo(
     () => new EventRoomApi(requestAuthenticated),
     [requestAuthenticated],
@@ -1694,6 +1686,10 @@ function AuthenticatedEventRoomScreen({
       followConfirmedEntry(projection);
       textMutationIdentityRef.current = null;
       setTextDraft('');
+      // On a phone the keyboard leaves the timeline almost no room, so the
+      // person would not see their own update land. Dropping the keyboard
+      // after a confirmed post shows it; a failed post keeps it up to retry.
+      Keyboard.dismiss();
     } catch (error) {
       setTextError(
         publicError(error, 'The update was not posted. Your text is retained.'),
@@ -2178,16 +2174,29 @@ function AuthenticatedEventRoomScreen({
           >
             {responseLabel}
           </Text>
-          <Text
-            style={[styles.facilityName, { color: theme.colors.textPrimary }]}
-          >
-            Threat: {threatLabel}
-          </Text>
-          <Text
-            style={[styles.facilityName, { color: theme.colors.textMuted }]}
-          >
-            {header.facility.name} · {header.facility.code}
-          </Text>
+          {/*
+            While typing, the keyboard takes about half a phone screen, and
+            these lines would push the composer below it. The header's
+            accessibility label still carries them, and the event name and
+            the classification banner below stay visible.
+          */}
+          {keyboardOpen ? null : (
+            <>
+              <Text
+                style={[
+                  styles.facilityName,
+                  { color: theme.colors.textPrimary },
+                ]}
+              >
+                Threat: {threatLabel}
+              </Text>
+              <Text
+                style={[styles.facilityName, { color: theme.colors.textMuted }]}
+              >
+                {header.facility.name} · {header.facility.code}
+              </Text>
+            </>
+          )}
         </View>
         <ClassificationBanner
           compact
@@ -2201,7 +2210,8 @@ function AuthenticatedEventRoomScreen({
           >
             Status: {event.status.replaceAll('-', ' ')}
           </Text>
-          {event.status === 'active' ? (
+          {!sync.model.viewerManagesLifecycle ? null : event.status ===
+            'active' ? (
             <ActionButton
               disabled={!online}
               label="End event…"
@@ -2217,7 +2227,7 @@ function AuthenticatedEventRoomScreen({
             />
           ) : null}
         </View>
-        {participants.length === 0 ? null : (
+        {participants.length === 0 || keyboardOpen ? null : (
           <View accessible style={styles.participantRow}>
             <Text
               accessibilityLabel={`In this event: ${participants
@@ -2312,9 +2322,14 @@ function AuthenticatedEventRoomScreen({
         )}
       </View>
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={88}
+      {/*
+        The page's SafeAreaView already pads the home-indicator inset, which
+        the keyboard covers too, so only the rest of the keyboard is added.
+      */}
+      <View
+        style={{
+          paddingBottom: Math.max(0, keyboardOverlap - safeAreaInsets.bottom),
+        }}
       >
         <View style={styles.composerBar}>
           {!eventAcceptsPosts ? (
@@ -2407,7 +2422,7 @@ function AuthenticatedEventRoomScreen({
             </>
           )}
         </View>
-      </KeyboardAvoidingView>
+      </View>
 
       <LocationComposerDialog
         ambiguousLabel={ambiguousLabel}
@@ -2668,11 +2683,6 @@ const styles = StyleSheet.create({
     textAlign: 'right',
   },
   timelineBody: { color: '#102A43', fontSize: 16, lineHeight: 23 },
-  timelineSequence: {
-    color: EVENT_ROOM_MUTED_TEXT_COLOR,
-    fontSize: 12,
-    lineHeight: 16,
-  },
   timelinePhoto: { borderRadius: 10, height: 200, width: '100%' },
   photoPlaceholder: {
     alignItems: 'center',

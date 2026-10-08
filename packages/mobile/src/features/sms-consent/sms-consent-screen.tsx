@@ -169,8 +169,10 @@ export function SmsConsentScreen() {
       style={[styles.page, { backgroundColor: theme.colors.pageBackground }]}
     >
       <ScrollView
+        automaticallyAdjustKeyboardInsets
         contentContainerStyle={styles.content}
         contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
       >
         <Text style={[styles.title, { color: theme.colors.textPrimary }]}>
           Emergency text messages

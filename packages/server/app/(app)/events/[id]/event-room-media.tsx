@@ -421,7 +421,6 @@ type PrivatePhotoObserverSupport =
 
 export function AuthorizedPhoto({
   entryId,
-  entrySequence,
   eventId,
   mediaId,
   altText,
@@ -434,7 +433,6 @@ export function AuthorizedPhoto({
   realEvent,
 }: Readonly<{
   entryId: string;
-  entrySequence: number;
   eventId: string;
   mediaId: string;
   altText: string;
@@ -898,7 +896,7 @@ export function AuthorizedPhoto({
             onClick={() => requestLoad('explicit')}
             type="button"
           >
-            Load private photo for entry {entrySequence}
+            Load private photo
           </button>
         </div>
       ) : null}
@@ -916,7 +914,7 @@ export function AuthorizedPhoto({
             onClick={() => requestLoad('explicit')}
             type="button"
           >
-            Retry private photo for entry {entrySequence}
+            Retry private photo
           </button>
         </div>
       )}
@@ -929,7 +927,6 @@ export type PrivatePhotoMountMode =
 
 export function DeferredPrivatePhoto({
   entryId,
-  entrySequence,
   altText,
   caption,
   onActivate,
@@ -937,7 +934,6 @@ export function DeferredPrivatePhoto({
   realEvent,
 }: Readonly<{
   entryId: string;
-  entrySequence: number;
   altText: string;
   caption: string | null;
   onActivate: () => void;
@@ -972,7 +968,7 @@ export function DeferredPrivatePhoto({
           onClick={onActivate}
           type="button"
         >
-          Load older private photo for entry {entrySequence}
+          Load older private photo
         </button>
       </div>
     </figure>

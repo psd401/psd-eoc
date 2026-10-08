@@ -14,7 +14,7 @@ import {
 } from 'react';
 import { AppState } from 'react-native';
 
-import { useMobileAuth } from '../auth';
+import { connectivityBannerVisible, useMobileAuth } from '../auth';
 import {
   configureForegroundPushHandling,
   currentNativePushPlatform,
@@ -33,6 +33,7 @@ import {
   PushRegistrationController,
   type PushRegistrationSession,
 } from './registration-controller';
+import { useKeyboardOverlap } from '../keyboard';
 import { PushNotificationNotice } from './permission-notice';
 import { PushResponseController } from './response-controller';
 
@@ -44,6 +45,7 @@ configureForegroundPushHandling();
 export function PushNotificationLifecycle() {
   const auth = useMobileAuth();
   const router = useRouter();
+  const keyboardOverlap = useKeyboardOverlap();
   const registrationRef = useRef<PushRegistrationController | null>(null);
   registrationRef.current ??= new PushRegistrationController({
     configuration: currentPushRegistrationConfiguration(),
@@ -205,8 +207,13 @@ export function PushNotificationLifecycle() {
     };
   }, [responses]);
 
+  // A notice above the app takes room the keyboard needs: with it showing,
+  // the event-room composer was pushed under the keyboard. It returns as soon
+  // as the keyboard closes.
+  if (keyboardOverlap > 0) return null;
   return (
     <PushNotificationNotice
+      belowTopBanner={connectivityBannerVisible(auth.state.phase)}
       onOpenSettings={() => {
         void registration.openSettings();
       }}

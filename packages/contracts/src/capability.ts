@@ -4,7 +4,7 @@ import {
   isInstalledMutationCapabilityId,
   isInstalledQueryCapabilityId,
 } from './capability-derived-registry';
-import { FacilityScopeSchema } from './facility';
+import { FacilityIdSchema, FacilityScopeSchema } from './facility';
 import { HumanOnlyActionIdSchema, isHumanOnlyActionId } from './human-only';
 import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
 
@@ -599,6 +599,14 @@ export type IdempotencyRecord = z.infer<typeof IdempotencyRecordSchema>;
 export const CapabilityScopeSchema = z
   .object({
     facilityScope: FacilityScopeSchema,
+    /**
+     * Schools on the same campus as a facility-limited person's own. Events
+     * there notify this person, so capabilities that declare campus
+     * participation (opening an event, reading and posting to its timeline)
+     * accept them too. It never widens starting, ending, or correcting an
+     * event, and is absent for district scope and for agents.
+     */
+    campusFacilityIds: z.array(FacilityIdSchema).max(500).readonly().optional(),
   })
   .strict()
   .readonly();

@@ -440,13 +440,23 @@ export const syncEventRoomRegistration: ServerCapabilityRegistration<
   EventRoomCapabilityTransaction
 > = {
   id: 'sync-event-room',
+  campusParticipation: true,
   async resolveFacilityId(input, context) {
     return (await cachedDescriptor(input, context)).event.facilityId;
   },
   async handler(input, context) {
     const descriptor = await cachedDescriptor(input, context);
     await context.transaction.beforeSync();
-    return context.transaction.syncEventRoom(input, descriptor);
+    const result = await context.transaction.syncEventRoom(input, descriptor);
+    const facilityScope = context.invocation.scope.facilityScope;
+    // A campus mate reaches this capability through `campusParticipation`;
+    // ending the event stays with the event's own school.
+    return {
+      ...result,
+      viewerManagesLifecycle:
+        facilityScope.kind === 'district' ||
+        facilityScope.facilityIds.includes(descriptor.event.facilityId),
+    };
   },
 };
 

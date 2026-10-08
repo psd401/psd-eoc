@@ -288,6 +288,13 @@ export interface ServerCapabilityRegistration<
     input: CapabilityInput<Id>,
     context: CapabilityHandlerContext<Transaction>,
   ) => string | null | Promise<string | null>;
+  /**
+   * Also admits a facility on the caller's campus (`campusFacilityIds`), not
+   * only the caller's own schools. Declared only by capabilities that open an
+   * event and take part in its timeline; starting, ending, correcting, and
+   * every other capability keep the strict facility scope.
+   */
+  readonly campusParticipation?: true;
   readonly resolveSafety?: (
     request: CapabilitySafetyResolutionRequest,
     context: CapabilityHandlerContext<Transaction>,
@@ -392,11 +399,16 @@ function sameStrings(
 function scopeAllowsFacility(
   scope: CapabilityScope,
   facilityId: string | null,
+  campusParticipation = false,
 ): boolean {
   if (facilityId === null || scope.facilityScope.kind === 'district') {
     return true;
   }
-  return scope.facilityScope.facilityIds.includes(facilityId);
+  return (
+    scope.facilityScope.facilityIds.includes(facilityId) ||
+    (campusParticipation &&
+      (scope.campusFacilityIds?.includes(facilityId) ?? false))
+  );
 }
 
 function assertInvocationAllowed(
@@ -868,7 +880,13 @@ async function authorizeExecution<
   assertInvocationAllowed(registration.id, invocation);
   const facilityId = await registration.resolveFacilityId(input, context);
   context.resolvedFacilityId = facilityId;
-  if (!scopeAllowsFacility(invocation.scope, facilityId)) {
+  if (
+    !scopeAllowsFacility(
+      invocation.scope,
+      facilityId,
+      registration.campusParticipation === true,
+    )
+  ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',
       'CAPABILITY_SCOPE_DENIED',
@@ -1259,7 +1277,13 @@ export async function executeAuditedCapabilityTransaction<
                 transactionContext,
               );
               transactionContext.resolvedFacilityId = facilityId;
-              if (!scopeAllowsFacility(invocation.scope, facilityId)) {
+              if (
+                !scopeAllowsFacility(
+                  invocation.scope,
+                  facilityId,
+                  registration.campusParticipation === true,
+                )
+              ) {
                 throw new CapabilityEngineError(
                   'FORBIDDEN',
                   'CAPABILITY_SCOPE_DENIED',

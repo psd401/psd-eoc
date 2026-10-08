@@ -1303,6 +1303,7 @@ export const joinEventRegistration: ServerCapabilityRegistration<
   EventCapabilityTransaction
 > = {
   id: 'join-event',
+  campusParticipation: true,
   async resolveFacilityId(input, context) {
     return eventFacilityId(input.eventId, context);
   },
@@ -1364,6 +1365,7 @@ export const listActiveEventsRegistration: ServerCapabilityRegistration<
   EventCapabilityTransaction
 > = {
   id: 'list-active-events',
+  campusParticipation: true,
   resolveFacilityId: (input) => input.facilityId,
   async handler(input, context): Promise<EventPage> {
     return EventPageSchema.parse(
@@ -1380,6 +1382,7 @@ export const getEventRegistration: ServerCapabilityRegistration<
   EventCapabilityTransaction
 > = {
   id: 'get-event',
+  campusParticipation: true,
   async resolveFacilityId(input, context) {
     return eventFacilityId(input.eventId, context);
   },
@@ -2717,7 +2720,9 @@ function createDrizzleEventTransaction(
         input.facilityId !== null
           ? [input.facilityId]
           : facilityScope.kind === 'facilities'
-            ? [...facilityScope.facilityIds]
+            ? // Campus events notify this person, so they are listed too;
+              // see `campusParticipation`.
+              [...facilityScope.facilityIds, ...(scope.campusFacilityIds ?? [])]
             : null;
       const rows = await database
         .select()

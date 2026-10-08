@@ -453,6 +453,7 @@ function createRegistrations(
     MediaCapabilityTransaction
   > = {
     id: 'create-media-upload-intent',
+    campusParticipation: true,
     resolveFacilityId: (input, context) =>
       eventFacilityId(input.eventId, context),
     async handler(input, context): Promise<MediaUploadIntent> {
@@ -515,6 +516,7 @@ function createRegistrations(
     MediaCapabilityTransaction
   > = {
     id: 'complete-media-upload',
+    campusParticipation: true,
     async resolveFacilityId(input, context) {
       return (await uploadIntent(input.uploadIntentId, context, false))
         .facilityId;
@@ -632,6 +634,7 @@ function createRegistrations(
     MediaCapabilityTransaction
   > = {
     id: 'get-media-read-grant',
+    campusParticipation: true,
     async resolveFacilityId(input, context) {
       return (await readyMedia(input.eventId, input.mediaId, context))
         .facilityId;

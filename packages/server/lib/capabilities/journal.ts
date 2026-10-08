@@ -1060,6 +1060,7 @@ export const appendJournalEntryRegistration: ServerCapabilityRegistration<
   JournalCapabilityTransaction
 > = {
   id: 'append-journal-entry',
+  campusParticipation: true,
   resolveFacilityId: (input, context) =>
     eventFacilityId(input.eventId, context),
   handler: (input, context) =>
@@ -1105,6 +1106,7 @@ export const listJournalEntriesRegistration: ServerCapabilityRegistration<
   JournalCapabilityTransaction
 > = {
   id: 'list-journal-entries',
+  campusParticipation: true,
   resolveFacilityId: (input, context) =>
     eventFacilityId(input.eventId, context),
   async handler(input, context): Promise<JournalEntryPage> {
@@ -1158,6 +1160,7 @@ export const getFacilityRegistration: ServerCapabilityRegistration<
   JournalCapabilityTransaction
 > = {
   id: 'get-facility',
+  campusParticipation: true,
   resolveFacilityId: (input) => input.facilityId,
   async handler(input, context): Promise<Facility> {
     const facility = await context.transaction.getFacility(input.facilityId);

@@ -1,6 +1,7 @@
 import { Stack } from 'expo-router';
 import type { ReactNode } from 'react';
 import { StyleSheet, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AuthProvider, ConnectivityBanner, useMobileAuth } from '../lib/auth';
 import { PushNotificationLifecycle } from '../lib/push';
@@ -18,62 +19,69 @@ export function AuthenticatedStack() {
     <View style={styles.shell}>
       <ConnectivityBanner />
       <PushNotificationLifecycle />
-      <Stack
-        screenOptions={{
-          headerBackTitle: 'Home',
-          headerTintColor: '#17324D',
-          headerTitleStyle: {
-            fontWeight: '800',
-          },
-        }}
-      >
-        <Stack.Protected guard={hasCachedShell}>
-          <Stack.Screen name="index" options={{ title: 'PSD EOC' }} />
-          <Stack.Screen
-            name="release-diagnostic"
-            options={{ title: 'Release diagnostics' }}
-          />
-          <Stack.Screen name="(app)" options={{ headerShown: false }} />
-          <Stack.Screen
-            name="start/index"
-            options={{ headerShown: false, title: 'Start event' }}
-          />
-          <Stack.Screen
-            name="preview/real"
-            options={{ title: 'Real incident preview' }}
-          />
-          <Stack.Screen
-            name="preview/drill"
-            options={{ title: 'Drill preview' }}
-          />
-        </Stack.Protected>
+      {/*
+        The banners above take the status-bar inset when they show. This
+        provider measures insets from where the stack actually starts, so a
+        screen below a banner does not reserve the status bar a second time.
+      */}
+      <SafeAreaProvider style={styles.stack}>
+        <Stack
+          screenOptions={{
+            headerBackTitle: 'Home',
+            headerTintColor: '#17324D',
+            headerTitleStyle: {
+              fontWeight: '800',
+            },
+          }}
+        >
+          <Stack.Protected guard={hasCachedShell}>
+            <Stack.Screen name="index" options={{ title: 'PSD EOC' }} />
+            <Stack.Screen
+              name="release-diagnostic"
+              options={{ title: 'Release diagnostics' }}
+            />
+            <Stack.Screen name="(app)" options={{ headerShown: false }} />
+            <Stack.Screen
+              name="start/index"
+              options={{ headerShown: false, title: 'Start event' }}
+            />
+            <Stack.Screen
+              name="preview/real"
+              options={{ title: 'Real incident preview' }}
+            />
+            <Stack.Screen
+              name="preview/drill"
+              options={{ title: 'Drill preview' }}
+            />
+          </Stack.Protected>
 
-        <Stack.Protected guard={showUnlock}>
-          <Stack.Screen
-            name="(auth)/unlock"
-            options={{ headerShown: false, title: 'Unlock PSD EOC' }}
-          />
-        </Stack.Protected>
+          <Stack.Protected guard={showUnlock}>
+            <Stack.Screen
+              name="(auth)/unlock"
+              options={{ headerShown: false, title: 'Unlock PSD EOC' }}
+            />
+          </Stack.Protected>
 
-        <Stack.Protected guard={showSignIn}>
-          <Stack.Screen
-            name="(auth)/sign-in"
-            options={{ headerShown: false, title: 'Sign in to PSD EOC' }}
-          />
-        </Stack.Protected>
+          <Stack.Protected guard={showSignIn}>
+            <Stack.Screen
+              name="(auth)/sign-in"
+              options={{ headerShown: false, title: 'Sign in to PSD EOC' }}
+            />
+          </Stack.Protected>
 
-        {/*
+          {/*
           Deliberately outside every guard: the Android OIDC redirect lands here
           precisely when there is no session yet, so a guard that depends on one
           would turn the callback back into an Unmatched Route. Declared last so
           it stays a destination and never becomes the anchor route — `index`
           holds that position.
         */}
-        <Stack.Screen
-          name="auth/callback"
-          options={{ headerShown: false, title: 'Completing sign-in' }}
-        />
-      </Stack>
+          <Stack.Screen
+            name="auth/callback"
+            options={{ headerShown: false, title: 'Completing sign-in' }}
+          />
+        </Stack>
+      </SafeAreaProvider>
     </View>
   );
 }
@@ -103,6 +111,7 @@ export default function RootLayout() {
 }
 
 const styles = StyleSheet.create({
+  stack: { flex: 1 },
   shell: {
     backgroundColor: '#F4F7FA',
     flex: 1,

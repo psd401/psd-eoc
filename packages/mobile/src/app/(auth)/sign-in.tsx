@@ -103,6 +103,7 @@ export default function SignInScreen() {
   return (
     <SafeAreaView style={styles.page}>
       <ScrollView
+        automaticallyAdjustKeyboardInsets
         contentContainerStyle={styles.content}
         contentInsetAdjustmentBehavior="automatic"
         keyboardShouldPersistTaps="handled"

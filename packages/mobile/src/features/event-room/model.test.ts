@@ -129,6 +129,21 @@ function page(
 }
 
 describe('event-room model', () => {
+  test('keeps a campus mate out of ending the event, and older servers in', () => {
+    const older = applyEventRoomPage(
+      EMPTY_EVENT_ROOM_MODEL,
+      page([textEntry(1)], false, true),
+      { initialCatchUp: true, nearLiveEdge: true },
+    );
+    expect(older.viewerManagesLifecycle).toBe(true);
+    const campus = applyEventRoomPage(
+      EMPTY_EVENT_ROOM_MODEL,
+      { ...page([textEntry(1)], false, true), viewerManagesLifecycle: false },
+      { initialCatchUp: true, nearLiveEdge: true },
+    );
+    expect(campus.viewerManagesLifecycle).toBe(false);
+  });
+
   test('drains late-join pages in order and deduplicates replayed entries', () => {
     const first = applyEventRoomPage(
       EMPTY_EVENT_ROOM_MODEL,
