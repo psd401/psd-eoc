@@ -447,7 +447,16 @@ export const syncEventRoomRegistration: ServerCapabilityRegistration<
   async handler(input, context) {
     const descriptor = await cachedDescriptor(input, context);
     await context.transaction.beforeSync();
-    return context.transaction.syncEventRoom(input, descriptor);
+    const result = await context.transaction.syncEventRoom(input, descriptor);
+    const facilityScope = context.invocation.scope.facilityScope;
+    // A campus mate reaches this capability through `campusParticipation`;
+    // ending the event stays with the event's own school.
+    return {
+      ...result,
+      viewerManagesLifecycle:
+        facilityScope.kind === 'district' ||
+        facilityScope.facilityIds.includes(descriptor.event.facilityId),
+    };
   },
 };
 

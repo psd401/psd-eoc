@@ -308,6 +308,13 @@ export const EventRoomSyncResultSchema = z
     cursor: PaginationCursorSchema,
     hasMore: z.boolean(),
     snapshotSequence: z.number().int().nonnegative(),
+    /**
+     * Whether the viewer may end this event (all-clear and close). False for
+     * a staff member reading a campus mate's event: they can open it and post,
+     * but its status belongs to the school where it started. Absent from
+     * servers that predate the field, which clients read as true.
+     */
+    viewerManagesLifecycle: z.boolean().optional(),
   })
   .strict()
   .superRefine((result, context) => {

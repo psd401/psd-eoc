@@ -122,6 +122,11 @@ export interface EventRoomProps {
   readonly initialSnapshotSequence: number;
   /** True when the client must drain more history before announcing updates. */
   readonly initialHasMore: boolean;
+  /**
+   * False for a campus mate's event: the viewer can read and post, but the
+   * event's own school ends it. Defaults to true.
+   */
+  readonly viewerManagesLifecycle?: boolean;
   /** Authorized display label; never used for authorization or mutation input. */
   readonly facilityLabel: string;
   /** Pinned event-type-version label; never used as classification input. */
@@ -200,6 +205,7 @@ export function EventRoom({
   sessionId,
   authorDisplayName,
   displayTimeZone,
+  viewerManagesLifecycle = true,
 }: EventRoomProps) {
   const sync = useEventRoomSync({
     event,
@@ -582,7 +588,13 @@ export function EventRoom({
           <strong>{statusLabel(currentEvent)}</strong>
         </p>
         <div className="lifecycle-actions">
-          {currentEvent.status === 'active' ? (
+          {!viewerManagesLifecycle && currentEvent.status !== 'closed' ? (
+            <p>
+              This event started at {facilityLabel}. Staff there end it; you can
+              follow it and post updates here.
+            </p>
+          ) : null}
+          {viewerManagesLifecycle && currentEvent.status === 'active' ? (
             <button
               aria-haspopup="dialog"
               className="danger"
@@ -593,7 +605,7 @@ export function EventRoom({
               End event
             </button>
           ) : null}
-          {currentEvent.status === 'all-clear' ? (
+          {viewerManagesLifecycle && currentEvent.status === 'all-clear' ? (
             <>
               <p>Staff have the all-clear. This event is not closed yet.</p>
               <button

@@ -20,6 +20,11 @@ export const LIVE_EDGE_DISTANCE_PX = 96;
 export interface EventRoomModel {
   readonly event: Event | null;
   readonly header: EventRoomHeader | null;
+  /**
+   * False when this person reached the room as a campus mate: they read and
+   * post, the event's own school ends it. True until a server says otherwise.
+   */
+  readonly viewerManagesLifecycle: boolean;
   readonly entries: readonly JournalEntryReadProjection[];
   readonly cursor: string | null;
   readonly snapshotSequence: number;
@@ -31,6 +36,7 @@ export interface EventRoomModel {
 export const EMPTY_EVENT_ROOM_MODEL: EventRoomModel = Object.freeze({
   event: null,
   header: null,
+  viewerManagesLifecycle: true,
   entries: Object.freeze([]),
   cursor: null,
   snapshotSequence: 0,
@@ -230,6 +236,8 @@ export function applyEventRoomPage(
   return Object.freeze({
     event: nextEvent,
     header: nextHeader,
+    viewerManagesLifecycle:
+      page.viewerManagesLifecycle ?? model.viewerManagesLifecycle,
     entries,
     cursor: page.cursor,
     snapshotSequence: Math.max(model.snapshotSequence, page.snapshotSequence),

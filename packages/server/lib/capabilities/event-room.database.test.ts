@@ -969,4 +969,26 @@ describeWithDatabase('event-room atomic synchronization', () => {
       .where(eq(securityAuditEntries.requestId, requestId));
     expect(rows).toHaveLength(0);
   });
+
+  test('tells a campus mate the event is theirs to follow, not to end', async () => {
+    const eventId = await createActiveEvent();
+    const campusMate = randomUUID();
+    const own = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 100 },
+      invocation(),
+    );
+    const campus = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 100 },
+      {
+        ...invocation(),
+        scope: {
+          facilityScope: { kind: 'facilities', facilityIds: [campusMate] },
+          campusFacilityIds: [fixtures().facilityId],
+        },
+      },
+    );
+    expect(own.viewerManagesLifecycle).toBe(true);
+    expect(campus.viewerManagesLifecycle).toBe(false);
+    expect(campus.header).toEqual(expectedHeader());
+  });
 });

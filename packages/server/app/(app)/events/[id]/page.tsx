@@ -112,6 +112,7 @@ export default async function EventRoomPage({
         initialHasMore={initialSync.hasMore}
         initialSnapshotSequence={initialSync.snapshotSequence}
         sessionId={authenticated.result.session.id}
+        viewerManagesLifecycle={initialSync.viewerManagesLifecycle ?? true}
       />
     );
   } catch (error) {

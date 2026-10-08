@@ -268,6 +268,7 @@ function render(
   event: Event,
   entries: readonly JournalEntry[] = ENTRIES,
   initialHasMore = false,
+  viewerManagesLifecycle = true,
 ) {
   return renderToStaticMarkup(
     <EventRoom
@@ -288,11 +289,24 @@ function render(
       initialHasMore={initialHasMore}
       initialSnapshotSequence={entries.at(-1)?.sequence ?? 0}
       sessionId={IDS.session}
+      viewerManagesLifecycle={viewerManagesLifecycle}
     />,
   );
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('lets a campus mate post but leaves ending the event to its school', () => {
+    const own = render(activeEvent('drill'), []);
+    const campus = render(activeEvent('drill'), [], false, false);
+
+    expect(own).toContain('>End event</button>');
+    expect(campus).not.toContain('>End event</button>');
+    expect(campus).toContain(
+      'This event started at Synthetic North Campus. Staff there end it',
+    );
+    expect(campus).toContain('Post an update');
+  });
+
   test('builds web lifecycle requests without typed acknowledgement fields', () => {
     expect(
       webLifecycleCommandBody({

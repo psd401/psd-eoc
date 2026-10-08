@@ -2210,7 +2210,8 @@ function AuthenticatedEventRoomScreen({
           >
             Status: {event.status.replaceAll('-', ' ')}
           </Text>
-          {event.status === 'active' ? (
+          {!sync.model.viewerManagesLifecycle ? null : event.status ===
+            'active' ? (
             <ActionButton
               disabled={!online}
               label="End event…"
