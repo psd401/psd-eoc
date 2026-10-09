@@ -46,4 +46,5 @@ jobs:
         explains why. And a `*.database.test.ts` that stops running is a
         silently weakened gate, because those tests skip rather than fail when
         no database is configured.
-    secrets: inherit
+    secrets:
+      BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
