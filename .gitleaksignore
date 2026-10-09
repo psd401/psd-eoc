@@ -1,0 +1,18 @@
+# gitleaks baseline: historical findings reviewed 2026-10-09 (Hagel). One fingerprint per line.
+# New findings are NOT covered: anything not listed here still fails security-scan.
+#
+# False positives: test fixtures only. The aws-access-token hits are the fake ASIA1234…CDEF key with
+# 'temporary-secret-key-material'; the private-key hit is 'A'.repeat(128).
+0894cf8c264c4021b54af696d2ac9f54696ca3bd:infra/gcp/terraform.test.ts:generic-api-key:678
+2426dc59dccf5e16d785209c5b3ce903da0ac320:workers/push/direct-adapter.test.ts:generic-api-key:35
+2426dc59dccf5e16d785209c5b3ce903da0ac320:workers/push/service.test.ts:private-key:87
+4b31514c93b773f9832f718eae6cc1484efdcf33:packages/server/lib/capabilities/engine.test.ts:generic-api-key:703
+4b31514c93b773f9832f718eae6cc1484efdcf33:packages/server/lib/capabilities/events.test.ts:generic-api-key:1229
+4b31514c93b773f9832f718eae6cc1484efdcf33:packages/server/lib/capabilities/events.test.ts:generic-api-key:1629
+52c47fa124b6d423942ff833005d1c07ba1f9ecc:packages/contracts/src/contracts.test.ts:generic-api-key:1307
+52c47fa124b6d423942ff833005d1c07ba1f9ecc:packages/contracts/src/contracts.test.ts:generic-api-key:1320
+748c3a6725a473fd160030e8592694fe25f0350b:packages/server/scripts/exploration-smoke/bootstrap.test.ts:aws-access-token:192
+748c3a6725a473fd160030e8592694fe25f0350b:packages/server/scripts/exploration-smoke/bootstrap.test.ts:aws-access-token:247
+c0473418d45e8ee96d9cc7c30b9f7ef835ca19c7:packages/mobile/src/lib/start/start-mutation-coordinator.test.ts:generic-api-key:32
+ca01cc3aa31a4a53a26053fc6a5a9e7718a444e4:packages/mobile/native-tests/event-room-screen.native.tsx:generic-api-key:330
+ca01cc3aa31a4a53a26053fc6a5a9e7718a444e4:packages/mobile/native-tests/event-room-screen.native.tsx:generic-api-key:342
