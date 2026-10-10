@@ -1,0 +1,19 @@
+name: PSD CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  psd-ci:
+    # @main is deliberate: org-owned reusable; central bumps must propagate
+    # (psd-dev-standards standards/06). zizmor: ignore[unpinned-uses]
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      # Static half of `bun run check` (the repo's authoritative gate).
+      lint-command: 'bun run format:check && bun run lint && bun run verify:config && bun run verify:docs'
+      # `test` is test:full, which requires PostgreSQL (TEST_DATABASE_URL) and
+      # Poppler; ci.yml's gate job covers it. test:unit is the repo's
+      # database-free subset (scripts/test.ts --unit-only).
+      test-command: 'bun run test:unit'
