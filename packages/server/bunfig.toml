@@ -1,0 +1,5 @@
+[test]
+# The root bunfig.toml's preload, for `bun test` run from this directory:
+# `bun test` does not read a parent directory's [test] section. `bun add` and
+# `bun install` still apply the root [install] settings from here.
+preload = ["../../scripts/test-preload.ts"]

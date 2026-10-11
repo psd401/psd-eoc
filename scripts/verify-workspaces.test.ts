@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import {
   isTypeScriptSource,
@@ -66,4 +73,27 @@ describe('root Bun workspace coverage', () => {
       'packages/example/missed.mts is not included by packages/example/tsconfig.json.',
     );
   });
+});
+
+describe('test preload', () => {
+  const repositoryRoot = resolve(import.meta.dir, '..');
+  const preload = join(repositoryRoot, 'scripts/test-preload.ts');
+
+  // Bun reads bunfig.toml from the working directory only, and the gate runs
+  // from the root, so nothing else would notice packages/server losing it.
+  test.each(['bunfig.toml', 'packages/server/bunfig.toml'])(
+    '%s preloads the synthetic district',
+    (path) => {
+      const file = join(repositoryRoot, path);
+      expect(existsSync(file)).toBe(true);
+      const config = Bun.TOML.parse(readFileSync(file, 'utf8')) as {
+        readonly test?: { readonly preload?: readonly string[] };
+      };
+      const preloads = (config.test?.preload ?? []).map((entry) =>
+        resolve(dirname(file), entry),
+      );
+      expect(preloads).toEqual([preload]);
+      expect(existsSync(preload)).toBe(true);
+    },
+  );
 });

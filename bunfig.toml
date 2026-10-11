@@ -2,5 +2,6 @@
 exact = true
 
 [test]
-# Every test runs as a synthetic district, never as this one.
+# Deployment values default to a synthetic district; a value already set in
+# the environment wins (see scripts/test-preload.ts).
 preload = ["./scripts/test-preload.ts"]
