@@ -3,12 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import {
-  IdempotencyPrincipalSchema,
-  UserSchema,
-  type Role,
-} from '@psd-eoc/contracts';
-import { eq, inArray } from 'drizzle-orm';
+import { IdempotencyPrincipalSchema, type Role } from '@psd-eoc/contracts';
+import { inArray } from 'drizzle-orm';
 
 import {
   createDrizzleStartFlowCapabilityStore,
@@ -28,8 +24,6 @@ import {
   mediaUploadIntents,
   rosterSnapshots,
   rosterSourceConfigurations,
-  userFacilityScopes,
-  users,
 } from '../db/schema';
 import { migrateDatabase } from '../drizzle/migrate';
 import { createCsrfToken } from '../lib/auth/middleware';
@@ -117,7 +111,6 @@ async function issueIdentity(
     email: string;
     displayName: string;
     groupSourceId: string;
-    facilityIds: readonly string[] | null;
     now: Date;
     statePath: string;
   }>,
@@ -133,27 +126,9 @@ async function issueIdentity(
     throw new Error(`Synthetic sign-in was refused: ${authorization.refusal}`);
   }
 
-  const facilityScope =
-    input.facilityIds === null
-      ? ({ kind: 'district' } as const)
-      : ({ kind: 'facilities', facilityIds: input.facilityIds } as const);
-  if (input.facilityIds !== null) {
-    await connection.db
-      .update(users)
-      .set({ facilityScopeKind: 'facilities' })
-      .where(eq(users.id, authorization.user.id));
-    await connection.db.insert(userFacilityScopes).values(
-      input.facilityIds.map((facilityId) => ({
-        userId: authorization.user.id,
-        facilityId,
-      })),
-    );
-  }
-
-  const user = UserSchema.parse({
-    ...authorization.user,
-    facilityScope,
-  });
+  // Where the identity acts is what its group grants, as in production: a
+  // school staff group limits it to that school, a sign-in group does not.
+  const user = authorization.user;
   const credential = randomBytes(48).toString('base64url');
   const responseDigest = digestWebSessionCredential(randomUUID());
   const principal = IdempotencyPrincipalSchema.parse({
@@ -562,33 +537,35 @@ async function main(): Promise<void> {
 
     const now = new Date();
     const adminGroupId = randomUUID();
-    const staffGroupId = randomUUID();
-    await opened.db
-      .insert(groupSources)
-      .values([
-        accessGroup(adminGroupId, 'admin', now),
-        accessGroup(staffGroupId, 'staff', now),
-      ]);
+    const facilityStaffGroupId = randomUUID();
+    await opened.db.insert(groupSources).values([
+      accessGroup(adminGroupId, 'admin', now),
+      {
+        id: facilityStaffGroupId,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: SYNTHETIC_FACILITY_ID,
+        displayName: 'Synthetic facility staff group',
+        active: true,
+        grantedRole: null,
+        membersCapturedAt: now,
+        googleGroupId: `synthetic-browser-building-${facilityStaffGroupId}`,
+        email: `synthetic-browser-building-${facilityStaffGroupId}@example.invalid`,
+        fixtureKey: null,
+        createdAt: now,
+      },
+    ]);
     const identities = [
       {
         email: 'district-admin@example.invalid',
         displayName: 'Synthetic District Administrator',
         groupSourceId: adminGroupId,
-        facilityIds: null,
         stateName: 'district-admin.json',
-      },
-      {
-        email: 'facility-admin@example.invalid',
-        displayName: 'Synthetic Facility Administrator',
-        groupSourceId: adminGroupId,
-        facilityIds: [SYNTHETIC_FACILITY_ID],
-        stateName: 'facility-admin.json',
       },
       {
         email: 'facility-staff@example.invalid',
         displayName: 'Synthetic Facility Staff',
-        groupSourceId: staffGroupId,
-        facilityIds: [SYNTHETIC_FACILITY_ID],
+        groupSourceId: facilityStaffGroupId,
         stateName: 'facility-staff.json',
       },
     ] as const;

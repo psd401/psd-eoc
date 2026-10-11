@@ -114,31 +114,37 @@ export async function authorizeSignIn(
       throw new Error('The signing-in account could not be resolved.');
     }
 
-    // Someone admitted only by their school's staff group acts at that
-    // school and nowhere else, and their limit follows the group: moving to
-    // another school's group moves them at their next sign-in. Anyone a
-    // sign-in group or an admission admits keeps the limit an administrator
-    // set on the Access page, which this never touches.
+    // Where someone acts is what their groups say today, rewritten at every
+    // sign-in: a district group grants the district, school groups grant
+    // their schools, and moving between groups moves the person. Only an
+    // account a direct admission alone lets in keeps the limit an
+    // administrator set on the Access page. This used to write a school
+    // limit and never take it back, so district staff who had once signed in
+    // through only their building's group stayed limited to that building
+    // after joining the district group.
     let facilityScopeKind = user.facilityScopeKind;
-    if (decision.schoolFacilityIds !== null) {
+    const granted = decision.facilityScope;
+    if (granted !== null) {
       // The order every writer of a person's facility limit takes: the
       // administrator-availability lock first, then the rows.
       await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
       await transaction
         .delete(userFacilityScopes)
         .where(eq(userFacilityScopes.userId, user.id));
-      await transaction.insert(userFacilityScopes).values(
-        decision.schoolFacilityIds.map((facilityId) => ({
-          userId: user.id,
-          facilityId,
-        })),
-      );
-      if (facilityScopeKind !== 'facilities') {
+      if (granted.kind === 'facilities') {
+        await transaction.insert(userFacilityScopes).values(
+          granted.facilityIds.map((facilityId) => ({
+            userId: user.id,
+            facilityId,
+          })),
+        );
+      }
+      if (facilityScopeKind !== granted.kind) {
         await transaction
           .update(users)
-          .set({ facilityScopeKind: 'facilities' })
+          .set({ facilityScopeKind: granted.kind })
           .where(eq(users.id, user.id));
-        facilityScopeKind = 'facilities';
+        facilityScopeKind = granted.kind;
       }
     }
 

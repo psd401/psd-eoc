@@ -1411,10 +1411,17 @@ export class DrizzleSessionStore implements SessionStore {
       .select({ facilityId: userFacilityScopes.facilityId })
       .from(userFacilityScopes)
       .where(eq(userFacilityScopes.userId, userRow.id));
-    const currentScope = buildFacilityScope(
-      userRow.facilityScopeKind,
-      facilityRows.map((row) => row.facilityId),
-    );
+    // Where the person acts is what their groups say now, on every request,
+    // so a phone that stays signed in for weeks follows group changes too.
+    // The stored limit decides only for an account a direct admission alone
+    // lets in, and for a refused session that authorizes nothing anyway.
+    const currentScope =
+      decision.granted && decision.facilityScope !== null
+        ? decision.facilityScope
+        : buildFacilityScope(
+            userRow.facilityScopeKind,
+            facilityRows.map((row) => row.facilityId),
+          );
     const user = UserSchema.parse({
       id: userRow.id,
       googleSubject: userRow.googleSubject,

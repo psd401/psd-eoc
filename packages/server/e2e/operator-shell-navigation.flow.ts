@@ -99,21 +99,10 @@ test.describe('operator-shell-navigation', () => {
     });
   });
 
-  test('server authorization filters facility admin and staff destinations', async ({
+  test('server authorization filters facility staff destinations', async ({
     browser,
   }) => {
     const cases = [
-      {
-        state: 'facility-admin.json',
-        labels: [
-          'Events',
-          'Start event',
-          'Records',
-          'Text alerts',
-          'Devices',
-          'Audit',
-        ],
-      },
       {
         state: 'facility-staff.json',
         labels: ['Events', 'Start event', 'Records', 'Text alerts'],

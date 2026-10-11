@@ -309,4 +309,65 @@ describeWithDatabase('sign-in to session round trip', () => {
     });
     expect(authenticated.scope.campusFacilityIds).toEqual([north]);
   });
+
+  test('a signed-in school-group member is district-wide once a district group admits them', async () => {
+    // Friday 2026-10-09: district staff in both the district group and their
+    // building's group could not see other schools' events, because an
+    // earlier sign-in through only the building group left a school limit
+    // that nothing took back. A phone stays signed in for weeks, so the
+    // groups must decide on every request, not only at the next sign-in.
+    const now = new Date();
+    const capturedAt = new Date(now.getTime() - 60_000);
+    const office = randomUUID();
+    const officeGroup = randomUUID();
+    const districtGroup = randomUUID();
+    const email = 'round-trip-district-office@example.invalid';
+    await database()
+      .insert(facilities)
+      .values({
+        id: office,
+        code: `O-${office.slice(0, 6)}`.toUpperCase(),
+        name: 'Office',
+      });
+    await database()
+      .insert(groupSources)
+      .values([
+        {
+          id: officeGroup,
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: office,
+          displayName: 'Office staff',
+          active: true,
+          grantedRole: null,
+          membersCapturedAt: capturedAt,
+          googleGroupId: `provider-${officeGroup}`,
+          email: `office-${officeGroup}@example.invalid`,
+          fixtureKey: null,
+        },
+        {
+          ...accessGroup(districtGroup, 'staff', capturedAt),
+          googleGroupId: `provider-${districtGroup}`,
+          email: `district-${districtGroup}@example.invalid`,
+        },
+      ]);
+    await database()
+      .insert(groupMembers)
+      .values({ groupSourceId: officeGroup, email, capturedAt });
+
+    const signedIn = await signIn(email, now);
+    const service = new SessionService(new DrizzleSessionStore(database()));
+    const before = await service.authenticate(signedIn.credential, 'web');
+    expect(before.scope.facilityScope).toEqual({
+      kind: 'facilities',
+      facilityIds: [office],
+    });
+
+    await database()
+      .insert(groupMembers)
+      .values({ groupSourceId: districtGroup, email, capturedAt });
+
+    const after = await service.authenticate(signedIn.credential, 'web');
+    expect(after.scope.facilityScope).toEqual({ kind: 'district' });
+  });
 });

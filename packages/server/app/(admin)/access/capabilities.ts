@@ -45,7 +45,10 @@ import {
   type RoleChangeFact,
 } from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
-import { MEMBERSHIP_FRESHNESS_MS } from '../../../lib/auth/trusted-group-access';
+import {
+  facilityScopeFromGroups,
+  MEMBERSHIP_FRESHNESS_MS,
+} from '../../../lib/auth/trusted-group-access';
 import { type ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
 import {
   AdminCapabilityError,
@@ -299,7 +302,12 @@ async function projectUserPage(
   // only stored grants left this page empty once roles stopped being stored.
   const emails = rows.map(({ email }) => email);
   const groupGrantRows = await database
-    .select({ email: groupMembers.email, role: groupSources.grantedRole })
+    .select({
+      email: groupMembers.email,
+      role: groupSources.grantedRole,
+      purpose: groupSources.purpose,
+      facilityId: groupSources.facilityId,
+    })
     .from(groupMembers)
     .innerJoin(groupSources, eq(groupSources.id, groupMembers.groupSourceId))
     .where(and(freshAccessMembership(now), inArray(groupMembers.email, emails)))
@@ -314,12 +322,23 @@ async function projectUserPage(
       ),
     );
   const grantedRolesByEmail = new Map<string, Set<Role>>();
-  for (const { email, role } of groupGrantRows) {
+  const groupsByEmail = new Map<
+    string,
+    {
+      purpose: (typeof groupGrantRows)[number]['purpose'];
+      facilityId: string | null;
+    }[]
+  >();
+  for (const { email, role, purpose, facilityId } of groupGrantRows) {
     const roles = grantedRolesByEmail.get(email) ?? new Set<Role>();
     // Only a school staff group carries no role of its own; it grants staff.
     roles.add(role === null ? 'staff' : RoleSchema.parse(role));
     grantedRolesByEmail.set(email, roles);
+    const groups = groupsByEmail.get(email) ?? [];
+    groups.push({ purpose, facilityId });
+    groupsByEmail.set(email, groups);
   }
+  const admittedEmails = new Set(admittedRows.map(({ email }) => email));
   for (const { email } of admittedRows) {
     const roles = grantedRolesByEmail.get(email) ?? new Set<Role>();
     roles.add('staff');
@@ -349,13 +368,19 @@ async function projectUserPage(
         email: row.email,
         displayName: row.displayName,
         roles: rolesFor(row),
+        // What the person's groups grant now, the same answer every request
+        // gets; the stored limit only for an account admitted without one.
         facilityScope:
-          row.facilityScopeKind === 'district'
+          facilityScopeFromGroups(
+            groupsByEmail.get(row.email) ?? [],
+            admittedEmails.has(row.email) ? row.id : null,
+          ) ??
+          (row.facilityScopeKind === 'district'
             ? { kind: 'district' }
             : {
                 kind: 'facilities',
                 facilityIds: facilityIdsByUserId.get(row.id) ?? [],
-              },
+              }),
         createdAt: row.createdAt.toISOString(),
         disabledAt: row.disabledAt?.toISOString() ?? null,
       }),
@@ -526,6 +551,37 @@ async function setUserFacilityScope(
       if (!active) {
         throw invalid('A selected facility is inactive.');
       }
+    }
+    // A person a group admits acts wherever their groups say, recomputed on
+    // every request, so a limit written here would be silently ignored.
+    // Refuse instead and say where the change belongs. Returning someone to
+    // district-wide is harmless and stays allowed.
+    const groupRows = await database
+      .select({
+        purpose: groupSources.purpose,
+        facilityId: groupSources.facilityId,
+      })
+      .from(groupMembers)
+      .innerJoin(groupSources, eq(groupSources.id, groupMembers.groupSourceId))
+      .where(
+        and(freshAccessMembership(now), eq(groupMembers.email, userRow.email)),
+      );
+    const [admission] = await database
+      .select({ id: admittedAccounts.id })
+      .from(admittedAccounts)
+      .where(
+        and(
+          isNull(admittedAccounts.revokedAt),
+          eq(admittedAccounts.email, userRow.email),
+        ),
+      )
+      .limit(1);
+    if (facilityScopeFromGroups(groupRows, admission?.id ?? null) !== null) {
+      throw new AdminCapabilityError(
+        'CONFLICT',
+        'Their Google groups decide where this person acts. Change their group membership instead.',
+        409,
+      );
     }
   }
   await database
