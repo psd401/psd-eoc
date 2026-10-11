@@ -39,8 +39,9 @@ export type AccessDecision =
        * Where this person's groups let them act, decided afresh every time
        * the question is asked: the district when any sign-in group admits
        * them, every school whose staff group admits them otherwise, or null
-       * when only a direct admission lets them in and the limit an
-       * administrator set on the Access page decides.
+       * when a direct admission lets them in and no sign-in group does. An
+       * admission is not a school limit, so the limit an administrator set
+       * on the Access page decides for that account, as it always has.
        */
       facilityScope: FacilityScope | null;
       /**
@@ -233,9 +234,11 @@ export async function decideAccess(
  * later added to the district group, is district-wide from then on. Keeping
  * the old school limit is what hid other schools' events from district staff.
  *
- * Null means no group decides — a direct admission lets them in and no
- * sign-in group does — and the limit an administrator set for that account
- * applies.
+ * Null means the stored limit decides: either no group places the person,
+ * or a direct admission lets them in and no sign-in group does. An
+ * admission carries no school, so a school group beside it must not narrow
+ * the account; the app-review account is held to its facility by the limit
+ * an administrator set, which a school group must not override either.
  */
 export function facilityScopeFromGroups(
   groups: readonly Readonly<{
