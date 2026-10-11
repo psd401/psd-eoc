@@ -1,5 +1,4 @@
 [test]
-# Bun reads bunfig.toml from the working directory only, so `bun test` run from
-# here would skip the repository root's preload and run as no district at all.
-# Every test runs as a synthetic district, never as this one.
+# The root bunfig.toml's preload, for `bun test` run from this directory: Bun
+# reads bunfig.toml from the working directory only.
 preload = ["../../scripts/test-preload.ts"]
