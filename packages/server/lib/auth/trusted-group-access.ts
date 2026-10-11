@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 
-import { RoleSchema, type Role } from '@psd-eoc/contracts';
+import { RoleSchema, type FacilityScope, type Role } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
 import { admittedAccounts, groupMembers, groupSources } from '../../db/schema';
@@ -36,12 +36,14 @@ export type AccessDecision =
       /** The admission that granted this sign-in without a group, if any. */
       admittedAccountId: string | null;
       /**
-       * The schools this person may act at when the only thing admitting
-       * them is their school's own staff group, or null when a sign-in
-       * group or an admission grants them the district. A school group
-       * admits its members as staff at that school and nowhere else.
+       * Where this person's groups let them act, decided afresh every time
+       * the question is asked: the district when any sign-in group admits
+       * them, every school whose staff group admits them otherwise, or null
+       * when a direct admission lets them in and no sign-in group does. An
+       * admission is not a school limit, so the limit an administrator set
+       * on the Access page decides for that account, as it always has.
        */
-      schoolFacilityIds: readonly string[] | null;
+      facilityScope: FacilityScope | null;
       /**
        * When the granting membership was last read from the provider — the
        * freshest capture among the groups that granted it. Callers that need
@@ -205,20 +207,10 @@ export async function decideAccess(
     ),
   );
   if (admittedAccountId !== null) roles.add('staff');
-  const districtWide =
-    admittedAccountId !== null ||
-    usable.some((group) => group.purpose === 'access');
-  const schoolFacilityIds = districtWide
-    ? null
-    : Object.freeze(
-        [
-          ...new Set(
-            usable.flatMap(({ facilityId }) =>
-              facilityId === null ? [] : [facilityId],
-            ),
-          ),
-        ].sort(),
-      );
+  const facilityScope = facilityScopeFromGroups(
+    usable,
+    admittedAccountId !== null,
+  );
   const capturedAt = new Date(
     Math.max(
       ...usable.map((group) => group.capturedAt.getTime()),
@@ -230,7 +222,44 @@ export async function decideAccess(
     roles: Object.freeze([...roles].sort()),
     groupSourceIds: Object.freeze(usable.map(({ id }) => id).sort()),
     admittedAccountId,
-    schoolFacilityIds,
+    facilityScope,
     capturedAt,
   });
+}
+
+/**
+ * Where a person may act, from the groups that admit them right now.
+ *
+ * Every group counts, every time. A sign-in group grants the district, so
+ * someone in a district group and a school group acts district-wide; someone
+ * in two schools' groups acts at both. Nothing a previous sign-in decided is
+ * carried forward: a person once admitted only by their school's group, and
+ * later added to the district group, is district-wide from then on.
+ *
+ * Null means the stored limit decides: either no group places the person,
+ * or a direct admission lets them in and no sign-in group does. An
+ * admission carries no school, so a school group beside it must not narrow
+ * the account; the app-review account is held to its facility by the limit
+ * an administrator set, which a school group must not override either.
+ */
+export function facilityScopeFromGroups(
+  groups: readonly Readonly<{
+    purpose: 'access' | 'building' | 'others';
+    facilityId: string | null;
+  }>[],
+  admitted: boolean,
+): FacilityScope | null {
+  if (groups.some((group) => group.purpose === 'access')) {
+    return Object.freeze({ kind: 'district' as const });
+  }
+  if (admitted) return null;
+  const facilityIds = [
+    ...new Set(
+      groups.flatMap(({ purpose, facilityId }) =>
+        purpose === 'building' && facilityId !== null ? [facilityId] : [],
+      ),
+    ),
+  ].sort();
+  if (facilityIds.length === 0) return null;
+  return Object.freeze({ kind: 'facilities' as const, facilityIds });
 }

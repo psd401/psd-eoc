@@ -1437,10 +1437,9 @@ describeWithDatabase(
           authenticated.result.session.authorization.membershipSnapshotId,
         ).toBe(issuanceSnapshotId);
         expect(renewedSnapshotId).not.toBe(issuanceSnapshotId);
-        expect(authenticated.scope.facilityScope).toEqual({
-          kind: 'facilities',
-          facilityIds: [fixture.facilityId],
-        });
+        // The access group places them, not the stored limit: a sign-in
+        // group grants the district on every request.
+        expect(authenticated.scope.facilityScope).toEqual({ kind: 'district' });
         const extraEpochId = crypto.randomUUID();
         await database.insert(connectivityEpochs).values({
           id: extraEpochId,

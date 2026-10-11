@@ -204,7 +204,7 @@ describeWithDatabase('a school staff group admits its members', () => {
       roles: ['staff'],
       groupSourceIds: [NORTH_GROUP],
       admittedAccountId: null,
-      schoolFacilityIds: [NORTH],
+      facilityScope: { kind: 'facilities', facilityIds: [NORTH] },
     });
   });
 
@@ -266,7 +266,7 @@ describeWithDatabase('a school staff group admits its members', () => {
     });
   });
 
-  test('a sign-in group keeps the district and its stored limit untouched', async () => {
+  test('a sign-in group grants the district', async () => {
     const decision = await decideAccess(database(), {
       email: 'district@example.invalid',
       checkedAt: NOW,
@@ -274,7 +274,7 @@ describeWithDatabase('a school staff group admits its members', () => {
     expect(decision).toMatchObject({
       granted: true,
       roles: ['staff'],
-      schoolFacilityIds: null,
+      facilityScope: { kind: 'district' },
     });
     const result = await signIn('district@example.invalid');
     if (!result.authorized) throw new Error('expected a sign-in');
@@ -304,5 +304,38 @@ describeWithDatabase('a school staff group admits its members', () => {
         checkedAt: NOW,
       }),
     ).toEqual({ granted: false, refusal: 'MEMBERSHIP_STALE' });
+  });
+
+  test('joining the district group lifts a limit an earlier sign-in wrote', async () => {
+    // The person signed in once through only their building's group, then
+    // was added to the district group. Their next sign-in is district-wide;
+    // the old school limit is not carried forward.
+    const first = await signIn('promoted@example.invalid');
+    expect(first).toMatchObject({ authorized: false });
+
+    await database().insert(groupMembers).values({
+      groupSourceId: NORTH_GROUP,
+      email: 'promoted@example.invalid',
+      capturedAt: FRESH,
+    });
+    const limited = await signIn('promoted@example.invalid');
+    if (!limited.authorized) throw new Error('expected a sign-in');
+    expect(limited.user.facilityScope).toEqual({
+      kind: 'facilities',
+      facilityIds: [NORTH],
+    });
+
+    await database().insert(groupMembers).values({
+      groupSourceId: DISTRICT_GROUP,
+      email: 'promoted@example.invalid',
+      capturedAt: FRESH,
+    });
+    const promoted = await signIn('promoted@example.invalid');
+    if (!promoted.authorized) throw new Error('expected a sign-in');
+    expect(promoted.user.facilityScope).toEqual({ kind: 'district' });
+    expect(await storedScope('promoted@example.invalid')).toEqual({
+      kind: 'district',
+      facilityIds: [],
+    });
   });
 });

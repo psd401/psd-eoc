@@ -589,6 +589,68 @@ describeWithDatabase('set-user-facility-scope', () => {
     );
   });
 
+  test('a person a group admits is placed by their groups, not a stored limit', async () => {
+    // Friday 2026-10-09: district staff were stuck on an old school limit.
+    // The page shows what their groups grant, and refuses to write a limit
+    // the next request would ignore.
+    const personId = await persistPerson();
+    const [person] = await database()
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, personId));
+    if (person === undefined) throw new Error('The person vanished.');
+    await database()
+      .update(users)
+      .set({ facilityScopeKind: 'facilities' })
+      .where(eq(users.id, personId));
+    await database()
+      .insert(userFacilityScopes)
+      .values({ userId: personId, facilityId: activeFacilityId });
+    const groupId = randomUUID();
+    await database()
+      .insert(groupSources)
+      .values({
+        id: groupId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'Scope test district staff',
+        grantedRole: 'staff',
+        active: true,
+        googleGroupId: `scope-staff-${groupId.slice(0, 8)}`,
+        email: `scope-staff-${groupId.slice(0, 8)}@example.invalid`,
+        fixtureKey: null,
+      });
+    await database().insert(groupMembers).values({
+      groupSourceId: groupId,
+      email: person.email,
+      capturedAt: new Date(),
+    });
+
+    const page = await executeListUsersCapability({
+      authenticated: admin,
+      store: createDrizzleAdminCapabilityStore(database(), admin),
+      query: {
+        facilityId: null,
+        includeDisabled: false,
+        cursor: null,
+        limit: 100,
+      },
+    });
+    expect(
+      page.items.find((item) => item.id === personId)?.facilityScope,
+    ).toEqual({ kind: 'district' });
+
+    await expectRefusal(
+      setScope(admin, personId, {
+        kind: 'facilities',
+        facilityIds: [activeFacilityId],
+      }),
+      409,
+      'Their Google groups decide where this person acts. Change their group membership instead.',
+    );
+  });
+
   test('the staff list shows who a group admits and who was admitted directly', async () => {
     const store = createDrizzleAdminCapabilityStore(database(), admin);
     const groupPerson = await persistPerson();

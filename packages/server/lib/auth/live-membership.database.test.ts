@@ -381,7 +381,7 @@ describeWithDatabase('live membership at sign-in', () => {
       granted: true,
       roles: ['staff'],
       groupSourceIds: [schoolGroup],
-      schoolFacilityIds: [school],
+      facilityScope: { kind: 'facilities', facilityIds: [school] },
     });
   });
 });
