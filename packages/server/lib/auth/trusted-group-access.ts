@@ -207,7 +207,10 @@ export async function decideAccess(
     ),
   );
   if (admittedAccountId !== null) roles.add('staff');
-  const facilityScope = facilityScopeFromGroups(usable, admittedAccountId);
+  const facilityScope = facilityScopeFromGroups(
+    usable,
+    admittedAccountId !== null,
+  );
   const capturedAt = new Date(
     Math.max(
       ...usable.map((group) => group.capturedAt.getTime()),
@@ -231,8 +234,7 @@ export async function decideAccess(
  * someone in a district group and a school group acts district-wide; someone
  * in two schools' groups acts at both. Nothing a previous sign-in decided is
  * carried forward: a person once admitted only by their school's group, and
- * later added to the district group, is district-wide from then on. Keeping
- * the old school limit is what hid other schools' events from district staff.
+ * later added to the district group, is district-wide from then on.
  *
  * Null means the stored limit decides: either no group places the person,
  * or a direct admission lets them in and no sign-in group does. An
@@ -245,12 +247,12 @@ export function facilityScopeFromGroups(
     purpose: 'access' | 'building' | 'others';
     facilityId: string | null;
   }>[],
-  admittedAccountId: string | null,
+  admitted: boolean,
 ): FacilityScope | null {
   if (groups.some((group) => group.purpose === 'access')) {
     return Object.freeze({ kind: 'district' as const });
   }
-  if (admittedAccountId !== null) return null;
+  if (admitted) return null;
   const facilityIds = [
     ...new Set(
       groups.flatMap(({ purpose, facilityId }) =>

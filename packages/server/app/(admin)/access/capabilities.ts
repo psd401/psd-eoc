@@ -373,7 +373,7 @@ async function projectUserPage(
         facilityScope:
           facilityScopeFromGroups(
             groupsByEmail.get(row.email) ?? [],
-            admittedEmails.has(row.email) ? row.id : null,
+            admittedEmails.has(row.email),
           ) ??
           (row.facilityScopeKind === 'district'
             ? { kind: 'district' }
@@ -576,7 +576,7 @@ async function setUserFacilityScope(
         ),
       )
       .limit(1);
-    if (facilityScopeFromGroups(groupRows, admission?.id ?? null) !== null) {
+    if (facilityScopeFromGroups(groupRows, admission !== undefined) !== null) {
       throw new AdminCapabilityError(
         'CONFLICT',
         'Their Google groups decide where this person acts. Change their group membership instead.',

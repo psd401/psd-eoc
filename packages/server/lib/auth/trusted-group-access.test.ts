@@ -10,13 +10,13 @@ const south = { purpose: 'building' as const, facilityId: SOUTH };
 
 describe('facilityScopeFromGroups', () => {
   test('a district group wins over any school group', () => {
-    expect(facilityScopeFromGroups([north, district], null)).toEqual({
+    expect(facilityScopeFromGroups([north, district], false)).toEqual({
       kind: 'district',
     });
   });
 
   test('school groups grant every one of their schools', () => {
-    expect(facilityScopeFromGroups([south, north, north], null)).toEqual({
+    expect(facilityScopeFromGroups([south, north, north], false)).toEqual({
       kind: 'facilities',
       facilityIds: [NORTH, SOUTH],
     });
@@ -26,14 +26,14 @@ describe('facilityScopeFromGroups', () => {
     // The admission carries no school; the app-review account is held to its
     // facility by an administrator's limit that a school group must not
     // override.
-    expect(facilityScopeFromGroups([], 'admission')).toBeNull();
-    expect(facilityScopeFromGroups([north], 'admission')).toBeNull();
-    expect(facilityScopeFromGroups([north, district], 'admission')).toEqual({
+    expect(facilityScopeFromGroups([], true)).toBeNull();
+    expect(facilityScopeFromGroups([north], true)).toBeNull();
+    expect(facilityScopeFromGroups([north, district], true)).toEqual({
       kind: 'district',
     });
   });
 
   test('no group places nobody', () => {
-    expect(facilityScopeFromGroups([], null)).toBeNull();
+    expect(facilityScopeFromGroups([], false)).toBeNull();
   });
 });

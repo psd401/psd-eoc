@@ -117,11 +117,8 @@ export async function authorizeSignIn(
     // Where someone acts is what their groups say today, rewritten at every
     // sign-in: a district group grants the district, school groups grant
     // their schools, and moving between groups moves the person. Only an
-    // account a direct admission alone lets in keeps the limit an
-    // administrator set on the Access page. This used to write a school
-    // limit and never take it back, so district staff who had once signed in
-    // through only their building's group stayed limited to that building
-    // after joining the district group.
+    // account a direct admission lets in, with no sign-in group, keeps the
+    // limit an administrator set on the Access page.
     let facilityScopeKind = user.facilityScopeKind;
     const granted = decision.facilityScope;
     if (granted !== null) {
