@@ -105,12 +105,34 @@ function accessGroup(
   };
 }
 
+function buildingGroup(
+  id: string,
+  facilityId: string,
+  label: string,
+  capturedAt: Date,
+): typeof groupSources.$inferInsert {
+  return {
+    id,
+    kind: 'google-group',
+    purpose: 'building',
+    facilityId,
+    displayName: `Synthetic ${label} facility staff group`,
+    active: true,
+    grantedRole: null,
+    membersCapturedAt: capturedAt,
+    googleGroupId: `synthetic-browser-building-${id}`,
+    email: `synthetic-browser-building-${id}@example.invalid`,
+    fixtureKey: null,
+    createdAt: capturedAt,
+  };
+}
+
 async function issueIdentity(
   connection: PostgresDatabaseConnection,
   input: Readonly<{
     email: string;
     displayName: string;
-    groupSourceId: string;
+    groupSourceIds: readonly string[];
     now: Date;
     statePath: string;
   }>,
@@ -126,8 +148,9 @@ async function issueIdentity(
     throw new Error(`Synthetic sign-in was refused: ${authorization.refusal}`);
   }
 
-  // Where the identity acts is what its group grants, as in production: a
-  // school staff group limits it to that school, a sign-in group does not.
+  // Where the identity acts is what its groups grant, as in production: a
+  // school staff group limits it to that school, several place it at each of
+  // them, and a sign-in group does not limit it at all.
   const user = authorization.user;
   const credential = randomBytes(48).toString('base64url');
   const responseDigest = digestWebSessionCredential(randomUUID());
@@ -141,7 +164,7 @@ async function issueIdentity(
   ).persist({
     user,
     membership: {
-      groupSourceIds: [input.groupSourceId],
+      groupSourceIds: [...input.groupSourceIds],
       admittedAccountId: null,
       capturedAt: input.now,
     },
@@ -537,44 +560,64 @@ async function main(): Promise<void> {
 
     const now = new Date();
     const adminGroupId = randomUUID();
+    const districtStaffGroupId = randomUUID();
     const facilityStaffGroupId = randomUUID();
-    await opened.db.insert(groupSources).values([
-      accessGroup(adminGroupId, 'admin', now),
-      {
-        id: facilityStaffGroupId,
-        kind: 'google-group',
-        purpose: 'building',
-        facilityId: SYNTHETIC_FACILITY_ID,
-        displayName: 'Synthetic facility staff group',
-        active: true,
-        grantedRole: null,
-        membersCapturedAt: now,
-        googleGroupId: `synthetic-browser-building-${facilityStaffGroupId}`,
-        email: `synthetic-browser-building-${facilityStaffGroupId}@example.invalid`,
-        fixtureKey: null,
-        createdAt: now,
-      },
-    ]);
+    const otherFacilityStaffGroupId = randomUUID();
+    await opened.db
+      .insert(groupSources)
+      .values([
+        accessGroup(adminGroupId, 'admin', now),
+        accessGroup(districtStaffGroupId, 'staff', now),
+        buildingGroup(
+          facilityStaffGroupId,
+          SYNTHETIC_FACILITY_ID,
+          'North',
+          now,
+        ),
+        buildingGroup(
+          otherFacilityStaffGroupId,
+          SYNTHETIC_OTHER_FACILITY_ID,
+          'South',
+          now,
+        ),
+      ]);
     const identities = [
       {
         email: 'district-admin@example.invalid',
         displayName: 'Synthetic District Administrator',
-        groupSourceId: adminGroupId,
+        groupSourceIds: [adminGroupId],
         stateName: 'district-admin.json',
       },
       {
         email: 'facility-staff@example.invalid',
         displayName: 'Synthetic Facility Staff',
-        groupSourceId: facilityStaffGroupId,
+        groupSourceIds: [facilityStaffGroupId],
         stateName: 'facility-staff.json',
+      },
+      // District staff without administrator authority: a sign-in group
+      // places them across the district, as `psd-eoc@` does in production.
+      {
+        email: 'district-staff@example.invalid',
+        displayName: 'Synthetic District Staff',
+        groupSourceIds: [districtStaffGroupId],
+        stateName: 'district-staff.json',
+      },
+      // Two schools' staff groups, which place one person at both.
+      {
+        email: 'two-campus-staff@example.invalid',
+        displayName: 'Synthetic Two Campus Staff',
+        groupSourceIds: [facilityStaffGroupId, otherFacilityStaffGroupId],
+        stateName: 'two-campus-staff.json',
       },
     ] as const;
     await opened.db.insert(groupMembers).values(
-      identities.map(({ email, groupSourceId }) => ({
-        groupSourceId,
-        email,
-        capturedAt: now,
-      })),
+      identities.flatMap(({ email, groupSourceIds }) =>
+        groupSourceIds.map((groupSourceId) => ({
+          groupSourceId,
+          email,
+          capturedAt: now,
+        })),
+      ),
     );
     const issued: IssuedIdentity[] = [];
     // Session issuance appends to the global security journal. Keep setup

@@ -16,7 +16,11 @@ import {
 } from './_lib/date-range';
 import { loadEventRecordPage, loadRecordsFilterOptions } from './_lib/data';
 import { requireRecordsPageSession } from './_lib/session';
-import { RecordsView, type RecordsFilters } from './records-view';
+import {
+  ALL_AUTHORIZED_SITES,
+  RecordsView,
+  type RecordsFilters,
+} from './records-view';
 import '../start/styles.css';
 import './styles.css';
 
@@ -71,7 +75,7 @@ function recordsReturnTo(parameters: RawSearchParams): string {
 
 function parseFilters(
   parameters: RawSearchParams,
-  defaultFacilityId: string,
+  defaultFacilityId: string | null,
   today: string,
 ): Readonly<{
   filters: RecordsFilters;
@@ -88,9 +92,17 @@ function parseFilters(
     throw new RecordsFilterError();
   }
 
-  const facilityId = FacilityIdSchema.parse(
-    optionalSingle(parameters, 'facilityId') ?? defaultFacilityId,
-  );
+  // An absent site means the default for this viewer's scope, and the
+  // explicit `all` means every site they are authorized for. Null travels
+  // to the capability as "no site filter", which the records query answers
+  // inside the authenticated facility scope.
+  const facilityValue = optionalSingle(parameters, 'facilityId');
+  const facilityId =
+    facilityValue === null
+      ? defaultFacilityId
+      : facilityValue === ALL_AUTHORIZED_SITES
+        ? null
+        : FacilityIdSchema.parse(facilityValue);
   const from =
     optionalSingle(parameters, 'from') ?? addCalendarDays(today, -30);
   const through = optionalSingle(parameters, 'through') ?? today;
@@ -126,15 +138,22 @@ export default async function RecordsPage({
   );
   const options = await loadRecordsFilterOptions(authenticated);
   const today = currentPacificDate();
-  const defaultFacilityId = options.facilities[0]?.id;
-  if (defaultFacilityId === undefined) {
+  // Every site this viewer is authorized for is the default whenever their
+  // scope holds more than one: district staff and anyone placed at several
+  // schools arrive at their whole authorized history, not at whichever site
+  // happens to sort first. One authorized site defaults straight to it.
+  const defaultFacilityId =
+    options.facilities.length === 1
+      ? (options.facilities[0]?.id ?? null)
+      : null;
+  if (options.facilities.length === 0) {
     return (
       <RecordsView
         errorMessage={null}
         eventTypes={options.eventTypes}
         facilities={options.facilities}
         filters={{
-          facilityId: '',
+          facilityId: null,
           from: addCalendarDays(today, -30),
           through: today,
           eventTypeId: null,
@@ -178,9 +197,10 @@ export default async function RecordsPage({
   }
 
   if (
-    !options.facilities.some(
-      (facility) => facility.id === parsed.filters.facilityId,
-    ) ||
+    (parsed.filters.facilityId !== null &&
+      !options.facilities.some(
+        (facility) => facility.id === parsed.filters.facilityId,
+      )) ||
     (parsed.filters.eventTypeId !== null &&
       !options.eventTypes.some(
         ({ eventType }) => eventType.id === parsed.filters.eventTypeId,
@@ -201,10 +221,16 @@ export default async function RecordsPage({
         limit: 200,
       }),
     );
+    // One selected site admits that site alone; every authorized site admits
+    // exactly the sites this viewer's scope listed. Either way a row from
+    // anywhere else is a leak, and the page refuses to render it.
+    const admittedFacilityIds = new Set(
+      parsed.filters.facilityId === null
+        ? options.facilities.map((facility) => facility.id)
+        : [parsed.filters.facilityId],
+    );
     if (
-      page.items.some(
-        (record) => record.facilityId !== parsed.filters.facilityId,
-      )
+      page.items.some((record) => !admittedFacilityIds.has(record.facilityId))
     ) {
       throw new Error('The records result crossed its authorized site filter.');
     }

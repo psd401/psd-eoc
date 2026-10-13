@@ -6,8 +6,16 @@ import {
 } from '@psd-eoc/contracts';
 import Link from 'next/link';
 
+/**
+ * The site-filter value that stands for every site the viewer is authorized
+ * for. It is a reserved query value, never a facility identifier, because
+ * facility identifiers are UUIDs.
+ */
+export const ALL_AUTHORIZED_SITES = 'all';
+
 export interface RecordsFilters {
-  readonly facilityId: string;
+  /** One authorized site, or null for every site in the viewer's scope. */
+  readonly facilityId: string | null;
   readonly from: string;
   readonly through: string;
   readonly eventTypeId: string | null;
@@ -82,7 +90,7 @@ function recordDuration(record: EventRecord): string {
 
 function filterQuery(filters: RecordsFilters, cursor: string | null): string {
   const query = new URLSearchParams({
-    facilityId: filters.facilityId,
+    facilityId: filters.facilityId ?? ALL_AUTHORIZED_SITES,
     from: filters.from,
     through: filters.through,
     eventTypeId: filters.eventTypeId ?? '',
@@ -93,7 +101,13 @@ function filterQuery(filters: RecordsFilters, cursor: string | null): string {
   return query.toString();
 }
 
-export function drillCsvExportPath(filters: RecordsFilters): string {
+/**
+ * The retained drill/test training export is one site's, so it exists only
+ * while one site is selected.
+ */
+export function drillCsvExportPath(
+  filters: RecordsFilters & Readonly<{ facilityId: string }>,
+): string {
   const query = new URLSearchParams({
     facilityId: filters.facilityId,
     startedFrom: filters.from,
@@ -147,11 +161,16 @@ export function RecordsView({
           <div className="filter-field">
             <label htmlFor="records-facility">Site</label>
             <select
-              defaultValue={filters.facilityId}
+              defaultValue={filters.facilityId ?? ALL_AUTHORIZED_SITES}
               id="records-facility"
               name="facilityId"
               required
             >
+              {facilities.length > 1 ? (
+                <option value={ALL_AUTHORIZED_SITES}>
+                  All authorized sites
+                </option>
+              ) : null}
               {facilities.map((facility) => (
                 <option key={facility.id} value={facility.id}>
                   {facility.name} ({facility.code})
@@ -223,16 +242,22 @@ export function RecordsView({
                 append-only event history.
               </p>
             </div>
-            <a
-              className="button button--drill"
-              href={drillCsvExportPath(filters)}
-            >
-              Download training CSV
-            </a>
+            {filters.facilityId === null ? null : (
+              <a
+                className="button button--drill"
+                href={drillCsvExportPath({
+                  ...filters,
+                  facilityId: filters.facilityId,
+                })}
+              >
+                Download training CSV
+              </a>
+            )}
           </div>
           <p className="export-note">
-            The CSV is the retained drill/test training export for this site and
-            date range. Each event row also links to its authorized PDF summary.
+            {filters.facilityId === null
+              ? 'Choose one site to download its retained drill/test training export. Each event row links to its authorized PDF summary.'
+              : 'The CSV is the retained drill/test training export for this site and date range. Each event row also links to its authorized PDF summary.'}
           </p>
 
           {records.length === 0 ? (
@@ -248,8 +273,9 @@ export function RecordsView({
             >
               <table className="records-table">
                 <caption>
-                  Incident, drill, and test history for the selected site and
-                  date range
+                  {filters.facilityId === null
+                    ? 'Incident, drill, and test history for every authorized site and the selected date range'
+                    : 'Incident, drill, and test history for the selected site and date range'}
                 </caption>
                 <thead>
                   <tr>

@@ -96,4 +96,88 @@ test.describe('incident-record-history', () => {
     });
     await context.close();
   });
+
+  test('district staff without administrator authority open every authorized site at once', async ({
+    browser,
+  }) => {
+    const fixture = await readFixture();
+    const context = await browser.newContext({
+      storageState: statePath('district-staff.json'),
+    });
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    const response = await page.goto('/records');
+    expect(response?.ok()).toBe(true);
+    // Every site the district places them at, without choosing one first.
+    await expect(page.getByLabel('Site')).toHaveValue('all');
+    await expect(
+      page.getByRole('option', { name: 'All authorized sites' }),
+    ).toHaveCount(1);
+    for (const eventId of [
+      fixture.records.northIncidentId,
+      fixture.records.northDrillId,
+      fixture.records.northTestId,
+      fixture.records.southIncidentId,
+    ]) {
+      await expect(page.locator(`a[href="/events/${eventId}"]`)).toBeVisible();
+    }
+    await expect(page.getByText('Synthetic North Campus')).not.toHaveCount(0);
+    await expect(page.getByText('Synthetic South Campus')).not.toHaveCount(0);
+    // One site's retained training export needs one site chosen.
+    await expect(
+      page.getByRole('link', { name: 'Download training CSV' }),
+    ).toHaveCount(0);
+
+    const oneSite = await page.goto(
+      `/records?facilityId=00000000-0000-4000-8000-000000000002`,
+    );
+    expect(oneSite?.ok()).toBe(true);
+    await expect(
+      page.locator(`a[href="/events/${fixture.records.southIncidentId}"]`),
+    ).toBeVisible();
+    await expect(
+      page.locator(`a[href="/events/${fixture.records.northIncidentId}"]`),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole('link', { name: 'Download training CSV' }),
+    ).toBeVisible();
+
+    await page.goto('/records');
+    await expectAxeClean(page);
+    await page.screenshot({
+      path: issue341EvidencePath('records-all-authorized-sites.png'),
+      fullPage: true,
+    });
+    await context.close();
+  });
+
+  test('two schools’ staff groups open both schools’ history and nothing beyond it', async ({
+    browser,
+  }) => {
+    const fixture = await readFixture();
+    const context = await browser.newContext({
+      storageState: statePath('two-campus-staff.json'),
+    });
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    const response = await page.goto('/records');
+    expect(response?.ok()).toBe(true);
+    await expect(page.getByLabel('Site')).toHaveValue('all');
+    for (const eventId of [
+      fixture.records.northIncidentId,
+      fixture.records.southIncidentId,
+    ]) {
+      await expect(page.locator(`a[href="/events/${eventId}"]`)).toBeVisible();
+    }
+    // Both of their schools, and only their schools, are offered.
+    await expect(page.getByLabel('Site').getByRole('option')).toHaveCount(3);
+
+    await page.screenshot({
+      path: issue341EvidencePath('records-two-campus-union.png'),
+      fullPage: true,
+    });
+    await context.close();
+  });
 });
