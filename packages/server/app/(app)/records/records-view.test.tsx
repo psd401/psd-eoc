@@ -2,11 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import type { EventRecord, Facility } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import {
-  RecordsView,
-  drillCsvExportPath,
-  type RecordsFilters,
-} from './records-view';
+import type { RecordsFilters } from './_lib/filters';
+import { RecordsView, drillCsvExportPath } from './records-view';
 
 const FACILITY: Facility = Object.freeze({
   id: '10000000-0000-4000-8000-000000000001',
@@ -130,13 +127,13 @@ describe('operational records view', () => {
     expect(html).toContain(
       '<option value="all" selected="">All authorized sites</option>',
     );
-    expect(html).toContain('every authorized site');
+    expect(html).toContain('for all authorized sites');
     expect(html).toContain('Synthetic North Campus');
     expect(html).toContain('Synthetic South Campus');
     // The training export is one site's retained CSV, so it is offered only
     // once a site is chosen.
     expect(html).not.toContain('/records/export/drills?');
-    expect(html).toContain('Choose one site to download');
+    expect(html).toContain('Choose one site in the filters above to download');
     expect(html).toContain('facilityId=all');
   });
 

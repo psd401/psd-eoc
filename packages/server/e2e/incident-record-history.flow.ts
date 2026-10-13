@@ -167,6 +167,8 @@ test.describe('incident-record-history', () => {
     await expect(page.getByLabel('Site')).toHaveValue('all');
     for (const eventId of [
       fixture.records.northIncidentId,
+      fixture.records.northDrillId,
+      fixture.records.northTestId,
       fixture.records.southIncidentId,
     ]) {
       await expect(page.locator(`a[href="/events/${eventId}"]`)).toBeVisible();

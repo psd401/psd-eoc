@@ -1,9 +1,4 @@
-import {
-  EventTypeIdSchema,
-  FacilityIdSchema,
-  ListEventRecordsInputSchema,
-  PaginationCursorSchema,
-} from '@psd-eoc/contracts';
+import { ListEventRecordsInputSchema } from '@psd-eoc/contracts';
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 
@@ -12,15 +7,16 @@ import {
   RecordsDateRangeError,
   addCalendarDays,
   currentPacificDate,
-  parsePacificDateRange,
 } from './_lib/date-range';
+import {
+  RecordsFilterError,
+  defaultRecordsFacilityId,
+  parseRecordsFilters,
+  type RawSearchParams,
+} from './_lib/filters';
 import { loadEventRecordPage, loadRecordsFilterOptions } from './_lib/data';
 import { requireRecordsPageSession } from './_lib/session';
-import {
-  ALL_AUTHORIZED_SITES,
-  RecordsView,
-  type RecordsFilters,
-} from './records-view';
+import { RecordsView } from './records-view';
 import '../start/styles.css';
 import './styles.css';
 
@@ -30,35 +26,6 @@ export const metadata: Metadata = {
   title: { absolute: 'Records' },
   description: 'Authorized retained incident, drill, and test history.',
 };
-
-type RawSearchParams = Readonly<
-  Record<string, string | readonly string[] | undefined>
->;
-
-class RecordsFilterError extends Error {
-  public constructor(message = 'Check the selected records filters.') {
-    super(message);
-    this.name = 'RecordsFilterError';
-  }
-}
-
-function optionalSingle(
-  parameters: RawSearchParams,
-  name: string,
-  allowEmpty = false,
-): string | null {
-  const value = parameters[name];
-  if (Array.isArray(value)) {
-    throw new RecordsFilterError();
-  }
-  if (value === undefined) {
-    return null;
-  }
-  if (typeof value !== 'string' || (value.length === 0 && !allowEmpty)) {
-    throw new RecordsFilterError();
-  }
-  return value.length === 0 ? null : value;
-}
 
 function recordsReturnTo(parameters: RawSearchParams): string {
   const query = new URLSearchParams();
@@ -73,62 +40,6 @@ function recordsReturnTo(parameters: RawSearchParams): string {
   return serialized.length === 0 ? '/records' : `/records?${serialized}`;
 }
 
-function parseFilters(
-  parameters: RawSearchParams,
-  defaultFacilityId: string | null,
-  today: string,
-): Readonly<{
-  filters: RecordsFilters;
-  range: ReturnType<typeof parsePacificDateRange>;
-}> {
-  const allowed = new Set([
-    'facilityId',
-    'from',
-    'through',
-    'eventTypeId',
-    'cursor',
-  ]);
-  if (Object.keys(parameters).some((name) => !allowed.has(name))) {
-    throw new RecordsFilterError();
-  }
-
-  // An absent site means the default for this viewer's scope, and the
-  // explicit `all` means every site they are authorized for. Null travels
-  // to the capability as "no site filter", which the records query answers
-  // inside the authenticated facility scope.
-  const facilityValue = optionalSingle(parameters, 'facilityId');
-  const facilityId =
-    facilityValue === null
-      ? defaultFacilityId
-      : facilityValue === ALL_AUTHORIZED_SITES
-        ? null
-        : FacilityIdSchema.parse(facilityValue);
-  const from =
-    optionalSingle(parameters, 'from') ?? addCalendarDays(today, -30);
-  const through = optionalSingle(parameters, 'through') ?? today;
-  const eventTypeValue = optionalSingle(parameters, 'eventTypeId', true);
-  const eventTypeId =
-    eventTypeValue === null ? null : EventTypeIdSchema.parse(eventTypeValue);
-  const cursorValue = optionalSingle(parameters, 'cursor');
-  const cursor =
-    cursorValue === null ? null : PaginationCursorSchema.parse(cursorValue);
-  const range = parsePacificDateRange(from, through);
-  if (through > today) {
-    throw new RecordsFilterError('The through date cannot be in the future.');
-  }
-
-  return Object.freeze({
-    filters: Object.freeze({
-      facilityId,
-      from,
-      through,
-      eventTypeId,
-      cursor,
-    }),
-    range,
-  });
-}
-
 export default async function RecordsPage({
   searchParams,
 }: Readonly<{ searchParams: Promise<RawSearchParams> }>) {
@@ -138,61 +49,39 @@ export default async function RecordsPage({
   );
   const options = await loadRecordsFilterOptions(authenticated);
   const today = currentPacificDate();
-  // Every site this viewer is authorized for is the default whenever their
-  // scope holds more than one: district staff and anyone placed at several
-  // schools arrive at their whole authorized history, not at whichever site
-  // happens to sort first. One authorized site defaults straight to it.
-  const defaultFacilityId =
-    options.facilities.length === 1
-      ? (options.facilities[0]?.id ?? null)
-      : null;
+  const defaultFacilityId = defaultRecordsFacilityId(options.facilities);
+  /** The page with no rows: an unauthorized scope, or filters to correct. */
+  const emptyView = (errorMessage: string | null) => (
+    <RecordsView
+      errorMessage={errorMessage}
+      eventTypes={options.eventTypes}
+      facilities={options.facilities}
+      filters={{
+        facilityId: defaultFacilityId,
+        from: addCalendarDays(today, -30),
+        through: today,
+        eventTypeId: null,
+        cursor: null,
+      }}
+      hasMore={false}
+      nextCursor={null}
+      records={[]}
+      today={today}
+    />
+  );
   if (options.facilities.length === 0) {
-    return (
-      <RecordsView
-        errorMessage={null}
-        eventTypes={options.eventTypes}
-        facilities={options.facilities}
-        filters={{
-          facilityId: null,
-          from: addCalendarDays(today, -30),
-          through: today,
-          eventTypeId: null,
-          cursor: null,
-        }}
-        hasMore={false}
-        nextCursor={null}
-        records={[]}
-        today={today}
-      />
-    );
+    return emptyView(null);
   }
 
-  let parsed: ReturnType<typeof parseFilters>;
+  let parsed: ReturnType<typeof parseRecordsFilters>;
   try {
-    parsed = parseFilters(parameters, defaultFacilityId, today);
+    parsed = parseRecordsFilters(parameters, defaultFacilityId, today);
   } catch (error) {
-    const message =
+    return emptyView(
       error instanceof RecordsDateRangeError ||
-      error instanceof RecordsFilterError
+        error instanceof RecordsFilterError
         ? error.message
-        : 'Check the selected records filters.';
-    return (
-      <RecordsView
-        errorMessage={message}
-        eventTypes={options.eventTypes}
-        facilities={options.facilities}
-        filters={{
-          facilityId: defaultFacilityId,
-          from: addCalendarDays(today, -30),
-          through: today,
-          eventTypeId: null,
-          cursor: null,
-        }}
-        hasMore={false}
-        nextCursor={null}
-        records={[]}
-        today={today}
-      />
+        : 'Check the selected records filters.',
     );
   }
 

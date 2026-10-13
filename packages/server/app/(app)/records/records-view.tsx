@@ -6,21 +6,7 @@ import {
 } from '@psd-eoc/contracts';
 import Link from 'next/link';
 
-/**
- * The site-filter value that stands for every site the viewer is authorized
- * for. It is a reserved query value, never a facility identifier, because
- * facility identifiers are UUIDs.
- */
-export const ALL_AUTHORIZED_SITES = 'all';
-
-export interface RecordsFilters {
-  /** One authorized site, or null for every site in the viewer's scope. */
-  readonly facilityId: string | null;
-  readonly from: string;
-  readonly through: string;
-  readonly eventTypeId: string | null;
-  readonly cursor: string | null;
-}
+import { ALL_AUTHORIZED_SITES, type RecordsFilters } from './_lib/filters';
 
 export interface RecordsViewProps {
   readonly errorMessage: string | null;
@@ -256,7 +242,7 @@ export function RecordsView({
           </div>
           <p className="export-note">
             {filters.facilityId === null
-              ? 'Choose one site to download its retained drill/test training export. Each event row links to its authorized PDF summary.'
+              ? 'Choose one site in the filters above to download its retained drill/test training export. Each event row links to its authorized PDF summary.'
               : 'The CSV is the retained drill/test training export for this site and date range. Each event row also links to its authorized PDF summary.'}
           </p>
 
@@ -274,7 +260,7 @@ export function RecordsView({
               <table className="records-table">
                 <caption>
                   {filters.facilityId === null
-                    ? 'Incident, drill, and test history for every authorized site and the selected date range'
+                    ? 'Incident, drill, and test history for all authorized sites and the selected date range'
                     : 'Incident, drill, and test history for the selected site and date range'}
                 </caption>
                 <thead>
