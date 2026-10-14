@@ -66,6 +66,26 @@ export function defaultRecordsFacilityId(
   return facilities.length === 1 ? (facilities[0]?.id ?? null) : null;
 }
 
+/**
+ * Whether every returned record belongs to a site this page may show.
+ *
+ * One selected site admits that site alone; every authorized site admits
+ * exactly the sites this viewer's scope listed. Either way a row from
+ * anywhere else is a leak, and the page refuses to render it.
+ */
+export function recordsStayInAdmittedSites(
+  records: readonly Readonly<{ facilityId: string }>[],
+  selectedFacilityId: string | null,
+  authorizedFacilities: readonly Facility[],
+): boolean {
+  const admitted = new Set(
+    selectedFacilityId === null
+      ? authorizedFacilities.map((facility) => facility.id)
+      : [selectedFacilityId],
+  );
+  return records.every((record) => admitted.has(record.facilityId));
+}
+
 /** The dates, site, and response the viewer asked for, bounded and parsed. */
 export function parseRecordsFilters(
   parameters: RawSearchParams,
@@ -86,17 +106,17 @@ export function parseRecordsFilters(
     throw new RecordsFilterError();
   }
 
-  // An absent site means the default for this viewer's scope, and the
-  // explicit `all` means every site they are authorized for. Null travels
-  // to the capability as "no site filter", which the records query answers
-  // inside the authenticated facility scope.
+  // An absent site and the explicit `all` both mean the scope's default:
+  // every authorized site (null, "no site filter", which the records query
+  // answers inside the authenticated facility scope) when more than one is
+  // authorized, and the one site itself otherwise, so a single-site viewer
+  // following an `all` link sees their site selected rather than an option
+  // their menu never offers.
   const facilityValue = optionalSingle(parameters, 'facilityId');
   const facilityId =
-    facilityValue === null
+    facilityValue === null || facilityValue === ALL_AUTHORIZED_SITES
       ? defaultFacilityId
-      : facilityValue === ALL_AUTHORIZED_SITES
-        ? null
-        : FacilityIdSchema.parse(facilityValue);
+      : FacilityIdSchema.parse(facilityValue);
   const from =
     optionalSingle(parameters, 'from') ?? addCalendarDays(today, -30);
   const through = optionalSingle(parameters, 'through') ?? today;

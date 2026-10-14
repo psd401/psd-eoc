@@ -12,6 +12,7 @@ import {
   RecordsFilterError,
   defaultRecordsFacilityId,
   parseRecordsFilters,
+  recordsStayInAdmittedSites,
   type RawSearchParams,
 } from './_lib/filters';
 import { loadEventRecordPage, loadRecordsFilterOptions } from './_lib/data';
@@ -110,16 +111,12 @@ export default async function RecordsPage({
         limit: 200,
       }),
     );
-    // One selected site admits that site alone; every authorized site admits
-    // exactly the sites this viewer's scope listed. Either way a row from
-    // anywhere else is a leak, and the page refuses to render it.
-    const admittedFacilityIds = new Set(
-      parsed.filters.facilityId === null
-        ? options.facilities.map((facility) => facility.id)
-        : [parsed.filters.facilityId],
-    );
     if (
-      page.items.some((record) => !admittedFacilityIds.has(record.facilityId))
+      !recordsStayInAdmittedSites(
+        page.items,
+        parsed.filters.facilityId,
+        options.facilities,
+      )
     ) {
       throw new Error('The records result crossed its authorized site filter.');
     }

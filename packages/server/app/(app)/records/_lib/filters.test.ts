@@ -6,6 +6,7 @@ import {
   RecordsFilterError,
   defaultRecordsFacilityId,
   parseRecordsFilters,
+  recordsStayInAdmittedSites,
 } from './filters';
 
 const TODAY = '2026-08-11';
@@ -50,11 +51,17 @@ describe('records filter parsing', () => {
     expect(parseRecordsFilters({}, null, TODAY).filters.facilityId).toBeNull();
   });
 
-  test('reads the reserved all-sites value as no site filter', () => {
+  test('reads the reserved all-sites value as the scope default', () => {
+    expect(
+      parseRecordsFilters({ facilityId: ALL_AUTHORIZED_SITES }, null, TODAY)
+        .filters.facilityId,
+    ).toBeNull();
+    // A single-site viewer's menu never offers `all`, so the link lands on
+    // their one site, selected.
     expect(
       parseRecordsFilters({ facilityId: ALL_AUTHORIZED_SITES }, NORTH.id, TODAY)
         .filters.facilityId,
-    ).toBeNull();
+    ).toBe(NORTH.id);
   });
 
   test('keeps one named site, and refuses anything that is not a site', () => {
@@ -96,7 +103,44 @@ describe('records filter parsing', () => {
       through: '2026-08-10',
       eventTypeId: null,
     });
-    expect(parsed.range.startedFrom).toContain('2026-08-01');
-    expect(parsed.range.startedThrough).toContain('2026-08-1');
+    // Pacific midnight to the last millisecond of the through date (PDT).
+    expect(parsed.range.startedFrom).toBe('2026-08-01T07:00:00.000Z');
+    expect(parsed.range.startedThrough).toBe('2026-08-11T06:59:59.999Z');
+  });
+});
+
+describe('records site leak guard', () => {
+  const WEST = facility('10000000-0000-4000-8000-000000000003', 'SYW');
+  const at = (facilityId: string) => ({ facilityId });
+
+  test('admits only the selected site while one is selected', () => {
+    expect(
+      recordsStayInAdmittedSites([at(NORTH.id)], NORTH.id, [NORTH, SOUTH]),
+    ).toBe(true);
+    expect(
+      recordsStayInAdmittedSites([at(NORTH.id), at(SOUTH.id)], NORTH.id, [
+        NORTH,
+        SOUTH,
+      ]),
+    ).toBe(false);
+  });
+
+  test('admits exactly the authorized sites across all sites', () => {
+    expect(
+      recordsStayInAdmittedSites([at(NORTH.id), at(SOUTH.id)], null, [
+        NORTH,
+        SOUTH,
+      ]),
+    ).toBe(true);
+    expect(
+      recordsStayInAdmittedSites([at(NORTH.id), at(WEST.id)], null, [
+        NORTH,
+        SOUTH,
+      ]),
+    ).toBe(false);
+  });
+
+  test('admits an empty page', () => {
+    expect(recordsStayInAdmittedSites([], null, [])).toBe(true);
   });
 });
