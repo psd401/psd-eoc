@@ -147,4 +147,30 @@ describe('push permission accessibility', () => {
       /ExponentPushToken|synthetic-apns/iu,
     );
   });
+  test.each(['ios' as const, 'android' as const])(
+    'says a timed-out registration is retrying and keeps Retry on %s',
+    (platform) => {
+      const retry = jest.fn();
+      render(
+        <PushNotificationNotice
+          onOpenSettings={jest.fn()}
+          onRequestPermission={jest.fn()}
+          onRetry={retry}
+          snapshot={{
+            phase: 'error',
+            platform,
+            message:
+              'Expo did not issue a push token for this build. Reconnect and try again. Expo push-token request timed out. Retrying automatically.',
+            alertsMuted: false,
+          }}
+        />,
+      );
+
+      expect(screen.getByText(/Retrying automatically\./u)).toBeTruthy();
+      fireEvent.press(
+        screen.getByRole('button', { name: 'Retry push registration' }),
+      );
+      expect(retry).toHaveBeenCalledTimes(1);
+    },
+  );
 });

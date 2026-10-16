@@ -142,10 +142,36 @@ export interface PushRegistrationConfiguration {
   readonly build: NativePushBuildIdentity | null;
 }
 
+/** Schedules the automatic retry; injectable so tests control time. */
+export interface PushRetryTimer {
+  schedule(callback: () => void, delayMilliseconds: number): unknown;
+  cancel(handle: unknown): void;
+}
+
 interface PushRegistrationControllerDependencies {
   readonly configuration: PushRegistrationConfiguration;
   readonly native: PushNativePort;
+  readonly retryTimer?: PushRetryTimer;
 }
+
+const DEFAULT_RETRY_TIMER: PushRetryTimer = Object.freeze({
+  schedule: (callback: () => void, delayMilliseconds: number) =>
+    globalThis.setTimeout(callback, delayMilliseconds),
+  cancel: (handle: unknown) =>
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+});
+
+/**
+ * Delays before each automatic retry of a registration that failed on the
+ * network. During the 2026-10-16 district power outage a phone whose route to
+ * Expo was degraded showed "push-token request timed out" and stayed that way
+ * until someone tapped Retry, because nothing else asks again while the PSD EOC
+ * session itself stays online. Bounded, so a device that cannot reach Expo at
+ * all stops after about nine minutes and leaves the Retry button.
+ */
+export const AUTOMATIC_RETRY_DELAYS_MS: readonly number[] = Object.freeze([
+  5_000, 15_000, 30_000, 60_000, 120_000, 300_000,
+]);
 
 const IDLE_SNAPSHOT: PushRegistrationSnapshot = Object.freeze({
   phase: 'idle',
@@ -196,6 +222,8 @@ export class PushRegistrationController {
   private providerRequestAbortController: AbortController | null = null;
   private running = false;
   private prepared = false;
+  private automaticRetryAttempts = 0;
+  private automaticRetryHandle: unknown = null;
 
   public constructor(
     private readonly dependencies: PushRegistrationControllerDependencies,
@@ -242,6 +270,7 @@ export class PushRegistrationController {
     this.session = null;
     this.permissionStatus = null;
     this.abortProviderRequest();
+    this.cancelAutomaticRetry();
     this.tokenSubscription?.remove();
     this.tokenSubscription = null;
     this.update(IDLE_SNAPSHOT);
@@ -252,6 +281,7 @@ export class PushRegistrationController {
     this.session = null;
     this.permissionStatus = null;
     this.abortProviderRequest();
+    this.cancelAutomaticRetry();
     this.unregisteredSessionId = null;
     this.update(IDLE_SNAPSHOT);
   }
@@ -266,6 +296,7 @@ export class PushRegistrationController {
     this.session = null;
     this.permissionStatus = null;
     this.abortProviderRequest();
+    this.cancelAutomaticRetry();
     if (
       this.snapshot.phase !== 'denied' &&
       this.snapshot.phase !== 'provider-disabled'
@@ -285,9 +316,16 @@ export class PushRegistrationController {
     }
   }
 
+  /** An auth change or a person's Retry starts a fresh retry budget. */
   public reconcile(session: PushRegistrationSession): Promise<void> {
+    this.automaticRetryAttempts = 0;
+    return this.reconcileAgain(session);
+  }
+
+  private reconcileAgain(session: PushRegistrationSession): Promise<void> {
     const generation = ++this.generation;
     this.abortProviderRequest();
+    this.cancelAutomaticRetry();
     this.session = session;
     return this.enqueue(() => this.reconcileCurrent(generation, session));
   }
@@ -297,6 +335,8 @@ export class PushRegistrationController {
     if (session === null) return Promise.resolve();
     const generation = ++this.generation;
     this.abortProviderRequest();
+    this.cancelAutomaticRetry();
+    this.automaticRetryAttempts = 0;
     return this.enqueue(async () => {
       if (!this.isCurrent(generation, session)) return;
       if (!this.configurationReady()) {
@@ -442,7 +482,7 @@ export class PushRegistrationController {
     try {
       nativeToken = await this.dependencies.native.getDevicePushToken();
     } catch {
-      this.failCurrent(
+      this.failTransiently(
         generation,
         session,
         'PSD EOC could not prepare this device for push alerts. Reconnect and try again.',
@@ -534,6 +574,7 @@ export class PushRegistrationController {
         );
         return;
       }
+      this.automaticRetryAttempts = 0;
       // Asked after the endpoint is registered, never before: how loudly this
       // device will present an alert must not decide whether it receives one.
       this.update({
@@ -545,11 +586,14 @@ export class PushRegistrationController {
           .catch(() => false),
       });
     } catch (error) {
-      this.failCurrent(
-        generation,
-        session,
-        pushRegistrationFailureMessage(stage, error),
-      );
+      const message = pushRegistrationFailureMessage(stage, error);
+      // An assembly failure is this build's own bug; asking again cannot fix
+      // it. Every other stage is a network round trip that can.
+      if (stage === 'assemble') {
+        this.failCurrent(generation, session, message);
+      } else {
+        this.failTransiently(generation, session, message);
+      }
     } finally {
       if (this.providerRequestAbortController === providerRequest) {
         this.providerRequestAbortController = null;
@@ -635,6 +679,42 @@ export class PushRegistrationController {
   ): void {
     if (!this.isCurrent(generation, session)) return;
     this.update({ phase: 'error', platform: session.platform, message });
+  }
+
+  /**
+   * Reports the failure and, while the retry budget lasts, asks again on its
+   * own. The previous server registration is never touched by a failure here,
+   * so a device that was registered keeps receiving alerts meanwhile.
+   */
+  private failTransiently(
+    generation: number,
+    session: PushRegistrationSession,
+    message: string,
+  ): void {
+    if (!this.isCurrent(generation, session)) return;
+    const delay = AUTOMATIC_RETRY_DELAYS_MS[this.automaticRetryAttempts];
+    if (delay === undefined || !this.running) {
+      this.failCurrent(generation, session, message);
+      return;
+    }
+    this.automaticRetryAttempts += 1;
+    this.failCurrent(generation, session, `${message} Retrying automatically.`);
+    const timer = this.dependencies.retryTimer ?? DEFAULT_RETRY_TIMER;
+    const handle = timer.schedule(() => {
+      if (this.automaticRetryHandle !== handle) return;
+      this.automaticRetryHandle = null;
+      if (!this.running || !this.isCurrent(generation, session)) return;
+      void this.reconcileAgain(session);
+    }, delay);
+    this.automaticRetryHandle = handle;
+  }
+
+  private cancelAutomaticRetry(): void {
+    if (this.automaticRetryHandle === null) return;
+    (this.dependencies.retryTimer ?? DEFAULT_RETRY_TIMER).cancel(
+      this.automaticRetryHandle,
+    );
+    this.automaticRetryHandle = null;
   }
 
   private isCurrent(

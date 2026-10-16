@@ -176,7 +176,7 @@ assert(
     "'https://exp.host/--/api/v2/push/getExpoPushToken'",
   ) &&
     expoTokenSource.includes('fetchToken(EXPO_PUSH_TOKEN_URL') &&
-    expoTokenSource.includes('const EXPO_PUSH_TOKEN_TIMEOUT_MS = 8_000') &&
+    expoTokenSource.includes('const EXPO_PUSH_TOKEN_TIMEOUT_MS = 15_000') &&
     expoTokenSource.includes('new AbortController()'),
   'Expo token acquisition must use the single explicit, non-persisting endpoint.',
 );
