@@ -7,6 +7,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
+  AUTOMATIC_RETRY_DELAYS_MS,
   pushRegistrationFailureMessage,
   PushRegistrationController,
   parsePushRegistrationConfiguration,
@@ -639,5 +640,193 @@ describe('push registration failure messages', () => {
     expect(pushRegistrationFailureMessage('server', new Error('  '))).toContain(
       'did not accept',
     );
+  });
+});
+
+class ManualRetryTimer {
+  public scheduled: Array<{ callback: () => void; delay: number }> = [];
+  public cancelled = 0;
+
+  public schedule(callback: () => void, delay: number): unknown {
+    const entry = { callback, delay };
+    this.scheduled.push(entry);
+    return entry;
+  }
+
+  public cancel(handle: unknown): void {
+    const index = this.scheduled.indexOf(handle as never);
+    if (index >= 0) {
+      this.scheduled.splice(index, 1);
+      this.cancelled += 1;
+    }
+  }
+
+  /** Fires the oldest pending retry; the controller then runs to idle. */
+  public async fire(controller: PushRegistrationController): Promise<void> {
+    const next = this.scheduled.shift();
+    if (next === undefined) throw new Error('No retry is scheduled.');
+    next.callback();
+    // The retry enqueues behind the controller's serial operation tail; every
+    // fake here settles in microtasks, so one macrotask drains it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    void controller;
+  }
+}
+
+class FlakyExpoPort extends NativePort {
+  public expoFailuresRemaining = 0;
+  public expoCalls = 0;
+
+  public override async getExpoPushToken(input: {
+    projectId: string;
+    devicePushToken: NativePushToken;
+    serviceEnvironment: 'development' | 'production';
+    signal: AbortSignal;
+  }): Promise<string> {
+    this.expoCalls += 1;
+    if (this.expoFailuresRemaining > 0) {
+      this.expoFailuresRemaining -= 1;
+      throw new Error('Expo push-token request timed out.');
+    }
+    return super.getExpoPushToken(input);
+  }
+}
+
+function retryingController(native: NativePort, retryTimer: ManualRetryTimer) {
+  return new PushRegistrationController({
+    configuration: { enabled: true, projectId: PROJECT_ID, build: BUILD },
+    native,
+    retryTimer,
+  });
+}
+
+describe('automatic retry after a network failure', () => {
+  test('a timed-out Expo token request registers on its own once Expo answers', async () => {
+    // 2026-10-16: the banner stayed until someone tapped Retry, because the
+    // PSD EOC session never went offline and nothing else asked again.
+    const native = new FlakyExpoPort('granted');
+    native.expoFailuresRemaining = 2;
+    const timer = new ManualRetryTimer();
+    const currentSession = session();
+    const controller = retryingController(native, timer);
+
+    await controller.start();
+    await controller.reconcile(currentSession.binding);
+
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'error',
+      message: expect.stringContaining('Retrying automatically.'),
+    });
+    expect(timer.scheduled.map((entry) => entry.delay)).toEqual(
+      AUTOMATIC_RETRY_DELAYS_MS.slice(0, 1),
+    );
+
+    await timer.fire(controller);
+    expect(controller.getSnapshot().phase).toBe('error');
+    expect(timer.scheduled.map((entry) => entry.delay)).toEqual(
+      AUTOMATIC_RETRY_DELAYS_MS.slice(1, 2),
+    );
+
+    await timer.fire(controller);
+    expect(controller.getSnapshot().phase).toBe('registered');
+    expect(currentSession.registrations).toHaveLength(1);
+    expect(timer.scheduled).toEqual([]);
+  });
+
+  test('a failure never unregisters the endpoint the server already holds', async () => {
+    const native = new FlakyExpoPort('granted');
+    native.expoFailuresRemaining = 1;
+    const timer = new ManualRetryTimer();
+    const currentSession = session();
+    const controller = retryingController(native, timer);
+
+    await controller.start();
+    await controller.reconcile(currentSession.binding);
+
+    expect(controller.getSnapshot().phase).toBe('error');
+    expect(currentSession.unregistrations).toEqual([]);
+  });
+
+  test('stops after the bounded schedule and leaves the Retry button', async () => {
+    const native = new FlakyExpoPort('granted');
+    native.expoFailuresRemaining = Number.POSITIVE_INFINITY;
+    const timer = new ManualRetryTimer();
+    const currentSession = session();
+    const controller = retryingController(native, timer);
+
+    await controller.start();
+    await controller.reconcile(currentSession.binding);
+    for (let index = 0; index < AUTOMATIC_RETRY_DELAYS_MS.length; index += 1) {
+      await timer.fire(controller);
+    }
+
+    expect(timer.scheduled).toEqual([]);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'error' });
+    expect(controller.getSnapshot().message).not.toContain(
+      'Retrying automatically.',
+    );
+    expect(native.expoCalls).toBe(AUTOMATIC_RETRY_DELAYS_MS.length + 1);
+
+    // A person's Retry starts a fresh budget.
+    native.expoFailuresRemaining = 0;
+    await controller.retry();
+    expect(controller.getSnapshot().phase).toBe('registered');
+  });
+
+  test('a manual Retry or an auth change replaces the pending automatic retry', async () => {
+    const native = new FlakyExpoPort('granted');
+    native.expoFailuresRemaining = 1;
+    const timer = new ManualRetryTimer();
+    const currentSession = session();
+    const controller = retryingController(native, timer);
+
+    await controller.start();
+    await controller.reconcile(currentSession.binding);
+    expect(timer.scheduled).toHaveLength(1);
+
+    await controller.retry();
+
+    expect(timer.cancelled).toBe(1);
+    expect(timer.scheduled).toEqual([]);
+    expect(controller.getSnapshot().phase).toBe('registered');
+  });
+
+  test('sign-out and backgrounding cancel the pending retry', async () => {
+    for (const leave of ['clearSession', 'suspendSession', 'stop'] as const) {
+      const native = new FlakyExpoPort('granted');
+      native.expoFailuresRemaining = 1;
+      const timer = new ManualRetryTimer();
+      const controller = retryingController(native, timer);
+
+      await controller.start();
+      await controller.reconcile(session().binding);
+      expect(timer.scheduled).toHaveLength(1);
+
+      controller[leave]();
+
+      expect(timer.scheduled).toEqual([]);
+      expect(native.expoCalls).toBe(1);
+    }
+  });
+
+  test('an assembly failure is not retried, because asking again cannot fix it', async () => {
+    const native = new NativePort('granted');
+    const timer = new ManualRetryTimer();
+    const controller = new PushRegistrationController({
+      configuration: {
+        enabled: true,
+        projectId: PROJECT_ID,
+        // A build identity the registration schema refuses.
+        build: { ...BUILD, applicationVersion: '' },
+      },
+      native,
+      retryTimer: timer,
+    });
+
+    await controller.start();
+    await controller.reconcile(session().binding);
+
+    expect(controller.getSnapshot().phase).toBe('error');
+    expect(timer.scheduled).toEqual([]);
   });
 });

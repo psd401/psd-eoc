@@ -52,7 +52,7 @@ describe('explicit Expo push-token request', () => {
       redirect: 'error',
     });
     expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal);
-    expect(timerObservation.delay).toBe(8_000);
+    expect(timerObservation.delay).toBe(15_000);
     expect(timerObservation.cancelled).toBe(timeoutHandle);
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
       type: 'apns',
@@ -116,7 +116,7 @@ describe('explicit Expo push-token request', () => {
       },
       {
         schedule(callback, delayMilliseconds) {
-          expect(delayMilliseconds).toBe(8_000);
+          expect(delayMilliseconds).toBe(15_000);
           observation.deadline = callback;
           return timeoutHandle;
         },

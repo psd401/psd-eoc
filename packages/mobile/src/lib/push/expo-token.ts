@@ -1,6 +1,8 @@
 const EXPO_PUSH_TOKEN_URL =
   'https://exp.host/--/api/v2/push/getExpoPushToken' as const;
-const EXPO_PUSH_TOKEN_TIMEOUT_MS = 8_000;
+// Eight seconds was not enough on a degraded outage network; the controller
+// also retries on its own now, so a longer single wait costs little.
+const EXPO_PUSH_TOKEN_TIMEOUT_MS = 15_000;
 const EXPO_PUSH_TOKEN_PATTERN =
   /^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]{1,4064}\]$/u;
 
