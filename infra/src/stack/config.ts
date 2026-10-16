@@ -29,6 +29,12 @@ export const DATABASE_NAME = 'psd_eoc';
 export const DATABASE_IDENTIFIER = 'psd-eoc';
 export const DATABASE_PORT = 5_432;
 export const HEALTH_PATH = '/api/health';
+/**
+ * App Runner's own health check. Process liveness only: the deep
+ * `HEALTH_PATH` read failed on every instance at once when one dependency was
+ * slow, and App Runner replaces an instance that fails its check.
+ */
+export const LIVENESS_PATH = '/api/health/live';
 export const SERVER_REPOSITORY_NAME = 'psd-eoc/server';
 export const HEALTH_QUEUE_NAME = 'psd-eoc-health';
 export const EMAIL_QUEUE_NAME = 'psd-eoc-email';

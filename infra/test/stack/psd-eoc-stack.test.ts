@@ -19,6 +19,7 @@ import {
   EMAIL_WORKER_LOG_GROUP_NAME,
   DEPLOYMENT_ENVIRONMENT,
   HEALTH_PATH,
+  LIVENESS_PATH,
   HEALTH_QUEUE_NAME,
   SERVER_REPOSITORY_NAME,
   SMS_RECEIPT_DEAD_LETTER_QUEUE_NAME,
@@ -1101,8 +1102,10 @@ describe('App Runner runtime safety boundary', () => {
     const scaling = properties(
       onlyResource('AWS::AppRunner::AutoScalingConfiguration'),
     );
-    expect(scaling.MinSize).toBe(1);
-    expect(scaling.MaxSize).toBe(1);
+    // One instance was a single point of failure: when it was killed out of
+    // memory the whole service went with it.
+    expect(scaling.MinSize).toBe(2);
+    expect(scaling.MaxSize).toBe(4);
     expect(scaling.MaxConcurrency).toBe(10);
 
     const service = onlyResource('AWS::AppRunner::Service');
@@ -1144,9 +1147,12 @@ describe('App Runner runtime safety boundary', () => {
         Value: 'AWS CDK',
       },
     ]);
+    // Liveness only: a deep check fails every instance at once when one
+    // dependency is slow, and App Runner replaces instances that fail it.
     expect(asRecord(serviceProperties.HealthCheckConfiguration).Path).toBe(
-      HEALTH_PATH,
+      LIVENESS_PATH,
     );
+    expect(LIVENESS_PATH).not.toBe(HEALTH_PATH);
     const egress = asRecord(
       asRecord(serviceProperties.NetworkConfiguration).EgressConfiguration,
     );
@@ -2565,6 +2571,24 @@ describe('alarm topic delivery', () => {
     }
     expect(burst.Threshold).toBe(5);
     expect(burst.EvaluationPeriods).toBe(1);
+  });
+
+  it('pages before App Runner memory runs out', () => {
+    // On 2026-10-15 memory sat near 92% for four hours before the only
+    // instance was killed. Nothing alarmed until the 5xx it caused.
+    const memory = resourceEntries('AWS::CloudWatch::Alarm')
+      .map(([, resource]) => properties(resource))
+      .find((alarm) => alarm.AlarmName === 'psd-eoc-apprunner-memory-high');
+    if (memory === undefined) {
+      throw new Error('Missing the App Runner memory alarm.');
+    }
+    expect(memory.Namespace).toBe('AWS/AppRunner');
+    expect(memory.MetricName).toBe('MemoryUtilization');
+    expect(memory.Statistic).toBe('Maximum');
+    expect(memory.Threshold).toBe(75);
+    expect(memory.DatapointsToAlarm).toBe(3);
+    expect(memory.EvaluationPeriods).toBe(3);
+    expect(JSON.stringify(memory.AlarmActions)).toContain('CriticalAlarmTopic');
   });
 
   it('measures Aurora capacity in ACU, not as a share of the ceiling', () => {

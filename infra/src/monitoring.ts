@@ -557,6 +557,7 @@ interface MonitoringMetrics {
   readonly activationAcceptLatency: ExactPercentileMetrics;
   readonly appRunner5xx: cloudwatch.Metric;
   readonly appRunnerLatency: cloudwatch.Metric;
+  readonly appRunnerMemory: cloudwatch.Metric;
   readonly auroraFailover: cloudwatch.Metric;
   readonly failoverBridgeErrors: cloudwatch.IMetric;
   readonly canaryLatency: cloudwatch.Metric;
@@ -1455,6 +1456,26 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  // Memory that does not come back is a crash on a timer. On 2026-10-15 a
+  // drill burst took the instance from 36% to 88%, it never came down, and
+  // four hours later it was killed out of memory. Three minutes running above
+  // 75% is that warning, early enough to replace instances before the next
+  // burst finishes the job.
+  emit({
+    tier: 'infrastructure',
+    datapointsToAlarm: 3,
+    evaluationPeriods: 3,
+    dependsOnApplication: true,
+    id: 'AppRunnerMemoryAlarm',
+    metric: metrics.appRunnerMemory,
+    name: 'psd-eoc-apprunner-memory-high',
+    runbookAnchor: 'runbook-app-runner-memory',
+    summary:
+      'An App Runner instance stayed above 75% memory for three minutes.',
+    threshold: 75,
+    topic: props.criticalAlarmTopic,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
   emit({
     tier: 'infrastructure',
     datapointsToAlarm: 3,
@@ -1756,6 +1777,11 @@ function assembleMetrics(
       props.appRunnerService,
       'RequestLatency',
       'Average',
+    ),
+    appRunnerMemory: appRunnerMetric(
+      props.appRunnerService,
+      'MemoryUtilization',
+      'Maximum',
     ),
     auroraFailover: customMetric('AuroraFailoverEvent', { statistic: 'Sum' }),
     failoverBridgeErrors,
