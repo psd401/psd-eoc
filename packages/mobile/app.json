@@ -46,6 +46,7 @@
     },
     "plugins": [
       "expo-router",
+      ["expo-build-properties", { "ios": { "enableSceneSupport": true } }],
       [
         "expo-image-picker",
         {
