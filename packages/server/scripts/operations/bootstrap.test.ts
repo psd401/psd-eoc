@@ -611,7 +611,7 @@ describe('bootstrap coordinator', () => {
 });
 
 describe('immutable server image contract', () => {
-  test('pins the Bun base, reviewed source SHA, non-root runtime, and bounded workspaces', async () => {
+  test('pins the Bun and Node bases, reviewed source SHA, non-root runtime, and bounded workspaces', async () => {
     const dockerfile = await Bun.file(
       new URL('../../container/psd-eoc.Dockerfile', import.meta.url),
     ).text();
@@ -626,9 +626,18 @@ describe('immutable server image contract', () => {
       'RUN bun install --frozen-lockfile --production',
     );
     expect(dockerfile).toContain('USER bun');
+    // Node serves Next.js: under Bun the server never released the memory a
+    // request burst allocated. WORKDIR stays /app for the task commands.
     expect(dockerfile).toContain(
-      'CMD ["bun", "--cwd", "packages/server", "start"]',
+      'node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402',
     );
+    expect(dockerfile).toContain(
+      'COPY --from=node /usr/local/bin/node /usr/local/bin/node',
+    );
+    expect(dockerfile).toContain(
+      'CMD ["node", "node_modules/next/dist/bin/next", "start", "packages/server"]',
+    );
+    expect(dockerfile).not.toContain('WORKDIR /app/packages/server');
     expect(dockerfile).toContain(
       'COPY --from=build --chown=bun:bun /app/packages/server ./packages/server',
     );

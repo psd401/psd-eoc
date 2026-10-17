@@ -43,6 +43,10 @@ documentation.
 Use the [5xx](../docs/runbooks/alarm-app-runner-5xx.md) and
 [latency](../docs/runbooks/alarm-app-runner-latency.md) procedures.
 
+### Runbook: App Runner memory
+
+Use the [memory](../docs/runbooks/alarm-app-runner-memory.md) procedure.
+
 ### Runbook: Activation accept latency
 
 Use the [activation latency](../docs/runbooks/alarm-activation-latency.md)

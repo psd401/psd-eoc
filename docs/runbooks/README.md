@@ -37,6 +37,7 @@ EOC is not a 911 service.
 | Alarm family                  | Procedure                                                                                                                                                                         |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | App Runner errors and latency | [5xx](alarm-app-runner-5xx.md), [request latency](alarm-app-runner-latency.md)                                                                                                    |
+| App Runner memory             | [memory](alarm-app-runner-memory.md)                                                                                                                                              |
 | Activation acceptance         | [Activation latency](alarm-activation-latency.md)                                                                                                                                 |
 | Aurora                        | [Capacity](alarm-aurora-capacity.md), [failover](alarm-aurora-failover.md)                                                                                                        |
 | Queues and dead letters       | [Queue age](alarm-sqs-age.md), [common DLQ](alarm-sqs-dlq.md), [delivery](alarm-dlq-delivery.md), [push](alarm-dlq-push.md), [email](alarm-dlq-email.md), [SMS](alarm-dlq-sms.md) |

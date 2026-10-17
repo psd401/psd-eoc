@@ -1,3 +1,11 @@
+# Node serves the Next.js application; Bun still installs, builds, and runs the
+# bootstrap and channel-worker tasks from this same image. Under Bun the server
+# kept the memory every request burst allocated: a drill burst on 2026-10-15
+# took the only instance from 36% to 88% of 2 GB, it never came down, and the
+# instance was killed out of memory four hours later. Same Alpine/musl family,
+# so the binary runs against the libraries this image already carries.
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS node
+
 FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS base
 
 WORKDIR /app
@@ -120,9 +128,11 @@ COPY --from=build --chown=bun:bun /app/packages/contracts/src ./packages/contrac
 # and pinned RDS CA bundle beside the built Next application.
 COPY --from=build --chown=bun:bun /app/packages/server ./packages/server
 COPY --from=build --chown=bun:bun /app/workers ./workers
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 
 USER bun
 
 EXPOSE 3000
 
-CMD ["bun", "--cwd", "packages/server", "start"]
+# WORKDIR stays /app: the bootstrap and worker task commands resolve from it.
+CMD ["node", "node_modules/next/dist/bin/next", "start", "packages/server"]

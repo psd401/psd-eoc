@@ -82,6 +82,7 @@ import {
   DEPLOYMENT_ENVIRONMENT,
   HEALTH_PATH,
   HEALTH_QUEUE_NAME,
+  LIVENESS_PATH,
   SERVER_REPOSITORY_NAME,
   readDeploymentIdentity,
   readFacilityContext,
@@ -3153,10 +3154,16 @@ export class PsdEocStack extends Stack {
       this,
       'AppRunnerScaling',
       {
-        autoScalingConfigurationName: 'psd-eoc-single',
+        // Two warm instances, so losing one is not an outage: on 2026-10-15
+        // the only instance was killed out of memory mid-afternoon and the
+        // service and every channel worker behind it were down until App
+        // Runner replaced it. Up to four absorb a district-wide burst. One
+        // instance peaked at 19 database connections in those bursts, so four
+        // stay well inside the 189 Aurora PostgreSQL allows at 1 ACU.
+        autoScalingConfigurationName: 'psd-eoc-resilient',
         maxConcurrency: 10,
-        maxSize: 1,
-        minSize: 1,
+        maxSize: 4,
+        minSize: 2,
       },
     );
     appRunnerScaling.cfnOptions.condition = shouldProvisionApplication;
@@ -3170,7 +3177,7 @@ export class PsdEocStack extends Stack {
         healthCheckConfiguration: {
           healthyThreshold: 1,
           interval: 10,
-          path: HEALTH_PATH,
+          path: LIVENESS_PATH,
           protocol: 'HTTP',
           timeout: 5,
           unhealthyThreshold: 5,
