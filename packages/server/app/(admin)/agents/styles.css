@@ -390,3 +390,17 @@ summary:focus-visible,
     border: 0.125rem solid CanvasText;
   }
 }
+
+.admin-form .capability-group {
+  margin-top: 0.75rem;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.admin-form .capability-group legend {
+  font-size: 1rem;
+}
+
+.capability-group .capability-choices {
+  margin-left: 0;
+}

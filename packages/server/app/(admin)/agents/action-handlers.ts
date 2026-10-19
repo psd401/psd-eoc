@@ -74,7 +74,9 @@ export async function handleIssueAgentApiKeyAction(
               facilityIds: texts(formData, 'facilityIds'),
             },
       capabilityIds: texts(formData, 'capabilityIds'),
-      expiresInSeconds: expiration.length === 0 ? null : Number(expiration),
+      // Number('') is 0, which the contract's positive() check refuses, so a
+      // submission without an expiry cannot issue a key that never expires.
+      expiresInSeconds: Number(expiration),
     });
     const issuance = await dependencies.administration.issue({
       access: dependencies.access,

@@ -224,6 +224,36 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = Object.freeze([
   draftMessageTemplateRevisionTool,
 ]);
 
+/**
+ * Tools whose results carry free text that a person or another agent wrote:
+ * journal entries, operator-typed threat and response details, correction
+ * reasons, template wording, and unpublished drafts. The protocol layer
+ * prefixes their text content with the untrusted-content notice. Facility,
+ * threat, roster-health, and export-grant results are server-authored and
+ * carry no such text, so they are left unlabeled.
+ */
+export const MCP_UNTRUSTED_CONTENT_TOOL_NAMES = Object.freeze([
+  'list-active-events',
+  'get-event',
+  'search-journal-entries',
+  'list-drill-records',
+  'list-event-types',
+  'get-event-type-version',
+  'get-event-type-draft',
+  'create-activation-preview',
+  'prepare-activation',
+  'draft-message-template-revision',
+] as const satisfies readonly McpToolName[]);
+
+const untrustedContentToolNames = new Set<string>(
+  MCP_UNTRUSTED_CONTENT_TOOL_NAMES,
+);
+
+/** True when a tool's successful result can contain staff- or agent-written text. */
+export function isUntrustedContentMcpTool(name: McpToolName): boolean {
+  return untrustedContentToolNames.has(name);
+}
+
 const mcpToolIds = new Set<string>(MCP_TOOL_CAPABILITY_IDS);
 const mcpToolNames = new Set<string>([
   ...MCP_TOOL_CAPABILITY_IDS,

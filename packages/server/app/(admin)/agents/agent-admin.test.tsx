@@ -78,7 +78,6 @@ const agent: AgentAdminAgent = {
 const humanOnlyOptionInjectedAtRuntime = {
   id: 'all-clear' as AgentCapabilityGrant,
   label: 'Unsafe injected action',
-  description: 'This must be rejected by the presentation boundary.',
 };
 
 const baseProps: AgentAdminProps = {
@@ -91,18 +90,25 @@ const baseProps: AgentAdminProps = {
       active: true,
     },
   ],
-  grantOptions: [
+  grantGroups: [
     {
-      id: 'get-event',
-      label: 'Read event',
-      description: 'Read an event in the selected facility scope.',
+      id: 'reads-and-reports',
+      title: 'Reads and reports',
+      description: 'Read events and records. Nothing here changes an event.',
+      options: [{ id: 'get-event', label: 'Read event' }],
     },
     {
-      id: 'prepare-activation',
-      label: 'Prepare activation',
-      description: 'Prepare a draft for later human confirmation.',
+      id: 'drafts',
+      title: 'Drafts',
+      description: 'Prepare drafts and intents for a human to confirm.',
+      options: [{ id: 'prepare-activation', label: 'Prepare activation' }],
     },
-    humanOnlyOptionInjectedAtRuntime,
+    {
+      id: 'synthetic-event-lifecycle',
+      title: 'Synthetic event lifecycle',
+      description: 'Run drills and tests on the synthetic roster only.',
+      options: [humanOnlyOptionInjectedAtRuntime],
+    },
   ],
   issueIdempotencyKey,
   issuedKey,
@@ -180,10 +186,47 @@ describe('agent administration presentation', () => {
     const markup = render();
 
     expect(markup).not.toContain(
-      'name="capabilityIds" type="checkbox" value="all-clear"',
+      '<input type="checkbox" name="capabilityIds" value="all-clear"/>',
     );
     expect(markup).not.toContain('Unsafe injected action');
+    // A group left with only unsafe options is not rendered at all.
+    expect(markup).not.toContain('Synthetic event lifecycle');
     expect(markup).toContain('regardless of the facilities or capabilities');
+  });
+
+  test('groups grants by risk with one description per group and offers no unbounded expiry', () => {
+    const markup = render();
+
+    const reads = markup.indexOf('<legend>Reads and reports</legend>');
+    const drafts = markup.indexOf('<legend>Drafts</legend>');
+    const getEvent = markup.indexOf(
+      '<input type="checkbox" name="capabilityIds" value="get-event"/>',
+    );
+    const prepare = markup.indexOf(
+      '<input type="checkbox" name="capabilityIds" value="prepare-activation"/>',
+    );
+    expect(reads).toBeGreaterThan(-1);
+    expect(drafts).toBeGreaterThan(reads);
+    expect(getEvent).toBeGreaterThan(reads);
+    expect(getEvent).toBeLessThan(drafts);
+    expect(prepare).toBeGreaterThan(drafts);
+    expect(markup).toContain(
+      'Read events and records. Nothing here changes an event.',
+    );
+    expect(markup).toContain(
+      'Prepare drafts and intents for a human to confirm.',
+    );
+    expect(markup).toContain('<fieldset class="capability-group">');
+    expect(markup).not.toContain(
+      'The server applies the selected facility scope',
+    );
+
+    expect(markup).toMatch(
+      /<option value="7776000" selected="">90 days \(recommended\)<\/option>/u,
+    );
+    expect(markup).not.toContain('<option value="">');
+    expect(markup).not.toContain('No automatic expiration</option>');
+    expect(markup).toContain('Every key expires.');
   });
 
   test('shows scoped retained keys and minimized per-agent audit facts', () => {
