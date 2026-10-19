@@ -77,3 +77,31 @@ export function hasUniqueStrings(values: readonly string[]): boolean {
 export function isAtOrAfter(later: string, earlier: string): boolean {
   return Date.parse(later) >= Date.parse(earlier);
 }
+
+/** Administrator-given display name for an agent identity or agent key. */
+export const AgentApiKeyDisplayNameSchema = z.string().trim().min(1).max(160);
+
+/** Public, non-secret prefix that identifies one agent API key. */
+export const AgentApiKeyPrefixSchema = z
+  .string()
+  .trim()
+  .min(8)
+  .max(24)
+  .regex(/^[A-Za-z0-9_-]+$/u);
+
+/**
+ * Owns the two key-summary fields that identify an agent key to a human
+ * reader: the name an administrator gave the key and its public prefix. Draft
+ * review shows these for an agent author instead of a bare UUID. It lives here
+ * so event-type contracts can use it without importing the agent-key module.
+ */
+export const AgentApiKeyLabelSchema = z
+  .object({
+    displayName: AgentApiKeyDisplayNameSchema,
+    keyPrefix: AgentApiKeyPrefixSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Human-readable agent key label inferred from its schema. */
+export type AgentApiKeyLabel = z.infer<typeof AgentApiKeyLabelSchema>;

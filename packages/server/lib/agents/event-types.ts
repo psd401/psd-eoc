@@ -1,6 +1,7 @@
 import type { CapabilityAuditEvent } from '../capabilities/engine';
 import {
   DrizzleEventTypeStore,
+  EventTypeCapabilityError,
   type EventTypeMutationMetadata,
   type EventTypeStore,
 } from '../capabilities/event-types';
@@ -68,6 +69,26 @@ export class AtomicAgentEventTypeStore implements EventTypeStore {
 
   public readonly getDraft: EventTypeStore['getDraft'] = (input) =>
     this.queries.getDraft(input);
+
+  /**
+   * Draft review is the human half of the draft flow. The capability policy
+   * refuses agent principals before any store is reached; these fail closed
+   * so an agent transport can never list or withdraw proposals even if a
+   * future adapter forgets the policy.
+   */
+  public readonly listDrafts: EventTypeStore['listDrafts'] = async () => {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Draft review is reserved for human administrators.',
+    );
+  };
+
+  public readonly discardDraft: EventTypeStore['discardDraft'] = async () => {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Draft review is reserved for human administrators.',
+    );
+  };
 
   public readonly createDraft: EventTypeStore['createDraft'] = (
     input,

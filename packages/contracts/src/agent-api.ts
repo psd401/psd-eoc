@@ -5,7 +5,12 @@ import { PaginationCursorSchema, paginatedSchema } from './api';
 import type { AgentGrantableCapabilityId } from './capability-catalog';
 import { InstalledAgentGrantableCapabilityIdSchema } from './capability-derived-registry';
 import { FacilityScopeSchema } from './facility';
-import { TimestampSchema, UuidSchema } from './shared';
+import {
+  AgentApiKeyDisplayNameSchema,
+  AgentApiKeyPrefixSchema,
+  TimestampSchema,
+  UuidSchema,
+} from './shared';
 
 /** Stable identity for a district agent principal. */
 export const AgentIdSchema = UuidSchema;
@@ -74,19 +79,14 @@ export type IssueAgentApiKeyInput = z.infer<typeof IssueAgentApiKeyInputSchema>;
 const agentApiKeySummaryShape = {
   id: AgentApiKeyIdSchema,
   agentId: AgentIdSchema,
-  displayName: z.string().trim().min(1).max(160),
+  displayName: AgentApiKeyDisplayNameSchema,
   facilityScope: FacilityScopeSchema,
   capabilityIds: z
     .array(RetainedAgentCapabilityGrantSchema)
     .min(1)
     .max(100)
     .readonly(),
-  keyPrefix: z
-    .string()
-    .trim()
-    .min(8)
-    .max(24)
-    .regex(/^[A-Za-z0-9_-]+$/u),
+  keyPrefix: AgentApiKeyPrefixSchema,
   issuedByUserId: UuidSchema,
   issuedAt: TimestampSchema,
   expiresAt: TimestampSchema.nullable(),

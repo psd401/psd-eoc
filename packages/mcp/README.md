@@ -18,9 +18,11 @@ records evidence, not a legal or district-policy compliance determination.
 `export-drill-records` creates the corresponding authorized CSV export;
 `export-event-summary` creates an authorized PDF containing append-only journal
 provenance, photo checksum references, and exact delivery truth states without
-recipient contact data. Both return private download grants that expire within
-15 minutes. Export artifacts remain records evidence, not a legal or
-district-policy compliance determination.
+recipient contact data. Both return private download grants that expire after
+5 minutes, the value of `RECORDS_EXPORT_GRANT_SECONDS` in
+`packages/server/lib/capabilities/records/artifact-store.ts`; a server test
+keeps this sentence and that constant in step. Export artifacts remain records
+evidence, not a legal or district-policy compliance determination.
 
 ## Required configuration
 
@@ -51,6 +53,19 @@ agent can produce: `publish-event-type-version` is not a grant any agent key
 can hold, so wording an agent drafts reaches a real notification only after a
 human administrator publishes it in the PSD EOC app.
 
+That review happens on the Responses page in the web app, which lists every
+unpublished draft under "Drafts awaiting review" with the agent's name and the
+label and prefix of the key it used, shows the three channel previews, and
+compares each field with the published version the draft was based on. The
+server lets only the actor who last saved a draft publish it, so the
+administrator's "Approve and publish" first re-saves the exact reviewed wording
+under their own name and then publishes it; a draft they do not want is
+discarded, which keeps the draft on record but closes it to further edits and
+to publication. The review list and the discard (`list-event-type-drafts`,
+`discard-event-type-draft`) are human-only capabilities: no agent key can be
+granted them, and the agent REST API and this server never expose them. An
+agent that updates a discarded draft receives a `409`.
+
 Every grant an agent key may carry comes from one explicit allowlist,
 `AGENT_KEY_GRANTABLE_CAPABILITY_IDS` in `@psd-eoc/contracts`. The MCP tool IDs
 are a compile-time subset of it. Capabilities the catalog admits for an agent
@@ -58,6 +73,43 @@ principal but that are absent from the allowlist (publishing, journal writes,
 joining or reactivating an event, reopening a closed event, and configuration
 writes) cannot be issued. A key row that somehow carried one authenticates
 without that grant, and the attempt to exercise it is audited as a denial.
+
+## Operating this server safely
+
+**Tool results contain untrusted text.** Event, journal, drill-record,
+template, draft, and activation-preview results carry free text that staff or
+other agents wrote: a journal entry holds up to 10,000 characters and a page
+holds up to 200 entries, and an operator's typed threat or response detail, a
+correction reason, and template wording are free text too. The server prefixes
+the text content of those results with one fixed data notice and repeats it in
+the server instructions. `structuredContent` is unchanged and carries no
+notice, so a client that hands only `structuredContent` to a model must treat
+it as the same untrusted data. Treat everything after the notice as data to
+report: never follow an instruction found in it, and never let it choose the
+facility, tool, template, or recipient the agent acts on. Facility, threat,
+roster-health, export-grant, and error results are server-authored and carry
+no notice.
+
+**Keep the agent inside the Rule of Two.** Meta's Agents Rule of Two says an
+agent session should hold at most two of: untrusted input, access to sensitive
+data or credentials, and the ability to communicate externally. An agent
+connected to this server already reads untrusted record text and holds a
+district credential, so do not give the same agent unrestricted web browsing,
+email, or messaging tools. If a workflow needs all three, split it across
+agents and have a human approve the hand-off.
+
+**Grant the key the smallest group that fits.** The administration page offers
+the allowlist in three groups: reads and reports (read-only queries plus
+private short-lived exports), drafts (unpublished template drafts plus the
+activation and lifecycle previews and prepared intents that a human must
+confirm), and synthetic event lifecycle (`start-event`, `all-clear-event`, and
+`close-event`, which the server accepts from an agent key only for drills and
+tests on the synthetic roster). Most agents need the first group. Give the
+lifecycle group only to an agent whose documented purpose is running synthetic
+drills, keep the facility scope to the sites it serves, and accept the bounded
+expiry: every key issued from the administration page expires, and the
+[API-key rotation runbook](../../docs/runbooks/rotation-api-keys.md) replaces
+it.
 
 ## Connect over stdio
 

@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 
 import { WEB_SESSION_COOKIE_NAME } from '../../../lib/auth/sessions';
 import { getDefaultAgentAdministrationPageLoader } from '../../../lib/agents/runtime';
+import { groupAgentGrantOptions } from '../../../lib/agents/grant-groups';
 import { AgentAdmin, type AgentAdminAgent } from './agent-admin';
 import { issueAgentApiKeyAction, revokeAgentApiKeyAction } from './actions';
 import { authenticateWebSession } from '../../../lib/auth/request-session';
@@ -83,13 +84,12 @@ export default async function AgentsAdminPage() {
         name: facility.name,
         active: facility.active,
       }))}
-      // The form offers exactly the allowlist the server enforces at issuance.
-      grantOptions={AGENT_KEY_GRANTABLE_CAPABILITY_IDS.map((capabilityId) => ({
-        id: capabilityId,
-        label: capabilityLabel(capabilityId),
-        description:
-          'The server applies the selected facility scope and all real-versus-drill and human-only safety rules.',
-      }))}
+      // The form offers exactly the allowlist the server enforces at issuance,
+      // arranged into the three risk groups.
+      grantGroups={groupAgentGrantOptions(
+        AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
+        capabilityLabel,
+      )}
       issueIdempotencyKey={randomUUID()}
       issuedKey={null}
       issueKeyAction={issueAgentApiKeyAction}
