@@ -94,7 +94,7 @@ confirm), and synthetic event lifecycle (`start-event`, `all-clear-event`, and
 tests on the synthetic roster). Most agents need the first group. Give the
 lifecycle group only to an agent whose documented purpose is running synthetic
 drills, keep the facility scope to the sites it serves, and accept the bounded
-expiry: every key expires, and the
+expiry: every key issued from the administration page expires, and the
 [API-key rotation runbook](../../docs/runbooks/rotation-api-keys.md) replaces
 it.
 
