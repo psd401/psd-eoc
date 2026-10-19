@@ -330,7 +330,7 @@ describeWithDatabase('dispatch batch lifecycle currency', () => {
     }
   });
 
-  test('an activation is current only while the event is active under the same authorization', async () => {
+  test('an activation is current while the event is active under the same authorization', async () => {
     const active = await installDrill('active');
     await expect(
       batchHasCurrentLifecycle(
@@ -348,11 +348,43 @@ describeWithDatabase('dispatch batch lifecycle currency', () => {
         ),
       ),
     ).resolves.toBe(false);
+  });
+
+  test('an email activation stays current after the event is cleared, closed or reactivated; SMS does not', async () => {
+    // 2026-10-15 ShakeOut: the email worker ran minutes behind, and drills
+    // that ended before it reached their activation batch lost the begin
+    // email entirely. A short drill must still deliver its begin email. SMS
+    // keeps the active-only rule.
+    const cleared = await installDrill('all-clear');
     const closed = await installDrill('closed');
+    const reactivated = await installDrill('active', {
+      reactivatedAt: CLOSED_AT,
+    });
+    for (const drill of [cleared, closed, reactivated]) {
+      await expect(
+        batchHasCurrentLifecycle(
+          database(),
+          batch(drill.eventId, 'activation', drill.activation, 'email'),
+          'no key update',
+        ),
+      ).resolves.toBe(true);
+      await expect(
+        batchHasCurrentLifecycle(
+          database(),
+          batch(drill.eventId, 'activation', drill.activation, 'sms'),
+        ),
+      ).resolves.toBe(false);
+    }
     await expect(
       batchHasCurrentLifecycle(
         database(),
-        batch(closed.eventId, 'activation', closed.activation),
+        batch(
+          closed.eventId,
+          'activation',
+          activationAuthorization(randomUUID()),
+          'email',
+        ),
+        'no key update',
       ),
     ).resolves.toBe(false);
   });

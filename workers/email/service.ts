@@ -21,6 +21,13 @@ import { EmailRuntimeClient } from './state-client';
 
 const VISIBILITY_HEARTBEAT_MILLISECONDS = 30_000;
 const VISIBILITY_TIMEOUT_SECONDS = 120;
+/**
+ * Queue messages processed at once by one worker task. Each message is a
+ * batch (or one retry) whose sends run in order; separate batches never
+ * share an attempt, and every attempt is claimed under a lease, so they are
+ * safe to run side by side.
+ */
+export const EMAIL_WORKER_CONCURRENCY = 4;
 
 type SafeLogEvent = Readonly<{
   event:
@@ -309,7 +316,9 @@ export async function runEmailService(
   const now = dependencies.now ?? Date.now;
   log({ event: 'email-worker-started' });
 
-  while (shouldContinue()) {
+  let stopped = false;
+
+  const pollOnce = async (): Promise<void> => {
     log({ event: 'email-worker-heartbeat' });
     const response = (await sqs.send(
       new ReceiveMessageCommand({
@@ -321,7 +330,7 @@ export async function runEmailService(
       }),
     )) as Readonly<{ Messages?: readonly unknown[] }>;
     const raw = response.Messages?.[0];
-    if (raw === undefined) continue;
+    if (raw === undefined) return;
 
     let message: ReturnType<typeof parseMessage>;
     try {
@@ -337,7 +346,7 @@ export async function runEmailService(
         count: 1,
         detail: failureDetail(error),
       });
-      continue;
+      return;
     }
     const heartbeat = setInterval(() => {
       void sqs
@@ -425,6 +434,31 @@ export async function runEmailService(
     } finally {
       clearInterval(heartbeat);
     }
+  };
+
+  const pollLoop = async (): Promise<void> => {
+    try {
+      while (!stopped && shouldContinue()) {
+        await pollOnce();
+      }
+    } catch (error) {
+      stopped = true;
+      throw error;
+    }
+  };
+
+  // Several messages are in flight at once. One loop handled one batch at a
+  // time, each one recipient after another, and during the 2026-10-15
+  // ShakeOut drill fourteen drills started within five minutes: the queue
+  // ran up to seven minutes behind, and nine drills ended before their begin
+  // email was reached. A loop that throws (an SQS receive failure, say)
+  // stops the others, and the worker fails only once every loop has
+  // returned, so the task restarts whole rather than partly alive.
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: EMAIL_WORKER_CONCURRENCY }, () => pollLoop()),
+  );
+  for (const outcome of outcomes) {
+    if (outcome.status === 'rejected') throw outcome.reason;
   }
 }
 
