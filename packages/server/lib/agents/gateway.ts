@@ -313,7 +313,9 @@ function auditReasonCode(error: unknown): string {
 function auditOutcome(error: unknown): 'denied' | 'failure' {
   if (typeof error !== 'object' || error === null) return 'failure';
   const status = Reflect.get(error, 'status');
-  return status === 401 || status === 403 ? 'denied' : 'failure';
+  return status === 401 || status === 403 || status === 429
+    ? 'denied'
+    : 'failure';
 }
 
 function executionAudit(
@@ -389,25 +391,29 @@ export class AgentRestGateway {
       );
     }
 
-    // The budget applies once the key is known, so every refusal is
-    // attributable, and after the human-only check above, so a protected
+    // The per-minute budget applies once the key is known, so every refusal
+    // is attributable, and after the human-only check above, so a protected
     // action attempt is always audited as what it is rather than as a
     // rate-limit refusal. A refused request never reaches the dispatcher.
+    // Only the first refusal of a lockout is audited: each append takes the
+    // global audit lock and adds a permanent row, so auditing every refusal
+    // would let a key grow the chain at its send rate.
     const admission = this.limiter.admit(
       authenticated.actor.apiKeyId,
-      route.capabilityId,
       request.serverTime,
     );
     if (admission.kind === 'refused') {
-      await this.dependencies.audit.append(
-        denialAudit(authenticated, {
-          capabilityId: route.capabilityId,
-          actionIds: [],
-          requestId: request.requestId,
-          serverTime: request.serverTime,
-          reasonCode: 'RATE_LIMITED',
-        }),
-      );
+      if (admission.firstRefusal) {
+        await this.dependencies.audit.append(
+          denialAudit(authenticated, {
+            capabilityId: route.capabilityId,
+            actionIds: [],
+            requestId: request.requestId,
+            serverTime: request.serverTime,
+            reasonCode: 'RATE_LIMITED',
+          }),
+        );
+      }
       throw new AgentGatewayRateLimitError(
         admission.window,
         admission.retryAfterSeconds,
@@ -486,6 +492,21 @@ export class AgentRestGateway {
         },
         call.capabilityId,
       );
+      // The hourly budget for costly calls is charged here, where the
+      // document would be rendered or the row persisted. The ingress audit
+      // in the catch below records the refusal; it is already bounded by the
+      // per-minute budget every call passed in authorize().
+      const costlyAdmission = this.limiter.admitCostly(
+        call.authenticated.actor.apiKeyId,
+        call.capabilityId,
+        call.serverTime,
+      );
+      if (costlyAdmission.kind === 'refused') {
+        throw new AgentGatewayRateLimitError(
+          costlyAdmission.window,
+          costlyAdmission.retryAfterSeconds,
+        );
+      }
       let parsed: unknown;
       try {
         const output = await this.dependencies.dispatcher.execute(

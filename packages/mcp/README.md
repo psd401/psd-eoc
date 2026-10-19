@@ -142,4 +142,6 @@ Mutation calls (`prepare-activation` and the create/update calls behind
 SHA-256 of the capability ID and the canonical JSON of the validated
 arguments. A model that retries the same tool call therefore gets the stored
 result back instead of creating a second prepared activation or draft; a
-changed argument is a new request.
+changed argument is a new request. Idempotency records do not expire, so an
+identical call keeps returning its first result for as long as the record
+exists; change an argument to make a new one.

@@ -68,15 +68,19 @@ Authorization is deny-by-default, server-side, and scoped by role and facility.
 Client visibility is never an authorization control.
 
 Agent REST calls are budgeted per API key. The gateway admits at most 60
-requests per key per minute, and at most 20 per key per hour across
-`export-drill-records`, `export-event-summary`, and
-`create-activation-preview`, which render a document or persist a row on every
-call. A refused request is answered `429 RATE_LIMITED` with a `Retry-After`
-header, is recorded as an `access-denial` audit fact with reason code
-`RATE_LIMITED` under the key, and never reaches a capability handler. The
-limiter is in memory and per server process: with up to four App Runner
-instances, one key's effective ceiling is up to four times each constant, and
-an instance restart resets its windows. The constants live in
+requests per key per minute, charged at authorization, and at most 20 per key
+per hour across `export-drill-records`, `export-event-summary`, and
+`create-activation-preview`, charged at dispatch because those calls render a
+document or persist a row. A refused request is answered `429 RATE_LIMITED`
+with a `Retry-After` header and never reaches a capability handler. A refusal
+is recorded as an `access-denial` audit fact with reason code `RATE_LIMITED`
+under the key, but only the first per-minute refusal of each lockout: later
+refusals in that lockout are answered without an audit row, so a key sending
+past its budget cannot grow the audit chain faster than its admitted budget.
+Authentication, one indexed read, still runs for every request. The limiter is
+in memory and per server process: with up to four App Runner instances, one
+key's effective ceiling is up to four times each constant, and an instance
+restart resets its windows. The constants live in
 `packages/server/lib/agents/rate-limit.ts`.
 
 ## Human-only actions

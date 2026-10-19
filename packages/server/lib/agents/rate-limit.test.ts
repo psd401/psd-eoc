@@ -30,37 +30,64 @@ describe('agent request limiter', () => {
       index < AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
       index += 1
     ) {
-      expect(
-        limiter.admit(KEYS.first, 'list-active-events', at(index * 100)),
-      ).toEqual({ kind: 'admitted' });
+      expect(limiter.admit(KEYS.first, at(index * 100))).toEqual({
+        kind: 'admitted',
+      });
     }
 
-    const refused = limiter.admit(KEYS.first, 'list-active-events', at(6_000));
-    expect(refused).toEqual({
+    expect(limiter.admit(KEYS.first, at(6_000))).toEqual({
       kind: 'refused',
       window: 'per-minute',
       retryAfterSeconds: 54,
+      firstRefusal: true,
     });
 
     // Hammering while refused does not extend the lockout: the first request
     // ages out exactly one window after it was admitted.
+    expect(limiter.admit(KEYS.first, at(59_999)).kind).toBe('refused');
     expect(
-      limiter.admit(KEYS.first, 'list-active-events', at(59_999)).kind,
-    ).toBe('refused');
-    expect(
-      limiter.admit(
-        KEYS.first,
-        'list-active-events',
-        at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS),
-      ),
+      limiter.admit(KEYS.first, at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS)),
     ).toEqual({ kind: 'admitted' });
     expect(
-      limiter.admit(
-        KEYS.first,
-        'list-active-events',
-        at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS + 1),
-      ).kind,
+      limiter.admit(KEYS.first, at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS + 1)).kind,
     ).toBe('refused');
+  });
+
+  test('flags only the first refusal of each lockout', () => {
+    const limiter = createAgentRequestLimiter();
+    for (
+      let index = 0;
+      index < AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
+      index += 1
+    ) {
+      limiter.admit(KEYS.first, at(0));
+    }
+    expect(limiter.admit(KEYS.first, at(1))).toMatchObject({
+      kind: 'refused',
+      firstRefusal: true,
+    });
+    expect(limiter.admit(KEYS.first, at(2))).toMatchObject({
+      kind: 'refused',
+      firstRefusal: false,
+    });
+    expect(limiter.admit(KEYS.first, at(3))).toMatchObject({
+      kind: 'refused',
+      firstRefusal: false,
+    });
+
+    // After the window the budget refills; the next lockout is a fresh one.
+    for (
+      let index = 0;
+      index < AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
+      index += 1
+    ) {
+      expect(
+        limiter.admit(KEYS.first, at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS)).kind,
+      ).toBe('admitted');
+    }
+    expect(
+      limiter.admit(KEYS.first, at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS)),
+    ).toMatchObject({ kind: 'refused', firstRefusal: true });
   });
 
   test('reports at least one second so Retry-After is never zero', () => {
@@ -70,20 +97,18 @@ describe('agent request limiter', () => {
       index < AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
       index += 1
     ) {
-      limiter.admit(KEYS.first, 'get-event', at(0));
+      limiter.admit(KEYS.first, at(0));
     }
     expect(
-      limiter.admit(
-        KEYS.first,
-        'get-event',
-        at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS - 1),
-      ),
-    ).toEqual({ kind: 'refused', window: 'per-minute', retryAfterSeconds: 1 });
+      limiter.admit(KEYS.first, at(AGENT_RATE_LIMIT_MINUTE_WINDOW_MS - 1)),
+    ).toMatchObject({
+      kind: 'refused',
+      window: 'per-minute',
+      retryAfterSeconds: 1,
+    });
   });
 
   test('caps costly calls per hour for one key without touching another key', () => {
-    const limiter = createAgentRequestLimiter();
-
     for (const capabilityId of AGENT_RATE_LIMIT_COSTLY_CAPABILITY_IDS) {
       const scoped = createAgentRequestLimiter();
       for (
@@ -91,13 +116,13 @@ describe('agent request limiter', () => {
         index < AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR;
         index += 1
       ) {
-        // Spread across minutes so the per-minute budget is never the reason.
         expect(
-          scoped.admit(KEYS.first, capabilityId, at(index * 120_000)).kind,
+          scoped.admitCostly(KEYS.first, capabilityId, at(index * 120_000))
+            .kind,
         ).toBe('admitted');
       }
       expect(
-        scoped.admit(
+        scoped.admitCostly(
           KEYS.first,
           capabilityId,
           at(AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR * 120_000),
@@ -109,26 +134,65 @@ describe('agent request limiter', () => {
           (AGENT_RATE_LIMIT_HOUR_WINDOW_MS -
             AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR * 120_000) /
           1_000,
+        firstRefusal: true,
       });
     }
 
+    const limiter = createAgentRequestLimiter();
     for (
       let index = 0;
       index < AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR;
       index += 1
     ) {
-      limiter.admit(KEYS.first, 'export-event-summary', at(index * 1_000));
+      limiter.admitCostly(
+        KEYS.first,
+        'export-event-summary',
+        at(index * 1_000),
+      );
     }
     expect(
-      limiter.admit(KEYS.first, 'export-event-summary', at(30_000)).kind,
+      limiter.admitCostly(KEYS.first, 'export-drill-records', at(30_000)).kind,
     ).toBe('refused');
     expect(
-      limiter.admit(KEYS.second, 'export-event-summary', at(30_000)),
+      limiter.admitCostly(KEYS.second, 'export-event-summary', at(30_000)),
     ).toEqual({ kind: 'admitted' });
-    // The exhausted key may still make ordinary reads.
-    expect(limiter.admit(KEYS.first, 'list-active-events', at(30_000))).toEqual(
-      { kind: 'admitted' },
-    );
+  });
+
+  test('admits ordinary capabilities at dispatch without counting them', () => {
+    const limiter = createAgentRequestLimiter();
+    for (let index = 0; index < 500; index += 1) {
+      expect(
+        limiter.admitCostly(KEYS.first, 'list-active-events', at(0)),
+      ).toEqual({ kind: 'admitted' });
+    }
+    for (
+      let index = 0;
+      index < AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR;
+      index += 1
+    ) {
+      expect(
+        limiter.admitCostly(KEYS.first, 'create-activation-preview', at(0))
+          .kind,
+      ).toBe('admitted');
+    }
+    expect(
+      limiter.admitCostly(KEYS.first, 'create-activation-preview', at(0)).kind,
+    ).toBe('refused');
+  });
+
+  test('keeps the two budgets independent', () => {
+    const limiter = createAgentRequestLimiter();
+    for (
+      let index = 0;
+      index < AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
+      index += 1
+    ) {
+      limiter.admit(KEYS.first, at(0));
+    }
+    expect(limiter.admit(KEYS.first, at(0)).kind).toBe('refused');
+    expect(
+      limiter.admitCostly(KEYS.first, 'export-event-summary', at(0)),
+    ).toEqual({ kind: 'admitted' });
   });
 
   test('releases the hourly budget one window after the oldest costly call', () => {
@@ -138,17 +202,21 @@ describe('agent request limiter', () => {
       index < AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR;
       index += 1
     ) {
-      limiter.admit(KEYS.first, 'create-activation-preview', at(index * 1_000));
+      limiter.admitCostly(
+        KEYS.first,
+        'create-activation-preview',
+        at(index * 1_000),
+      );
     }
     expect(
-      limiter.admit(
+      limiter.admitCostly(
         KEYS.first,
         'create-activation-preview',
         at(AGENT_RATE_LIMIT_HOUR_WINDOW_MS - 1),
       ).kind,
     ).toBe('refused');
     expect(
-      limiter.admit(
+      limiter.admitCostly(
         KEYS.first,
         'create-activation-preview',
         at(AGENT_RATE_LIMIT_HOUR_WINDOW_MS),
@@ -158,8 +226,15 @@ describe('agent request limiter', () => {
 
   test('rejects an invalid clock instead of admitting unbounded requests', () => {
     const limiter = createAgentRequestLimiter();
+    expect(() => limiter.admit(KEYS.first, new Date(Number.NaN))).toThrow(
+      TypeError,
+    );
     expect(() =>
-      limiter.admit(KEYS.first, 'list-active-events', new Date(Number.NaN)),
+      limiter.admitCostly(
+        KEYS.first,
+        'export-event-summary',
+        new Date(Number.NaN),
+      ),
     ).toThrow(TypeError);
   });
 

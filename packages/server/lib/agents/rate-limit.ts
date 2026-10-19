@@ -11,6 +11,14 @@ import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
  * instance do (the 2026-10-15 outage was an out-of-memory kill after request
  * bursts); it is not a precise meter. Restarting an instance resets its
  * windows.
+ *
+ * The per-minute budget is charged when a request is authorized. The hourly
+ * budget for costly calls is charged at dispatch, where the document is
+ * rendered or the row persisted: a request refused for budget never reaches
+ * the capability. Charging at dispatch also keeps the one-minute health
+ * canary clear of it, because the canary authorizes
+ * `create-activation-preview` on a long-lived gateway but executes it inside
+ * a per-run transactional gateway that is rolled back and discarded.
  */
 export const AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE = 60;
 export const AGENT_RATE_LIMIT_MINUTE_WINDOW_MS = 60 * 1_000;
@@ -30,18 +38,28 @@ const costlyCapabilityIds = new Set<string>(
 
 export type AgentRequestLimitWindow = 'per-minute' | 'per-hour';
 
+export interface AgentRequestRefusal {
+  readonly kind: 'refused';
+  readonly window: AgentRequestLimitWindow;
+  /** Whole seconds until the oldest counted request leaves the window. */
+  readonly retryAfterSeconds: number;
+  /**
+   * True for the first refusal since the key was last admitted. The gateway
+   * audits only those, so a key that keeps sending past its budget cannot
+   * grow the audit chain faster than its admitted budget allows.
+   */
+  readonly firstRefusal: boolean;
+}
+
 export type AgentRequestLimitDecision =
-  | Readonly<{ kind: 'admitted' }>
-  | Readonly<{
-      kind: 'refused';
-      window: AgentRequestLimitWindow;
-      /** Whole seconds until the oldest counted request leaves the window. */
-      retryAfterSeconds: number;
-    }>;
+  Readonly<{ kind: 'admitted' }> | AgentRequestRefusal;
 
 /** Decides, and when admitted records, one authenticated request. */
 export interface AgentRequestLimiter {
-  admit(
+  /** Per-minute budget, charged once the key is authenticated. */
+  admit(apiKeyId: string, now: Date): AgentRequestLimitDecision;
+  /** Hourly costly budget, charged at dispatch; admits any other capability. */
+  admitCostly(
     apiKeyId: string,
     capabilityId: AgentGrantableCapabilityId,
     now: Date,
@@ -68,113 +86,118 @@ export class AgentGatewayRateLimitError extends Error {
   }
 }
 
+interface SlidingWindow {
+  /** Admission times (ms) still inside the window. */
+  admitted: number[];
+  /** Whether the last decision for this window was a refusal. */
+  refusing: boolean;
+}
+
 interface KeyWindows {
-  /** Admission times (ms) of every request inside the minute window. */
-  all: number[];
-  /** Admission times (ms) of costly requests inside the hour window. */
-  costly: number[];
+  readonly minute: SlidingWindow;
+  readonly hour: SlidingWindow;
 }
 
 const ADMITTED: AgentRequestLimitDecision = Object.freeze({
   kind: 'admitted',
 });
 
-function withinWindow(timestamps: number[], cutoff: number): number[] {
-  return timestamps.filter((timestamp) => timestamp > cutoff);
+function validClock(nowValue: Date): number {
+  const now = nowValue.getTime();
+  if (!Number.isFinite(now)) {
+    throw new TypeError('The agent request limiter requires a valid clock.');
+  }
+  return now;
 }
 
-function refusal(
-  window: AgentRequestLimitWindow,
-  timestamps: readonly number[],
-  windowMs: number,
-  now: number,
-): AgentRequestLimitDecision {
-  const oldest = Math.min(...timestamps);
-  const retryAfterMs = oldest + windowMs - now;
-  return Object.freeze({
-    kind: 'refused',
-    window,
-    retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1_000)),
-  });
+function prune(window: SlidingWindow, cutoff: number): void {
+  window.admitted = window.admitted.filter((timestamp) => timestamp > cutoff);
 }
 
 /**
- * Sliding-log limiter: a key is admitted while fewer than the limit of its
- * requests fall inside the trailing window. A refused request is not counted,
- * so a client that keeps retrying recovers as soon as the oldest admitted
- * request ages out rather than being locked out for as long as it hammers.
+ * Sliding-log decision for one window: admitted while fewer than the limit
+ * of requests fall inside the trailing window. A refused request is not
+ * counted, so a client that keeps retrying recovers as soon as the oldest
+ * admitted request ages out rather than being locked out for as long as it
+ * hammers.
  */
+function decide(
+  window: SlidingWindow,
+  kind: AgentRequestLimitWindow,
+  limit: number,
+  windowMs: number,
+  now: number,
+): AgentRequestLimitDecision {
+  prune(window, now - windowMs);
+  if (window.admitted.length < limit) {
+    window.admitted.push(now);
+    window.refusing = false;
+    return ADMITTED;
+  }
+  const oldest = Math.min(...window.admitted);
+  const firstRefusal = !window.refusing;
+  window.refusing = true;
+  return Object.freeze({
+    kind: 'refused',
+    window: kind,
+    retryAfterSeconds: Math.max(
+      1,
+      Math.ceil((oldest + windowMs - now) / 1_000),
+    ),
+    firstRefusal,
+  });
+}
+
 export function createAgentRequestLimiter(): AgentRequestLimiter {
   const keys = new Map<string, KeyWindows>();
   let sweptAt = Number.NEGATIVE_INFINITY;
 
-  function sweep(now: number): void {
-    if (now - sweptAt < AGENT_RATE_LIMIT_HOUR_WINDOW_MS) return;
-    sweptAt = now;
-    for (const [apiKeyId, windows] of keys) {
-      windows.all = withinWindow(
-        windows.all,
-        now - AGENT_RATE_LIMIT_MINUTE_WINDOW_MS,
-      );
-      windows.costly = withinWindow(
-        windows.costly,
-        now - AGENT_RATE_LIMIT_HOUR_WINDOW_MS,
-      );
-      if (windows.all.length === 0 && windows.costly.length === 0) {
-        keys.delete(apiKeyId);
+  function windowsFor(apiKeyId: string, now: number): KeyWindows {
+    if (now - sweptAt >= AGENT_RATE_LIMIT_HOUR_WINDOW_MS) {
+      sweptAt = now;
+      for (const [id, windows] of keys) {
+        prune(windows.minute, now - AGENT_RATE_LIMIT_MINUTE_WINDOW_MS);
+        prune(windows.hour, now - AGENT_RATE_LIMIT_HOUR_WINDOW_MS);
+        if (
+          windows.minute.admitted.length === 0 &&
+          windows.hour.admitted.length === 0
+        ) {
+          keys.delete(id);
+        }
       }
     }
+    let windows = keys.get(apiKeyId);
+    if (windows === undefined) {
+      windows = {
+        minute: { admitted: [], refusing: false },
+        hour: { admitted: [], refusing: false },
+      };
+      keys.set(apiKeyId, windows);
+    }
+    return windows;
   }
 
   const limiter: AgentRequestLimiter = {
-    admit(apiKeyId, capabilityId, nowValue) {
-      const now = nowValue.getTime();
-      if (!Number.isFinite(now)) {
-        throw new TypeError(
-          'The agent request limiter requires a valid clock.',
-        );
-      }
-      sweep(now);
-      const windows = keys.get(apiKeyId) ?? { all: [], costly: [] };
-      windows.all = withinWindow(
-        windows.all,
-        now - AGENT_RATE_LIMIT_MINUTE_WINDOW_MS,
+    admit(apiKeyId, nowValue) {
+      const now = validClock(nowValue);
+      return decide(
+        windowsFor(apiKeyId, now).minute,
+        'per-minute',
+        AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE,
+        AGENT_RATE_LIMIT_MINUTE_WINDOW_MS,
+        now,
       );
-      windows.costly = withinWindow(
-        windows.costly,
-        now - AGENT_RATE_LIMIT_HOUR_WINDOW_MS,
+    },
+    admitCostly(apiKeyId, capabilityId, nowValue) {
+      const now = validClock(nowValue);
+      if (!costlyCapabilityIds.has(capabilityId)) return ADMITTED;
+      return decide(
+        windowsFor(apiKeyId, now).hour,
+        'per-hour',
+        AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR,
+        AGENT_RATE_LIMIT_HOUR_WINDOW_MS,
+        now,
       );
-      const costly = costlyCapabilityIds.has(capabilityId);
-
-      let decision: AgentRequestLimitDecision = ADMITTED;
-      if (windows.all.length >= AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE) {
-        decision = refusal(
-          'per-minute',
-          windows.all,
-          AGENT_RATE_LIMIT_MINUTE_WINDOW_MS,
-          now,
-        );
-      } else if (
-        costly &&
-        windows.costly.length >= AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR
-      ) {
-        decision = refusal(
-          'per-hour',
-          windows.costly,
-          AGENT_RATE_LIMIT_HOUR_WINDOW_MS,
-          now,
-        );
-      } else {
-        windows.all.push(now);
-        if (costly) windows.costly.push(now);
-      }
-
-      if (windows.all.length === 0 && windows.costly.length === 0) {
-        keys.delete(apiKeyId);
-      } else {
-        keys.set(apiKeyId, windows);
-      }
-      return decision;
     },
   };
   return Object.freeze(limiter);

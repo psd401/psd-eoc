@@ -58,17 +58,19 @@ The agent gateway admits at most 60 requests per key per minute and 20 per key
 per hour across `export-drill-records`, `export-event-summary`, and
 `create-activation-preview`. Each server instance counts separately, so a key
 can reach up to four times those figures across the deployment, and an
-instance restart clears its counts. A refused request is an `access-denial`
-audit fact with reason code `RATE_LIMITED` under the agent and key IDs; no
-capability ran and nothing was created or exported.
+instance restart clears its counts. A refusal is an `access-denial` audit
+fact with reason code `RATE_LIMITED` under the agent and key IDs; no
+capability ran and nothing was created or exported. Only the first per-minute
+refusal of a lockout is recorded, so one fact can stand for many refused
+requests; every hourly refusal of an export or activation preview is recorded.
 
-A burst of `RATE_LIMITED` facts from one key means the consumer behind that
-key exceeded its budget on one instance: usually a client retry loop, a model
-calling the same tool repeatedly, or a job fanning out too widely. Read the
-facts for that key just before the burst to see what it was doing.
+Repeated `RATE_LIMITED` facts from one key mean the consumer behind that key
+keeps exceeding its budget on one instance: usually a client retry loop, a
+model calling the same tool repeatedly, or a job fanning out too widely. Read
+the facts for that key just before each one to see what it was doing.
 
-- Successful reads and exports before the burst point to a loop or fan-out on
-  the consumer side. Tell the key owner; no rotation is needed.
+- Successful reads and exports before the refusal point to a loop or fan-out
+  on the consumer side. Tell the key owner; no rotation is needed.
 - `CAPABILITY_NOT_GRANTED` denials in the same run point to a consumer that
   is probing for grants it does not hold. Treat the key as a suspected
   compromise and revoke it first.

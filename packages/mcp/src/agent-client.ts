@@ -72,6 +72,13 @@ function canonicalJson(value: unknown): string {
  * prepared activation; a different input gets a different key. The server
  * scopes keys to the agent key and capability, so equal inputs from different
  * agents never collide.
+ *
+ * The key is an unsalted digest of the input, stored in plaintext as the
+ * server-side idempotency key, and idempotency records do not expire. The
+ * three mutations this adapter sends carry no student or recipient data.
+ * Before exposing a mutation that does, salt the digest per agent key or
+ * leave those fields out of it; otherwise the stored key is a fingerprint
+ * of that data.
  */
 export function deriveIdempotencyKey(
   capabilityId: AgentGrantableCapabilityId,
