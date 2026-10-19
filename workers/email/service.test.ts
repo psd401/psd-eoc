@@ -1,9 +1,13 @@
+import { randomUUID } from 'node:crypto';
+
 import { describe, expect, test } from 'bun:test';
-import { SendMessageCommand } from '@aws-sdk/client-sqs';
+import { ReceiveMessageCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
 
 import {
+  EMAIL_WORKER_CONCURRENCY,
   EmailServiceError,
   readEmailServiceConfiguration,
+  runEmailService,
   SqsEmailRetryPublisher,
 } from './service';
 
@@ -139,5 +143,92 @@ describe('email retry publisher', () => {
       sourceAttemptId: '10000000-0000-4000-8000-000000000001',
     });
     expect(body).not.toContain('@');
+  });
+});
+
+function queueMessage() {
+  return {
+    MessageId: randomUUID(),
+    ReceiptHandle: `receipt-${randomUUID()}`,
+    Body: '{}',
+    Attributes: { SentTimestamp: String(Date.now()) },
+  };
+}
+
+describe('email service loop', () => {
+  test('works on several queued batches at once', async () => {
+    // One loop handled one batch at a time; on 2026-10-15 the queue ran
+    // minutes behind and drills ended before their begin email was reached.
+    let inFlight = 0;
+    let peak = 0;
+    let processed = 0;
+    const total = EMAIL_WORKER_CONCURRENCY * 3;
+    let releaseAll: () => void = () => undefined;
+    const allArrived = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    await runEmailService({
+      environment: ENABLED_ENV,
+      log: () => undefined,
+      shouldContinue: () => processed < total,
+      sqs: {
+        send(command) {
+          return Promise.resolve(
+            command instanceof ReceiveMessageCommand
+              ? { Messages: [queueMessage()] }
+              : {},
+          );
+        },
+      },
+      runtime: {
+        async processQueueMessage() {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          if (peak === EMAIL_WORKER_CONCURRENCY) releaseAll();
+          await allArrived;
+          inFlight -= 1;
+          processed += 1;
+          return {
+            kind: 'completed',
+            outboxCreatedAt: new Date().toISOString(),
+            acceptedCount: 1,
+            incompleteCount: 0,
+            suppressedCount: 0,
+          };
+        },
+      },
+    });
+    expect(EMAIL_WORKER_CONCURRENCY).toBeGreaterThan(1);
+    expect(peak).toBe(EMAIL_WORKER_CONCURRENCY);
+    expect(processed).toBeGreaterThanOrEqual(total);
+  });
+
+  test('stops every loop and fails when one receive fails', async () => {
+    let receives = 0;
+    const failure = new Error('synthetic receive failure');
+    await expect(
+      runEmailService({
+        environment: ENABLED_ENV,
+        log: () => undefined,
+        sqs: {
+          send(command) {
+            if (!(command instanceof ReceiveMessageCommand)) {
+              return Promise.resolve({});
+            }
+            receives += 1;
+            return receives === 1
+              ? Promise.reject(failure)
+              : new Promise((resolve) => setTimeout(() => resolve({}), 5));
+          },
+        },
+        runtime: {
+          processQueueMessage() {
+            throw new Error('no message should be processed');
+          },
+        },
+      }),
+    ).rejects.toBe(failure);
+    // The siblings each finish the poll they were in and stop; none loops on.
+    expect(receives).toBe(EMAIL_WORKER_CONCURRENCY);
   });
 });

@@ -33,8 +33,9 @@ function sameJson(left: unknown, right: unknown): boolean {
  * Whether a dispatch batch still describes the event's current lifecycle,
  * so that a queued send is still the send a human confirmed.
  *
- * An activation is current while the event is active and has not been
- * cleared or reactivated since, under the same authorization. A lifecycle
+ * An activation is current for as long as the event still carries the
+ * authorization it was confirmed under, whatever has happened to the event
+ * since. A lifecycle
  * batch (all-clear or reactivation) is current while the transition it was
  * confirmed for is the event's latest of that kind, under the same request
  * and authorization.
@@ -48,6 +49,14 @@ function sameJson(left: unknown, right: unknown): boolean {
  * 5c17f59c), and the email store's older rule, which required an active
  * event for every batch, refused every all-clear email ever queued, while
  * push carried the same message without either check.
+ *
+ * The activation rule used to require the event to still be active, and that
+ * silently dropped begin emails. During the 2026-10-15 ShakeOut drill the
+ * email worker ran up to seven minutes behind, and nine of fourteen drills
+ * ended before it reached their activation batch: those schools got the
+ * begin text, the begin push and the all-clear email, but never the begin
+ * email. The begin message is still true after the event ends, and staff who never got it cannot place
+ * the all-clear that follows.
  */
 export async function batchHasCurrentLifecycle(
   database: Database,
@@ -68,9 +77,7 @@ export async function batchHasCurrentLifecycle(
   if (event === undefined) return false;
   if (batch.purpose === 'activation') {
     return (
-      event.status === 'active' &&
-      event.allClearAt === null &&
-      event.reactivatedAt === null &&
+      event.status !== 'draft' &&
       sameJson(event.activationAuthorization, batch.authorization)
     );
   }

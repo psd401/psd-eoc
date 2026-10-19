@@ -888,4 +888,59 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
       true,
     );
   });
+
+  test('still sends an activation the worker reaches after the event was ended', async () => {
+    // 2026-10-15 ShakeOut: the worker ran up to seven minutes behind and
+    // nine of fourteen drills ended before it reached their activation
+    // batch. Each one resolved to "suppressed" and those schools never got
+    // the begin email, though the text, push and all-clear email arrived.
+    const snapshotId = randomUUID();
+    const recipients = Array.from({ length: 3 }, (_, index) =>
+      Object.freeze({
+        recipientId: randomUUID(),
+        endpointId: randomUUID(),
+        email: `ended-activation-${String(index)}@example.invalid`,
+        index,
+      }),
+    );
+    await installStaffRoster(databaseConnection().db, {
+      snapshotId,
+      version: 4,
+      recipients,
+    });
+    const bundle = await installNotificationBundle(
+      databaseConnection().db,
+      snapshotId,
+      recipients.length,
+    );
+    const endedAt = new Date(Date.parse(BATCH_CREATED_AT) + 100_000);
+    // "End event": the all-clear, then the close a second later.
+    await databaseConnection()
+      .db.update(events)
+      .set({ status: 'all-clear', allClearAt: endedAt })
+      .where(eq(events.id, bundle.batch.eventId));
+    await databaseConnection()
+      .db.update(events)
+      .set({
+        status: 'closed',
+        closedAt: new Date(endedAt.getTime() + 1_000),
+      })
+      .where(eq(events.id, bundle.batch.eventId));
+
+    const store = runtimeStore();
+    const page = EmailBatchResolutionPageSchema.parse(
+      await store.resolveBatch({
+        operation: 'resolve-batch',
+        batch: bundle.batch,
+        enqueuedAt: BATCH_CREATED_AT,
+        cursor: 0,
+      }),
+    );
+    expect(page.suppressedCount).toBe(0);
+    expect(page.items).toHaveLength(recipients.length);
+    for (const item of page.items) {
+      expect(item.batch.purpose).toBe('activation');
+      expect(await store.authorizeProviderSend(item)).toBe(true);
+    }
+  });
 });
