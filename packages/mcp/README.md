@@ -46,7 +46,18 @@ capability grants: `get-event-type-version`, `get-event-type-draft`,
 `create-event-type-draft`, and `update-event-type-draft`. The raw create and
 update capabilities remain hidden from the MCP catalog; the facade uses them
 internally to preserve real-or-drill mode, classification markers, lifecycle
-purpose, and all untouched wording from the canonical source.
+purpose, and all untouched wording from the canonical source. A draft is all an
+agent can produce: `publish-event-type-version` is not a grant any agent key
+can hold, so wording an agent drafts reaches a real notification only after a
+human administrator publishes it in the PSD EOC app.
+
+Every grant an agent key may carry comes from one explicit allowlist,
+`AGENT_KEY_GRANTABLE_CAPABILITY_IDS` in `@psd-eoc/contracts`. The MCP tool IDs
+are a compile-time subset of it. Capabilities the catalog admits for an agent
+principal but that are absent from the allowlist (publishing, journal writes,
+joining or reactivating an event, reopening a closed event, and configuration
+writes) cannot be issued. A key row that somehow carried one authenticates
+without that grant, and the attempt to exercise it is audited as a denial.
 
 A draft is a proposal, not a change. It becomes wording staff can receive only
 when a district administrator publishes it from the Responses page in the web

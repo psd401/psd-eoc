@@ -1,4 +1,5 @@
 export * from './agent-api';
+export * from './agent-key-grants';
 export * from './api';
 export * from './audit';
 export * from './capability-catalog';

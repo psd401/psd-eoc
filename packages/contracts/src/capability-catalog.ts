@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import type { AgentKeyGrantableCapabilityId } from './agent-key-grants';
 import {
   SecurityAuditPageSchema,
   SecurityAuditQuerySchema,
@@ -198,7 +199,7 @@ import {
 } from './agent-api';
 import { TimestampSchema } from './shared';
 
-export { AgentGrantableCapabilityIdSchema } from './agent-api';
+export { RetainedAgentCapabilityGrantSchema } from './agent-api';
 
 type CapabilityOperation = 'query' | 'mutation';
 
@@ -1738,7 +1739,12 @@ type GrantableCapabilityId<Catalog> = {
     : never;
 }[Extract<keyof Catalog, string>];
 
-/** Capability IDs whose canonical invocation policy admits agent principals. */
+/**
+ * Capability IDs whose canonical invocation policy admits agent principals.
+ * This is the agent-callable catalog vocabulary and the persisted grant enum,
+ * not the issuance allowlist; keys are granted only from
+ * `AgentKeyGrantableCapabilityId`, which is a subset of it.
+ */
 export type AgentGrantableCapabilityId =
   | GrantableCapabilityId<typeof CAPABILITY_CATALOG_BASE>
   | GrantableCapabilityId<typeof AGENT_API_CAPABILITY_METADATA>;
@@ -1774,8 +1780,8 @@ export const CAPABILITY_CATALOG = Object.freeze({
 /** Stable callable capability identifier inferred from the closed catalog. */
 export type RegisteredCapabilityId = keyof typeof CAPABILITY_CATALOG;
 
-/** Exact public grant type derived from the canonical catalog policy. */
-export type AgentCapabilityGrant = AgentGrantableCapabilityId;
+/** Exact public grant type: the agent-key allowlist, not the catalog policy. */
+export type AgentCapabilityGrant = AgentKeyGrantableCapabilityId;
 
 type CanonicalMutationSafetyManifest = Readonly<{
   [
@@ -1946,6 +1952,12 @@ export const MUTATION_CAPABILITY_IDS = Object.freeze(
   RegisteredMutationCapabilityId,
   ...RegisteredMutationCapabilityId[],
 ];
+/**
+ * Every catalog ID an agent principal may execute, in persisted enum order.
+ * The REST gateway resolves routes from it so an attempt to exercise a withheld
+ * ID is authenticated and audited; `AGENT_KEY_GRANTABLE_CAPABILITY_IDS`, a
+ * subset, is what a key may actually be granted.
+ */
 export const AGENT_GRANTABLE_CAPABILITY_IDS =
   CAPABILITY_VIEWS.agentGrantableCapabilityIds as readonly [
     AgentGrantableCapabilityId,
@@ -1956,7 +1968,11 @@ const agentGrantableCapabilityIdSet = new Set<string>(
   AGENT_GRANTABLE_CAPABILITY_IDS,
 );
 
-/** Returns true only for IDs derived as grantable to agent API keys. */
+/**
+ * Returns true only for IDs the canonical catalog admits for an agent
+ * principal. This is route existence, not key authority; authority is
+ * `isAgentKeyGrantableCapabilityId` plus the key's own grants.
+ */
 export function isAgentGrantableCapabilityId(
   value: unknown,
 ): value is AgentGrantableCapabilityId {

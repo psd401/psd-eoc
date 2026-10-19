@@ -47,6 +47,7 @@ connected from 1.0.10, so no client diagnostic before that build exists.
 | Event media and record exports       | `blocked`               |
 | GuardDuty Malware Protection for S3  | `configured-unverified` |
 | OpenStreetMap raster tiles           | `configured-unverified` |
+| Agent surface                        | `configured-unverified` |
 
 ## Evidence by boundary
 
@@ -199,6 +200,12 @@ CDK defines the scoped plan and fail-closed tag boundary; no active-plan readbac
 Status: `configured-unverified`
 
 The optional read-only configuration is source-defined; no live availability claim is retained.
+
+### Agent surface
+
+Status: `configured-unverified`
+
+As of 2026-10-18 no agent API key has been issued in production, so the agent REST API and the MCP adapter are deployed but have never been exercised by a real key. Grants come from the explicit allowlist `AGENT_KEY_GRANTABLE_CAPABILITY_IDS` in `packages/contracts/src/agent-key-grants.ts`, 27 IDs: the 15 MCP tool capabilities, the two event-type draft mutations, the synthetic-roster lifecycle trio (`start-event`, `all-clear-event`, `close-event`), and the remaining deployed reads and previews. `publish-event-type-version`, the three journal writes, `reopen-as-correction`, `join-event`, `reactivate-event`, and the 22 configuration and roster capabilities that never had a deployed agent handler cannot be granted; the gateway refuses them with an audited `CAPABILITY_NOT_GRANTED`. A stored key that carried one would still authenticate, without that grant. The allowlist replaced a derivation from the catalog's invocation policy, which had let an administrator grant publication and journal writes to an agent.
 
 ## Records-retention review
 
