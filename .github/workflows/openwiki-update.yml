@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 8 * * 1"
+    - cron: '0 8 * * 1'
 
 # Several merges in a row would otherwise queue a full wiki regeneration each;
 # only the last one's output survives anyway.
