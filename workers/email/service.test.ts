@@ -164,8 +164,14 @@ describe('email service loop', () => {
     let processed = 0;
     const total = EMAIL_WORKER_CONCURRENCY * 3;
     let releaseAll: () => void = () => undefined;
-    const allArrived = new Promise<void>((resolve) => {
+    // Released once every loop holds a message at the same time. A serial
+    // loop never gets there, so the bound turns that into a clean failure.
+    const allArrived = new Promise<void>((resolve, reject) => {
       releaseAll = resolve;
+      setTimeout(
+        () => reject(new Error('messages were not processed concurrently')),
+        2_000,
+      );
     });
     await runEmailService({
       environment: ENABLED_ENV,
@@ -184,10 +190,13 @@ describe('email service loop', () => {
         async processQueueMessage() {
           inFlight += 1;
           peak = Math.max(peak, inFlight);
-          if (peak === EMAIL_WORKER_CONCURRENCY) releaseAll();
-          await allArrived;
-          inFlight -= 1;
-          processed += 1;
+          if (inFlight === EMAIL_WORKER_CONCURRENCY) releaseAll();
+          try {
+            await allArrived;
+          } finally {
+            inFlight -= 1;
+            processed += 1;
+          }
           return {
             kind: 'completed',
             outboxCreatedAt: new Date().toISOString(),
@@ -198,7 +207,6 @@ describe('email service loop', () => {
         },
       },
     });
-    expect(EMAIL_WORKER_CONCURRENCY).toBeGreaterThan(1);
     expect(peak).toBe(EMAIL_WORKER_CONCURRENCY);
     expect(processed).toBeGreaterThanOrEqual(total);
   });

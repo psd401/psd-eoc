@@ -33,10 +33,10 @@ function sameJson(left: unknown, right: unknown): boolean {
  * Whether a dispatch batch still describes the event's current lifecycle,
  * so that a queued send is still the send a human confirmed.
  *
- * An activation is current for as long as the event still carries the
- * authorization it was confirmed under, whatever has happened to the event
- * since. A lifecycle
- * batch (all-clear or reactivation) is current while the transition it was
+ * An activation is current while the event is active and has not been
+ * cleared or reactivated since, under the same authorization; an email
+ * activation stays current after that (see below). A lifecycle batch
+ * (all-clear or reactivation) is current while the transition it was
  * confirmed for is the event's latest of that kind, under the same request
  * and authorization.
  *
@@ -50,13 +50,17 @@ function sameJson(left: unknown, right: unknown): boolean {
  * event for every batch, refused every all-clear email ever queued, while
  * push carried the same message without either check.
  *
- * The activation rule used to require the event to still be active, and that
- * silently dropped begin emails. During the 2026-10-15 ShakeOut drill the
- * email worker ran up to seven minutes behind, and nine of fourteen drills
- * ended before it reached their activation batch: those schools got the
- * begin text, the begin push and the all-clear email, but never the begin
- * email. The begin message is still true after the event ends, and staff who never got it cannot place
- * the all-clear that follows.
+ * An email activation stays current after the event is cleared, closed or
+ * reactivated, as long as the event still carries the authorization it was
+ * confirmed under (the database makes that column immutable). Requiring an
+ * active event silently dropped begin emails: during the 2026-10-15 ShakeOut
+ * drill the email worker ran up to seven minutes behind, and nine of
+ * fourteen drills ended before it reached their activation batch. Those
+ * schools got the begin text, the begin push and the all-clear email, but
+ * never the begin email. The begin message is still true after the event
+ * ends, and staff who never got it cannot place the all-clear that follows.
+ * The email send horizon still bounds how late it can arrive. SMS keeps the
+ * active-only rule: it kept up that day and has its own shorter lifetime.
  */
 export async function batchHasCurrentLifecycle(
   database: Database,
@@ -76,9 +80,18 @@ export async function batchHasCurrentLifecycle(
   const [event] = await (lock === null ? eventQuery : eventQuery.for(lock));
   if (event === undefined) return false;
   if (batch.purpose === 'activation') {
+    const confirmed = sameJson(
+      event.activationAuthorization,
+      batch.authorization,
+    );
+    if (batch.channel === 'email') {
+      return event.status !== 'draft' && confirmed;
+    }
     return (
-      event.status !== 'draft' &&
-      sameJson(event.activationAuthorization, batch.authorization)
+      event.status === 'active' &&
+      event.allClearAt === null &&
+      event.reactivatedAt === null &&
+      confirmed
     );
   }
   const authorization = batch.authorization;

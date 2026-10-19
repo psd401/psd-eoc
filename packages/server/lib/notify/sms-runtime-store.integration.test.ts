@@ -1354,7 +1354,7 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     expect(replayedFirst.items).toHaveLength(49);
   });
 
-  test('authorizes a queued activation after its event is cleared', async () => {
+  test('denies an eligible queued activation after its event leaves the authorized lifecycle', async () => {
     currentTime = Date.parse(CREATED_AT) + 1_000;
     const resolution = await runtimeStore().resolveBatch({
       operation: 'resolve-batch',
@@ -1372,11 +1372,9 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
       .set({ status: 'all-clear', allClearAt: new Date(currentTime) })
       .where(eq(events.id, workItem.batch.eventId));
 
-    // A drill that ends before the worker reaches its begin text still sends
-    // it (2026-10-15 ShakeOut lost nine begin emails this way).
     await expect(
       runtimeStore().authorizeProviderSend(workItem),
-    ).resolves.toEqual(expect.objectContaining({ authorized: true }));
+    ).resolves.toEqual({ authorized: false });
   });
 
   test('authorizes an all-clear work item after the event is ended into closed', async () => {
