@@ -53,6 +53,19 @@ agent can produce: `publish-event-type-version` is not a grant any agent key
 can hold, so wording an agent drafts reaches a real notification only after a
 human administrator publishes it in the PSD EOC app.
 
+That review happens on the Responses page in the web app, which lists every
+unpublished draft under "Drafts awaiting review" with the agent's name and the
+label and prefix of the key it used, shows the three channel previews, and
+compares each field with the published version the draft was based on. The
+server lets only the actor who last saved a draft publish it, so the
+administrator's "Approve and publish" first re-saves the exact reviewed wording
+under their own name and then publishes it; a draft they do not want is
+discarded, which keeps the draft on record but closes it to further edits and
+to publication. The review list and the discard (`list-event-type-drafts`,
+`discard-event-type-draft`) are human-only capabilities: no agent key can be
+granted them, and the agent REST API and this server never expose them. An
+agent that updates a discarded draft receives a `409`.
+
 Every grant an agent key may carry comes from one explicit allowlist,
 `AGENT_KEY_GRANTABLE_CAPABILITY_IDS` in `@psd-eoc/contracts`. The MCP tool IDs
 are a compile-time subset of it. Capabilities the catalog admits for an agent

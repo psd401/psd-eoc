@@ -328,6 +328,7 @@ const PERSISTED_MUTATION_CAPABILITY_ORDER = [
   'set-user-facility-scope',
   'admit-account',
   'revoke-admitted-account',
+  'discard-event-type-draft',
 ] as const;
 
 export const agentCapabilityGrantEnum = contractPgEnum(

@@ -856,6 +856,7 @@ describe('capability execution source boundary', () => {
       'create-event-type-draft',
       'update-event-type-draft',
       'publish-event-type-version',
+      'discard-event-type-draft',
       'issue-agent-api-key',
       'revoke-agent-api-key',
     ]);

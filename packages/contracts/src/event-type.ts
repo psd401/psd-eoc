@@ -3,7 +3,12 @@ import { z } from 'zod';
 import { PaginationCursorSchema, paginatedSchema } from './api';
 import { ActorSchema } from './capability';
 import { IntegrationIdSchema } from './integration';
-import { TimestampSchema, UuidSchema, VersionSchema } from './shared';
+import {
+  AgentApiKeyLabelSchema,
+  TimestampSchema,
+  UuidSchema,
+  VersionSchema,
+} from './shared';
 
 /**
  * Owns the top-level operational event classification used by event records,
@@ -1073,3 +1078,146 @@ export const PublishEventTypeVersionInputSchema = z
 export type PublishEventTypeVersionInput = z.infer<
   typeof PublishEventTypeVersionInputSchema
 >;
+
+/**
+ * Owns who a human reviewer sees as a draft's author. An agent's identity is
+ * its UUID pair; a reviewer needs the key's administrator-given name and public
+ * prefix to know which integration proposed the wording. Names resolve at read
+ * time so a renamed account or key shows its current label; `null` means the
+ * row the actor points at is gone.
+ */
+export const EventTypeDraftAuthorSchema = z
+  .discriminatedUnion('kind', [
+    z
+      .object({
+        kind: z.literal('human'),
+        displayName: z.string().trim().min(1).max(160).nullable(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal('agent'),
+        agentDisplayName: z.string().trim().min(1).max(160).nullable(),
+        key: AgentApiKeyLabelSchema.nullable(),
+      })
+      .strict(),
+  ])
+  .readonly();
+
+/** Draft author projection inferred from its schema. */
+export type EventTypeDraftAuthor = z.infer<typeof EventTypeDraftAuthorSchema>;
+
+/** Owns the bounded, human-only review list of unpublished drafts. */
+export const ListEventTypeDraftsInputSchema = z
+  .object({
+    cursor: PaginationCursorSchema.nullable(),
+    limit: z.number().int().positive().max(200),
+  })
+  .strict()
+  .readonly();
+
+/** Draft review-list input inferred from its schema. */
+export type ListEventTypeDraftsInput = z.infer<
+  typeof ListEventTypeDraftsInputSchema
+>;
+
+/**
+ * Owns one row of the human review list: enough to find a draft, see who
+ * proposed it and against which published version, and open it by exact
+ * revision. Wording is deliberately absent; `get-event-type-draft` returns it.
+ */
+export const EventTypeDraftListItemSchema = z
+  .object({
+    id: EventTypeVersionDraftIdSchema,
+    eventTypeId: EventTypeIdSchema,
+    name: z.string().trim().min(1).max(160),
+    templateMode: TemplateModeSchema,
+    baseVersionId: EventTypeVersionIdSchema.nullable(),
+    baseVersionNumber: z.number().int().positive().nullable(),
+    draftedBy: ActorSchema,
+    author: EventTypeDraftAuthorSchema,
+    draftRevision: EventTypeDraftRevisionSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict()
+  .superRefine((item, context) => {
+    if (item.draftedBy.kind === 'system') {
+      context.addIssue({
+        code: 'custom',
+        message: 'Only humans or agents may author configuration drafts.',
+        path: ['draftedBy'],
+      });
+    }
+    if (item.draftedBy.kind !== item.author.kind) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'The draft author projection must describe the drafting actor.',
+        path: ['author'],
+      });
+    }
+    if ((item.baseVersionId === null) !== (item.baseVersionNumber === null)) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A base version has both an identity and a number, or neither.',
+        path: ['baseVersionNumber'],
+      });
+    }
+  })
+  .readonly();
+
+/** Draft review-list row inferred from its schema. */
+export type EventTypeDraftListItem = z.infer<
+  typeof EventTypeDraftListItemSchema
+>;
+
+/** Owns a bounded page of unpublished drafts awaiting human review. */
+export const EventTypeDraftPageSchema = paginatedSchema(
+  EventTypeDraftListItemSchema,
+);
+
+/** Draft review page inferred from its schema. */
+export type EventTypeDraftPage = z.infer<typeof EventTypeDraftPageSchema>;
+
+/**
+ * Owns a request to withdraw one exact reviewed draft revision from review.
+ * The draft and its revision ledger stay as written; the discard is one more
+ * append-only fact that stops the draft from being edited or published.
+ */
+export const DiscardEventTypeDraftInputSchema = z
+  .object({
+    draftId: EventTypeVersionDraftIdSchema,
+    expectedDraftRevision: EventTypeDraftRevisionSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Draft discard input inferred from its schema. */
+export type DiscardEventTypeDraftInput = z.infer<
+  typeof DiscardEventTypeDraftInputSchema
+>;
+
+/** Owns the append-only record that one draft revision was withdrawn. */
+export const EventTypeDraftDiscardSchema = z
+  .object({
+    draftId: EventTypeVersionDraftIdSchema,
+    eventTypeId: EventTypeIdSchema,
+    draftRevision: EventTypeDraftRevisionSchema,
+    discardedBy: ActorSchema,
+    discardedAt: TimestampSchema,
+  })
+  .strict()
+  .superRefine((discard, context) => {
+    if (discard.discardedBy.kind !== 'human') {
+      context.addIssue({
+        code: 'custom',
+        message: 'Only a human reviewer may discard a configuration draft.',
+        path: ['discardedBy'],
+      });
+    }
+  })
+  .readonly();
+
+/** Draft discard record inferred from its schema. */
+export type EventTypeDraftDiscard = z.infer<typeof EventTypeDraftDiscardSchema>;
