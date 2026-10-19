@@ -74,9 +74,10 @@ per hour across `export-drill-records`, `export-event-summary`, and
 document or persist a row. A refused request is answered `429 RATE_LIMITED`
 with a `Retry-After` header and never reaches a capability handler. A refusal
 is recorded as an `access-denial` audit fact with reason code `RATE_LIMITED`
-under the key, but only the first per-minute refusal of each lockout: later
-refusals in that lockout are answered without an audit row, so a key sending
-past its budget cannot grow the audit chain faster than its admitted budget.
+under the key, but only the first refusal of each lockout for either budget:
+later refusals in that lockout are answered without an audit row, so a key
+sending past its budget cannot grow the audit chain faster than its admitted
+budget.
 Authentication, one indexed read, still runs for every request. The limiter is
 in memory and per server process: with up to four App Runner instances, one
 key's effective ceiling is up to four times each constant, and an instance

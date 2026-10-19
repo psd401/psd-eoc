@@ -301,7 +301,8 @@ describe('agent gateway request budget', () => {
       reasonCode: 'RATE_LIMITED',
     });
 
-    // The other costly capability shares the same hourly budget for that key.
+    // The other costly capability shares the same hourly budget for that
+    // key, and a repeated refusal inside the lockout adds no audit row.
     await expect(
       gateway.execute({
         credential: CREDENTIALS.first,
@@ -321,6 +322,7 @@ describe('agent gateway request budget', () => {
       }),
     ).rejects.toMatchObject({ status: 429 });
     expect(dispatches).toHaveLength(AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR);
+    expect(audits).toHaveLength(refusedSequence);
 
     // A different key is unaffected, and the exhausted key may still read.
     await expect(
@@ -345,6 +347,10 @@ describe('agent gateway request budget', () => {
       'export-event-summary',
       'list-active-events',
     ]);
+    expect(audits).toHaveLength(refusedSequence + 2);
+    expect(
+      audits.filter((audit) => audit.reasonCode === 'RATE_LIMITED'),
+    ).toHaveLength(1);
   });
 
   test('does not charge the hourly budget at authorization', async () => {

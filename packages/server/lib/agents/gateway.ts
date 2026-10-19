@@ -450,6 +450,8 @@ export class AgentRestGateway {
   /**
    * Parses and executes only after authorization, appending one ingress audit
    * for every authenticated canonical call, including validation failures.
+   * The one exception is a repeated budget refusal inside a lockout, which is
+   * answered without a row so a refused key cannot grow the audit chain.
    */
   public async executeAuthorized(
     call: AuthorizedAgentGatewayCall,
@@ -461,6 +463,7 @@ export class AgentRestGateway {
         ? Object.freeze({ acceptCanonicalRequestAudit: true })
         : undefined;
     let targetFacilityId: string | null = null;
+    let repeatedRefusal = false;
     try {
       const request = await prepare();
       const definition = defineCapability(call.capabilityId);
@@ -494,14 +497,15 @@ export class AgentRestGateway {
       );
       // The hourly budget for costly calls is charged here, where the
       // document would be rendered or the row persisted. The ingress audit
-      // in the catch below records the refusal; it is already bounded by the
-      // per-minute budget every call passed in authorize().
+      // in the catch below records the first refusal of a lockout only, as
+      // authorize() does for the per-minute budget.
       const costlyAdmission = this.limiter.admitCostly(
         call.authenticated.actor.apiKeyId,
         call.capabilityId,
         call.serverTime,
       );
       if (costlyAdmission.kind === 'refused') {
+        repeatedRefusal = !costlyAdmission.firstRefusal;
         throw new AgentGatewayRateLimitError(
           costlyAdmission.window,
           costlyAdmission.retryAfterSeconds,
@@ -533,11 +537,17 @@ export class AgentRestGateway {
       );
       return parsed;
     } catch (error) {
-      const outcome = auditOutcome(error);
-      await this.dependencies.audit.append(
-        executionAudit(call, outcome, auditReasonCode(error), targetFacilityId),
-        auditOptions,
-      );
+      if (!repeatedRefusal) {
+        await this.dependencies.audit.append(
+          executionAudit(
+            call,
+            auditOutcome(error),
+            auditReasonCode(error),
+            targetFacilityId,
+          ),
+          auditOptions,
+        );
+      }
       throw error;
     }
   }

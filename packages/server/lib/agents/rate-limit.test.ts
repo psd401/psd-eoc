@@ -151,8 +151,11 @@ describe('agent request limiter', () => {
       );
     }
     expect(
-      limiter.admitCostly(KEYS.first, 'export-drill-records', at(30_000)).kind,
-    ).toBe('refused');
+      limiter.admitCostly(KEYS.first, 'export-drill-records', at(30_000)),
+    ).toMatchObject({ kind: 'refused', firstRefusal: true });
+    expect(
+      limiter.admitCostly(KEYS.first, 'export-event-summary', at(31_000)),
+    ).toMatchObject({ kind: 'refused', firstRefusal: false });
     expect(
       limiter.admitCostly(KEYS.second, 'export-event-summary', at(30_000)),
     ).toEqual({ kind: 'admitted' });

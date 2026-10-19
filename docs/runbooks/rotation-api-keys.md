@@ -60,9 +60,9 @@ per hour across `export-drill-records`, `export-event-summary`, and
 can reach up to four times those figures across the deployment, and an
 instance restart clears its counts. A refusal is an `access-denial` audit
 fact with reason code `RATE_LIMITED` under the agent and key IDs; no
-capability ran and nothing was created or exported. Only the first per-minute
-refusal of a lockout is recorded, so one fact can stand for many refused
-requests; every hourly refusal of an export or activation preview is recorded.
+capability ran and nothing was created or exported. Only the first refusal of
+a lockout is recorded, for either budget, so one fact can stand for many
+refused requests.
 
 Repeated `RATE_LIMITED` facts from one key mean the consumer behind that key
 keeps exceeding its budget on one instance: usually a client retry loop, a
