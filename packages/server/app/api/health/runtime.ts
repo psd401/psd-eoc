@@ -4,7 +4,7 @@ import {
   EventTypeVersionIdSchema,
   FacilityIdSchema,
   type ActivationPreview,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type EventLifecycleMutationResult,
   type LifecycleConsequencePreview,
 } from '@psd-eoc/contracts';
@@ -55,7 +55,7 @@ const CANARY_CAPABILITY_IDS = Object.freeze([
   'create-lifecycle-consequence-preview',
   'all-clear-event',
   'close-event',
-] as const satisfies readonly AgentGrantableCapabilityId[]);
+] as const satisfies readonly AgentKeyGrantableCapabilityId[]);
 
 const CanaryConfigurationSchema = z
   .object({
@@ -1000,9 +1000,8 @@ interface CanaryAuthorizedCalls {
   readonly serverTime: Date;
 }
 
-function hasExactCanaryCapabilities(
-  capabilityIds: readonly AgentGrantableCapabilityId[],
-): boolean {
+/** Compares effective grants and the retained key summary alike. */
+function hasExactCanaryCapabilities(capabilityIds: readonly string[]): boolean {
   return (
     capabilityIds.length === CANARY_CAPABILITY_IDS.length &&
     CANARY_CAPABILITY_IDS.every(

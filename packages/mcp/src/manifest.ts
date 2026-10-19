@@ -2,7 +2,7 @@ import {
   CAPABILITY_CATALOG,
   HUMAN_ONLY_ACTION_IDS,
   McpDraftMessageRevisionInputSchema,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
 } from '@psd-eoc/contracts';
 import { z } from 'zod';
 
@@ -22,7 +22,7 @@ export const MCP_TOOL_CAPABILITY_IDS = Object.freeze([
   'get-event-type-draft',
   'create-activation-preview',
   'prepare-activation',
-] as const satisfies readonly AgentGrantableCapabilityId[]);
+] as const satisfies readonly AgentKeyGrantableCapabilityId[]);
 
 export type McpToolCapabilityId = (typeof MCP_TOOL_CAPABILITY_IDS)[number];
 

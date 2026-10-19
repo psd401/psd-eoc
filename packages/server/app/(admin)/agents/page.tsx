@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
-import { AGENT_GRANTABLE_CAPABILITY_IDS } from '@psd-eoc/contracts';
+import { AGENT_KEY_GRANTABLE_CAPABILITY_IDS } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
 import { WEB_SESSION_COOKIE_NAME } from '../../../lib/auth/sessions';
 import { getDefaultAgentAdministrationPageLoader } from '../../../lib/agents/runtime';
-import { isAgentDeployedCapabilityId } from '../../../lib/agents/availability';
 import { groupAgentGrantOptions } from '../../../lib/agents/grant-groups';
 import { AgentAdmin, type AgentAdminAgent } from './agent-admin';
 import { issueAgentApiKeyAction, revokeAgentApiKeyAction } from './actions';
@@ -85,8 +84,10 @@ export default async function AgentsAdminPage() {
         name: facility.name,
         active: facility.active,
       }))}
+      // The form offers exactly the allowlist the server enforces at issuance,
+      // arranged into the three risk groups.
       grantGroups={groupAgentGrantOptions(
-        AGENT_GRANTABLE_CAPABILITY_IDS.filter(isAgentDeployedCapabilityId),
+        AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
         capabilityLabel,
       )}
       issueIdempotencyKey={randomUUID()}

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type {
-  AgentGrantableCapabilityId,
+  AgentKeyGrantableCapabilityId,
   FacilityScope,
 } from '@psd-eoc/contracts';
 
@@ -30,7 +30,7 @@ const NOW = new Date('2026-08-10T20:00:00.000Z');
 
 function authenticated(
   facilityScope: FacilityScope,
-  capabilityIds: readonly AgentGrantableCapabilityId[] = [
+  capabilityIds: readonly AgentKeyGrantableCapabilityId[] = [
     'get-stale-roster-report',
   ],
 ): AuthenticatedAgentApiKey {

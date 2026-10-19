@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  AGENT_GRANTABLE_CAPABILITY_IDS,
+  AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
   CAPABILITY_CATALOG,
   HUMAN_ONLY_ACTION_IDS,
   ApiErrorSchema,
@@ -109,12 +109,14 @@ function operationMetadata() {
 
 describe('agent REST OpenAPI', () => {
   test('derives the callable manifest exactly from the contract grant list', () => {
-    expect(AGENT_REST_CAPABILITY_IDS).toEqual(AGENT_GRANTABLE_CAPABILITY_IDS);
+    expect(AGENT_REST_CAPABILITY_IDS).toEqual(
+      AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
+    );
     expect(new Set(AGENT_REST_CAPABILITY_IDS).size).toBe(
       AGENT_REST_CAPABILITY_IDS.length,
     );
     expect(Object.keys(AGENT_REST_CAPABILITY_MANIFEST).sort()).toEqual(
-      [...AGENT_GRANTABLE_CAPABILITY_IDS].sort(),
+      [...AGENT_KEY_GRANTABLE_CAPABILITY_IDS].sort(),
     );
 
     for (const capabilityId of AGENT_REST_CAPABILITY_IDS) {
