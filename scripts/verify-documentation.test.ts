@@ -102,6 +102,19 @@ describe('documentation contract', () => {
     expect(currentMarkdownFiles(root)).toEqual([join(root, 'README.md')]);
   });
 
+  test('ignores the generated OpenWiki knowledge base', () => {
+    const root = mkdtempSync(join(tmpdir(), 'psd-eoc-openwiki-docs-'));
+    temporaryDirectories.push(root);
+    mkdirSync(join(root, 'openwiki', 'operations'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# Source\n');
+    writeFileSync(
+      join(root, 'openwiki', 'operations', 'configuration-and-readiness.md'),
+      '<!-- psd-eoc:readiness-register -->\n# Generated restatement\n',
+    );
+
+    expect(currentMarkdownFiles(root)).toEqual([join(root, 'README.md')]);
+  });
+
   test('keeps the repository documentation synchronized', () => {
     expect(verifyDocumentation()).toEqual([]);
   });

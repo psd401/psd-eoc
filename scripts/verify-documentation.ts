@@ -234,6 +234,10 @@ export function currentMarkdownFiles(repositoryRoot: string): string[] {
       const absolute = join(directory, entry.name);
       const repositoryPath = relative(repositoryRoot, absolute);
       if (entry.isDirectory()) {
+        // The OpenWiki workflow regenerates openwiki/ from these sources; it
+        // restates them, including the readiness-register marker, and is not
+        // a current source of truth.
+        if (repositoryPath === 'openwiki') continue;
         if (repositoryPath === join('docs', 'archive')) {
           const archiveIndex = join(absolute, 'README.md');
           if (existsSync(archiveIndex)) files.push(archiveIndex);
