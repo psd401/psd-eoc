@@ -136,3 +136,23 @@ Tool arguments and successful API results are parsed with the canonical
 not-found errors are intentionally scope-safe: they do not enumerate other
 facilities, recipient data, or credentials. A `503` means the underlying
 capability is not deployed; the MCP adapter never substitutes synthetic data.
+
+## Request budget and retries
+
+The agent API budgets each key: at most 60 requests per minute, and at most
+20 per hour across `export-drill-records`, `export-event-summary`, and
+`create-activation-preview`, which render a document or persist a row on every
+call. Past the budget the API answers `429 RATE_LIMITED` with a `Retry-After`
+header; the MCP server surfaces that as a retryable tool error and never
+retries on its own. The budget is counted in memory on each server instance,
+so a deployment running several instances allows up to that many times the
+stated figures; it is a bound, not a guarantee.
+
+Mutation calls (`prepare-activation` and the create/update calls behind
+`draft-message-template-revision`) send an `Idempotency-Key` derived from a
+SHA-256 of the capability ID and the canonical JSON of the validated
+arguments. A model that retries the same tool call therefore gets the stored
+result back instead of creating a second prepared activation or draft; a
+changed argument is a new request. Idempotency records do not expire, so an
+identical call keeps returning its first result for as long as the record
+exists; change an argument to make a new one.

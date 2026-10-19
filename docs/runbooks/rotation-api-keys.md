@@ -58,6 +58,35 @@ Preserve the audit chain, notify the security/privacy lead and product owner,
 rotate any downstream secret the key could read, and follow district incident
 reporting. Never broaden a replacement key to restore service quickly.
 
+## Rate-limit audit bursts
+
+The agent gateway admits at most 60 requests per key per minute and 20 per key
+per hour across `export-drill-records`, `export-event-summary`, and
+`create-activation-preview`. Each server instance counts separately, so a key
+can reach up to four times those figures across the deployment, and an
+instance restart clears its counts. A refusal is an `access-denial` audit
+fact with reason code `RATE_LIMITED` under the agent and key IDs; no
+capability ran and nothing was created or exported. Only the first refusal of
+a lockout is recorded, for either budget, so one fact can stand for many
+refused requests.
+
+Repeated `RATE_LIMITED` facts from one key mean the consumer behind that key
+keeps exceeding its budget on one instance: usually a client retry loop, a
+model calling the same tool repeatedly, or a job fanning out too widely. Read
+the facts for that key just before each one to see what it was doing.
+
+- Successful reads and exports before the refusal point to a loop or fan-out
+  on the consumer side. Tell the key owner; no rotation is needed.
+- `CAPABILITY_NOT_GRANTED` denials in the same run point to a consumer that
+  is probing for grants it does not hold. Treat the key as a suspected
+  compromise and revoke it first.
+- A human-only attempt within the key's budget is recorded as
+  `HUMAN_ONLY_REQUIRED`; past the budget it is refused, and the lockout's
+  one fact is a `human-only-rejection` with reason code `RATE_LIMITED`
+  naming the action. Either is **SEV-0** on its own.
+- Refusals from several keys at once, or the same key on every instance, are
+  a capacity signal rather than a key problem.
+
 ## Evidence
 
 Record agent ID, old/new key IDs, facility and capability scope, expiry,

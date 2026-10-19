@@ -29,6 +29,7 @@ import {
   type PreparedAgentGatewayRequest,
 } from '../../../../../lib/agents/gateway';
 import { AgentApiKeyError } from '../../../../../lib/agents/keys';
+import { AgentGatewayRateLimitError } from '../../../../../lib/agents/rate-limit';
 import { getDefaultAgentRestGateway } from '../../../../../lib/agents/runtime';
 
 export const AGENT_IDEMPOTENCY_KEY_HEADER = 'idempotency-key' as const;
@@ -181,6 +182,8 @@ export function agentApiErrorResponse(
   const engineError = error instanceof CapabilityEngineError ? error : null;
   const keyError = error instanceof AgentApiKeyError ? error : null;
   const gatewayError = error instanceof AgentGatewayError ? error : null;
+  const rateLimitError =
+    error instanceof AgentGatewayRateLimitError ? error : null;
   const gatewayOutputError =
     error instanceof AgentGatewayOutputError ? error : null;
   const unavailableError =
@@ -207,6 +210,7 @@ export function agentApiErrorResponse(
     : (engineError?.status ??
       keyError?.status ??
       gatewayError?.status ??
+      rateLimitError?.status ??
       gatewayOutputError?.status ??
       unavailableError?.status ??
       routeNotFoundError?.status ??
@@ -226,6 +230,7 @@ export function agentApiErrorResponse(
   const code =
     engineError?.code ??
     routeNotFoundError?.code ??
+    rateLimitError?.code ??
     gatewayOutputError?.code ??
     administrationError?.code ??
     auditForbiddenError?.code ??
@@ -234,6 +239,7 @@ export function agentApiErrorResponse(
     engineError?.message ??
     keyError?.message ??
     gatewayError?.message ??
+    rateLimitError?.message ??
     gatewayOutputError?.message ??
     unavailableError?.message ??
     routeNotFoundError?.message ??
@@ -251,6 +257,9 @@ export function agentApiErrorResponse(
       : 'The agent capability request failed.');
   const headers: Record<string, string> = { ...RESPONSE_HEADERS };
   if (status === 401) headers['WWW-Authenticate'] = 'Bearer';
+  if (rateLimitError !== null) {
+    headers['Retry-After'] = String(rateLimitError.retryAfterSeconds);
+  }
   return NextResponse.json(
     ApiErrorSchema.parse({
       code,
@@ -260,6 +269,7 @@ export function agentApiErrorResponse(
         engineError?.retryable ??
         keyError?.retryable ??
         gatewayError?.retryable ??
+        rateLimitError?.retryable ??
         gatewayOutputError?.retryable ??
         unavailableError?.retryable ??
         routeNotFoundError?.retryable ??
