@@ -53,6 +53,14 @@ class StubEventTypeStore implements EventTypeStore {
     throw new Error('Unexpected getDraft call.');
   };
 
+  public readonly listDrafts: EventTypeStore['listDrafts'] = async () => {
+    throw new Error('Unexpected listDrafts call.');
+  };
+
+  public readonly discardDraft: EventTypeStore['discardDraft'] = async () => {
+    throw new Error('Unexpected discardDraft call.');
+  };
+
   public readonly createDraft: EventTypeStore['createDraft'] = async () => {
     throw new Error('Unexpected createDraft call.');
   };

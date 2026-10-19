@@ -340,6 +340,7 @@ export const REPOSITORY_OWNED_MUTATION_CAPABILITY_IDS = Object.freeze([
   'create-event-type-draft',
   'update-event-type-draft',
   'publish-event-type-version',
+  'discard-event-type-draft',
   'issue-agent-api-key',
   'revoke-agent-api-key',
 ] as const satisfies readonly RegisteredMutationCapabilityId[]);

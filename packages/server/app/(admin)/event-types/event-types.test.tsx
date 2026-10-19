@@ -4,12 +4,16 @@ import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
+  EventTypeDraftPageSchema,
   EventTypePageSchema,
   EventTypeRenderingPreviewSchema,
   MessageTemplateCatalogSchema,
   SessionEstablishmentResultSchema,
   type AgentCapabilityGrant,
   type CreateEventTypeDraftInput,
+  type EventTypeDraftDiscard,
+  type EventTypeDraftListItem,
+  type EventTypeDraftPage,
   type EventTypePage,
   type EventTypeVersion,
   type EventTypeVersionDraft,
@@ -25,6 +29,8 @@ import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import {
   EventTypeCapabilityError,
   executeCreateEventTypeDraftCapability,
+  executeDiscardEventTypeDraftCapability,
+  executeListEventTypeDraftsCapability,
   executeListEventTypesCapability,
   isDatabaseConstraintError,
   type AuthenticatedEventTypeAgent,
@@ -38,6 +44,13 @@ import {
   renderTemplateSet,
 } from '../../../lib/notify/render';
 import { eventTypeLandingResponse } from './landing';
+import {
+  DraftReviewList,
+  TemplateDiff,
+  compareDraftToBase,
+  draftAuthorLabel,
+  wordDiff,
+} from './manage/draft-review';
 import { PreviewCards, TemplateFields } from './manage/event-type-admin';
 import { NAV_DESTINATIONS } from '../../nav/primary-nav-model';
 
@@ -213,7 +226,9 @@ function catalog(
 
 class CountingStore implements EventTypeStore {
   public listCalls = 0;
+  public listDraftCalls = 0;
   public createCalls = 0;
+  public discardCalls = 0;
 
   public async list(): Promise<EventTypePage> {
     this.listCalls += 1;
@@ -229,6 +244,19 @@ class CountingStore implements EventTypeStore {
 
   public async getDraft(): Promise<EventTypeVersionDraft> {
     throw new Error('Unexpected draft read.');
+  }
+
+  public async listDrafts(): Promise<EventTypeDraftPage> {
+    this.listDraftCalls += 1;
+    return EventTypeDraftPageSchema.parse({
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    });
+  }
+
+  public async discardDraft(): Promise<EventTypeDraftDiscard> {
+    this.discardCalls += 1;
+    throw new Error('The authorization test reached the store.');
   }
 
   public async createDraft(): Promise<EventTypeVersionDraft> {
@@ -1219,6 +1247,145 @@ describe('capability-level administrator authorization', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
     expect(facilityStore.createCalls).toBe(0);
   });
+
+  test('refuses every agent key the draft review list, whatever it was granted', async () => {
+    for (const grants of [
+      ['get-event-type-draft', 'create-event-type-draft'],
+      ['update-event-type-draft'],
+      ['list-event-types', 'preview-event-type-rendering'],
+    ] as const satisfies readonly (readonly AgentCapabilityGrant[])[]) {
+      const store = new CountingStore();
+      await expect(
+        executeListEventTypeDraftsCapability({
+          store,
+          authenticated: authenticatedAgent(grants),
+          query: { cursor: null, limit: 200 },
+          now: NOW,
+        }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+      expect(store.listDraftCalls).toBe(0);
+    }
+  });
+
+  test('refuses an agent key the draft discard before any store is reached', async () => {
+    const store = new CountingStore();
+    await expect(
+      executeDiscardEventTypeDraftCapability({
+        store,
+        capabilityStore: capabilityStore(store),
+        authenticated: authenticatedAgent([
+          'create-event-type-draft',
+          'update-event-type-draft',
+          'get-event-type-draft',
+        ]),
+        command: {
+          draftId: '20000000-0000-4000-8000-000000000001',
+          expectedDraftRevision: 'a'.repeat(64),
+        },
+        idempotencyKey: 'event-type-agent-discard-deny-0001',
+        transport: { kind: 'mcp-tool-call' },
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(store.discardCalls).toBe(0);
+  });
+
+  test('lists drafts only for a district-scoped administrator', async () => {
+    const adminStore = new CountingStore();
+    const page = await executeListEventTypeDraftsCapability({
+      store: adminStore,
+      authenticated: authenticatedSession(['admin']),
+      query: { cursor: null, limit: 200 },
+      now: NOW,
+    });
+    expect(page.items).toEqual([]);
+    expect(adminStore.listDraftCalls).toBe(1);
+
+    const staffStore = new CountingStore();
+    await expect(
+      executeListEventTypeDraftsCapability({
+        store: staffStore,
+        authenticated: authenticatedSession(['staff']),
+        query: { cursor: null, limit: 200 },
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(staffStore.listDraftCalls).toBe(0);
+
+    // Template wording is district configuration, so an administrator whose
+    // scope is one campus cannot review drafts for the whole district.
+    const campusStore = new CountingStore();
+    await expect(
+      executeListEventTypeDraftsCapability({
+        store: campusStore,
+        authenticated: {
+          ...authenticatedSession(['admin']),
+          scope: {
+            facilityScope: { kind: 'facilities', facilityIds: [IDS.facility] },
+          },
+        },
+        query: { cursor: null, limit: 200 },
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(campusStore.listDraftCalls).toBe(0);
+  });
+
+  test('lets a district administrator reach the discard store over a verified web submit', async () => {
+    const store = new CountingStore();
+    await expect(
+      executeDiscardEventTypeDraftCapability({
+        store,
+        capabilityStore: capabilityStore(store),
+        authenticated: authenticatedSession(['admin']),
+        command: {
+          draftId: '20000000-0000-4000-8000-000000000001',
+          expectedDraftRevision: 'a'.repeat(64),
+        },
+        idempotencyKey: 'event-type-admin-discard-0001',
+        transport: {
+          kind: 'web-interactive',
+          method: 'POST',
+          interaction: 'explicit-user-submit',
+          csrfVerified: true,
+        },
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({
+      name: 'CapabilityEngineError',
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 500,
+    });
+    expect(store.discardCalls).toBe(1);
+
+    const campusStore = new CountingStore();
+    await expect(
+      executeDiscardEventTypeDraftCapability({
+        store: campusStore,
+        capabilityStore: capabilityStore(campusStore),
+        authenticated: {
+          ...authenticatedSession(['admin']),
+          scope: {
+            facilityScope: { kind: 'facilities', facilityIds: [IDS.facility] },
+          },
+        },
+        command: {
+          draftId: '20000000-0000-4000-8000-000000000001',
+          expectedDraftRevision: 'a'.repeat(64),
+        },
+        idempotencyKey: 'event-type-campus-discard-0001',
+        transport: {
+          kind: 'web-interactive',
+          method: 'POST',
+          interaction: 'explicit-user-submit',
+          csrfVerified: true,
+        },
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(campusStore.discardCalls).toBe(0);
+  });
 });
 
 describe('database error classification', () => {
@@ -1295,6 +1462,172 @@ describe('admin UI semantics', () => {
     const markup = await forbidden.text();
     expect(markup).toContain('manage responses and message templates');
     expect(markup.toLowerCase()).not.toContain('event type');
+  });
+
+  test('names an agent author by agent and key label, never by UUID alone', () => {
+    const agentDraft: EventTypeDraftListItem = {
+      id: '20000000-0000-4000-8000-000000000001',
+      eventTypeId: '20000000-0000-4000-8000-000000000002',
+      name: 'Secure',
+      templateMode: 'real',
+      baseVersionId: '20000000-0000-4000-8000-000000000003',
+      baseVersionNumber: 2,
+      draftedBy: { kind: 'agent', agentId: IDS.agent, apiKeyId: IDS.apiKey },
+      author: {
+        kind: 'agent',
+        agentDisplayName: 'Wording Assistant',
+        key: {
+          displayName: 'Night shift drafting',
+          keyPrefix: 'psd_eoc_ak_12ab',
+        },
+      },
+      draftRevision: 'b'.repeat(64),
+      createdAt: '2026-10-18T17:00:00.000Z',
+    };
+    expect(draftAuthorLabel(agentDraft)).toBe(
+      'Agent Wording Assistant via key Night shift drafting (psd_eoc_ak_12ab…)',
+    );
+    expect(
+      draftAuthorLabel({
+        ...agentDraft,
+        author: { kind: 'agent', agentDisplayName: null, key: null },
+      }),
+    ).toBe('Agent an agent no longer on record via a key no longer on record');
+    expect(
+      draftAuthorLabel({
+        draftedBy: { kind: 'human', userId: IDS.user, sessionId: IDS.session },
+        author: { kind: 'human', displayName: 'Synthetic Reviewer' },
+      }),
+    ).toBe('Synthetic Reviewer');
+
+    const markup = renderToStaticMarkup(
+      <DraftReviewList
+        currentVersions={
+          new Map([
+            [
+              agentDraft.eventTypeId,
+              { id: '20000000-0000-4000-8000-000000000004', version: 3 },
+            ],
+          ])
+        }
+        drafts={[agentDraft]}
+        onReview={() => undefined}
+        selectedDraftId={null}
+      />,
+    );
+    expect(markup).toContain('Drafts awaiting review');
+    expect(markup).toContain('Wording Assistant');
+    expect(markup).toContain('Night shift drafting (psd_eoc_ak_12ab…)');
+    expect(markup).not.toContain(IDS.agent);
+    expect(markup).not.toContain(IDS.apiKey);
+    expect(markup).toContain('<th scope="col">Drafted by</th>');
+    expect(markup).toContain('REAL');
+    // The draft is against version 2 while version 3 is current, so the
+    // reviewer is told before opening it that it cannot publish as is.
+    expect(markup).toContain(
+      'Version 2; version 3 is now current, so this draft must be re-based before it can publish',
+    );
+    expect(markup).toMatch(/<button[^>]*type="button"[^>]*>Review/u);
+    expect(markup).toContain('Secure drafted by Agent Wording Assistant');
+    expect(markup).toContain(`<time dateTime="${agentDraft.createdAt}"`);
+    expect(
+      renderToStaticMarkup(
+        <DraftReviewList
+          currentVersions={new Map()}
+          drafts={[]}
+          onReview={() => undefined}
+          selectedDraftId={null}
+        />,
+      ),
+    ).toContain('No drafts are waiting for review.');
+  });
+
+  test('marks exactly the fields whose wording differs from the base version, with the mode visible', () => {
+    const base = {
+      id: '20000000-0000-4000-8000-000000000003',
+      version: 2,
+      name: 'Lockdown Drill',
+      description: 'Practice only.',
+      enabled: true,
+      templates: catalog('drill'),
+    };
+    const draft = {
+      baseVersionId: base.id,
+      name: 'Lockdown Drill',
+      description: 'Practice only.',
+      enabled: false,
+      templateMode: 'drill' as const,
+      templates: catalog('drill', {
+        activationSmsBody:
+          '{{eventType}} at {{site}}. Stay where you are and open PSD EOC.',
+      }),
+    };
+    const comparisons = compareDraftToBase(draft, base);
+    expect(comparisons).toHaveLength(18);
+    expect(comparisons.filter((c) => c.changed).map((c) => c.id)).toEqual([
+      'enabled',
+      'activation-sms-body',
+    ]);
+
+    const markup = renderToStaticMarkup(
+      <TemplateDiff base={base} draft={draft} />,
+    );
+    expect(markup).toContain('DRILL — TRAINING ONLY WORDING');
+    expect(markup).toContain('[DRILL]');
+    expect(markup).not.toContain('[INCIDENT]');
+    expect(markup).toContain('2 of 18 fields differ from published version 2');
+    expect(markup).toMatch(
+      /<tr class="changed" data-field="activation-sms-body">/u,
+    );
+    expect(markup).toMatch(/<tr class="changed" data-field="enabled">/u);
+    expect(markup).not.toMatch(
+      /<tr class="changed" data-field="activation-push-title">/u,
+    );
+    expect(markup.match(/>Changed</gu)).toHaveLength(2);
+    expect(markup.match(/>Unchanged</gu)).toHaveLength(16);
+    expect(markup).toContain('<del class="diff-removed">');
+    expect(markup).toContain('<ins class="diff-added">');
+    expect(markup).toContain('Removed: </span>Open');
+    expect(markup).toContain('Added: </span>Stay');
+
+    expect(wordDiff('Open PSD EOC.', 'Open PSD EOC.')).toEqual([
+      { kind: 'same', text: 'Open PSD EOC.' },
+    ]);
+    expect(wordDiff('Go to the gym.', 'Go to the office now.')).toEqual([
+      { kind: 'same', text: 'Go to the ' },
+      { kind: 'removed', text: 'gym.' },
+      { kind: 'added', text: 'office now.' },
+    ]);
+    // A rewrite that shares only scattered words is shown whole rather than
+    // as an unreadable interleave of one-word removals and additions.
+    expect(
+      wordDiff(
+        'Completed by {{updatedBy}} at {{updatedAt}}. Open PSD EOC for current information.',
+        '{{eventType}} at {{site}} is all clear as of {{updatedAt}}. Open PSD EOC now for the latest.',
+      ),
+    ).toEqual([
+      {
+        kind: 'removed',
+        text: 'Completed by {{updatedBy}} at {{updatedAt}}. Open PSD EOC for current information.',
+      },
+      {
+        kind: 'added',
+        text: '{{eventType}} at {{site}} is all clear as of {{updatedAt}}. Open PSD EOC now for the latest.',
+      },
+    ]);
+
+    // Nothing published yet: every field is new and nothing is struck through.
+    const fresh = renderToStaticMarkup(
+      <TemplateDiff
+        base={null}
+        draft={{ ...draft, baseVersionId: null, templateMode: 'real' }}
+      />,
+    );
+    expect(fresh).toContain('REAL INCIDENT WORDING');
+    expect(fresh).toContain('[INCIDENT]');
+    expect(fresh).toContain('all 18 fields are new');
+    expect(fresh).not.toContain('<del');
+    expect(fresh.match(/>New</gu)).toHaveLength(18);
   });
 
   test('ships visible keyboard focus and minimum target sizing in owned CSS', () => {

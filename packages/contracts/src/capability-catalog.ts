@@ -31,12 +31,16 @@ import {
 } from './event-room';
 import {
   CreateEventTypeDraftInputSchema,
+  DiscardEventTypeDraftInputSchema,
+  EventTypeDraftDiscardSchema,
+  EventTypeDraftPageSchema,
   EventTypePageSchema,
   EventTypeRenderingPreviewSchema,
   EventTypeVersionDraftSchema,
   EventTypeVersionSchema,
   GetEventTypeDraftInputSchema,
   GetEventTypeVersionInputSchema,
+  ListEventTypeDraftsInputSchema,
   ListEventTypesInputSchema,
   PreviewEventTypeRenderingInputSchema,
   PublishEventTypeVersionInputSchema,
@@ -1202,6 +1206,18 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     inputSchema: PublishEventTypeVersionInputSchema,
     outputSchema: EventTypeVersionSchema,
   }),
+  // Draft review is the human half of "an agent drafts, a human publishes".
+  // Neither capability admits an agent principal or an agent transport, so no
+  // key grant for them can exist and the review list can never be read by the
+  // integrations whose proposals it shows.
+  'discard-event-type-draft': canonicalCapability({
+    id: 'discard-event-type-draft',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
+    inputSchema: DiscardEventTypeDraftInputSchema,
+    outputSchema: EventTypeDraftDiscardSchema,
+  }),
   'dispatch-outbox': canonicalCapability({
     id: 'dispatch-outbox',
     operation: 'mutation',
@@ -1503,6 +1519,14 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanAgentInvocationPolicy,
     inputSchema: PreviewEventTypeRenderingInputSchema,
     outputSchema: EventTypeRenderingPreviewSchema,
+  }),
+  'list-event-type-drafts': canonicalCapability({
+    id: 'list-event-type-drafts',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanInteractiveInvocationPolicy,
+    inputSchema: ListEventTypeDraftsInputSchema,
+    outputSchema: EventTypeDraftPageSchema,
   }),
   'get-notification-status': canonicalCapability({
     id: 'get-notification-status',

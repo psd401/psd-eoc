@@ -4,12 +4,20 @@ import { useRouter } from 'next/navigation';
 
 import { defaultMessageTemplateCatalog } from '../../../../lib/notify/default-templates';
 
+import {
+  DraftReviewList,
+  TemplateDiff,
+  draftAuthorLabel,
+  draftBaseLabel,
+} from './draft-review';
 import { responseListHref, type ResponseListFilters } from './filters';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import {
   ApiErrorSchema,
   CreateEventTypeDraftInputSchema,
+  DiscardEventTypeDraftInputSchema,
+  EventTypeDraftDiscardSchema,
   EventTypeDraftRevisionSchema,
   EventTypeRenderingPreviewSchema,
   EventTypeVersionIdSchema,
@@ -18,6 +26,9 @@ import {
   PublishEventTypeVersionInputSchema,
   UpdateEventTypeDraftInputSchema,
   type CreateEventTypeDraftInput,
+  type DiscardEventTypeDraftInput,
+  type EventTypeDraftDiscard,
+  type EventTypeDraftListItem,
   type EventTypePage,
   type EventTypeRenderingPreview,
   type EventTypeVersion,
@@ -44,6 +55,10 @@ type EventTypeCommand =
   | Readonly<{
       action: 'publish-version';
       input: PublishEventTypeVersionInput;
+    }>
+  | Readonly<{
+      action: 'discard-draft';
+      input: DiscardEventTypeDraftInput;
     }>;
 
 type CommandSuccess =
@@ -54,6 +69,10 @@ type CommandSuccess =
   | Readonly<{
       kind: 'version';
       version: EventTypeVersion;
+    }>
+  | Readonly<{
+      kind: 'discard';
+      discard: EventTypeDraftDiscard;
     }>;
 
 interface FieldIssue {
@@ -91,7 +110,7 @@ class BrowserRecoveryError extends Error {
 
 class ConfirmedCommandBrowserStateError extends Error {
   public constructor(
-    public readonly successKind: 'draft' | 'version',
+    public readonly successKind: 'discard' | 'draft' | 'version',
     message: string,
   ) {
     super(message);
@@ -121,7 +140,8 @@ interface RetainedDraft {
   readonly savedAt: string;
 }
 
-type PendingAction = 'publish' | 'restore' | 'retry' | 'save' | null;
+type PendingAction =
+  'approve' | 'discard' | 'publish' | 'restore' | 'retry' | 'save' | null;
 
 const PURPOSES = [
   'activation',
@@ -180,6 +200,12 @@ function parseCommand(value: unknown): EventTypeCommand | null {
       const parsed = PublishEventTypeVersionInputSchema.safeParse(input);
       return parsed.success
         ? { action: 'publish-version', input: parsed.data }
+        : null;
+    }
+    case 'discard-draft': {
+      const parsed = DiscardEventTypeDraftInputSchema.safeParse(input);
+      return parsed.success
+        ? { action: 'discard-draft', input: parsed.data }
         : null;
     }
     default:
@@ -613,6 +639,17 @@ function validateCommand(command: EventTypeCommand): EventTypeCommand {
       }
       return { action: 'publish-version', input: parsed.data };
     }
+    case 'discard-draft': {
+      const parsed = DiscardEventTypeDraftInputSchema.safeParse(command.input);
+      if (!parsed.success) {
+        throw new EventTypeRequestError(
+          'Review the highlighted event-type fields and try again.',
+          'definite',
+          validationFieldIssues(parsed.error.issues),
+        );
+      }
+      return { action: 'discard-draft', input: parsed.data };
+    }
   }
 }
 
@@ -711,6 +748,11 @@ function parseCommandSuccess(
     const parsed = EventTypeVersionSchema.safeParse(value);
     if (parsed.success) {
       return { kind: 'version', version: parsed.data };
+    }
+  } else if (command.action === 'discard-draft') {
+    const parsed = EventTypeDraftDiscardSchema.safeParse(value);
+    if (parsed.success && parsed.data.draftId === command.input.draftId) {
+      return { kind: 'discard', discard: parsed.data };
     }
   } else {
     const parsed = EventTypeVersionDraftSchema.safeParse(value);
@@ -811,6 +853,47 @@ async function requestPreviews(
       }
     }),
   );
+}
+
+/**
+ * The published version a draft was based on, for the field comparison. The
+ * list item already carries it when the draft is against the current version;
+ * otherwise it is one read away.
+ */
+async function loadBaseVersion(
+  loaded: EventTypeVersionDraft,
+  item: EventTypeListItem | null,
+  signal?: AbortSignal,
+): Promise<EventTypeVersion | null> {
+  if (loaded.baseVersionId === null) {
+    return null;
+  }
+  if (item?.latestVersion.id === loaded.baseVersionId) {
+    return item.latestVersion;
+  }
+  return requestBaseVersion(loaded.baseVersionId, signal);
+}
+
+async function requestBaseVersion(
+  eventTypeVersionId: string,
+  signal?: AbortSignal,
+): Promise<EventTypeVersion> {
+  const parameters = new URLSearchParams({
+    operation: 'version',
+    eventTypeVersionId,
+  });
+  const value = await requestJson(
+    `/event-types/api?${parameters.toString()}`,
+    signal,
+  );
+  const parsed = EventTypeVersionSchema.safeParse(value);
+  if (!parsed.success || parsed.data.id !== eventTypeVersionId) {
+    throw new EventTypeRequestError(
+      'The published version for comparison returned incomplete data.',
+      'definite',
+    );
+  }
+  return parsed.data;
 }
 
 function defaultCatalog(mode: TemplateMode): MessageTemplateCatalog {
@@ -1166,20 +1249,28 @@ function uiError(
 
 function EventTypeEditor({
   item,
+  reviewDraft,
   csrfCookieName,
   editorId,
   sessionId,
+  userId,
+  onDraftDiscarded,
 }: Readonly<{
   item: EventTypeListItem | null;
+  /** A server-listed draft the administrator chose to review, if any. */
+  reviewDraft: EventTypeDraftListItem | null;
   csrfCookieName: string;
   editorId: string;
   sessionId: string;
+  userId: string;
+  onDraftDiscarded: (message: string) => void;
 }>) {
   const router = useRouter();
   const [mode, setMode] = useState<TemplateMode>(
-    item?.eventType.templateMode ?? 'real',
+    reviewDraft?.templateMode ?? item?.eventType.templateMode ?? 'real',
   );
   const [draft, setDraft] = useState<EventTypeVersionDraft | null>(null);
+  const [baseVersion, setBaseVersion] = useState<EventTypeVersion | null>(null);
   const [draftRetained, setDraftRetained] = useState(false);
   const [previews, setPreviews] = useState<
     readonly EventTypeRenderingPreview[]
@@ -1257,13 +1348,37 @@ function EventTypeEditor({
       );
     }
 
-    if (draftRecord?.editorId === editorId) {
+    // A draft chosen from the review list wins over a browser-retained one:
+    // the server list is the source of truth for what awaits review, and the
+    // retained record only exists to find a draft this browser started.
+    const target: Readonly<{
+      draftId: string;
+      eventTypeId: string;
+      draftRevision: string;
+      kind: 'restore' | 'review';
+    }> | null =
+      reviewDraft !== null
+        ? {
+            draftId: reviewDraft.id,
+            eventTypeId: reviewDraft.eventTypeId,
+            draftRevision: reviewDraft.draftRevision,
+            kind: 'review',
+          }
+        : draftRecord?.editorId === editorId
+          ? {
+              draftId: draftRecord.draftId,
+              eventTypeId: draftRecord.eventTypeId,
+              draftRevision: draftRecord.draftRevision,
+              kind: 'restore',
+            }
+          : null;
+    if (target !== null) {
       setPendingAction('restore');
       void (async () => {
         try {
           const parameters = new URLSearchParams({
             operation: 'draft',
-            draftId: draftRecord.draftId,
+            draftId: target.draftId,
           });
           const value = await requestJson(
             `/event-types/api?${parameters.toString()}`,
@@ -1272,21 +1387,24 @@ function EventTypeEditor({
           const parsed = EventTypeVersionDraftSchema.safeParse(value);
           if (
             !parsed.success ||
-            parsed.data.id !== draftRecord.draftId ||
-            parsed.data.eventTypeId !== draftRecord.eventTypeId
+            parsed.data.id !== target.draftId ||
+            parsed.data.eventTypeId !== target.eventTypeId
           ) {
             throw new EventTypeRequestError(
-              'The retained draft response did not match its recovery record.',
+              target.kind === 'review'
+                ? 'The draft response did not match the review list entry.'
+                : 'The retained draft response did not match its recovery record.',
               'definite',
             );
           }
           const restored = parsed.data;
           const restoredNewerRevision =
-            restored.draftRevision !== draftRecord.draftRevision;
+            restored.draftRevision !== target.draftRevision;
           if (!active) {
             return;
           }
           setDraft(restored);
+          setBaseVersion(null);
           setDraftRetained(false);
           setMode(restored.templateMode);
           setDirty(false);
@@ -1297,14 +1415,15 @@ function EventTypeEditor({
           setFormEpoch((value) => value + 1);
           retainDraft(sessionId, editorId, restored);
           setDraftRetained(true);
-          const restoredPreviews = await requestPreviews(
-            restored,
-            controller.signal,
-          );
+          const [restoredPreviews, base] = await Promise.all([
+            requestPreviews(restored, controller.signal),
+            loadBaseVersion(restored, item, controller.signal),
+          ]);
           if (!active) {
             return;
           }
           setPreviews(restoredPreviews);
+          setBaseVersion(base);
           setPreviewReady(true);
           setPreviewedDraftRevision(restored.draftRevision);
           if (recoveryReadFailure === null) {
@@ -1312,9 +1431,13 @@ function EventTypeEditor({
             setStatus(
               pendingRecord?.editorId === editorId
                 ? 'Unpublished draft restored and previewed. Resolve the previous retained change before continuing.'
-                : restoredNewerRevision
-                  ? 'A newer saved draft revision was restored and previewed. Review every channel before publishing.'
-                  : 'Unpublished draft restored and previewed. Review every channel before publishing.',
+                : target.kind === 'review'
+                  ? restoredNewerRevision
+                    ? 'A newer revision of this draft was saved after the list loaded; the newer wording is shown. Review every channel and the comparison before publishing or discarding.'
+                    : 'Draft loaded for review. Check every channel preview and the comparison below, then approve and publish, or discard.'
+                  : restoredNewerRevision
+                    ? 'A newer saved draft revision was restored and previewed. Review every channel before publishing.'
+                    : 'Unpublished draft restored and previewed. Review every channel before publishing.',
             );
           }
         } catch (caught) {
@@ -1326,9 +1449,13 @@ function EventTypeEditor({
           setPreviews([]);
           setError(
             uiError(
-              'Draft recovery needs attention',
+              target.kind === 'review'
+                ? 'Draft could not be loaded for review'
+                : 'Draft recovery needs attention',
               caught,
-              'PSD EOC could not restore the unpublished draft.',
+              target.kind === 'review'
+                ? 'PSD EOC could not load the draft for review.'
+                : 'PSD EOC could not restore the unpublished draft.',
             ),
           );
           setStatus('');
@@ -1344,7 +1471,15 @@ function EventTypeEditor({
       active = false;
       controller.abort();
     };
+    // `item` is a server prop and `reviewDraft` is part of this editor's key,
+    // so a change to either remounts the editor instead of re-running this.
   }, [editorId, sessionId]);
+
+  const isLastSaver =
+    draft !== null &&
+    draft.draftedBy.kind === 'human' &&
+    draft.draftedBy.userId === userId &&
+    draft.draftedBy.sessionId === sessionId;
 
   const initial =
     draft?.templates ?? item?.latestVersion.templates ?? defaultCatalog(mode);
@@ -1438,8 +1573,14 @@ function EventTypeEditor({
       );
     }
     try {
-      const results = await requestPreviews(savedDraft);
+      const [results, base] = await Promise.all([
+        requestPreviews(savedDraft),
+        baseVersion?.id === savedDraft.baseVersionId
+          ? Promise.resolve(baseVersion)
+          : loadBaseVersion(savedDraft, item),
+      ]);
       setPreviews(results);
+      setBaseVersion(base);
       setPreviewReady(true);
       setPreviewedDraftRevision(savedDraft.draftRevision);
       setError(null);
@@ -1498,15 +1639,58 @@ function EventTypeEditor({
     }
   }
 
+  function acceptDiscardSuccess(
+    record: RetainedCommand,
+    discard: EventTypeDraftDiscard,
+  ): void {
+    if (record.command.action !== 'discard-draft') {
+      throw new EventTypeRequestError(
+        'The retained command response did not match the requested action.',
+        'ambiguous',
+      );
+    }
+    const discardedName = draft?.name ?? 'the draft';
+    setDraftRetained(false);
+    setPreviewReady(false);
+    setPreviewedDraftRevision(null);
+    setPreviews([]);
+    setBaseVersion(null);
+    setDirty(false);
+    setDraft(null);
+    setError(null);
+    router.refresh();
+    try {
+      clearRetainedDraft(sessionId, discard.draftId);
+      clearRetainedCommand(sessionId, record.idempotencyKey);
+      setRetainedCommand(null);
+    } catch (caught) {
+      throw new ConfirmedCommandBrowserStateError(
+        'discard',
+        caught instanceof Error
+          ? `The draft was discarded, but browser recovery needs attention. ${caught.message}`
+          : 'The draft was discarded, but browser recovery needs attention.',
+      );
+    }
+    onDraftDiscarded(
+      `Draft "${discardedName}" discarded. Its wording stays on record and can no longer be edited or published.`,
+    );
+  }
+
   async function completeCommand(
     record: RetainedCommand,
     recovered: boolean,
   ): Promise<void> {
     const result = await executeRetained(record);
-    if (result.kind === 'draft') {
-      await acceptDraftSuccess(record, result.draft, recovered);
-    } else {
-      acceptVersionSuccess(record, result.version);
+    switch (result.kind) {
+      case 'draft':
+        await acceptDraftSuccess(record, result.draft, recovered);
+        return;
+      case 'version':
+        acceptVersionSuccess(record, result.version);
+        return;
+      case 'discard':
+        acceptDiscardSuccess(record, result.discard);
+        return;
     }
   }
 
@@ -1656,6 +1840,174 @@ function EventTypeEditor({
     }
   }
 
+  /**
+   * The human half of "an agent drafts, a human publishes", as one action.
+   * The server lets only the actor who last saved a draft publish it, so the
+   * reviewer first re-saves the exact wording they previewed (becoming that
+   * actor) and then publishes the revision that save produced. Edited wording
+   * never takes this path: an edit goes through the ordinary save first.
+   */
+  async function approveAndPublish(): Promise<void> {
+    if (!canPublish || draft === null) {
+      setError({
+        heading: 'Version not published',
+        message:
+          'Complete all three renderer previews of the reviewed wording before approving.',
+        fieldIssues: [],
+      });
+      return;
+    }
+    const takeover: EventTypeCommand = {
+      action: 'update-draft',
+      input: {
+        draftId: draft.id,
+        expectedDraftRevision: draft.draftRevision,
+        name: draft.name,
+        description: draft.description,
+        enabled: draft.enabled,
+        templates: draft.templates,
+      },
+    };
+    setPendingAction('approve');
+    setError(null);
+    setStatus('Taking over the reviewed draft…');
+    let owned: EventTypeVersionDraft | null = null;
+    try {
+      const takeoverRecord = retainNewCommand(
+        sessionId,
+        editorId,
+        validateCommand(takeover),
+      );
+      setRetainedCommand(takeoverRecord);
+      const result = await executeRetained(takeoverRecord);
+      if (result.kind !== 'draft') {
+        throw new EventTypeRequestError(
+          'The takeover response did not match the requested action.',
+          'ambiguous',
+        );
+      }
+      owned = result.draft;
+      setDraft(owned);
+      setDraftRetained(false);
+      setPreviewReady(false);
+      setPreviewedDraftRevision(null);
+      retainDraft(sessionId, editorId, owned);
+      setDraftRetained(true);
+      clearRetainedCommand(sessionId, takeoverRecord.idempotencyKey);
+      setRetainedCommand(null);
+      // The wording is byte-for-byte the reviewed wording, but the publish
+      // invariant is previews of the exact revision being published.
+      const ownedPreviews = await requestPreviews(owned);
+      setPreviews(ownedPreviews);
+      setPreviewReady(true);
+      setPreviewedDraftRevision(owned.draftRevision);
+      setStatus('Draft taken over. Publishing a new immutable version…');
+      const publishRecord = retainNewCommand(
+        sessionId,
+        editorId,
+        validateCommand({
+          action: 'publish-version',
+          input: {
+            draftId: owned.id,
+            expectedDraftRevision: owned.draftRevision,
+          },
+        }),
+      );
+      setRetainedCommand(publishRecord);
+      await completeCommand(publishRecord, false);
+    } catch (caught) {
+      const confirmed = caught instanceof ConfirmedCommandBrowserStateError;
+      setError(
+        uiError(
+          confirmed
+            ? caught.successKind === 'version'
+              ? 'Version published; browser recovery needs attention'
+              : 'Draft taken over; browser recovery needs attention'
+            : owned === null
+              ? 'Draft not taken over'
+              : 'Draft taken over, but not published',
+          caught,
+          'The reviewed draft could not be approved.',
+        ),
+      );
+      setStatus(
+        confirmed
+          ? 'The server confirmed the change. Resolve the retained browser recovery record before continuing.'
+          : caught instanceof EventTypeRequestError &&
+              caught.outcome === 'ambiguous'
+            ? 'The outcome is unresolved. Use the explicit recovery button; no automatic retry will occur.'
+            : owned === null
+              ? ''
+              : 'You are now the last saver of this draft. Fix the problem above, then use Publish new version.',
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function discardCurrentDraft(): Promise<void> {
+    if (
+      draft === null ||
+      published ||
+      pendingAction !== null ||
+      commandRetainedForEditor ||
+      recoveryReadBlocked
+    ) {
+      setError({
+        heading: 'Draft not discarded',
+        message: 'Resolve any retained change before discarding this draft.',
+        fieldIssues: [],
+      });
+      return;
+    }
+    const confirmed = window.confirm(
+      `Discard the draft "${draft.name}"? Its wording stays on the server as a record, but it can no longer be edited or published. Nothing is sent to staff and no published version changes.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    const command: EventTypeCommand = {
+      action: 'discard-draft',
+      input: {
+        draftId: draft.id,
+        expectedDraftRevision: draft.draftRevision,
+      },
+    };
+    setPendingAction('discard');
+    setError(null);
+    setStatus('Discarding the draft…');
+    try {
+      const record = retainNewCommand(
+        sessionId,
+        editorId,
+        validateCommand(command),
+      );
+      setRetainedCommand(record);
+      await completeCommand(record, false);
+    } catch (caught) {
+      const confirmed = caught instanceof ConfirmedCommandBrowserStateError;
+      setError(
+        uiError(
+          confirmed
+            ? 'Draft discarded; browser recovery needs attention'
+            : 'Draft not discarded',
+          caught,
+          'The draft could not be discarded.',
+        ),
+      );
+      setStatus(
+        confirmed
+          ? 'The server confirmed the discard. Resolve the retained browser recovery record before continuing.'
+          : caught instanceof EventTypeRequestError &&
+              caught.outcome === 'ambiguous'
+            ? 'The outcome is unresolved. Use the explicit recovery button; no automatic retry will occur.'
+            : '',
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
   async function retryRetainedCommand(): Promise<void> {
     setPendingAction('retry');
     setError(null);
@@ -1685,7 +2037,9 @@ function EventTypeEditor({
           confirmed
             ? caught.successKind === 'version'
               ? 'Version published; browser recovery needs attention'
-              : 'Draft saved; browser recovery needs attention'
+              : caught.successKind === 'discard'
+                ? 'Draft discarded; browser recovery needs attention'
+                : 'Draft saved; browser recovery needs attention'
             : 'Previous change not recovered',
           caught,
           'PSD EOC could not recover the previous change.',
@@ -1695,7 +2049,9 @@ function EventTypeEditor({
         confirmed
           ? caught.successKind === 'version'
             ? 'The server confirmed publication. Resolve the retained browser recovery record before continuing.'
-            : 'The server confirmed the draft save. Publication remains blocked until browser recovery is resolved.'
+            : caught.successKind === 'discard'
+              ? 'The server confirmed the discard. Resolve the retained browser recovery record before continuing.'
+              : 'The server confirmed the draft save. Publication remains blocked until browser recovery is resolved.'
           : caught instanceof EventTypeRequestError &&
               caught.outcome === 'ambiguous'
             ? 'The outcome remains unresolved. The exact command is still retained for an explicit retry.'
@@ -1758,15 +2114,71 @@ function EventTypeEditor({
     document.getElementById(fieldId)?.focus();
   }
 
+  // A reviewer reads what changed and how it renders before the long form;
+  // someone editing their own wording reads them after it.
+  const comparisonAndPreviews = (
+    <>
+      {draft !== null && !published ? (
+        <TemplateDiff
+          base={baseVersion}
+          baseVersionNumber={reviewDraft?.baseVersionNumber ?? null}
+          draft={draft}
+        />
+      ) : null}
+      {previews.map((preview) => (
+        <PreviewCards key={preview.purpose} preview={preview} />
+      ))}
+    </>
+  );
+
   return (
     <section className="editor" aria-labelledby="editor-heading">
       <h2 id="editor-heading">
-        {draft !== null && item === null
-          ? `Continue unpublished ${draft.name}`
-          : item === null
-            ? 'Create response'
-            : `Edit ${item.latestVersion.name}`}
+        {reviewDraft !== null
+          ? `Review draft: ${draft?.name ?? reviewDraft.name}`
+          : draft !== null && item === null
+            ? `Continue unpublished ${draft.name}`
+            : item === null
+              ? 'Create response'
+              : `Edit ${item.latestVersion.name}`}
       </h2>
+      {reviewDraft !== null && !published ? (
+        <dl className="version-facts review-facts">
+          <dt>Proposed by</dt>
+          <dd>{draftAuthorLabel(reviewDraft)}</dd>
+          <dt>Started</dt>
+          <dd>
+            <time dateTime={reviewDraft.createdAt} suppressHydrationWarning>
+              {new Intl.DateTimeFormat(undefined, {
+                dateStyle: 'medium',
+                timeStyle: 'short',
+              }).format(new Date(reviewDraft.createdAt))}
+            </time>
+          </dd>
+          <dt>Based on</dt>
+          <dd>
+            {draftBaseLabel(
+              reviewDraft,
+              item === null
+                ? null
+                : {
+                    id: item.latestVersion.id,
+                    version: item.latestVersion.version,
+                  },
+            )}
+          </dd>
+          <dt>Last saved by</dt>
+          <dd>
+            {draft === null
+              ? 'Loading…'
+              : isLastSaver
+                ? 'You, in this session'
+                : draft.draftedBy.kind === 'agent'
+                  ? 'The proposing agent; approving takes the draft over before publishing'
+                  : 'Another person or session; approving takes the draft over before publishing'}
+          </dd>
+        </dl>
+      ) : null}
       <p className={`mode-banner ${mode}`}>
         {mode === 'real'
           ? 'REAL INCIDENT RESPONSE'
@@ -1812,7 +2224,9 @@ function EventTypeEditor({
           >
             {retainedCommand.command.action === 'publish-version'
               ? 'Retry exact publication'
-              : 'Retry exact draft save'}
+              : retainedCommand.command.action === 'discard-draft'
+                ? 'Retry exact draft discard'
+                : 'Retry exact draft save'}
           </button>
         </div>
       ) : null}
@@ -1851,6 +2265,7 @@ function EventTypeEditor({
       <p aria-live="polite" className="status" role="status">
         {status}
       </p>
+      {reviewDraft !== null ? comparisonAndPreviews : null}
       <form
         aria-busy={pendingAction !== null}
         key={`${editorId}-${formEpoch}`}
@@ -2068,14 +2483,40 @@ function EventTypeEditor({
               ? 'Save draft and preview'
               : 'Update draft and preview'}
           </button>
-          <button
-            className="secondary"
-            disabled={!canPublish}
-            onClick={() => void publishDraft()}
-            type="button"
-          >
-            Publish new version
-          </button>
+          {draft !== null && !isLastSaver ? (
+            <button
+              aria-describedby="approve-help"
+              className="secondary"
+              disabled={!canPublish}
+              onClick={() => void approveAndPublish()}
+              type="button"
+            >
+              Approve and publish as new version
+            </button>
+          ) : (
+            <button
+              className="secondary"
+              disabled={!canPublish}
+              onClick={() => void publishDraft()}
+              type="button"
+            >
+              Publish new version
+            </button>
+          )}
+          {draft !== null && !published ? (
+            <button
+              className="secondary"
+              disabled={
+                pendingAction !== null ||
+                commandRetainedForEditor ||
+                recoveryReadBlocked
+              }
+              onClick={() => void discardCurrentDraft()}
+              type="button"
+            >
+              Discard this draft
+            </button>
+          ) : null}
           {draft !== null && draftRetained && !published ? (
             <button
               className="secondary"
@@ -2087,10 +2528,16 @@ function EventTypeEditor({
             </button>
           ) : null}
         </div>
+        {draft !== null && !isLastSaver ? (
+          <p className="field-help" id="approve-help">
+            Only the person who last saved a draft can publish it. Approving
+            saves this exact reviewed wording under your name and then publishes
+            it as one step. To change the wording first, edit it and use Update
+            draft and preview.
+          </p>
+        ) : null}
       </form>
-      {previews.map((preview) => (
-        <PreviewCards key={preview.purpose} preview={preview} />
-      ))}
+      {reviewDraft === null ? comparisonAndPreviews : null}
     </section>
   );
 }
@@ -2098,17 +2545,37 @@ function EventTypeEditor({
 export function EventTypeAdmin({
   filters,
   items,
+  drafts,
   csrfCookieName,
   sessionId,
+  userId,
 }: Readonly<{
   filters: ResponseListFilters;
   items: readonly EventTypeListItem[];
+  /** Every unpublished draft on the server, newest first, unfiltered. */
+  drafts: readonly EventTypeDraftListItem[];
   csrfCookieName: string;
   sessionId: string;
+  userId: string;
 }>) {
   const initialId = items[0]?.eventType.id ?? 'new';
   const [selectedId, setSelectedId] = useState(initialId);
+  const [reviewDraft, setReviewDraft] = useState<EventTypeDraftListItem | null>(
+    null,
+  );
+  const [reviewNotice, setReviewNotice] = useState('');
   const [recoveryOutsideFilter, setRecoveryOutsideFilter] = useState(false);
+  const currentVersions = new Map(
+    items.map((item) => [
+      item.eventType.id,
+      { id: item.latestVersion.id, version: item.latestVersion.version },
+    ]),
+  );
+  function reviewDraftFromList(draft: EventTypeDraftListItem): void {
+    setReviewNotice('');
+    setReviewDraft(draft);
+    setSelectedId(draft.eventTypeId);
+  }
 
   useEffect(() => {
     setRecoveryOutsideFilter(false);
@@ -2140,70 +2607,102 @@ export function EventTypeAdmin({
 
   const selected =
     items.find((item) => item.eventType.id === selectedId) ?? null;
+  const reviewOutsideFilter =
+    reviewDraft !== null && selected === null && selectedId !== 'new';
   return (
-    <div className="admin-grid">
-      <aside
-        className="panel type-list"
-        aria-labelledby="event-type-picker-heading"
-      >
-        <h2 id="event-type-picker-heading">Choose a configuration</h2>
-        {recoveryOutsideFilter ? (
-          <div className="error-summary" role="alert">
-            <p>
-              A retained change belongs to a response hidden by the current
-              filter. No new change can be sent until it is resolved.
-            </p>
-            <a href={responseListHref({ showRetired: true })}>
-              Show all responses and open the retained change
-            </a>
-          </div>
-        ) : null}
-        <label htmlFor="event-type-picker">Response</label>
-        <select
-          id="event-type-picker"
-          onChange={(event) => setSelectedId(event.target.value)}
-          value={selectedId}
+    <>
+      <DraftReviewList
+        currentVersions={currentVersions}
+        drafts={drafts}
+        onReview={reviewDraftFromList}
+        selectedDraftId={reviewDraft?.id ?? null}
+      />
+      <p aria-live="polite" className="status" role="status">
+        {reviewNotice}
+      </p>
+      <div className="admin-grid">
+        <aside
+          className="panel type-list"
+          aria-labelledby="event-type-picker-heading"
         >
-          {items.map((item) => (
-            <option key={item.eventType.id} value={item.eventType.id}>
-              {item.latestVersion.name} —{' '}
-              {item.eventType.templateMode === 'real' ? 'REAL' : 'DRILL'} — v
-              {item.latestVersion.version}
-            </option>
-          ))}
-          <option value="new">Create a new response</option>
-        </select>
-        <p className="field-help">
-          Real and drill variants are separate immutable identities. Publishing
-          never overwrites a version used by a historical event.
-        </p>
-        {/* A retired response is never deleted, because events stay pinned to
+          <h2 id="event-type-picker-heading">Choose a configuration</h2>
+          {recoveryOutsideFilter ? (
+            <div className="error-summary" role="alert">
+              <p>
+                A retained change belongs to a response hidden by the current
+                filter. No new change can be sent until it is resolved.
+              </p>
+              <a href={responseListHref({ showRetired: true })}>
+                Show all responses and open the retained change
+              </a>
+            </div>
+          ) : null}
+          <label htmlFor="event-type-picker">Response</label>
+          <select
+            id="event-type-picker"
+            onChange={(event) => {
+              setReviewDraft(null);
+              setSelectedId(event.target.value);
+            }}
+            value={selectedId}
+          >
+            {items.map((item) => (
+              <option key={item.eventType.id} value={item.eventType.id}>
+                {item.latestVersion.name} —{' '}
+                {item.eventType.templateMode === 'real' ? 'REAL' : 'DRILL'} — v
+                {item.latestVersion.version}
+              </option>
+            ))}
+            {reviewOutsideFilter && reviewDraft !== null ? (
+              <option value={reviewDraft.eventTypeId}>
+                {reviewDraft.name} —{' '}
+                {reviewDraft.templateMode === 'real' ? 'REAL' : 'DRILL'} — draft
+                under review (hidden by the current filter)
+              </option>
+            ) : null}
+            <option value="new">Create a new response</option>
+          </select>
+          <p className="field-help">
+            Real and drill variants are separate immutable identities.
+            Publishing never overwrites a version used by a historical event.
+          </p>
+          {/* A retired response is never deleted, because events stay pinned to
             the exact version they used. Hiding it here keeps the list to what
             an operator can actually choose, without losing the way back. */}
-        <a
-          className="retired-toggle"
-          href={responseListHref({
-            templateMode: filters.templateMode,
-            showRetired: !filters.showRetired,
-          })}
-        >
-          {filters.showRetired
-            ? 'Hide retired responses'
-            : 'Show retired responses'}
-        </a>
-        <p className="field-help">
-          {filters.showRetired
-            ? 'Showing every response, including those no longer available for new activations.'
-            : 'Showing responses available for new activations. Retired ones keep their history and can be re-enabled.'}
-        </p>
-      </aside>
-      <EventTypeEditor
-        csrfCookieName={csrfCookieName}
-        editorId={selectedId}
-        item={selectedId === 'new' ? null : selected}
-        key={selectedId}
-        sessionId={sessionId}
-      />
-    </div>
+          <a
+            className="retired-toggle"
+            href={responseListHref({
+              templateMode: filters.templateMode,
+              showRetired: !filters.showRetired,
+            })}
+          >
+            {filters.showRetired
+              ? 'Hide retired responses'
+              : 'Show retired responses'}
+          </a>
+          <p className="field-help">
+            {filters.showRetired
+              ? 'Showing every response, including those no longer available for new activations.'
+              : 'Showing responses available for new activations. Retired ones keep their history and can be re-enabled.'}
+          </p>
+        </aside>
+        <EventTypeEditor
+          csrfCookieName={csrfCookieName}
+          editorId={selectedId}
+          item={selectedId === 'new' ? null : selected}
+          // The key holds the chosen draft, not whether the refreshed server
+          // list still contains it: after an approval the draft leaves the
+          // list while the editor still shows which version it became.
+          key={`${selectedId}:${reviewDraft?.id ?? ''}`}
+          onDraftDiscarded={(message) => {
+            setReviewDraft(null);
+            setReviewNotice(message);
+          }}
+          reviewDraft={reviewDraft}
+          sessionId={sessionId}
+          userId={userId}
+        />
+      </div>
+    </>
   );
 }

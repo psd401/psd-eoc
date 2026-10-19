@@ -43,9 +43,11 @@ function unexpectedStore(): EventTypeStore {
     list: unexpected,
     getVersion: unexpected,
     getDraft: unexpected,
+    listDrafts: unexpected,
     createDraft: unexpected,
     updateDraft: unexpected,
     publishVersion: unexpected,
+    discardDraft: unexpected,
   };
 }
 

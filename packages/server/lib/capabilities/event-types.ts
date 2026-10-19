@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  ActorSchema,
+  EventTypeDraftDiscardSchema,
+  EventTypeDraftListItemSchema,
+  EventTypeDraftPageSchema,
   EventTypePageSchema,
   EventTypePublicationAuthorizationSchema,
   EventTypeRenderingPreviewSchema,
@@ -19,14 +23,19 @@ import {
   type CapabilityScope,
   type CapabilityExecutionAuthorizer,
   type CreateEventTypeDraftInput,
+  type DiscardEventTypeDraftInput,
   type EventKind,
   type EventType,
+  type EventTypeDraftAuthor,
+  type EventTypeDraftDiscard,
+  type EventTypeDraftPage,
   type EventTypePage,
   type EventTypeRenderingPreview,
   type EventTypeVersion,
   type EventTypeVersionDraft,
   type GetEventTypeDraftInput,
   type GetEventTypeVersionInput,
+  type ListEventTypeDraftsInput,
   type ListEventTypesInput,
   type MessageTemplateCatalog,
   type MutationTransport,
@@ -47,12 +56,15 @@ import {
   type DatabaseConnection,
 } from '../../db/client';
 import {
+  agentApiKeys,
+  agents,
   eventTypeDraftTemplates,
   eventTypeTemplates,
   eventTypeVersionDrafts,
   eventTypeVersions,
   eventTypes,
   idempotencyRecords,
+  users,
 } from '../../db/schema';
 import type { AuthenticatedSession } from '../auth/sessions';
 import {
@@ -78,6 +90,7 @@ const EVENT_TYPE_MUTATION_IDS = [
   'create-event-type-draft',
   'update-event-type-draft',
   'publish-event-type-version',
+  'discard-event-type-draft',
 ] as const;
 
 type EventTypeMutationId = (typeof EVENT_TYPE_MUTATION_IDS)[number];
@@ -86,6 +99,7 @@ type ConfigurationActor = Exclude<Actor, { readonly kind: 'system' }>;
 const EVENT_TYPE_ADMIN_CAPABILITY_IDS = new Set<RegisteredCapabilityId>([
   ...EVENT_TYPE_MUTATION_IDS,
   'get-event-type-draft',
+  'list-event-type-drafts',
   'preview-event-type-rendering',
 ]);
 
@@ -102,6 +116,14 @@ const CHANNELS = [
 
 const DRAFT_RESULT_PREFIX = 'event-type-draft-v2';
 const VERSION_RESULT_PREFIX = 'event-type-version-v1';
+/**
+ * A discard is one more completed idempotency record. Its reference names the
+ * exact revision a reviewer withdrew, so the draft row, its templates, and its
+ * revision ledger are never rewritten: the fact that review ended is appended
+ * beside the facts that it was drafted.
+ */
+const DISCARD_RESULT_PREFIX = 'event-type-draft-discard-v1';
+const PUBLICATION_REFERENCE_PREFIX = 'event-type-draft:';
 const ROOT_DRAFT_REVISION = 'root';
 const NO_BASE_VERSION = 'none';
 const SHA_256_PATTERN = /^[a-f0-9]{64}$/u;
@@ -185,6 +207,8 @@ export interface EventTypeStore {
   list(input: ListEventTypesInput): Promise<EventTypePage>;
   getVersion(input: GetEventTypeVersionInput): Promise<EventTypeVersion>;
   getDraft(input: GetEventTypeDraftInput): Promise<EventTypeVersionDraft>;
+  /** Unpublished, undiscarded drafts awaiting a human reviewer, newest first. */
+  listDrafts(input: ListEventTypeDraftsInput): Promise<EventTypeDraftPage>;
   createDraft(
     input: CreateEventTypeDraftInput,
     metadata: EventTypeMutationMetadata,
@@ -197,6 +221,11 @@ export interface EventTypeStore {
     input: PublishEventTypeVersionInput,
     metadata: EventTypeMutationMetadata,
   ): Promise<EventTypeVersion>;
+  /** Withdraws one exact draft revision from review without deleting it. */
+  discardDraft(
+    input: DiscardEventTypeDraftInput,
+    metadata: EventTypeMutationMetadata,
+  ): Promise<EventTypeDraftDiscard>;
 }
 
 /** Transaction-scoped event-type repository used by the audited engine. */
@@ -641,6 +670,83 @@ function publicationReferencesDraftRevision(
     authorizationReference(authorization) ===
     approvalReference(draftId, draftRevision)
   );
+}
+
+/** The draft a published version was approved from, if its reference names one. */
+function publishedDraftId(
+  authorization: EventTypeVersion['publicationAuthorization'],
+): string | null {
+  const reference = authorizationReference(authorization);
+  if (!reference.startsWith(PUBLICATION_REFERENCE_PREFIX)) {
+    return null;
+  }
+  const parsed = UuidSchema.safeParse(
+    reference.slice(PUBLICATION_REFERENCE_PREFIX.length).split(':')[0],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+function discardReference(draftId: string, draftRevision: string): string {
+  if (!SHA_256_PATTERN.test(draftRevision)) {
+    throwDraftStateConflict();
+  }
+  return `${DISCARD_RESULT_PREFIX}:${UuidSchema.parse(draftId)}:${draftRevision}`;
+}
+
+function parseDiscardReference(
+  reference: string | null,
+): Readonly<{ draftId: string; draftRevision: string }> | null {
+  const parts = reference?.split(':');
+  if (
+    parts === undefined ||
+    parts.length !== 3 ||
+    parts[0] !== DISCARD_RESULT_PREFIX
+  ) {
+    return null;
+  }
+  const draftId = UuidSchema.safeParse(parts[1]);
+  const draftRevision = parts[2];
+  if (
+    !draftId.success ||
+    draftRevision === undefined ||
+    !SHA_256_PATTERN.test(draftRevision)
+  ) {
+    return null;
+  }
+  return { draftId: draftId.data, draftRevision };
+}
+
+function throwDraftDiscarded(): never {
+  throw new EventTypeCapabilityError(
+    'CONFLICT',
+    'This draft was discarded by a reviewer and can no longer be edited or published.',
+  );
+}
+
+function existingIdempotentDiscardResult(
+  existing: typeof idempotencyRecords.$inferSelect | undefined,
+  requestDigest: string,
+): Readonly<{
+  draftId: string;
+  draftRevision: string;
+  completedAt: Date;
+}> | null {
+  if (existing === undefined) {
+    return null;
+  }
+  const parsed = parseDiscardReference(existing.resultReference);
+  if (
+    existing.requestDigest !== requestDigest ||
+    existing.status !== 'completed' ||
+    existing.completedAt === null ||
+    parsed === null
+  ) {
+    throw new EventTypeCapabilityError(
+      'IDEMPOTENCY_CONFLICT',
+      'The idempotency key is already bound to another request.',
+    );
+  }
+  return { ...parsed, completedAt: existing.completedAt };
 }
 
 function publicationAuthorization(
@@ -1322,6 +1428,9 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           'A published draft cannot be edited in place.',
         );
       }
+      if ((await this.discardRecordsFor(transaction, draft.id)).length > 0) {
+        throwDraftDiscarded();
+      }
       if (
         Object.values(input.templates).some(
           (set) => set.templateMode !== draft.templateMode,
@@ -1488,6 +1597,9 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           currentDraft.draftRevision,
           input.expectedDraftRevision,
         );
+        if ((await this.discardRecordsFor(transaction, draft.id)).length > 0) {
+          throwDraftDiscarded();
+        }
         if (digest(currentDraft.draftedBy) !== digest(metadata.actor)) {
           throw new EventTypeCapabilityError(
             'CONFLICT',
@@ -1611,6 +1723,410 @@ export class DrizzleEventTypeStore implements EventTypeStore {
     );
     return this.getVersion({ eventTypeVersionId: selectedVersionId });
   }
+
+  public async listDrafts(
+    input: ListEventTypeDraftsInput,
+  ): Promise<EventTypeDraftPage> {
+    return this.database.transaction(async (transaction) => {
+      const draftRows = await transaction
+        .select()
+        .from(eventTypeVersionDrafts)
+        .orderBy(
+          desc(eventTypeVersionDrafts.createdAt),
+          asc(eventTypeVersionDrafts.id),
+        );
+      if (draftRows.length === 0) {
+        return EventTypeDraftPageSchema.parse({
+          items: [],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+
+      // One ledger read for every draft, grouped by the draft named in the
+      // reference. A row that names a draft but does not parse stays in that
+      // draft's group so the same fail-closed ledger check as getDraft runs.
+      const ledgerRows = await transaction
+        .select({
+          capabilityId: idempotencyRecords.capabilityId,
+          resultReference: idempotencyRecords.resultReference,
+        })
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.status, 'completed'),
+            inArray(idempotencyRecords.capabilityId, DRAFT_MUTATION_IDS),
+            like(
+              idempotencyRecords.resultReference,
+              `${DRAFT_RESULT_PREFIX}:%`,
+            ),
+          ),
+        );
+      const ledgerByDraft = new Map<string, DraftLedgerRow[]>();
+      for (const row of ledgerRows) {
+        const named = row.resultReference?.split(':')[1];
+        if (named === undefined) continue;
+        const group = ledgerByDraft.get(named) ?? [];
+        group.push(row);
+        ledgerByDraft.set(named, group);
+      }
+
+      const discardRows = await transaction
+        .select({ resultReference: idempotencyRecords.resultReference })
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.status, 'completed'),
+            eq(idempotencyRecords.capabilityId, 'discard-event-type-draft'),
+            like(
+              idempotencyRecords.resultReference,
+              `${DISCARD_RESULT_PREFIX}:%`,
+            ),
+          ),
+        );
+      const discardedDraftIds = new Set(
+        discardRows.flatMap((row) => {
+          const parsed = parseDiscardReference(row.resultReference);
+          return parsed === null ? [] : [parsed.draftId];
+        }),
+      );
+
+      const eventTypeIds = [
+        ...new Set(draftRows.map((row) => row.eventTypeId)),
+      ];
+      const versionRows = await transaction
+        .select({
+          id: eventTypeVersions.id,
+          version: eventTypeVersions.version,
+          publicationAuthorization: eventTypeVersions.publicationAuthorization,
+        })
+        .from(eventTypeVersions)
+        .where(inArray(eventTypeVersions.eventTypeId, eventTypeIds));
+      const versionNumberById = new Map<string, number>();
+      const publishedDraftIds = new Set<string>();
+      for (const version of versionRows) {
+        versionNumberById.set(version.id, version.version);
+        const fromDraft = publishedDraftId(
+          EventTypePublicationAuthorizationSchema.parse(
+            version.publicationAuthorization,
+          ),
+        );
+        if (fromDraft !== null) publishedDraftIds.add(fromDraft);
+      }
+
+      const pending = draftRows.filter(
+        (row) =>
+          !discardedDraftIds.has(row.id) && !publishedDraftIds.has(row.id),
+      );
+      const authors = await this.resolveDraftAuthors(
+        transaction,
+        pending.map((row) => row.draftedBy),
+      );
+
+      // A draft whose ledger is forked or incomplete cannot be opened,
+      // edited, or published: every one of those paths fails closed on its
+      // own. Leaving it out here keeps one damaged record from hiding every
+      // other proposal from the reviewer; the log line says which one.
+      const rows = pending.flatMap((row) => {
+        try {
+          const ledger = currentDraftLedgerEntry(
+            row.id,
+            ledgerByDraft.get(row.id) ?? [],
+          );
+          const baseVersionNumber =
+            ledger.baseVersionId === null
+              ? null
+              : versionNumberById.get(ledger.baseVersionId);
+          if (baseVersionNumber === undefined) {
+            throwDraftStateConflict();
+          }
+          const draftedBy = ActorSchema.safeParse(row.draftedBy);
+          if (!draftedBy.success) {
+            throwDraftStateConflict();
+          }
+          return [
+            EventTypeDraftListItemSchema.parse({
+              id: row.id,
+              eventTypeId: row.eventTypeId,
+              name: row.name,
+              templateMode: row.templateMode,
+              baseVersionId: ledger.baseVersionId,
+              baseVersionNumber,
+              draftedBy: draftedBy.data,
+              author: authors(draftedBy.data),
+              draftRevision: ledger.draftRevision,
+              createdAt: row.createdAt.toISOString(),
+            }),
+          ];
+        } catch (error) {
+          if (
+            error instanceof EventTypeCapabilityError &&
+            error.code === 'CONFLICT'
+          ) {
+            console.warn(
+              JSON.stringify({
+                event: 'event-type-draft-review-skipped',
+                draftId: row.id,
+                eventTypeId: row.eventTypeId,
+                reason: error.message,
+              }),
+            );
+            return [];
+          }
+          throw error;
+        }
+      });
+      const offset = decodeCursor(input.cursor);
+      const items = rows.slice(offset, offset + input.limit);
+      const nextOffset = offset + items.length;
+      return EventTypeDraftPageSchema.parse({
+        items,
+        pageInfo: {
+          hasMore: nextOffset < rows.length,
+          nextCursor:
+            nextOffset < rows.length ? encodeCursor(nextOffset) : null,
+        },
+      });
+    });
+  }
+
+  public async discardDraft(
+    input: DiscardEventTypeDraftInput,
+    metadata: EventTypeMutationMetadata,
+  ): Promise<EventTypeDraftDiscard> {
+    if (metadata.actor.kind !== 'human') {
+      throw new EventTypeCapabilityError(
+        'FORBIDDEN',
+        'Only a human reviewer can discard a draft.',
+      );
+    }
+    const principal = IdempotencyPrincipalSchema.parse(metadata.actor);
+    const principalDigest = digest(principal);
+    const requestDigest = digest(input);
+    return this.database.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`${metadata.capabilityId}:${principalDigest}:${metadata.idempotencyKey}`}, 4010))`,
+      );
+      const [existing] = await transaction
+        .select()
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.capabilityId, metadata.capabilityId),
+            eq(idempotencyRecords.principalDigest, principalDigest),
+            eq(idempotencyRecords.key, metadata.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      const [draft] = await transaction
+        .select()
+        .from(eventTypeVersionDrafts)
+        .where(eq(eventTypeVersionDrafts.id, input.draftId))
+        .for('update')
+        .limit(1);
+      if (draft === undefined) {
+        throw new EventTypeCapabilityError(
+          'NOT_FOUND',
+          'The event-type draft was not found.',
+        );
+      }
+      const replay = existingIdempotentDiscardResult(existing, requestDigest);
+      if (replay !== null) {
+        if (replay.draftId !== draft.id) {
+          throwDraftStateConflict();
+        }
+        return EventTypeDraftDiscardSchema.parse({
+          draftId: draft.id,
+          eventTypeId: draft.eventTypeId,
+          draftRevision: replay.draftRevision,
+          discardedBy: metadata.actor,
+          discardedAt: replay.completedAt.toISOString(),
+        });
+      }
+      const storedTemplates = await transaction
+        .select()
+        .from(eventTypeDraftTemplates)
+        .where(eq(eventTypeDraftTemplates.eventTypeVersionDraftId, draft.id));
+      const ledgerRows = await transaction
+        .select({
+          capabilityId: idempotencyRecords.capabilityId,
+          resultReference: idempotencyRecords.resultReference,
+        })
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.status, 'completed'),
+            inArray(idempotencyRecords.capabilityId, DRAFT_MUTATION_IDS),
+            like(
+              idempotencyRecords.resultReference,
+              `${DRAFT_RESULT_PREFIX}:${draft.id}:%`,
+            ),
+          ),
+        );
+      const currentDraft = draftFromRows(
+        draft,
+        storedTemplates,
+        currentDraftLedgerEntry(draft.id, ledgerRows),
+      );
+      assertExpectedDraftRevision(
+        currentDraft.draftRevision,
+        input.expectedDraftRevision,
+      );
+      const publishedAuthorizations = await transaction
+        .select({
+          publicationAuthorization: eventTypeVersions.publicationAuthorization,
+        })
+        .from(eventTypeVersions)
+        .where(eq(eventTypeVersions.eventTypeId, draft.eventTypeId));
+      if (
+        publishedAuthorizations.some((row) =>
+          publicationReferencesDraft(
+            EventTypePublicationAuthorizationSchema.parse(
+              row.publicationAuthorization,
+            ),
+            draft.id,
+          ),
+        )
+      ) {
+        throw new EventTypeCapabilityError(
+          'CONFLICT',
+          'A published draft cannot be discarded. Publish a new version to change its wording.',
+        );
+      }
+      if ((await this.discardRecordsFor(transaction, draft.id)).length > 0) {
+        throw new EventTypeCapabilityError(
+          'CONFLICT',
+          'This draft was already discarded.',
+        );
+      }
+      const idempotencyId = randomUUID();
+      await transaction.insert(idempotencyRecords).values({
+        id: idempotencyId,
+        key: metadata.idempotencyKey,
+        capabilityId: metadata.capabilityId,
+        principal,
+        principalDigest,
+        requestDigest,
+        status: 'in-progress',
+        createdAt: metadata.now,
+        completedAt: null,
+        resultReference: null,
+      });
+      await transaction
+        .update(idempotencyRecords)
+        .set({
+          status: 'completed',
+          completedAt: metadata.now,
+          resultReference: discardReference(
+            draft.id,
+            currentDraft.draftRevision,
+          ),
+        })
+        .where(eq(idempotencyRecords.id, idempotencyId));
+      return EventTypeDraftDiscardSchema.parse({
+        draftId: draft.id,
+        eventTypeId: draft.eventTypeId,
+        draftRevision: currentDraft.draftRevision,
+        discardedBy: metadata.actor,
+        discardedAt: metadata.now.toISOString(),
+      });
+    });
+  }
+
+  private discardRecordsFor(
+    transaction: Pick<Database, 'select'>,
+    draftId: string,
+  ): Promise<readonly Readonly<{ resultReference: string | null }>[]> {
+    return transaction
+      .select({ resultReference: idempotencyRecords.resultReference })
+      .from(idempotencyRecords)
+      .where(
+        and(
+          eq(idempotencyRecords.status, 'completed'),
+          eq(idempotencyRecords.capabilityId, 'discard-event-type-draft'),
+          like(
+            idempotencyRecords.resultReference,
+            `${DISCARD_RESULT_PREFIX}:${UuidSchema.parse(draftId)}:%`,
+          ),
+        ),
+      );
+  }
+
+  /**
+   * Resolves the names a reviewer reads for each draft author: the current
+   * account name for a person, and for an agent both the agent's name and the
+   * administrator-given label and public prefix of the key it used. Resolved
+   * at read time so a renamed account or key shows its current label.
+   */
+  private async resolveDraftAuthors(
+    transaction: Pick<Database, 'select'>,
+    draftedByValues: readonly unknown[],
+  ): Promise<(actor: Actor) => EventTypeDraftAuthor> {
+    const userIds = new Set<string>();
+    const agentIds = new Set<string>();
+    const apiKeyIds = new Set<string>();
+    for (const value of draftedByValues) {
+      const actor = ActorSchema.safeParse(value);
+      if (!actor.success) continue;
+      if (actor.data.kind === 'human') userIds.add(actor.data.userId);
+      if (actor.data.kind === 'agent') {
+        agentIds.add(actor.data.agentId);
+        apiKeyIds.add(actor.data.apiKeyId);
+      }
+    }
+    const userNames = new Map<string, string>();
+    const agentNames = new Map<string, string>();
+    const keyLabels = new Map<
+      string,
+      Readonly<{ displayName: string; keyPrefix: string }>
+    >();
+    if (userIds.size > 0) {
+      const found = await transaction
+        .select({ id: users.id, displayName: users.displayName })
+        .from(users)
+        .where(inArray(users.id, [...userIds]));
+      for (const row of found) userNames.set(row.id, row.displayName);
+    }
+    if (agentIds.size > 0) {
+      const found = await transaction
+        .select({ id: agents.id, displayName: agents.displayName })
+        .from(agents)
+        .where(inArray(agents.id, [...agentIds]));
+      for (const row of found) agentNames.set(row.id, row.displayName);
+    }
+    if (apiKeyIds.size > 0) {
+      const found = await transaction
+        .select({
+          id: agentApiKeys.id,
+          displayName: agentApiKeys.displayName,
+          keyPrefix: agentApiKeys.keyPrefix,
+        })
+        .from(agentApiKeys)
+        .where(inArray(agentApiKeys.id, [...apiKeyIds]));
+      for (const row of found) {
+        keyLabels.set(row.id, {
+          displayName: row.displayName,
+          keyPrefix: row.keyPrefix,
+        });
+      }
+    }
+    return (actor) => {
+      switch (actor.kind) {
+        case 'human':
+          return {
+            kind: 'human',
+            displayName: userNames.get(actor.userId) ?? null,
+          };
+        case 'agent':
+          return {
+            kind: 'agent',
+            agentDisplayName: agentNames.get(actor.agentId) ?? null,
+            key: keyLabels.get(actor.apiKeyId) ?? null,
+          };
+        case 'system':
+          throwDraftStateConflict();
+      }
+    };
+  }
 }
 
 export interface AuthenticatedEventTypeAgent {
@@ -1666,6 +2182,12 @@ const getEventTypeVersionHandler = registerCapabilityHandler(
 const getEventTypeDraftHandler = registerCapabilityHandler(
   'get-event-type-draft',
   (input, context: EventTypeCapabilityContext) => context.store.getDraft(input),
+);
+
+const listEventTypeDraftsHandler = registerCapabilityHandler(
+  'list-event-type-drafts',
+  (input, context: EventTypeCapabilityContext) =>
+    context.store.listDrafts(input),
 );
 
 const previewEventTypeRenderingHandler = registerCapabilityHandler(
@@ -1867,11 +2389,29 @@ function queryEnvelope(
   capabilityId:
     | 'get-event-type-draft'
     | 'get-event-type-version'
+    | 'list-event-type-drafts'
     | 'list-event-types'
     | 'preview-event-type-rendering',
   input: unknown,
   execution: ReturnType<typeof queryContext>,
 ) {
+  // The envelope parser refuses a principal class or source the capability
+  // policy excludes, but as a schema failure. A caller the policy excludes is
+  // a denial, and the review capabilities are the first event-type reads to
+  // exclude agents, so answer it as the authorizer would: a scope-safe 403.
+  const policy = getCapabilityInvocationPolicy(capabilityId);
+  const principalKinds: ReadonlySet<string> = new Set(policy.principalKinds);
+  const sources: ReadonlySet<string> = new Set(policy.sources);
+  const authenticated = execution.context.authenticated;
+  if (
+    !principalKinds.has(authenticated.actor.kind) ||
+    !sources.has(authenticated.source)
+  ) {
+    throw new EventTypeCapabilityError(
+      'FORBIDDEN',
+      'Event-type capability authorization failed.',
+    );
+  }
   return parseCapabilityEnvelopeFor(capabilityId, {
     capabilityId,
     operation: 'query',
@@ -1930,6 +2470,22 @@ export async function executeGetEventTypeDraftCapability(
   );
   return executeAuthorizedCapabilityQuery(
     getEventTypeDraftHandler,
+    envelope.input,
+    executionDependencies(execution.context),
+  );
+}
+
+export async function executeListEventTypeDraftsCapability(
+  input: ExecuteEventTypeQueryInput<ListEventTypeDraftsInput>,
+): Promise<EventTypeDraftPage> {
+  const execution = queryContext(input);
+  const envelope = queryEnvelope(
+    'list-event-type-drafts',
+    input.query,
+    execution,
+  );
+  return executeAuthorizedCapabilityQuery(
+    listEventTypeDraftsHandler,
     envelope.input,
     executionDependencies(execution.context),
   );
@@ -2118,6 +2674,39 @@ export async function executePublishEventTypeVersionCapability(
       context.transaction.eventTypes.publishVersion(
         command,
         engineMutationMetadata(context, 'publish-event-type-version'),
+      ),
+  };
+  return executeAuditedCapabilityTransaction(
+    registration,
+    input.command,
+    eventTypeMutationInvocation(execution),
+    input.capabilityStore,
+  );
+}
+
+export async function executeDiscardEventTypeDraftCapability(
+  input: ExecuteEventTypeMutationInput<DiscardEventTypeDraftInput>,
+): Promise<EventTypeDraftDiscard> {
+  const execution = mutationContext(input);
+  const registration: ServerCapabilityRegistration<
+    'discard-event-type-draft',
+    EventTypeCapabilityTransaction
+  > = {
+    id: 'discard-event-type-draft',
+    mutationPersistence: 'repository-owned',
+    resolveFacilityId(command, context) {
+      authorizeEngineEventTypeMutation(
+        'discard-event-type-draft',
+        command,
+        input.authenticated,
+        context.invocation,
+      );
+      return null;
+    },
+    handler: (command, context) =>
+      context.transaction.eventTypes.discardDraft(
+        command,
+        engineMutationMetadata(context, 'discard-event-type-draft'),
       ),
   };
   return executeAuditedCapabilityTransaction(

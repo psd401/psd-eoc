@@ -5,9 +5,11 @@ import { legacyMobileWording } from './legacy-mobile-wording';
 import {
   ApiErrorSchema,
   CreateEventTypeDraftInputSchema,
+  DiscardEventTypeDraftInputSchema,
   GetEventTypeDraftInputSchema,
   GetEventTypeVersionInputSchema,
   IdempotencyKeySchema,
+  ListEventTypeDraftsInputSchema,
   ListEventTypesInputSchema,
   PreviewEventTypeRenderingInputSchema,
   PublishEventTypeVersionInputSchema,
@@ -23,8 +25,10 @@ import {
 import {
   EventTypeCapabilityError,
   executeCreateEventTypeDraftCapability,
+  executeDiscardEventTypeDraftCapability,
   executeGetEventTypeDraftCapability,
   executeGetEventTypeVersionCapability,
+  executeListEventTypeDraftsCapability,
   executeListEventTypesCapability,
   executePreviewEventTypeRenderingCapability,
   executePublishEventTypeVersionCapability,
@@ -180,6 +184,18 @@ export async function GET(request: Request): Promise<Response> {
             }),
           }),
         );
+      case 'drafts':
+        return json(
+          await executeListEventTypeDraftsCapability({
+            store,
+            authenticated,
+            requestId,
+            query: parseRequestInput(ListEventTypeDraftsInputSchema, {
+              cursor: parameters.get('cursor'),
+              limit: Number(parameters.get('limit') ?? '200'),
+            }),
+          }),
+        );
       case 'preview':
         return json(
           await executePreviewEventTypeRenderingCapability({
@@ -291,6 +307,21 @@ export async function POST(request: Request): Promise<Response> {
             ),
           }),
           201,
+        );
+      case 'discard-draft':
+        return json(
+          await executeDiscardEventTypeDraftCapability({
+            store,
+            capabilityStore,
+            authenticated,
+            requestId,
+            idempotencyKey,
+            transport,
+            command: parseRequestInput(
+              DiscardEventTypeDraftInputSchema,
+              rawInput,
+            ),
+          }),
         );
       default:
         return errorResponse(

@@ -335,6 +335,151 @@ dd {
   margin: 0;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Drafts awaiting review sit above the editor grid at full width so an agent
+   proposal is the first thing an administrator sees, not something hidden
+   behind the response picker. */
+.drafts-panel {
+  margin-bottom: 1.5rem;
+}
+
+.drafts-table,
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+.drafts-table th,
+.drafts-table td,
+.diff-table th,
+.diff-table td {
+  border-bottom: 1px solid #cbd5e1;
+  padding: 0.6rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.drafts-table thead th,
+.diff-table thead th {
+  border-bottom: 2px solid #64748b;
+  font-size: 0.94rem;
+}
+
+.drafts-table tr.selected > * {
+  background: #eff6ff;
+}
+
+.draft-author {
+  overflow-wrap: anywhere;
+}
+
+.mode-pill {
+  display: inline-block;
+  border: 2px solid currentcolor;
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.mode-pill.real {
+  background: #fff1f2;
+  color: #9f1239;
+}
+
+.mode-pill.drill {
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.diff-section {
+  margin-top: 2rem;
+}
+
+.diff-table caption {
+  padding: 0.5rem 0;
+  text-align: left;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.diff-table th[scope='row'] {
+  width: 12rem;
+}
+
+.diff-status {
+  width: 7rem;
+  white-space: nowrap;
+}
+
+.diff-table tr.changed .diff-status {
+  font-weight: 800;
+}
+
+.diff-table tr.changed th[scope='row'] {
+  border-left: 0.35rem solid #b45309;
+}
+
+.diff-wording {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Struck-through and underlined plus a background, so a change is still
+   readable in grayscale and when a reader strips colors. */
+.diff-removed {
+  background: #fee2e2;
+  color: #7f1d1d;
+  text-decoration: line-through;
+}
+
+.diff-added {
+  background: #dcfce7;
+  color: #14532d;
+  text-decoration: underline;
+  text-decoration-thickness: 0.12em;
+}
+
+.review-facts {
+  border-left: 0.35rem solid #1e3a8a;
+  background: #eff6ff;
+  padding: 0.75rem 1rem;
+}
+
+@media (max-width: 52rem) {
+  .drafts-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .drafts-table tr {
+    display: block;
+    border-bottom: 2px solid #64748b;
+    padding: 0.5rem 0;
+  }
+
+  .drafts-table th,
+  .drafts-table td {
+    display: block;
+    border-bottom: 0;
+    padding: 0.25rem 0.65rem;
+  }
+}
+
 @media (max-width: 52rem) {
   .admin-grid {
     grid-template-columns: 1fr;

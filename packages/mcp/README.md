@@ -48,6 +48,20 @@ update capabilities remain hidden from the MCP catalog; the facade uses them
 internally to preserve real-or-drill mode, classification markers, lifecycle
 purpose, and all untouched wording from the canonical source.
 
+A draft is a proposal, not a change. It becomes wording staff can receive only
+when a district administrator publishes it from the Responses page in the web
+app, which lists every unpublished draft under "Drafts awaiting review" with
+the agent's name and the label and prefix of the key it used, shows the three
+channel previews, and compares each field with the published version the draft
+was based on. The server lets only the actor who last saved a draft publish it,
+so the administrator's "Approve and publish" first re-saves the exact reviewed
+wording under their own name and then publishes it; a draft they do not want is
+discarded, which keeps the draft on record but closes it to further edits and
+to publication. The review list and the discard (`list-event-type-drafts`,
+`discard-event-type-draft`) are human-only capabilities: no agent key can be
+granted them, and the agent REST API and this server never expose them. An
+agent that updates a discarded draft receives a `409`.
+
 ## Connect over stdio
 
 Run from the repository root:

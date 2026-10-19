@@ -50,6 +50,21 @@ idempotency protocols, but their mutations still run inside
 `executeAuditedCapabilityTransaction`; audit appends before a domain write can
 commit.
 
+Event-type template drafts follow "an agent drafts, a human publishes". Humans
+and agents may create and revise an unpublished draft; the draft's revision
+history is an append-only ledger of idempotency facts, and publication binds a
+new immutable version to one exact draft revision. The human half is the
+Responses admin page: `list-event-type-drafts` shows every unpublished draft
+with its author resolved to a current name (for an agent, the agent and the
+administrator-given label and public prefix of its key) and the published
+version it was based on; the page renders the channel previews and a
+field-by-field comparison. Only the actor who last saved a draft may publish
+it, so approving an agent draft re-saves the reviewed wording under the
+reviewer and then publishes. `discard-event-type-draft` appends a discard fact
+for one exact revision; the draft stays readable but can no longer be edited or
+published. Both review capabilities admit only human principals on web and
+mobile, so no agent grant for them exists.
+
 OIDC completion is the sole pre-session exception. It has no authenticated
 actor or facility scope yet, so
 `executeRepositoryAuditedOidcCompletion` accepts only the literal

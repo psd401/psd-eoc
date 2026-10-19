@@ -407,6 +407,13 @@
       "when": 1790799519242,
       "tag": "0057_fanned_out_push_attempt_binding",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1792380018082,
+      "tag": "0058_event_type_draft_discard",
+      "breakpoints": true
     }
   ]
 }

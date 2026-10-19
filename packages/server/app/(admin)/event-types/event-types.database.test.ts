@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   afterAll,
@@ -21,6 +21,8 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../db/client';
 import {
+  agentApiKeys,
+  agents,
   eventTypeDraftTemplates,
   eventTypeVersionDrafts,
   eventTypeVersions,
@@ -28,6 +30,7 @@ import {
   facilities,
   idempotencyRecords,
   events,
+  users,
 } from '../../../db/schema';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
@@ -1948,6 +1951,310 @@ describeWithDatabase('event-type database versioning', () => {
           item.latestVersion.id === publishFirstOutcome.value.id,
       ),
     ).toBe(true);
+  });
+
+  test('lists an agent draft for human review with its key label, and discards it as an append-only fact', async () => {
+    const db = databaseConnection().db;
+    const store = new DrizzleEventTypeStore(db);
+    const issuerId = randomUUID();
+    const agentId = randomUUID();
+    const apiKeyId = randomUUID();
+    const keyPrefix = `ak_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
+    const fixtureTime = new Date('2026-10-18T16:00:00.000Z');
+    await db.insert(users).values({
+      id: issuerId,
+      googleSubject: `synthetic-reviewer-${issuerId}`,
+      email: `reviewer-${issuerId.slice(0, 8)}@example.invalid`,
+      displayName: 'Synthetic Reviewer',
+      facilityScopeKind: 'district',
+      createdAt: fixtureTime,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      displayName: 'Wording Assistant',
+      createdAt: fixtureTime,
+    });
+    await db.insert(agentApiKeys).values({
+      id: apiKeyId,
+      agentId,
+      displayName: 'Night shift drafting',
+      facilityScopeKind: 'district',
+      keyPrefix,
+      credentialDigest: createHash('sha256').update(apiKeyId).digest('hex'),
+      issuedByUserId: issuerId,
+      issuedAt: fixtureTime,
+    });
+    const agentActor = { kind: 'agent' as const, agentId, apiKeyId };
+    const reviewer = {
+      kind: 'human' as const,
+      userId: issuerId,
+      sessionId: randomUUID(),
+    };
+
+    const key = `review-${randomUUID()}`;
+    const humanDraft = await store.createDraft(
+      {
+        target: {
+          kind: 'new-event-type',
+          key,
+          familyKey: key,
+          templateMode: 'real',
+          requiresDetail: false,
+        },
+        name: 'Secure',
+        description: 'Published wording the agent will propose changing.',
+        enabled: true,
+        templates: templates('real', 'INITIAL COPY'),
+      },
+      metadata(
+        'create-event-type-draft',
+        reviewer,
+        'review-create',
+        new Date('2026-10-18T16:01:00.000Z'),
+      ),
+    );
+    const published = await store.publishVersion(
+      {
+        draftId: humanDraft.id,
+        expectedDraftRevision: humanDraft.draftRevision,
+      },
+      metadata(
+        'publish-event-type-version',
+        reviewer,
+        'review-publish-v1',
+        new Date('2026-10-18T16:02:00.000Z'),
+      ),
+    );
+    const agentDraft = await store.createDraft(
+      {
+        target: {
+          kind: 'existing-event-type',
+          eventTypeId: published.eventTypeId,
+          baseVersionId: published.id,
+        },
+        name: 'Secure',
+        description: 'Agent-proposed wording.',
+        enabled: true,
+        templates: templates('real', 'AGENT REVISED COPY'),
+      },
+      metadata(
+        'create-event-type-draft',
+        agentActor,
+        'review-agent-create',
+        new Date('2026-10-18T16:03:00.000Z'),
+      ),
+    );
+
+    // The review list resolves the agent and its key by name and prefix, and
+    // leaves out the draft that already became version 1.
+    const page = await store.listDrafts({ cursor: null, limit: 200 });
+    expect(page.items.some((item) => item.id === humanDraft.id)).toBe(false);
+    expect(page.items.find((item) => item.id === agentDraft.id)).toEqual({
+      id: agentDraft.id,
+      eventTypeId: published.eventTypeId,
+      name: 'Secure',
+      templateMode: 'real',
+      baseVersionId: published.id,
+      baseVersionNumber: 1,
+      draftedBy: agentActor,
+      author: {
+        kind: 'agent',
+        agentDisplayName: 'Wording Assistant',
+        key: { displayName: 'Night shift drafting', keyPrefix },
+      },
+      draftRevision: agentDraft.draftRevision,
+      createdAt: '2026-10-18T16:03:00.000Z',
+    });
+    const [first] = await store
+      .listDrafts({ cursor: null, limit: 1 })
+      .then((bounded) => bounded.items);
+    expect(first?.id).toBe(agentDraft.id);
+
+    // Agents never discard: the store refuses even if the policy were bypassed.
+    await expect(
+      store.discardDraft(
+        {
+          draftId: agentDraft.id,
+          expectedDraftRevision: agentDraft.draftRevision,
+        },
+        metadata(
+          'discard-event-type-draft',
+          agentActor,
+          'review-agent-discard',
+          new Date('2026-10-18T16:04:00.000Z'),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    // A reviewer takes the draft over by re-saving the exact wording; the
+    // list then names the person as the author of the current revision.
+    const owned = await store.updateDraft(
+      {
+        draftId: agentDraft.id,
+        expectedDraftRevision: agentDraft.draftRevision,
+        name: agentDraft.name,
+        description: agentDraft.description,
+        enabled: agentDraft.enabled,
+        templates: agentDraft.templates,
+      },
+      metadata(
+        'update-event-type-draft',
+        reviewer,
+        'review-takeover',
+        new Date('2026-10-18T16:05:00.000Z'),
+      ),
+    );
+    expect(owned.draftedBy).toEqual(reviewer);
+    expect(owned.templates).toEqual(agentDraft.templates);
+    expect(
+      (await store.listDrafts({ cursor: null, limit: 200 })).items.find(
+        (item) => item.id === agentDraft.id,
+      ),
+    ).toMatchObject({
+      draftedBy: reviewer,
+      author: { kind: 'human', displayName: 'Synthetic Reviewer' },
+      draftRevision: owned.draftRevision,
+    });
+
+    // Discard is compare-and-swap on the exact reviewed revision.
+    await expect(
+      store.discardDraft(
+        {
+          draftId: agentDraft.id,
+          expectedDraftRevision: agentDraft.draftRevision,
+        },
+        metadata(
+          'discard-event-type-draft',
+          reviewer,
+          'review-discard-stale',
+          new Date('2026-10-18T16:06:00.000Z'),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'The event-type draft changed after this copy was loaded. Reload the draft before continuing.',
+    });
+    const discardMetadata = metadata(
+      'discard-event-type-draft',
+      reviewer,
+      'review-discard',
+      new Date('2026-10-18T16:07:00.000Z'),
+    );
+    const discard = await store.discardDraft(
+      { draftId: agentDraft.id, expectedDraftRevision: owned.draftRevision },
+      discardMetadata,
+    );
+    expect(discard).toEqual({
+      draftId: agentDraft.id,
+      eventTypeId: published.eventTypeId,
+      draftRevision: owned.draftRevision,
+      discardedBy: reviewer,
+      discardedAt: '2026-10-18T16:07:00.000Z',
+    });
+    expect(
+      await store.discardDraft(
+        { draftId: agentDraft.id, expectedDraftRevision: owned.draftRevision },
+        discardMetadata,
+      ),
+    ).toEqual(discard);
+    await expect(
+      store.discardDraft(
+        { draftId: agentDraft.id, expectedDraftRevision: owned.draftRevision },
+        metadata(
+          'discard-event-type-draft',
+          reviewer,
+          'review-discard-again',
+          new Date('2026-10-18T16:08:00.000Z'),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message: 'This draft was already discarded.',
+    });
+
+    // Discarded means gone from review and closed to edits and publication,
+    // while the draft itself stays readable as the record of what was proposed.
+    expect(
+      (await store.listDrafts({ cursor: null, limit: 200 })).items.some(
+        (item) => item.id === agentDraft.id,
+      ),
+    ).toBe(false);
+    await expect(
+      store.updateDraft(
+        {
+          draftId: agentDraft.id,
+          expectedDraftRevision: owned.draftRevision,
+          name: 'Secure',
+          description: 'A late edit.',
+          enabled: true,
+          templates: owned.templates,
+        },
+        metadata(
+          'update-event-type-draft',
+          agentActor,
+          'review-agent-late-edit',
+          new Date('2026-10-18T16:09:00.000Z'),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'This draft was discarded by a reviewer and can no longer be edited or published.',
+    });
+    await expect(
+      store.publishVersion(
+        { draftId: agentDraft.id, expectedDraftRevision: owned.draftRevision },
+        metadata(
+          'publish-event-type-version',
+          reviewer,
+          'review-publish-discarded',
+          new Date('2026-10-18T16:10:00.000Z'),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'This draft was discarded by a reviewer and can no longer be edited or published.',
+    });
+    expect(await store.getDraft({ draftId: agentDraft.id })).toEqual(owned);
+    const [row] = await db
+      .select()
+      .from(eventTypeVersionDrafts)
+      .where(eq(eventTypeVersionDrafts.id, agentDraft.id));
+    expect(row?.draftedBy).toEqual(reviewer);
+    expect(
+      (
+        await db
+          .select({ id: eventTypeDraftTemplates.eventTypeVersionDraftId })
+          .from(eventTypeDraftTemplates)
+          .where(
+            eq(eventTypeDraftTemplates.eventTypeVersionDraftId, agentDraft.id),
+          )
+      ).length,
+    ).toBe(9);
+    const discardFacts = await db
+      .select({ resultReference: idempotencyRecords.resultReference })
+      .from(idempotencyRecords)
+      .where(
+        and(
+          eq(idempotencyRecords.capabilityId, 'discard-event-type-draft'),
+          like(
+            idempotencyRecords.resultReference,
+            `event-type-draft-discard-v1:${agentDraft.id}:%`,
+          ),
+        ),
+      );
+    expect(discardFacts).toEqual([
+      {
+        resultReference: `event-type-draft-discard-v1:${agentDraft.id}:${owned.draftRevision}`,
+      },
+    ]);
+    const publishedVersions = await db
+      .select({ version: eventTypeVersions.version })
+      .from(eventTypeVersions)
+      .where(eq(eventTypeVersions.eventTypeId, published.eventTypeId));
+    expect(publishedVersions).toEqual([{ version: 1 }]);
   });
 
   test('rejects immutable family or mode reuse without leaking or retaining database conflicts', async () => {
