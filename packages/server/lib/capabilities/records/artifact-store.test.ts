@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import { describe, expect, test } from 'bun:test';
 import type {
@@ -10,6 +11,7 @@ import type {
 
 import {
   MAX_RECORDS_EXPORT_BYTES,
+  RECORDS_EXPORT_GRANT_SECONDS,
   RecordsArtifactStoreError,
   createRecordsArtifactStore,
   type RecordsArtifactStoreClient,
@@ -247,5 +249,20 @@ describe('private records artifact storage', () => {
         signer: async () => 'https://private.example.test/export',
       }).store(input(new Uint8Array(MAX_RECORDS_EXPORT_BYTES + 1))),
     ).rejects.toBeInstanceOf(RecordsArtifactStoreError);
+  });
+});
+
+describe('records export grant documentation', () => {
+  test('the MCP README states the lifetime RECORDS_EXPORT_GRANT_SECONDS defines', () => {
+    const readme = readFileSync(
+      new URL('../../../../mcp/README.md', import.meta.url),
+      'utf8',
+    );
+    const minutes = RECORDS_EXPORT_GRANT_SECONDS / 60;
+
+    expect(Number.isInteger(minutes)).toBe(true);
+    expect(readme).toContain('RECORDS_EXPORT_GRANT_SECONDS');
+    expect(readme).toContain(`expire after\n${String(minutes)} minutes`);
+    expect(readme).not.toMatch(/expire within\s+15 minutes/u);
   });
 });

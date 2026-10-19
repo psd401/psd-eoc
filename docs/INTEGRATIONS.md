@@ -47,6 +47,7 @@ connected from 1.0.10, so no client diagnostic before that build exists.
 | Event media and record exports       | `blocked`               |
 | GuardDuty Malware Protection for S3  | `configured-unverified` |
 | OpenStreetMap raster tiles           | `configured-unverified` |
+| Agent REST and MCP surface           | `configured-unverified` |
 
 ## Evidence by boundary
 
@@ -199,6 +200,12 @@ CDK defines the scoped plan and fail-closed tag boundary; no active-plan readbac
 Status: `configured-unverified`
 
 The optional read-only configuration is source-defined; no live availability claim is retained.
+
+### Agent REST and MCP surface
+
+Status: `configured-unverified`
+
+On 2026-10-18 the product owner confirmed that no agent API key is issued in production, so no agent has authenticated against the agent REST API or the MCP adapter and nothing in this entry is live-verified. The surface is deployed with the web application. A district-scoped administrator issues a key from the authenticated agent administration page at `/agents` by choosing an agent identity, a facility scope, one or more capability grants, and a bounded expiry of 30 days, 90 days, or one year; the one-time credential is shown once and goes straight into the district secret store. Issuance and revocation run through the `issue-agent-api-key` and `revoke-agent-api-key` capabilities and append to the hash-chained security audit; the same page revokes a key with a bounded reason code, and an expired or revoked key is refused on its next request. The grant allowlist is `AGENT_GRANTABLE_CAPABILITY_IDS`, derived in `packages/contracts/src/capability-catalog.ts` from the capabilities whose invocation policy admits the agent principal and narrowed to deployed handlers by `AGENT_DEPLOYED_CAPABILITY_IDS` in `packages/server/lib/agents/availability.ts`. The administration page presents those grants in three groups (reads and reports, drafts, and synthetic event lifecycle), and the four human-only actions in `packages/contracts/src/human-only.ts` are never grantable. Rotation follows [the API-key rotation runbook](runbooks/rotation-api-keys.md); operating guidance for an MCP client, including the data notice the adapter prefixes to journal-bearing tool results and the rule against pairing the server with unrestricted web or email tools, is in [the MCP server README](../packages/mcp/README.md).
 
 ## Records-retention review
 

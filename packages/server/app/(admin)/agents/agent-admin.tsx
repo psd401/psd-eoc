@@ -38,7 +38,18 @@ export type AgentAdminFacility = Readonly<
 export interface AgentCapabilityOption {
   readonly id: AgentCapabilityGrant;
   readonly label: string;
+}
+
+/**
+ * One risk group of grants with the single description the page shows for it.
+ * The server decides membership; this component only renders what it is given
+ * and still drops any human-only ID that reaches it.
+ */
+export interface AgentGrantGroupOptions {
+  readonly id: string;
+  readonly title: string;
   readonly description: string;
+  readonly options: readonly AgentCapabilityOption[];
 }
 
 type AgentAuditPrincipal = Extract<
@@ -80,7 +91,7 @@ export interface AgentAdminNotice {
 export interface AgentAdminProps {
   readonly agents: readonly AgentAdminAgent[];
   readonly facilities: readonly AgentAdminFacility[];
-  readonly grantOptions: readonly AgentCapabilityOption[];
+  readonly grantGroups: readonly AgentGrantGroupOptions[];
   readonly issueIdempotencyKey: string;
   readonly issuedKey: AgentApiKeyIssuance | null;
   readonly notice: AgentAdminNotice | null;
@@ -258,33 +269,53 @@ function ScopeEditor({
 }
 
 function CapabilityEditor({
-  grantOptions,
-}: Readonly<{ grantOptions: readonly AgentCapabilityOption[] }>) {
-  const safeGrantOptions = grantOptions.filter(
-    (option) => !isHumanOnlyActionId(option.id),
-  );
+  grantGroups,
+}: Readonly<{ grantGroups: readonly AgentGrantGroupOptions[] }>) {
+  const safeGroups = grantGroups
+    .map((group) => ({
+      ...group,
+      options: group.options.filter(
+        (option) => !isHumanOnlyActionId(option.id),
+      ),
+    }))
+    .filter((group) => group.options.length > 0);
   return (
     <fieldset>
       <legend>Capability scope</legend>
       <p className="field-help" id="capability-scope-help">
         Grant only the operations required for this agent. At least one
-        capability is required.
+        capability is required. Grants are grouped by what the server lets the
+        agent do; the groups are listed from least to most consequential.
       </p>
-      <div
-        aria-describedby="capability-scope-help"
-        className="choice-grid capability-choices"
-      >
-        {safeGrantOptions.map((option) => (
-          <label className="choice-card" key={option.id}>
-            <input name="capabilityIds" type="checkbox" value={option.id} />
-            <span>
-              <strong>{option.label}</strong>
-              <small>{option.description}</small>
-              <code>{option.id}</code>
-            </span>
-          </label>
-        ))}
-      </div>
+      {safeGroups.map((group) => {
+        const helpId = `capability-group-${group.id}-help`;
+        return (
+          <fieldset className="capability-group" key={group.id}>
+            <legend>{group.title}</legend>
+            <p className="field-help" id={helpId}>
+              {group.description}
+            </p>
+            <div
+              aria-describedby={`capability-scope-help ${helpId}`}
+              className="choice-grid capability-choices"
+            >
+              {group.options.map((option) => (
+                <label className="choice-card" key={option.id}>
+                  <input
+                    name="capabilityIds"
+                    type="checkbox"
+                    value={option.id}
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <code>{option.id}</code>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        );
+      })}
     </fieldset>
   );
 }
@@ -293,13 +324,13 @@ function IssueKeyForm({
   action,
   agents,
   facilities,
-  grantOptions,
+  grantGroups,
   initialIdempotencyKey,
 }: Readonly<{
   action: AgentAdminIssueAction;
   agents: readonly AgentAdminAgent[];
   facilities: readonly AgentAdminFacility[];
-  grantOptions: readonly AgentCapabilityOption[];
+  grantGroups: readonly AgentGrantGroupOptions[];
   initialIdempotencyKey: string;
 }>) {
   const [state, formAction, pending] = useActionState(action, {
@@ -359,13 +390,16 @@ function IssueKeyForm({
                 <option value="2592000">30 days</option>
                 <option value="7776000">90 days (recommended)</option>
                 <option value="31536000">1 year</option>
-                <option value="">No automatic expiration</option>
               </select>
+              <span className="field-help">
+                Every key expires. Rotate it before then with the API-key
+                rotation runbook; a key without an expiry cannot be issued here.
+              </span>
             </label>
           </div>
         </fieldset>
         <ScopeEditor facilities={facilities} />
-        <CapabilityEditor grantOptions={grantOptions} />
+        <CapabilityEditor grantGroups={grantGroups} />
         <button className="primary-action" disabled={pending} type="submit">
           {pending ? 'Issuing…' : 'Issue API key'}
         </button>
@@ -643,7 +677,7 @@ function AgentRecord({
 export function AgentAdmin({
   agents,
   facilities,
-  grantOptions,
+  grantGroups,
   issueIdempotencyKey,
   issuedKey,
   notice,
@@ -682,7 +716,7 @@ export function AgentAdmin({
           action={issueKeyAction}
           agents={agents}
           facilities={facilities}
-          grantOptions={grantOptions}
+          grantGroups={grantGroups}
           initialIdempotencyKey={issueIdempotencyKey}
         />
       </section>
