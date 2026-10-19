@@ -51,7 +51,7 @@ Literals that deliberately remain: the mobile bundle identifier and keychain ser
 
 ## Documentation contracts (why docs edits can fail the gate)
 
-`scripts/verify-documentation.ts` (`bun run verify:docs`) scans **every** Markdown file in the repository — including this wiki — and enforces, among others:
+`scripts/verify-documentation.ts` (`bun run verify:docs`) scans every Markdown file in the repository except the generated `openwiki/` tree, which `currentMarkdownFiles` skips because this wiki restates the sources rather than being one (pinned by the test "ignores the generated OpenWiki knowledge base" in `scripts/verify-documentation.test.ts`). It enforces, among others:
 
 - relative links and anchors resolve; documented `bun run <script>` and `bun <file>.ts` commands exist;
 - no hard-coded protected tenant identity (any 12-digit run other than the reserved unconfigured account, specific production hostnames/regions);

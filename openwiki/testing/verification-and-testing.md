@@ -84,7 +84,7 @@ Structural guard tests worth knowing: `capabilities/execution-boundary.test.ts` 
 ## Repository-level contracts
 
 - `verify:workspaces` (`scripts/verify-workspaces.ts`): every TypeScript source has an owning workspace package, every package with TypeScript is in the root `workspaces`, has a `typecheck` script and a `tsconfig.json` (tests in `verify-workspaces.test.ts`). Adding a new package or script directory means updating root `package.json` workspaces.
-- `verify:docs` (`scripts/verify-documentation.ts`): documentation contract; applies to this wiki too — see [configuration and readiness](../operations/configuration-and-readiness.md#documentation-contracts-why-docs-edits-can-fail-the-gate).
+- `verify:docs` (`scripts/verify-documentation.ts`): documentation contract over the repository's Markdown, excluding the generated `openwiki/` tree — see [configuration and readiness](../operations/configuration-and-readiness.md#documentation-contracts-why-docs-edits-can-fail-the-gate).
 - `scripts/check-applied-migrations.ts <base> <head>`: CI refuses edits/deletes of migrations or journal entries already on the base branch ([data model](../domain/data-model.md)).
 
 ## CI (`.github/workflows/ci.yml`)
