@@ -689,3 +689,44 @@ describe('agent REST capability route', () => {
     });
   });
 });
+
+describe('agent REST request budget', () => {
+  test('answers the request after the per-minute budget with 429 and Retry-After', async () => {
+    const harness = gatewayHarness({ kind: 'district' });
+    const input = { facilityId: null, cursor: null, limit: 25 };
+    const call = () =>
+      handleAgentCapability(
+        agentRequest('list-active-events', input),
+        'list-active-events',
+        harness.runtime,
+      );
+
+    for (let sequence = 1; sequence <= 60; sequence += 1) {
+      expect((await call()).status).toBe(200);
+    }
+    expect(harness.dispatches).toHaveLength(60);
+
+    const response = await call();
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe('60');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      code: 'RATE_LIMITED',
+      message:
+        'This agent key exceeded its request budget. Wait before retrying; nothing will retry automatically.',
+      requestId: IDS.request,
+      retryable: true,
+      fieldErrors: [],
+    });
+    expect(harness.dispatches).toHaveLength(60);
+    expect(harness.audits).toHaveLength(61);
+    expect(harness.audits.at(-1)).toMatchObject({
+      category: 'access-denial',
+      action: 'list-active-events',
+      outcome: 'denied',
+      actor: { kind: 'agent', agentId: IDS.agent, apiKeyId: IDS.apiKey },
+      reasonCode: 'RATE_LIMITED',
+    });
+  });
+});

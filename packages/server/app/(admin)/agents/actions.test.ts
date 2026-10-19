@@ -310,6 +310,37 @@ describe('agent administration action handlers', () => {
     }
   });
 
+  test('refuses an empty expiration so the form cannot issue a key that never expires', async () => {
+    const harness = actionHarness();
+    const result = await handleIssueAgentApiKeyAction(
+      {
+        issuedKey: null,
+        idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
+        notice: null,
+      },
+      submission({
+        idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
+        agentId: '',
+        displayName: 'Synthetic reporting agent',
+        facilityScopeKind: 'facilities',
+        facilityIds: [IDS.facility],
+        capabilityIds: ['get-event', 'prepare-activation'],
+        // The form no longer offers an unbounded lifetime; a crafted POST can
+        // still leave the value out.
+        expiresInSeconds: '',
+      }),
+      harness.dependencies,
+    );
+
+    expect(harness.issueCalls).toEqual([]);
+    expect(result).toMatchObject({
+      issuedKey: null,
+      idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
+      notice: { kind: 'error' },
+    });
+    expect(harness.revalidationCalls.count).toBe(0);
+  });
+
   test('replaces invalid retained idempotency state when the submission is invalid', async () => {
     const harness = actionHarness();
     const result = await handleIssueAgentApiKeyAction(
