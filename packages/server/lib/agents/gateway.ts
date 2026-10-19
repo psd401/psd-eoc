@@ -22,6 +22,11 @@ import {
   type AgentApiKeyService,
   type AuthenticatedAgentApiKey,
 } from './keys';
+import {
+  AgentGatewayRateLimitError,
+  createAgentRequestLimiter,
+  type AgentRequestLimiter,
+} from './rate-limit';
 
 const protectedActionCapability = Object.freeze({
   'start-real-incident': 'start-event',
@@ -74,6 +79,12 @@ export interface AgentGatewayDependencies {
   >;
   readonly dispatcher: AgentCapabilityDispatcher;
   readonly audit: AgentGatewayAuditSink;
+  /**
+   * Per-key request budget. Defaults to one fresh in-memory limiter per
+   * gateway; the production runtime builds one gateway per process, so the
+   * budget is per App Runner instance (see `./rate-limit.ts`).
+   */
+  readonly limiter?: AgentRequestLimiter;
 }
 
 export interface AgentGatewayRequest {
@@ -228,7 +239,8 @@ function denialAudit(
     actionIds: readonly HumanOnlyActionId[];
     requestId: string;
     serverTime: Date;
-    reasonCode: 'CAPABILITY_NOT_GRANTED' | 'HUMAN_ONLY_REQUIRED';
+    reasonCode:
+      'CAPABILITY_NOT_GRANTED' | 'HUMAN_ONLY_REQUIRED' | 'RATE_LIMITED';
   }>,
 ): CapabilityAuditEvent {
   return Object.freeze({
@@ -330,7 +342,11 @@ function executionAudit(
  * action aliases, and dispatches with server-owned agent identity and scope.
  */
 export class AgentRestGateway {
-  public constructor(private readonly dependencies: AgentGatewayDependencies) {}
+  private readonly limiter: AgentRequestLimiter;
+
+  public constructor(private readonly dependencies: AgentGatewayDependencies) {
+    this.limiter = dependencies.limiter ?? createAgentRequestLimiter();
+  }
 
   /** Authenticates first so all later parsing and execution has an audit identity. */
   public async authorize(
@@ -370,6 +386,31 @@ export class AgentRestGateway {
       throw new AgentGatewayError(
         'HUMAN_ONLY_REQUIRED',
         'This action requires an authenticated human in PSD EOC.',
+      );
+    }
+
+    // The budget applies once the key is known, so every refusal is
+    // attributable, and after the human-only check above, so a protected
+    // action attempt is always audited as what it is rather than as a
+    // rate-limit refusal. A refused request never reaches the dispatcher.
+    const admission = this.limiter.admit(
+      authenticated.actor.apiKeyId,
+      route.capabilityId,
+      request.serverTime,
+    );
+    if (admission.kind === 'refused') {
+      await this.dependencies.audit.append(
+        denialAudit(authenticated, {
+          capabilityId: route.capabilityId,
+          actionIds: [],
+          requestId: request.requestId,
+          serverTime: request.serverTime,
+          reasonCode: 'RATE_LIMITED',
+        }),
+      );
+      throw new AgentGatewayRateLimitError(
+        admission.window,
+        admission.retryAfterSeconds,
       );
     }
 

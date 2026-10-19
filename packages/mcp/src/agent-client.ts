@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   ApiErrorSchema,
   CAPABILITY_CATALOG,
@@ -37,7 +39,51 @@ export interface AgentApiConfig {
 
 export interface AgentApiClientDependencies {
   readonly fetch?: typeof fetch;
-  readonly createIdempotencyKey?: () => string;
+  /** Test seam; production derives the key from the request content. */
+  readonly createIdempotencyKey?: (
+    capabilityId: AgentGrantableCapabilityId,
+    input: unknown,
+  ) => string;
+}
+
+const IDEMPOTENCY_DIGEST_DOMAIN = 'psd-eoc-mcp-idempotency-v1';
+
+/** Key-sorted JSON so equal inputs digest equally whatever their key order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => canonicalJson(item ?? null));
+    return `[${items.join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Readonly<Record<string, unknown>>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The Idempotency-Key for a mutation is a digest of what the call asks for.
+ * A model that retries the same tool call therefore presents the same key and
+ * the server replays the stored result instead of creating a second draft or
+ * prepared activation; a different input gets a different key. The server
+ * scopes keys to the agent key and capability, so equal inputs from different
+ * agents never collide.
+ */
+export function deriveIdempotencyKey(
+  capabilityId: AgentGrantableCapabilityId,
+  input: unknown,
+): string {
+  const digest = createHash('sha256')
+    .update(
+      `${IDEMPOTENCY_DIGEST_DOMAIN}\n${capabilityId}\n${canonicalJson(input)}`,
+      'utf8',
+    )
+    .digest('hex');
+  return `mcp-${digest}`;
 }
 
 export class AgentApiConfigurationError extends Error {
@@ -276,7 +322,9 @@ function reviseMessageWording(
 
 export class AgentApiClient {
   readonly #fetch: typeof fetch;
-  readonly #createIdempotencyKey: () => string;
+  readonly #createIdempotencyKey: NonNullable<
+    AgentApiClientDependencies['createIdempotencyKey']
+  >;
   readonly #config: AgentApiConfig;
 
   public constructor(
@@ -294,7 +342,7 @@ export class AgentApiClient {
     });
     this.#fetch = dependencies.fetch ?? globalThis.fetch;
     this.#createIdempotencyKey =
-      dependencies.createIdempotencyKey ?? (() => crypto.randomUUID());
+      dependencies.createIdempotencyKey ?? deriveIdempotencyKey;
   }
 
   public async call(
@@ -334,7 +382,10 @@ export class AgentApiClient {
       'Content-Type': 'application/json',
     });
     if (definition.operation === 'mutation') {
-      headers.set('Idempotency-Key', this.#createIdempotencyKey());
+      headers.set(
+        'Idempotency-Key',
+        this.#createIdempotencyKey(capabilityId, parsedInput.data),
+      );
     }
 
     let response: Response;

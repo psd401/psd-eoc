@@ -67,6 +67,18 @@ invocation, and HTTP/page response mapping—not alternate business logic.
 Authorization is deny-by-default, server-side, and scoped by role and facility.
 Client visibility is never an authorization control.
 
+Agent REST calls are budgeted per API key. The gateway admits at most 60
+requests per key per minute, and at most 20 per key per hour across
+`export-drill-records`, `export-event-summary`, and
+`create-activation-preview`, which render a document or persist a row on every
+call. A refused request is answered `429 RATE_LIMITED` with a `Retry-After`
+header, is recorded as an `access-denial` audit fact with reason code
+`RATE_LIMITED` under the key, and never reaches a capability handler. The
+limiter is in memory and per server process: with up to four App Runner
+instances, one key's effective ceiling is up to four times each constant, and
+an instance restart resets its windows. The constants live in
+`packages/server/lib/agents/rate-limit.ts`.
+
 ## Human-only actions
 
 The immutable registry is `packages/contracts/src/human-only.ts`. Automation,

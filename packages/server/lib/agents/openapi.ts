@@ -315,7 +315,9 @@ function operationFor(
       '409': errorResponse(
         'The request conflicts with retained state or idempotency evidence.',
       ),
-      '429': errorResponse('The caller must wait before retrying.'),
+      '429': errorResponse(
+        'The key exceeded its per-instance request budget; wait for the Retry-After seconds before retrying.',
+      ),
       '500': errorResponse(
         'The request failed without overstating its outcome.',
       ),
