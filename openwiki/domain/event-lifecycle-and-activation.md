@@ -51,12 +51,11 @@ Event kinds are `incident` (template mode `real`), `drill` and `test` (both mode
 
 ## Activation flow
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: a semicolon inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 sequenceDiagram
   participant U as Operator (web /start or mobile start)
-  participant S as start.ts: create-activation-preview
-  participant EV as events.ts: start-event
+  participant S as start.ts create-activation-preview
+  participant EV as events.ts start-event
   participant DB as PostgreSQL
   participant D as Outbox dispatch hook
   U->>S: facility, threat, kind, response detail
@@ -66,7 +65,7 @@ sequenceDiagram
   EV->>DB: one transaction: event, transition seq 1, notification intent, outbox, audit
   EV-->>U: event
   EV->>D: after commit, poll up to 10 outbox rows
-  D->>D: queue to delivery SQS (errors swallowed; rows stay pending)
+  D->>D: queue to delivery SQS, errors swallowed and rows stay pending
 ```
 
 Caption: preview is a persisted, digest-bound artifact; the committed transaction owns the notification intent and outbox row.
@@ -75,6 +74,7 @@ Caption: preview is a persisted, digest-bound artifact; the committed transactio
 - **Active-event decision**: `StartEventInput.activeEventDecision` carries `activeEventIdsSeen`, and `JoinOrStartDecision` forces an operator to choose join-existing vs. start-new, so two people cannot silently start duplicates. `canonicalStartInput` sorts the seen IDs for idempotency.
 - **Prepared activations** (`prepare-activation`, `drizzle-prepared-activation-store.ts`, `agents/prepared-activation.ts`): an agent may prepare an activation; a human must still review and confirm it; consumption is recorded (`PreparedActivationConsumption`).
 - **Post-commit dispatch**: `createOutboxDispatchHook` in `events.ts` polls up to `POST_COMMIT_OUTBOX_DISPATCH_LIMIT` (10) rows after any result containing a `notificationIntent`; any failure is swallowed so an operator who has been told the incident is active never sees it fail. A stranded row is picked up by the next activation or sweep ([pipeline](notification-pipeline.md)).
+- **Later transitions and queued sends**: an activation batch can still be queued when the event is cleared, closed or reactivated. The email store still sends the begin email in that case because the activation authorization still matches, while the SMS store requires the event to remain active. The per-purpose rules and the 2026-10-15 ShakeOut reason are in [send-time currency](notification-pipeline.md#send-time-currency).
 - **Lifecycle consequence previews** (`create-lifecycle-consequence-preview`, in `journal.ts`) give all-clear/close/reactivate/reopen the same preview → digest → confirm shape.
 - Routes: web `app/(app)/start/api/{preview,activate,join}`, mobile `app/api/mobile/start/{facilities,threats,preview,activate}`, REST `app/api/events*`.
 
