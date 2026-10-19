@@ -98,7 +98,7 @@ describeWithDatabase('agent API-key PostgreSQL concurrency', () => {
       displayName: 'Synthetic concurrent reporting agent',
       facilityScope: { kind: 'district' as const },
       capabilityIds: ['list-active-events' as const],
-      expiresInSeconds: null,
+      expiresInSeconds: 7_776_000,
     };
     const invocation = {
       actor: {
@@ -238,7 +238,7 @@ describeWithDatabase('agent API-key PostgreSQL concurrency', () => {
           displayName,
           facilityScope: { kind: 'district' },
           capabilityIds: ['list-active-events'],
-          expiresInSeconds: null,
+          expiresInSeconds: 7_776_000,
         },
         idempotencyKey: rollbackKey,
         csrfVerified: true,
