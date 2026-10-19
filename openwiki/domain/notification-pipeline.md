@@ -14,10 +14,11 @@ openwiki:
     - packages/server/app/api/internal/delivery-state/route.ts
     - infra/lambda/delivery-router/index.mjs
     - packages/server/db/schema/delivery.ts
-  symbols: [dispatchOutbox, createSqsDispatchBatchQueue, createDrizzleOutboxDispatcherStore, resolveEmailEndpoints, DispatchBatchSchema, DeliveryTruthStateSchema, computeOutboxBackoffMilliseconds]
+  symbols: [dispatchOutbox, createSqsDispatchBatchQueue, createDrizzleOutboxDispatcherStore, resolveEmailEndpoints, DispatchBatchSchema, DeliveryTruthStateSchema, computeOutboxBackoffMilliseconds, batchHasCurrentLifecycle, EMAIL_SEND_HORIZON_MILLISECONDS]
   test_paths:
     - packages/server/lib/notify/dispatcher.test.ts
     - packages/server/lib/notify/batch-lifecycle.integration.test.ts
+    - packages/server/lib/notify/email-runtime-store.integration.test.ts
     - workers/shared/dispatcher-database.integration.test.ts
     - workers/shared/delivery-state-route.test.ts
     - infra/test/delivery-router-runtime.test.ts
@@ -25,6 +26,7 @@ openwiki:
     - Queue bodies are destination-free, raw DispatchBatchSchema values that repeat real/drill classification.
     - Provider acceptance, delivery and human receipt are separate facts; ambiguity is unknown.
     - The router forwards bytes unchanged and never alters authorization or classification.
+    - An email activation batch stays current after its event is cleared, closed or reactivated; an SMS activation batch requires the event to still be active.
   validation_commands: [bun test packages/server/lib/notify/dispatcher.test.ts infra/test/delivery-router-runtime.test.ts]
 ---
 
@@ -68,6 +70,34 @@ Caption: authorization happens once in the engine; everything downstream is untr
 ## Delivery truth model
 
 `DeliveryTruthStateSchema`: `accepted`, `recorded` (pre-attempt facts on the intent) and, per attempt, `attempted`, `provider-accepted`, `delivered`, `failed`, `expired`, `unknown` (`AttemptDeliveryTruthStateSchema`). `provider-accepted` is never `delivered`; `delivered` needs the contract's provider delivery proof; `unknown` is a first-class visible state. Evidence is append-only; `deliveryEvidence`, `endpointStatusRecords`, `smsOptOutRecords` are separate facts. Learning note: `docs/learnings/workflow/2026-08-26-reproject-delivery-truth-at-every-ingress.md`.
+
+## Send-time currency
+
+A batch is written during activation but sent later, so its event may have moved on by the time a worker reaches it. `batchHasCurrentLifecycle` in `packages/server/lib/notify/batch-lifecycle.ts` decides whether a batch still describes the event's lifecycle. The email store calls it in `workItemIsEligible` (`email-runtime-store.ts`) and the SMS store calls it in `sms-runtime-store.ts`; a false result means the item is not sent (the store reports it as suppressed).
+
+```mermaid
+flowchart TD
+  W[Queued work item for a batch] --> HZ{Email past send horizon}
+  HZ -- yes --> NO[Not sent]
+  HZ -- no --> P{Batch purpose}
+  P -- activation --> CH{Channel}
+  CH -- email --> EA[Current if event is not draft and authorization matches]
+  CH -- sms --> SA[Current if event is active, not cleared or reactivated, and authorization matches]
+  P -- all-clear or reactivation --> LT[Current if its transition is the latest of that kind and authorization matches]
+  EA --> OK[Eligible for provider send]
+  SA --> OK
+  LT --> OK
+```
+
+Caption: the email horizon check (`EMAIL_SEND_HORIZON_MILLISECONDS`, 15 minutes after the batch's `createdAt`) runs before the per-purpose rules; the horizon applies only to the email store.
+
+- **Email activation** stays current after the event is cleared, closed or reactivated, as long as the event's `activationAuthorization` still matches the batch. The database trigger `psd_eoc_guard_event_mutation` rejects changes to that column.
+- **SMS activation** keeps the active-only rule: the event must be `active` with no `allClearAt` or `reactivatedAt` and the same authorization.
+- **All-clear and reactivation batches** stay current while their referenced transition is the event's latest of that kind, under the same request and authorization. An all-clear stays current after the event is closed, because the close carries no message of its own.
+
+Why the email rule is relaxed: during the 2026-10-15 ShakeOut drill the email worker ran up to seven minutes behind, and nine of fourteen drills ended before it reached their activation batch. The previous active-only rule suppressed those begin emails, while the begin text, begin push and all-clear email still arrived. The rule is documented in the source comment on `batchHasCurrentLifecycle`. Lifecycle changes that affect queued work are owned by [event lifecycle](event-lifecycle-and-activation.md); the email worker that drains the queue is described in [channel workers](../integrations/channel-workers.md#channels).
+
+Focused checks: `batch-lifecycle.integration.test.ts` (test "an email activation stays current after the event is cleared, closed or reactivated; SMS does not") and `email-runtime-store.integration.test.ts` (test "still sends an activation the worker reaches after the event was ended"). Both need the synthetic database.
 
 ## Invariants and gotchas
 

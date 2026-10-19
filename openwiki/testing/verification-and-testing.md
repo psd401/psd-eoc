@@ -97,7 +97,7 @@ Structural guard tests worth knowing: `capabilities/execution-boundary.test.ts` 
 | --- | --- | --- |
 | A single server lib module | `bun test <path>.test.ts` (add `--bail` while iterating) | it has a `.database.test.ts` sibling → start the synthetic DB |
 | Contracts schema | `bun test packages/contracts/src` then `bun run --cwd packages/server typecheck` | consumers in mobile/mcp/workers change → typecheck those workspaces (`bun run typecheck`) |
-| Worker | `bun test workers/<channel>` | durable store/route involved → matching server `*.integration.test.ts` |
+| Worker | `bun test workers/<channel>` | durable store/route involved → matching server `*.integration.test.ts` (send-time currency: `packages/server/lib/notify/batch-lifecycle.integration.test.ts`, `email-runtime-store.integration.test.ts`) |
 | Mobile logic | `bun test packages/mobile/src/<area>`; native screens `bun run --cwd packages/mobile test:native -- --testPathPattern <name>` | behavior change → both `bun packages/mobile/e2e/run.ts ios` and `android` |
 | Infra | `bun test infra/test/<file>`; `bun run --cwd infra synth:example` | whole stack asserts → `bun test infra/test/stack` |
 | Docs | `bun run verify:docs` | — |
