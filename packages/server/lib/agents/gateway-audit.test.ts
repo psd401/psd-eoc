@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   SecurityAuditEntrySchema,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type SecurityAuditEntry,
 } from '@psd-eoc/contracts';
 
@@ -16,6 +16,7 @@ import { createAgentGatewayAuditSink } from './audit';
 import { AgentRestGateway, type AgentCapabilityDispatcher } from './gateway';
 import {
   AgentApiKeyError,
+  AgentApiKeyService,
   digestAgentApiKeyAuditSubject,
   digestAgentApiKeyCredential,
   type AuthenticatedAgentApiKey,
@@ -123,7 +124,7 @@ function gateway(
         if (!agent.capabilityIds.includes(capabilityId as never)) {
           throw new Error('Unexpected capability grant.');
         }
-        return capabilityId as AgentGrantableCapabilityId;
+        return capabilityId as AgentKeyGrantableCapabilityId;
       },
     },
     dispatcher,
@@ -326,5 +327,72 @@ describe('agent gateway audit ownership', () => {
     });
 
     expect(repository.retained.get(IDS.request)?.facilityId).toBeNull();
+  });
+
+  test('refuses a key carrying a withheld grant with an audited 403 before dispatch', async () => {
+    const repository = new UniqueRequestAuditRepository();
+    const keys = new AgentApiKeyService({
+      repository: {
+        persistIssuedKey: async () => {
+          throw new Error('Unexpected key persistence.');
+        },
+        findVerifierByPrefix: async () => null,
+        appendRevocation: async () => ({ kind: 'not-found' }),
+        listSummaries: async () => ({ items: [], hasMore: false }),
+      },
+    });
+    // The catalog admits the grant for agents, and a stored key could carry
+    // it; the allowlist, applied by the real service, is what refuses it.
+    const withheld = Object.freeze([
+      'list-active-events',
+      'publish-event-type-version',
+    ]) as unknown as readonly AgentKeyGrantableCapabilityId[];
+    const agent: AuthenticatedAgentApiKey = Object.freeze({
+      ...authenticated,
+      capabilityIds: withheld,
+      key: { ...authenticated.key, capabilityIds: withheld },
+    });
+    const dispatcher: AgentCapabilityDispatcher = {
+      auditOwnership: () => 'canonical',
+      async execute() {
+        throw new Error('A withheld grant must never dispatch.');
+      },
+    };
+    const subject = new AgentRestGateway({
+      keys: {
+        authenticate: async () => agent,
+        authorizeCapability: (resolved, capabilityId) =>
+          keys.authorizeCapability(resolved, capabilityId),
+      },
+      dispatcher,
+      audit: createAgentGatewayAuditSink(repository),
+    });
+
+    await expect(
+      subject.execute({
+        credential: 'synthetic',
+        capabilityId: 'publish-event-type-version',
+        input: {},
+        idempotencyKey: 'withheld-publish-attempt',
+        requestId: IDS.request,
+        serverTime: new Date('2026-08-10T18:01:00.000Z'),
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentApiKeyError',
+      code: 'CAPABILITY_NOT_GRANTED',
+      status: 403,
+    });
+
+    expect(repository.attempts).toHaveLength(1);
+    expect(repository.retained.get(IDS.request)).toMatchObject({
+      category: 'access-denial',
+      action: 'publish-event-type-version',
+      actionIds: [],
+      outcome: 'denied',
+      principal: authenticated.actor,
+      source: 'agent-rest',
+      facilityId: IDS.facility,
+      reasonCode: 'CAPABILITY_NOT_GRANTED',
+    });
   });
 });

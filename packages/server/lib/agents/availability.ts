@@ -1,51 +1,19 @@
-import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
+import {
+  AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
+  isAgentKeyGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
+} from '@psd-eoc/contracts';
 
-/** Canonical implementations present in this deployment, not future catalog promises. */
-export const AGENT_DEPLOYED_CAPABILITY_IDS = Object.freeze([
-  'start-event',
-  'join-event',
-  'all-clear-event',
-  'reactivate-event',
-  'close-event',
-  'reopen-as-correction',
-  'append-journal-entry',
-  'correct-journal-entry',
-  'redact-journal-entry',
-  'list-journal-entries',
-  'search-journal-entries',
-  'create-lifecycle-consequence-preview',
-  'get-facility',
-  'list-active-events',
-  'get-event',
-  'create-activation-preview',
-  'prepare-activation',
-  'get-prepared-activation',
-  'get-stale-roster-report',
-  'list-facilities',
-  'list-threats',
-  'list-agent-api-keys',
-  'create-event-type-draft',
-  'update-event-type-draft',
-  'publish-event-type-version',
-  'list-event-types',
-  'get-event-type-version',
-  'get-event-type-draft',
-  'preview-event-type-rendering',
-  'list-drill-records',
-  'export-drill-records',
-  'export-event-summary',
-  'query-security-audit',
-  'verify-security-audit-chain',
-] as const satisfies readonly AgentGrantableCapabilityId[]);
+/**
+ * Capabilities with a deployed agent handler. By decision this is the agent-key
+ * allowlist itself: every grantable ID has a handler, and no handler is
+ * reachable by an agent without a grant. Deriving it keeps the two lists from
+ * drifting, and the dispatcher's exhaustive switch makes an allowlist entry
+ * without a handler a compile error.
+ */
+export const AGENT_DEPLOYED_CAPABILITY_IDS = AGENT_KEY_GRANTABLE_CAPABILITY_IDS;
 
-export type AgentDeployedCapabilityId =
-  (typeof AGENT_DEPLOYED_CAPABILITY_IDS)[number];
+export type AgentDeployedCapabilityId = AgentKeyGrantableCapabilityId;
 
-const deployedCapabilityIds = new Set<string>(AGENT_DEPLOYED_CAPABILITY_IDS);
-
-/** Narrows contract catalog entries to handlers deployed by issue #24. */
-export function isAgentDeployedCapabilityId(
-  value: unknown,
-): value is AgentDeployedCapabilityId {
-  return typeof value === 'string' && deployedCapabilityIds.has(value);
-}
+/** Narrows an ID to the deployed, grantable agent vocabulary. */
+export const isAgentDeployedCapabilityId = isAgentKeyGrantableCapabilityId;

@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
   CAPABILITY_CATALOG,
   EventSchema,
   HUMAN_ONLY_ACTION_IDS,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type FacilityScope,
 } from '@psd-eoc/contracts';
 
@@ -69,7 +70,7 @@ class StubEventTypeStore implements EventTypeStore {
 
 function authenticatedAgent(
   facilityScope: FacilityScope,
-  capabilityIds: readonly AgentGrantableCapabilityId[],
+  capabilityIds: readonly AgentKeyGrantableCapabilityId[],
 ): AuthenticatedAgentApiKey {
   return Object.freeze({
     actor: {
@@ -640,7 +641,7 @@ describe('default agent dispatcher routing', () => {
       'list-drill-records',
       'export-drill-records',
       'export-event-summary',
-    ] as const satisfies readonly AgentGrantableCapabilityId[];
+    ] as const satisfies readonly AgentKeyGrantableCapabilityId[];
 
     expect(
       capabilityIds.map((capabilityId) => ({
@@ -751,15 +752,25 @@ describe('default agent dispatcher routing', () => {
     ).rejects.toThrow('Synthetic persistence failure.');
   });
 
-  test('fails closed with 503 when a catalog capability is not deployed', async () => {
+  test('deploys exactly the agent-key allowlist', () => {
+    expect(AGENT_DEPLOYED_CAPABILITY_IDS).toBe(
+      AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
+    );
+  });
+
+  test('fails closed with 503 when an ID outside the allowlist bypasses static typing', () => {
+    // The gateway refuses such an ID before dispatch; this proves the
+    // dispatcher itself stays closed if a caller sidesteps the type.
+    const withheld =
+      'get-roster-snapshot' as unknown as AgentKeyGrantableCapabilityId;
     const authenticated = authenticatedAgent(
       { kind: 'facilities', facilityIds: [IDS.facility] },
-      ['get-roster-snapshot'],
+      [withheld],
     );
 
-    await expect(
+    return expect(
       dispatcher(new StubEventTypeStore()).execute(
-        'get-roster-snapshot',
+        withheld,
         {},
         invocation(authenticated),
         authenticated,

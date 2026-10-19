@@ -1,11 +1,11 @@
 import {
-  AGENT_GRANTABLE_CAPABILITY_IDS,
+  AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
   CAPABILITY_CATALOG,
   HUMAN_ONLY_ACTION_IDS,
   ApiErrorSchema,
   IdempotencyKeySchema,
   getCapabilityInvocationPolicy,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
 } from '@psd-eoc/contracts';
 import { z } from 'zod';
 
@@ -15,11 +15,15 @@ const AGENT_API_BASE_PATH = '/api/agent/v1/capabilities' as const;
 const JSON_SCHEMA_DIALECT =
   'https://json-schema.org/draft/2020-12/schema' as const;
 
-/** The exact contract-owned capability IDs callable through agent REST. */
-export const AGENT_REST_CAPABILITY_IDS: readonly AgentGrantableCapabilityId[] =
-  Object.freeze([...AGENT_GRANTABLE_CAPABILITY_IDS]);
+/**
+ * The documented agent REST surface: exactly the IDs a key may be granted. A
+ * catalog ID withheld from keys still resolves at the gateway so an attempt is
+ * audited, but it is not a documented operation.
+ */
+export const AGENT_REST_CAPABILITY_IDS: readonly AgentKeyGrantableCapabilityId[] =
+  Object.freeze([...AGENT_KEY_GRANTABLE_CAPABILITY_IDS]);
 
-export type AgentRestCapabilityId = AgentGrantableCapabilityId;
+export type AgentRestCapabilityId = AgentKeyGrantableCapabilityId;
 
 export interface AgentRestCapabilityManifestEntry {
   readonly id: AgentRestCapabilityId;
