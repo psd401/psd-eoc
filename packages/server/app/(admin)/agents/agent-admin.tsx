@@ -3,13 +3,14 @@
 import type {
   AgentApiKeyIssuance,
   AgentApiKeySummary,
-  AgentCapabilityGrant,
   AgentId,
   Facility,
   SecurityAuditEntry,
 } from '@psd-eoc/contracts';
 import { isHumanOnlyActionId } from '@psd-eoc/contracts';
 import { useActionState, useEffect, useRef } from 'react';
+
+import type { AgentGrantGroupOptions } from '../../../lib/agents/grant-groups';
 
 export interface AgentAdminIssueState {
   readonly issuedKey: AgentApiKeyIssuance | null;
@@ -34,23 +35,6 @@ export type AgentAdminRevokeAction = (
 export type AgentAdminFacility = Readonly<
   Pick<Facility, 'id' | 'code' | 'name' | 'active'>
 >;
-
-export interface AgentCapabilityOption {
-  readonly id: AgentCapabilityGrant;
-  readonly label: string;
-}
-
-/**
- * One risk group of grants with the single description the page shows for it.
- * The server decides membership; this component only renders what it is given
- * and still drops any human-only ID that reaches it.
- */
-export interface AgentGrantGroupOptions {
-  readonly id: string;
-  readonly title: string;
-  readonly description: string;
-  readonly options: readonly AgentCapabilityOption[];
-}
 
 type AgentAuditPrincipal = Extract<
   SecurityAuditEntry['principal'],
