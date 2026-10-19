@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { AgentKeyGrantableCapabilityIdSchema } from './agent-key-grants';
 import { PaginationCursorSchema, paginatedSchema } from './api';
 import type { AgentGrantableCapabilityId } from './capability-catalog';
 import { InstalledAgentGrantableCapabilityIdSchema } from './capability-derived-registry';
@@ -18,18 +19,25 @@ export const AgentApiKeyIdSchema = UuidSchema;
 /** Agent API-key identifier inferred from its schema. */
 export type AgentApiKeyId = z.infer<typeof AgentApiKeyIdSchema>;
 
-/** Owns the closed agent-key capability-grant vocabulary. */
-export const AgentGrantableCapabilityIdSchema =
+/**
+ * Owns the vocabulary a persisted key row may carry: every ID the canonical
+ * catalog ever admitted for an agent principal, which is also the PostgreSQL
+ * `agent_capability_grant` enum. It is wider than the allowlist on purpose, so
+ * a stored key written before the allowlist tightened still parses and
+ * authentication can ignore its disallowed grants instead of failing with a
+ * 500. It never authorizes anything.
+ */
+export const RetainedAgentCapabilityGrantSchema =
   InstalledAgentGrantableCapabilityIdSchema as z.ZodType<AgentGrantableCapabilityId>;
 
 /**
- * Owns the closed capability grant vocabulary available to agent API keys.
- * Unknown aliases, protected action names, credentials, and internal worker
- * operations cannot be persisted as agent authority.
+ * Owns the closed capability grant vocabulary available to agent API keys:
+ * exactly `AGENT_KEY_GRANTABLE_CAPABILITY_IDS`. Issuance, trusted agent access
+ * contexts, and the gateway's grant check all parse through it, so unknown
+ * aliases, protected action names, credentials, internal worker operations,
+ * and catalog capabilities withheld from agents cannot become key authority.
  */
-export const AgentCapabilityGrantSchema = AgentGrantableCapabilityIdSchema;
-
-type AgentCapabilityGrantValue = z.infer<typeof AgentCapabilityGrantSchema>;
+export const AgentCapabilityGrantSchema = AgentKeyGrantableCapabilityIdSchema;
 
 /**
  * Owns an agent API-key issuance request. Actor, issuance time, key material,
@@ -67,7 +75,11 @@ const agentApiKeySummaryShape = {
   agentId: AgentIdSchema,
   displayName: z.string().trim().min(1).max(160),
   facilityScope: FacilityScopeSchema,
-  capabilityIds: z.array(AgentCapabilityGrantSchema).min(1).max(100).readonly(),
+  capabilityIds: z
+    .array(RetainedAgentCapabilityGrantSchema)
+    .min(1)
+    .max(100)
+    .readonly(),
   keyPrefix: z
     .string()
     .trim()
@@ -82,7 +94,7 @@ const agentApiKeySummaryShape = {
 
 function addAgentApiKeyLifecycleIssues(
   key: {
-    readonly capabilityIds: readonly AgentCapabilityGrantValue[];
+    readonly capabilityIds: readonly string[];
     readonly issuedAt: string;
     readonly expiresAt: string | null;
     readonly revokedAt: string | null;

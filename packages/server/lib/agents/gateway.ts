@@ -7,6 +7,7 @@ import {
   parseCapabilityInput,
   parseCapabilityOutput,
   type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type HumanOnlyActionId,
   type UnauthenticatedAuditPrincipal,
 } from '@psd-eoc/contracts';
@@ -33,15 +34,15 @@ const protectedActionCapability = Object.freeze({
   'send-real-notification': 'start-event',
   'all-clear': 'all-clear-event',
   'close-real-event': 'close-event',
-} as const satisfies Record<HumanOnlyActionId, AgentGrantableCapabilityId>);
+} as const satisfies Record<HumanOnlyActionId, AgentKeyGrantableCapabilityId>);
 
 export interface AgentCapabilityDispatcher {
   /** Dispatches through the canonical capability implementation. */
   auditOwnership(
-    capabilityId: AgentGrantableCapabilityId,
+    capabilityId: AgentKeyGrantableCapabilityId,
   ): 'canonical' | 'gateway';
   execute(
-    capabilityId: AgentGrantableCapabilityId,
+    capabilityId: AgentKeyGrantableCapabilityId,
     input: unknown,
     invocation: TrustedCapabilityInvocation,
     authenticated: AuthenticatedAgentApiKey,
@@ -99,7 +100,7 @@ export interface AgentGatewayRequest {
 /** Authenticated and grant-authorized identity for one canonical REST call. */
 export interface AuthorizedAgentGatewayCall {
   readonly authenticated: AuthenticatedAgentApiKey;
-  readonly capabilityId: AgentGrantableCapabilityId;
+  readonly capabilityId: AgentKeyGrantableCapabilityId;
   readonly requestId: string;
   readonly serverTime: Date;
 }
@@ -155,6 +156,13 @@ interface ResolvedAgentGatewayRoute {
   readonly actionIds: readonly HumanOnlyActionId[];
 }
 
+/**
+ * Routes exist for every catalog ID an agent principal may execute, not only
+ * for the key allowlist. A withheld ID such as `publish-event-type-version`
+ * therefore reaches authentication and is refused by `authorizeCapability`
+ * with an audited `CAPABILITY_NOT_GRANTED`, instead of vanishing as an
+ * unaudited 404. IDs outside the catalog's agent vocabulary are 404.
+ */
 function resolveAgentGatewayRoute(
   capabilityId: string,
 ): ResolvedAgentGatewayRoute {
@@ -262,7 +270,7 @@ function denialAudit(
 function agentInvocation(
   authenticated: AuthenticatedAgentApiKey,
   request: AgentGatewayRequest,
-  capabilityId: AgentGrantableCapabilityId,
+  capabilityId: AgentKeyGrantableCapabilityId,
 ): TrustedCapabilityInvocation {
   const definition = defineCapability(capabilityId);
   return Object.freeze({
@@ -422,7 +430,7 @@ export class AgentRestGateway {
       );
     }
 
-    let capabilityId: AgentGrantableCapabilityId;
+    let capabilityId: AgentKeyGrantableCapabilityId;
     try {
       capabilityId = this.dependencies.keys.authorizeCapability(
         authenticated,

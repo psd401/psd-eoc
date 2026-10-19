@@ -6,7 +6,7 @@ import {
   HUMAN_ONLY_ACTION_IDS,
   McpDraftMessageRevisionInputSchema,
   McpDraftMessageRevisionResultSchema,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type CapabilityOutput,
   type McpDraftMessageRevisionInput,
   type McpDraftMessageRevisionResult,
@@ -28,7 +28,7 @@ const MCP_ADAPTER_CAPABILITY_IDS = Object.freeze([
   ...MCP_TOOL_CAPABILITY_IDS,
   'create-event-type-draft',
   'update-event-type-draft',
-] as const satisfies readonly AgentGrantableCapabilityId[]);
+] as const satisfies readonly AgentKeyGrantableCapabilityId[]);
 type McpAdapterCapabilityId = (typeof MCP_ADAPTER_CAPABILITY_IDS)[number];
 const mcpAdapterCapabilityIds = new Set<string>(MCP_ADAPTER_CAPABILITY_IDS);
 
@@ -519,6 +519,6 @@ export async function callMcpToolByUnknownName(
 }
 
 // Compile-time proof that the HTTP adapter cannot widen to arbitrary grants.
-const _toolIdsAreAgentCapabilities: readonly AgentGrantableCapabilityId[] =
+const _toolIdsAreAgentCapabilities: readonly AgentKeyGrantableCapabilityId[] =
   MCP_TOOL_CAPABILITY_IDS;
 void _toolIdsAreAgentCapabilities;

@@ -101,6 +101,29 @@ Only an authenticated human acting in the application may perform them. MCP
 and agent REST do not expose aliases or alternate mutation paths. Synthetic
 drills and unroutable fixtures remain safe for automated tests.
 
+## Agent API keys
+
+An agent API key carries an explicit set of capability grants chosen by a
+district administrator. The vocabulary it may be granted from is one written
+allowlist, `AGENT_KEY_GRANTABLE_CAPABILITY_IDS` in
+`packages/contracts/src/agent-key-grants.ts`, not a derivation from the
+catalog. The catalog's invocation policy still says which capabilities can
+execute under an agent principal at all, and that wider set is the persisted
+PostgreSQL grant enum; the allowlist must be a subset of it, which contracts
+assert at load.
+
+The allowlist is enforced at every layer that touches a grant: the issuance
+schema, the admin issue form (which offers only allowlisted IDs), key
+persistence, authentication (a stored grant outside the allowlist is left out
+of the key's effective grants), authorization (the REST gateway refuses the ID
+with an audited `CAPABILITY_NOT_GRANTED`), the dispatcher (whose exhaustive
+switch proves every allowlisted ID has a handler), and the OpenAPI document.
+Publishing an event-type version, writing to a live journal, joining or
+reactivating an event, reopening a closed event, and configuration writes are
+deliberately absent: an agent may draft notification wording, and a human
+publishes it. Synthetic-roster lifecycle grants remain because the capability
+engine refuses every staff-roster target to a non-human actor.
+
 ## Data and delivery truth
 
 - Staff data only; no student, guardian, schedule, or reunification data.

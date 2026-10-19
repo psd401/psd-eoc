@@ -1,4 +1,7 @@
-import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
+import type {
+  AgentGrantableCapabilityId,
+  AgentKeyGrantableCapabilityId,
+} from '@psd-eoc/contracts';
 
 import type { StartFlowCapabilityRuntime } from '../capabilities/start';
 import {
@@ -12,7 +15,6 @@ import {
   executeGetEventTypeVersionCapability,
   executeListEventTypesCapability,
   executePreviewEventTypeRenderingCapability,
-  executePublishEventTypeVersionCapability,
   executeUpdateEventTypeDraftCapability,
   type AuthenticatedEventTypeAgent,
   type EventTypeCapabilityStore,
@@ -62,18 +64,12 @@ export class AgentCapabilityUnavailableError extends Error {
   }
 }
 
-const canonicallyAuditedCapabilityIds = new Set<AgentGrantableCapabilityId>([
+const canonicallyAuditedCapabilityIds = new Set<AgentKeyGrantableCapabilityId>([
   'start-event',
-  'join-event',
   'all-clear-event',
-  'reactivate-event',
   'close-event',
-  'reopen-as-correction',
   'list-active-events',
   'get-event',
-  'append-journal-entry',
-  'correct-journal-entry',
-  'redact-journal-entry',
   'list-journal-entries',
   'search-journal-entries',
   'create-lifecycle-consequence-preview',
@@ -83,7 +79,6 @@ const canonicallyAuditedCapabilityIds = new Set<AgentGrantableCapabilityId>([
   'get-prepared-activation',
   'create-event-type-draft',
   'update-event-type-draft',
-  'publish-event-type-version',
   'query-security-audit',
   'verify-security-audit-chain',
   'list-agent-api-keys',
@@ -130,42 +125,40 @@ function unhandledCapability(value: never): never {
 }
 
 /**
- * Production dispatcher. Event lifecycle and prepared intents use the shared
- * server engine (and self-audit atomically); the REST gateway records one
- * ingress audit for every authenticated call around this dispatcher.
+ * Production dispatcher over exactly the agent-key allowlist. Event lifecycle
+ * and prepared intents use the shared server engine (and self-audit
+ * atomically); the REST gateway records one ingress audit for every
+ * authenticated call around this dispatcher. The exhaustive switch is the
+ * proof that every grantable ID has a handler.
  */
 export function createDefaultAgentCapabilityDispatcher(
   dependencies: DefaultAgentCapabilityDispatcherDependencies,
 ): AgentCapabilityDispatcher {
   return Object.freeze({
-    auditOwnership(capabilityId: AgentGrantableCapabilityId) {
+    auditOwnership(capabilityId: AgentKeyGrantableCapabilityId) {
       return canonicallyAuditedCapabilityIds.has(capabilityId)
         ? 'canonical'
         : 'gateway';
     },
     async execute(
-      capabilityId: AgentGrantableCapabilityId,
+      capabilityId: AgentKeyGrantableCapabilityId,
       input: unknown,
       invocation: TrustedCapabilityInvocation,
       authenticated: AuthenticatedAgentApiKey,
     ): Promise<unknown> {
+      // The gateway has already refused anything outside the allowlist; this
+      // keeps the runtime closed if a caller bypasses the static type.
       if (!isAgentDeployedCapabilityId(capabilityId)) {
         throw new AgentCapabilityUnavailableError(capabilityId);
       }
       switch (capabilityId) {
         case 'start-event':
-        case 'join-event':
         case 'all-clear-event':
-        case 'reactivate-event':
         case 'close-event':
-        case 'reopen-as-correction':
         case 'list-active-events':
         case 'get-event':
           return dependencies.events.execute(capabilityId, input, invocation);
 
-        case 'append-journal-entry':
-        case 'correct-journal-entry':
-        case 'redact-journal-entry':
         case 'list-journal-entries':
         case 'search-journal-entries':
         case 'create-lifecycle-consequence-preview':
@@ -265,19 +258,6 @@ export function createDefaultAgentCapabilityDispatcher(
         case 'update-event-type-draft': {
           const mutation = agentEventTypeMutation(invocation);
           return executeUpdateEventTypeDraftCapability({
-            store: dependencies.eventTypes,
-            capabilityStore: dependencies.eventTypeCapabilities,
-            authenticated: eventTypeAgent(authenticated),
-            command: input as never,
-            idempotencyKey: mutation.idempotencyKey,
-            transport: mutation.transport,
-            requestId: invocation.requestId,
-            now: invocation.serverTime,
-          });
-        }
-        case 'publish-event-type-version': {
-          const mutation = agentEventTypeMutation(invocation);
-          return executePublishEventTypeVersionCapability({
             store: dependencies.eventTypes,
             capabilityStore: dependencies.eventTypeCapabilities,
             authenticated: eventTypeAgent(authenticated),

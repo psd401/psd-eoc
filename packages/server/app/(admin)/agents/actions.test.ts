@@ -274,6 +274,42 @@ describe('agent administration action handlers', () => {
     expect(harness.revalidationCalls.count).toBe(0);
   });
 
+  test('rejects a crafted grant outside the agent-key allowlist without calling administration', async () => {
+    for (const crafted of [
+      'publish-event-type-version',
+      'append-journal-entry',
+      'set-channel-enabled',
+      'list-users',
+    ]) {
+      const harness = actionHarness();
+      const result = await handleIssueAgentApiKeyAction(
+        {
+          issuedKey: null,
+          idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
+          notice: null,
+        },
+        submission({
+          idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
+          agentId: '',
+          displayName: 'Synthetic reporting agent',
+          facilityScopeKind: 'district',
+          // The form never offers this value; a crafted POST supplies it.
+          capabilityIds: ['get-event', crafted],
+          expiresInSeconds: '',
+        }),
+        harness.dependencies,
+      );
+
+      expect(harness.issueCalls).toEqual([]);
+      expect(result).toMatchObject({
+        issuedKey: null,
+        idempotencyKey: SUBMITTED_IDEMPOTENCY_KEY,
+        notice: { kind: 'error' },
+      });
+      expect(harness.revalidationCalls.count).toBe(0);
+    }
+  });
+
   test('replaces invalid retained idempotency state when the submission is invalid', async () => {
     const harness = actionHarness();
     const result = await handleIssueAgentApiKeyAction(

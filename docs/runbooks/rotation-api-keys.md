@@ -3,10 +3,14 @@
 Current deployed agent-surface state lives only in the
 [operational readiness register](../INTEGRATIONS.md).
 
-PSD EOC agent API keys are scoped credentials for read/report/draft and other
-explicitly granted capabilities. They can never receive the four human-only
-actions. Rotation uses the authenticated human administrator interface and
-append-only issue/revocation evidence.
+PSD EOC agent API keys are scoped credentials whose grants come from the
+explicit allowlist in `packages/contracts/src/agent-key-grants.ts`: reads,
+records evidence, security-audit reads, previews and activation preparation,
+unpublished template drafts, and synthetic-roster lifecycle. Publishing a
+template version, writing journal entries, joining or reactivating an event,
+reopening a closed event, and configuration writes are not grantable, and keys
+can never receive the four human-only actions. Rotation uses the authenticated
+human administrator interface and append-only issue/revocation evidence.
 
 ## Preconditions
 
@@ -17,7 +21,9 @@ append-only issue/revocation evidence.
 - [ ] A secure district secret store and a coordinated consumer cutover window
       are ready.
 - [ ] The existing key ID, not its secret value, is recorded.
-- [ ] No proposed grant contains a canonical human-only action.
+- [ ] No proposed grant contains a canonical human-only action or an ID
+      outside the allowlist; the admin form offers only allowlisted IDs and
+      the server refuses any other value.
 
 ## Planned rotation
 

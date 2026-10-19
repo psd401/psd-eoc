@@ -2,8 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   HUMAN_ONLY_ACTION_IDS,
-  isAgentGrantableCapabilityId,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type FacilityScope,
 } from '@psd-eoc/contracts';
 
@@ -20,8 +19,10 @@ import {
 } from '../../../../lib/agents/gateway';
 import {
   AgentApiKeyError,
+  AgentApiKeyService,
   type AuthenticatedAgentApiKey,
 } from '../../../../lib/agents/keys';
+import { unusedAgentApiKeyRepository } from '../../../../lib/testing/agent-api-keys';
 import {
   agentApiErrorResponse,
   handleAgentCapability,
@@ -40,9 +41,16 @@ const IDS = Object.freeze({
 const CREDENTIAL =
   'psd_eoc_agent_v1_abcdefghijkl.abcdefghijklmnopqrstuvwxyzABCDEFGHijklmno';
 
+/** Only `authorizeCapability` is used; it needs no persistence. */
+const keyService = new AgentApiKeyService({
+  repository: unusedAgentApiKeyRepository(),
+});
+
 function authenticatedAgent(
   facilityScope: FacilityScope,
-  capabilityIds: readonly AgentGrantableCapabilityId[] = ['list-active-events'],
+  capabilityIds: readonly AgentKeyGrantableCapabilityId[] = [
+    'list-active-events',
+  ],
 ): AuthenticatedAgentApiKey {
   return Object.freeze({
     actor: {
@@ -80,7 +88,9 @@ interface GatewayHarness {
 
 function gatewayHarness(
   facilityScope: FacilityScope,
-  capabilityIds: readonly AgentGrantableCapabilityId[] = ['list-active-events'],
+  capabilityIds: readonly AgentKeyGrantableCapabilityId[] = [
+    'list-active-events',
+  ],
   auditFailure: Error | null = null,
   dispatchFailure: Error | null = null,
 ): GatewayHarness {
@@ -98,9 +108,6 @@ function gatewayHarness(
           items: [],
           pageInfo: { hasMore: false, nextCursor: null },
         };
-      }
-      if (capabilityId === 'get-roster-health') {
-        throw new AgentCapabilityUnavailableError(capabilityId);
       }
       if (capabilityId === 'get-event') {
         return { invalid: 'synthetic server output' };
@@ -122,18 +129,10 @@ function gatewayHarness(
         }
         return authenticated;
       },
-      authorizeCapability(resolved, capabilityId) {
-        if (
-          !isAgentGrantableCapabilityId(capabilityId) ||
-          !resolved.capabilityIds.includes(capabilityId)
-        ) {
-          throw new AgentApiKeyError(
-            'CAPABILITY_NOT_GRANTED',
-            'The agent API key does not grant this capability.',
-          );
-        }
-        return capabilityId;
-      },
+      // The real grant check, so the route tests prove the allowlist rather
+      // than a re-implementation of it.
+      authorizeCapability: (resolved, capabilityId) =>
+        keyService.authorizeCapability(resolved, capabilityId),
     },
     dispatcher,
     audit: {
@@ -593,30 +592,73 @@ describe('agent REST capability route', () => {
     ]);
   });
 
-  test('reports unavailable contract capabilities truthfully and audits failure', async () => {
-    const harness = gatewayHarness({ kind: 'district' }, ['get-roster-health']);
+  test('refuses a catalog capability outside the key allowlist with an audited 403, never dispatching', async () => {
+    // The route exists (the catalog admits agents) and the key object even
+    // lists the grant, as a row written before the allowlist tightened would;
+    // the allowlist refuses it before any handler is selected.
+    const withheld =
+      'get-roster-health' as unknown as AgentKeyGrantableCapabilityId;
+    const harness = gatewayHarness({ kind: 'district' }, [withheld]);
 
     const response = await handleAgentCapability(
-      agentRequest('get-roster-health', {
+      agentRequest(withheld, {
         population: 'synthetic',
         facilityId: IDS.facility,
         cursor: null,
         limit: 50,
       }),
-      'get-roster-health',
+      withheld,
+      harness.runtime,
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      code: 'FORBIDDEN',
+      retryable: false,
+      requestId: IDS.request,
+    });
+    expect(harness.dispatches).toEqual([]);
+    expect(harness.audits).toEqual([
+      expect.objectContaining({
+        category: 'access-denial',
+        action: withheld,
+        outcome: 'denied',
+        reasonCode: 'CAPABILITY_NOT_GRANTED',
+      }),
+    ]);
+  });
+
+  test('reports an allowlisted capability whose handler is unavailable truthfully with 503 and audits the failure', async () => {
+    // The grant is valid and authorization passes; the dispatcher's own
+    // fail-closed signal must still reach the client as an honest 503.
+    const harness = gatewayHarness(
+      { kind: 'district' },
+      ['list-active-events'],
+      null,
+      new AgentCapabilityUnavailableError('list-active-events'),
+    );
+
+    const response = await handleAgentCapability(
+      agentRequest('list-active-events', {
+        facilityId: null,
+        cursor: null,
+        limit: 25,
+      }),
+      'list-active-events',
       harness.runtime,
     );
 
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({
       code: 'INTERNAL_ERROR',
+      message: 'The agent capability is not available in this deployment.',
       retryable: false,
       requestId: IDS.request,
     });
     expect(harness.audits).toEqual([
       expect.objectContaining({
         category: 'agent-access',
-        action: 'get-roster-health',
+        action: 'list-active-events',
         outcome: 'failure',
         reasonCode: 'INTERNAL_ERROR',
       }),
