@@ -41,7 +41,7 @@ export interface AgentApiClientDependencies {
   readonly fetch?: typeof fetch;
   /** Test seam; production derives the key from the request content. */
   readonly createIdempotencyKey?: (
-    capabilityId: AgentGrantableCapabilityId,
+    capabilityId: AgentKeyGrantableCapabilityId,
     input: unknown,
   ) => string;
 }
@@ -81,7 +81,7 @@ function canonicalJson(value: unknown): string {
  * of that data.
  */
 export function deriveIdempotencyKey(
-  capabilityId: AgentGrantableCapabilityId,
+  capabilityId: AgentKeyGrantableCapabilityId,
   input: unknown,
 ): string {
   const digest = createHash('sha256')

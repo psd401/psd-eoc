@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  isAgentGrantableCapabilityId,
-  type AgentGrantableCapabilityId,
+  isAgentKeyGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
 } from '@psd-eoc/contracts';
 
 import {
@@ -32,7 +32,7 @@ const CAPABILITY_IDS = Object.freeze([
   'export-event-summary',
   'export-drill-records',
   'start-event',
-] as const satisfies readonly AgentGrantableCapabilityId[]);
+] as const satisfies readonly AgentKeyGrantableCapabilityId[]);
 
 const CREDENTIALS = Object.freeze({
   first:
@@ -124,7 +124,7 @@ function harness(): Harness {
       },
       authorizeCapability(resolved, capabilityId) {
         if (
-          !isAgentGrantableCapabilityId(capabilityId) ||
+          !isAgentKeyGrantableCapabilityId(capabilityId) ||
           !resolved.capabilityIds.includes(capabilityId)
         ) {
           throw new AgentApiKeyError(
