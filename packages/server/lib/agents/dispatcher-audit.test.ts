@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
   CAPABILITY_CATALOG,
   EventSchema,
   HUMAN_ONLY_ACTION_IDS,
@@ -750,12 +749,6 @@ describe('default agent dispatcher routing', () => {
         authenticated,
       ),
     ).rejects.toThrow('Synthetic persistence failure.');
-  });
-
-  test('deploys exactly the agent-key allowlist', () => {
-    expect(AGENT_DEPLOYED_CAPABILITY_IDS).toBe(
-      AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
-    );
   });
 
   test('fails closed with 503 when an ID outside the allowlist bypasses static typing', () => {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import type { AgentKeyGrantableCapabilityId } from './agent-key-grants';
 import {
   SecurityAuditPageSchema,
   SecurityAuditQuerySchema,
@@ -23,7 +24,6 @@ import {
   type InvocationSource,
   type PreSessionOidcPrincipal,
 } from './capability';
-import type { AgentKeyGrantableCapabilityId } from './agent-key-grants';
 import { installCapabilityViews } from './capability-derived-registry';
 import {
   EventRoomSyncResultSchema,

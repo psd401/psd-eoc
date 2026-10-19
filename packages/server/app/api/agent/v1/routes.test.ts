@@ -11,6 +11,7 @@ import {
   SecurityAuditScopeError,
 } from '../../../../lib/audit';
 import { AgentApiKeyAdministrationError } from '../../../../lib/agents/admin-capabilities';
+import { AgentCapabilityUnavailableError } from '../../../../lib/agents/dispatcher';
 import {
   AgentRestGateway,
   type AgentCapabilityDispatcher,
@@ -21,6 +22,7 @@ import {
   AgentApiKeyService,
   type AuthenticatedAgentApiKey,
 } from '../../../../lib/agents/keys';
+import { unusedAgentApiKeyRepository } from '../../../../lib/testing/agent-api-keys';
 import {
   agentApiErrorResponse,
   handleAgentCapability,
@@ -41,14 +43,7 @@ const CREDENTIAL =
 
 /** Only `authorizeCapability` is used; it needs no persistence. */
 const keyService = new AgentApiKeyService({
-  repository: {
-    persistIssuedKey: async () => {
-      throw new Error('Unexpected key persistence.');
-    },
-    findVerifierByPrefix: async () => null,
-    appendRevocation: async () => ({ kind: 'not-found' }),
-    listSummaries: async () => ({ items: [], hasMore: false }),
-  },
+  repository: unusedAgentApiKeyRepository(),
 });
 
 function authenticatedAgent(
@@ -629,6 +624,43 @@ describe('agent REST capability route', () => {
         action: withheld,
         outcome: 'denied',
         reasonCode: 'CAPABILITY_NOT_GRANTED',
+      }),
+    ]);
+  });
+
+  test('reports an allowlisted capability whose handler is unavailable truthfully with 503 and audits the failure', async () => {
+    // The grant is valid and authorization passes; the dispatcher's own
+    // fail-closed signal must still reach the client as an honest 503.
+    const harness = gatewayHarness(
+      { kind: 'district' },
+      ['list-active-events'],
+      null,
+      new AgentCapabilityUnavailableError('list-active-events'),
+    );
+
+    const response = await handleAgentCapability(
+      agentRequest('list-active-events', {
+        facilityId: null,
+        cursor: null,
+        limit: 25,
+      }),
+      'list-active-events',
+      harness.runtime,
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      code: 'INTERNAL_ERROR',
+      message: 'The agent capability is not available in this deployment.',
+      retryable: false,
+      requestId: IDS.request,
+    });
+    expect(harness.audits).toEqual([
+      expect.objectContaining({
+        category: 'agent-access',
+        action: 'list-active-events',
+        outcome: 'failure',
+        reasonCode: 'INTERNAL_ERROR',
       }),
     ]);
   });

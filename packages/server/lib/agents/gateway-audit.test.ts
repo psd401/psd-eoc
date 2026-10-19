@@ -12,6 +12,7 @@ import {
 } from '../audit/repository';
 import { parseSecurityAuditFact, type SecurityAuditFact } from '../audit/model';
 import { CapabilityEngineError } from '../capabilities/engine';
+import { unusedAgentApiKeyRepository } from '../testing/agent-api-keys';
 import { createAgentGatewayAuditSink } from './audit';
 import { AgentRestGateway, type AgentCapabilityDispatcher } from './gateway';
 import {
@@ -332,14 +333,7 @@ describe('agent gateway audit ownership', () => {
   test('refuses a key carrying a withheld grant with an audited 403 before dispatch', async () => {
     const repository = new UniqueRequestAuditRepository();
     const keys = new AgentApiKeyService({
-      repository: {
-        persistIssuedKey: async () => {
-          throw new Error('Unexpected key persistence.');
-        },
-        findVerifierByPrefix: async () => null,
-        appendRevocation: async () => ({ kind: 'not-found' }),
-        listSummaries: async () => ({ items: [], hasMore: false }),
-      },
+      repository: unusedAgentApiKeyRepository(),
     });
     // The catalog admits the grant for agents, and a stored key could carry
     // it; the allowlist, applied by the real service, is what refuses it.
