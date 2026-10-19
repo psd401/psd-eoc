@@ -1805,11 +1805,22 @@ export class DrizzleEventTypeStore implements EventTypeStore {
       const publishedDraftIds = new Set<string>();
       for (const version of versionRows) {
         versionNumberById.set(version.id, version.version);
-        const fromDraft = publishedDraftId(
-          EventTypePublicationAuthorizationSchema.parse(
-            version.publicationAuthorization,
-          ),
+        // A version whose stored authorization no longer parses cannot name
+        // the draft it came from; it is logged and treated as naming none, so
+        // one damaged version row does not take the review list down either.
+        const authorization = EventTypePublicationAuthorizationSchema.safeParse(
+          version.publicationAuthorization,
         );
+        if (!authorization.success) {
+          console.warn(
+            JSON.stringify({
+              event: 'event-type-version-authorization-unreadable',
+              eventTypeVersionId: version.id,
+            }),
+          );
+          continue;
+        }
+        const fromDraft = publishedDraftId(authorization.data);
         if (fromDraft !== null) publishedDraftIds.add(fromDraft);
       }
 
@@ -2489,6 +2500,33 @@ export async function executeListEventTypeDraftsCapability(
     envelope.input,
     executionDependencies(execution.context),
   );
+}
+
+/**
+ * Every draft awaiting review, following the list's cursor to the end. The
+ * review page shows the whole set because a proposal past the first page is
+ * exactly the one that would otherwise go unreviewed.
+ */
+export async function executeListAllEventTypeDraftsCapability(
+  input: Omit<ExecuteEventTypeQueryInput<ListEventTypeDraftsInput>, 'query'>,
+): Promise<readonly EventTypeDraftPage['items'][number][]> {
+  const items: EventTypeDraftPage['items'][number][] = [];
+  let cursor: string | null = null;
+  do {
+    const page: EventTypeDraftPage = await executeListEventTypeDraftsCapability(
+      { ...input, query: { cursor, limit: 200 } },
+    );
+    items.push(...page.items);
+    const next = page.pageInfo.hasMore ? page.pageInfo.nextCursor : null;
+    if (next !== null && next === cursor) {
+      throw new EventTypeCapabilityError(
+        'CONFLICT',
+        'The draft review list did not advance between pages.',
+      );
+    }
+    cursor = next;
+  } while (cursor !== null);
+  return items;
 }
 
 export async function executePreviewEventTypeRenderingCapability(

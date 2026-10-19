@@ -8,7 +8,7 @@ import {
 } from '../../../../lib/auth/sessions';
 import {
   EventTypeCapabilityError,
-  executeListEventTypeDraftsCapability,
+  executeListAllEventTypeDraftsCapability,
   executeListEventTypesCapability,
   getDefaultEventTypeStore,
 } from '../../../../lib/capabilities/event-types';
@@ -41,7 +41,7 @@ export default async function EventTypesAdminPage({
   const parameters = await searchParams;
   const filters = parseResponseListFilters(parameters);
   let eventTypePage;
-  let draftPage;
+  let drafts;
   try {
     const store = getDefaultEventTypeStore();
     eventTypePage = await executeListEventTypesCapability({
@@ -54,13 +54,13 @@ export default async function EventTypesAdminPage({
         limit: 200,
       },
     });
-    // The review list is deliberately unfiltered: a draft against a retired or
-    // other-mode response still needs a human decision, and hiding it behind
-    // the list filter is how an agent proposal would go unreviewed.
-    draftPage = await executeListEventTypeDraftsCapability({
+    // The review list is deliberately unfiltered and complete: a draft against
+    // a retired or other-mode response, or one past the first page, still
+    // needs a human decision, and hiding it is how an agent proposal would go
+    // unreviewed.
+    drafts = await executeListAllEventTypeDraftsCapability({
       store,
       authenticated,
-      query: { cursor: null, limit: 200 },
     });
   } catch (error) {
     if (
@@ -86,7 +86,7 @@ export default async function EventTypesAdminPage({
       </header>
       <EventTypeAdmin
         csrfCookieName={WEB_CSRF_COOKIE_NAME}
-        drafts={draftPage.items}
+        drafts={drafts}
         filters={filters}
         items={eventTypePage.items}
         sessionId={authenticated.result.session.id}

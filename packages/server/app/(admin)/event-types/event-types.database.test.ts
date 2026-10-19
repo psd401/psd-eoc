@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import {
   afterAll,
@@ -1980,7 +1980,8 @@ describeWithDatabase('event-type database versioning', () => {
       displayName: 'Night shift drafting',
       facilityScopeKind: 'district',
       keyPrefix,
-      credentialDigest: createHash('sha256').update(apiKeyId).digest('hex'),
+      // The column only needs a well-formed digest; no credential exists.
+      credentialDigest: randomBytes(32).toString('hex'),
       issuedByUserId: issuerId,
       issuedAt: fixtureTime,
     });

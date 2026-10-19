@@ -18,6 +18,7 @@ import {
   type EventTypeVersion,
   type EventTypeVersionDraft,
   type EventKind,
+  type ListEventTypeDraftsInput,
   type MessageTemplateCatalog,
   type MessageTemplateSet,
   type NotificationPurpose,
@@ -30,6 +31,7 @@ import {
   EventTypeCapabilityError,
   executeCreateEventTypeDraftCapability,
   executeDiscardEventTypeDraftCapability,
+  executeListAllEventTypeDraftsCapability,
   executeListEventTypeDraftsCapability,
   executeListEventTypesCapability,
   isDatabaseConstraintError,
@@ -227,6 +229,7 @@ function catalog(
 class CountingStore implements EventTypeStore {
   public listCalls = 0;
   public listDraftCalls = 0;
+  public readonly draftCursors: (string | null)[] = [];
   public createCalls = 0;
   public discardCalls = 0;
 
@@ -246,8 +249,11 @@ class CountingStore implements EventTypeStore {
     throw new Error('Unexpected draft read.');
   }
 
-  public async listDrafts(): Promise<EventTypeDraftPage> {
+  public async listDrafts(
+    input: ListEventTypeDraftsInput,
+  ): Promise<EventTypeDraftPage> {
     this.listDraftCalls += 1;
+    this.draftCursors.push(input.cursor);
     return EventTypeDraftPageSchema.parse({
       items: [],
       pageInfo: { hasMore: false, nextCursor: null },
@@ -1329,6 +1335,88 @@ describe('capability-level administrator authorization', () => {
       }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
     expect(campusStore.listDraftCalls).toBe(0);
+  });
+
+  test('follows the review list to its last page and refuses a page that does not advance', async () => {
+    const item = (id: string): EventTypeDraftListItem => ({
+      id,
+      eventTypeId: '20000000-0000-4000-8000-000000000002',
+      name: 'Secure',
+      templateMode: 'real',
+      baseVersionId: null,
+      baseVersionNumber: null,
+      draftedBy: { kind: 'agent', agentId: IDS.agent, apiKeyId: IDS.apiKey },
+      author: {
+        kind: 'agent',
+        agentDisplayName: 'Wording Assistant',
+        key: null,
+      },
+      draftRevision: 'c'.repeat(64),
+      createdAt: '2026-10-18T17:00:00.000Z',
+    });
+    const first = item('20000000-0000-4000-8000-000000000011');
+    const second = item('20000000-0000-4000-8000-000000000012');
+    const third = item('20000000-0000-4000-8000-000000000013');
+    class PagingStore extends CountingStore {
+      public constructor(private readonly advances: boolean) {
+        super();
+      }
+      public override async listDrafts(
+        input: ListEventTypeDraftsInput,
+      ): Promise<EventTypeDraftPage> {
+        await super.listDrafts(input);
+        if (input.cursor === null) {
+          return EventTypeDraftPageSchema.parse({
+            items: [first, second],
+            pageInfo: { hasMore: true, nextCursor: 'Mg' },
+          });
+        }
+        return EventTypeDraftPageSchema.parse(
+          this.advances
+            ? {
+                items: [third],
+                pageInfo: { hasMore: false, nextCursor: null },
+              }
+            : {
+                items: [third],
+                pageInfo: { hasMore: true, nextCursor: 'Mg' },
+              },
+        );
+      }
+    }
+
+    const paging = new PagingStore(true);
+    const all = await executeListAllEventTypeDraftsCapability({
+      store: paging,
+      authenticated: authenticatedSession(['admin']),
+      now: NOW,
+    });
+    expect(all.map((draft) => draft.id)).toEqual([
+      first.id,
+      second.id,
+      third.id,
+    ]);
+    expect(paging.draftCursors).toEqual([null, 'Mg']);
+
+    const stuck = new PagingStore(false);
+    await expect(
+      executeListAllEventTypeDraftsCapability({
+        store: stuck,
+        authenticated: authenticatedSession(['admin']),
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(stuck.draftCursors).toEqual([null, 'Mg']);
+
+    const staff = new PagingStore(true);
+    await expect(
+      executeListAllEventTypeDraftsCapability({
+        store: staff,
+        authenticated: authenticatedSession(['staff']),
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(staff.draftCursors).toEqual([]);
   });
 
   test('lets a district administrator reach the discard store over a verified web submit', async () => {
