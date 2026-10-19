@@ -3,7 +3,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 
-import { AgentCapabilityGrantSchema } from './agent-api';
+import {
+  AgentCapabilityGrantSchema,
+  RetainedAgentCapabilityGrantSchema,
+} from './agent-api';
+import {
+  AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
+  type AgentKeyGrantableCapabilityId,
+} from './agent-key-grants';
 
 import {
   AGENT_GRANTABLE_CAPABILITY_IDS,
@@ -27,12 +34,19 @@ type Equal<Left, Right> =
 
 const agentGrantTypeIsExact: Equal<
   AgentCapabilityGrant,
-  AgentGrantableCapabilityId
+  AgentKeyGrantableCapabilityId
 > = true;
 const agentGrantSchemaOutputIsExact: Equal<
   z.output<typeof AgentCapabilityGrantSchema>,
+  AgentKeyGrantableCapabilityId
+> = true;
+const retainedGrantSchemaOutputIsExact: Equal<
+  z.output<typeof RetainedAgentCapabilityGrantSchema>,
   AgentGrantableCapabilityId
 > = true;
+const allowlistIsWithinCatalogVocabulary: AgentKeyGrantableCapabilityId extends AgentGrantableCapabilityId
+  ? true
+  : false = true;
 
 const syntheticPolicy = Object.freeze({
   principalKinds: Object.freeze(['human', 'agent'] as const),
@@ -132,8 +146,26 @@ describe('canonical capability derived views', () => {
     expect(agentGrantSchemaOutputIsExact).toBe(true);
     expect(z.toJSONSchema(AgentCapabilityGrantSchema)).toMatchObject({
       type: 'string',
+      enum: [...AGENT_KEY_GRANTABLE_CAPABILITY_IDS],
+    });
+  });
+
+  test('keeps the retained grant vocabulary on the derived view and the allowlist inside it', () => {
+    expect(retainedGrantSchemaOutputIsExact).toBe(true);
+    expect(allowlistIsWithinCatalogVocabulary).toBe(true);
+    expect(z.toJSONSchema(RetainedAgentCapabilityGrantSchema)).toMatchObject({
+      type: 'string',
       enum: [...AGENT_GRANTABLE_CAPABILITY_IDS],
     });
+    const derived = new Set<string>(AGENT_GRANTABLE_CAPABILITY_IDS);
+    expect(
+      AGENT_KEY_GRANTABLE_CAPABILITY_IDS.filter(
+        (capabilityId) => !derived.has(capabilityId),
+      ),
+    ).toEqual([]);
+    expect(AGENT_KEY_GRANTABLE_CAPABILITY_IDS.length).toBeLessThan(
+      AGENT_GRANTABLE_CAPABILITY_IDS.length,
+    );
   });
 
   test('exposes only the initialized root contract entry point', () => {

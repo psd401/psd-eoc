@@ -19,14 +19,14 @@ import {
   RevokeAgentApiKeyInputSchema,
   TimestampSchema,
   UuidSchema,
-  isAgentGrantableCapabilityId,
+  isAgentKeyGrantableCapabilityId,
   type Actor,
   type AgentApiKey,
   type AgentApiKeyIssuance,
   type AgentApiKeyPage,
   type AgentApiKeyRevocation,
   type AgentApiKeySummary,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type CapabilityScope,
   type ListAgentApiKeysInput,
 } from '@psd-eoc/contracts';
@@ -116,11 +116,16 @@ export interface AgentApiKeyMutationInvocation {
   readonly idempotencyKey: string;
 }
 
-/** Authenticated server-owned identity and exact persisted authority. */
+/** Authenticated server-owned identity and exact effective authority. */
 export interface AuthenticatedAgentApiKey {
   readonly actor: Extract<Actor, { readonly kind: 'agent' }>;
   readonly scope: CapabilityScope;
-  readonly capabilityIds: readonly AgentGrantableCapabilityId[];
+  /**
+   * Effective grants: the stored grants narrowed to the current allowlist. A
+   * grant persisted before the allowlist tightened stays visible on `key`
+   * but never authorizes a call.
+   */
+  readonly capabilityIds: readonly AgentKeyGrantableCapabilityId[];
   readonly key: AgentApiKeySummary;
 }
 
@@ -479,7 +484,12 @@ export class AgentApiKeyService {
         apiKeyId: stored.id,
       }),
       scope: Object.freeze({ facilityScope: stored.facilityScope }),
-      capabilityIds: stored.capabilityIds,
+      // A persisted grant outside the allowlist is retained evidence, not
+      // authority: it is dropped here and the gateway audits any attempt to
+      // exercise it as an access denial.
+      capabilityIds: Object.freeze(
+        stored.capabilityIds.filter(isAgentKeyGrantableCapabilityId),
+      ),
       key,
     });
   }
@@ -487,9 +497,9 @@ export class AgentApiKeyService {
   public authorizeCapability(
     authenticated: AuthenticatedAgentApiKey,
     capabilityIdValue: unknown,
-  ): AgentGrantableCapabilityId {
+  ): AgentKeyGrantableCapabilityId {
     if (
-      !isAgentGrantableCapabilityId(capabilityIdValue) ||
+      !isAgentKeyGrantableCapabilityId(capabilityIdValue) ||
       !authenticated.capabilityIds.includes(capabilityIdValue)
     ) {
       throw new AgentApiKeyError(

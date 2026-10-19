@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import { AGENT_KEY_GRANTABLE_CAPABILITY_IDS } from './agent-key-grants';
 import {
   AGENT_GRANTABLE_CAPABILITY_IDS,
   CAPABILITY_INVOCATION_POLICY,
@@ -24,7 +25,8 @@ const agentTransportCapabilities = Object.entries(CAPABILITY_INVOCATION_POLICY)
   .map(([capabilityId]) => capabilityId);
 
 const AGENT_SURFACE_MANIFESTS = {
-  'contracts agent capability grants': AGENT_GRANTABLE_CAPABILITY_IDS,
+  'contracts agent-key grant allowlist': AGENT_KEY_GRANTABLE_CAPABILITY_IDS,
+  'contracts agent-callable catalog vocabulary': AGENT_GRANTABLE_CAPABILITY_IDS,
   'canonical agent REST and MCP invocation policy': agentTransportCapabilities,
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 

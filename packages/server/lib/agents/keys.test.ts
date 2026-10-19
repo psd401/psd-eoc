@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { describe, expect, test } from 'bun:test';
+import { ZodError } from 'zod';
 
 import {
   AgentApiKeyRevocationSchema,
@@ -10,7 +11,7 @@ import {
   type AgentApiKey,
   type AgentApiKeyRevocation,
   type AgentApiKeySummary,
-  type AgentGrantableCapabilityId,
+  type AgentKeyGrantableCapabilityId,
   type IssueAgentApiKeyInput,
 } from '@psd-eoc/contracts';
 
@@ -31,6 +32,7 @@ import {
   AgentApiKeyService,
   digestAgentApiKeyAuditSubject,
   digestAgentApiKeyCredential,
+  type AuthenticatedAgentApiKey,
 } from './keys';
 
 const IDS = {
@@ -218,7 +220,7 @@ function issueInput(
     capabilityIds: [
       'prepare-activation',
       'list-active-events',
-      'run-delivery-report',
+      'list-drill-records',
     ],
     expiresInSeconds: 3_600,
     ...overrides,
@@ -321,7 +323,7 @@ describe('AgentApiKeyService', () => {
       },
     });
     expect(authenticated.capabilityIds).toEqual(
-      issueInput().capabilityIds as readonly AgentGrantableCapabilityId[],
+      issueInput().capabilityIds as readonly AgentKeyGrantableCapabilityId[],
     );
     expect('credentialDigest' in authenticated.key).toBe(false);
     expect(
@@ -355,6 +357,118 @@ describe('AgentApiKeyService', () => {
       if (!(error instanceof AgentApiKeyError)) throw error;
       expect(error.code).toBe('PERSISTENCE_FAILURE');
       expect(error.status).toBe(500);
+    }
+  });
+
+  test('refuses issuance of a catalog capability outside the agent-key allowlist', async () => {
+    const repository = new InMemoryAgentApiKeyRepository();
+    const service = new AgentApiKeyService({ repository });
+
+    for (const withheld of [
+      'publish-event-type-version',
+      'append-journal-entry',
+      'set-channel-enabled',
+    ]) {
+      await expect(
+        service.issue(
+          issueInput({
+            capabilityIds: ['get-event', withheld] as unknown as readonly [
+              AgentKeyGrantableCapabilityId,
+            ],
+          }),
+          IDS.issuer,
+          mutation(IDS.issuer),
+        ),
+      ).rejects.toBeInstanceOf(ZodError);
+    }
+    expect(repository.keys.size).toBe(0);
+  });
+
+  test('authenticates a retained key carrying a withheld grant but never exercises it', async () => {
+    const repository = new InMemoryAgentApiKeyRepository();
+    const service = new AgentApiKeyService({
+      repository,
+      now: () => new Date('2026-08-10T18:00:00.000Z'),
+    });
+    const issuance = await service.issue(
+      issueInput({ capabilityIds: ['get-event'] }),
+      IDS.issuer,
+      mutation(IDS.issuer),
+    );
+    const persisted = repository.keys.get(issuance.key.id);
+    if (persisted === undefined) throw new TypeError('Missing persisted key.');
+    // A row written before the allowlist tightened: the catalog admits the
+    // grant for agents and the retained vocabulary still parses it.
+    repository.keys.set(
+      persisted.id,
+      AgentApiKeySchema.parse({
+        ...persisted,
+        capabilityIds: [
+          ...persisted.capabilityIds,
+          'publish-event-type-version',
+        ],
+      }),
+    );
+
+    const authenticated = await service.authenticate(
+      issuance.oneTimeCredential,
+    );
+
+    expect(authenticated.capabilityIds).toEqual(['get-event']);
+    expect(authenticated.key.capabilityIds).toEqual([
+      'get-event',
+      'publish-event-type-version',
+    ]);
+    expect(service.authorizeCapability(authenticated, 'get-event')).toBe(
+      'get-event',
+    );
+    expect(() =>
+      service.authorizeCapability(authenticated, 'publish-event-type-version'),
+    ).toThrow(errorWith('CAPABILITY_NOT_GRANTED', 403));
+  });
+
+  test('refuses a withheld grant even when an authenticated key object lists it', () => {
+    const service = new AgentApiKeyService({
+      repository: new InMemoryAgentApiKeyRepository(),
+    });
+    const withheld = Object.freeze([
+      'publish-event-type-version',
+      'append-journal-entry',
+      'join-event',
+      'set-channel-enabled',
+    ]);
+    const authenticated: AuthenticatedAgentApiKey = Object.freeze({
+      actor: Object.freeze({
+        kind: 'agent' as const,
+        agentId: IDS.existingAgent,
+        apiKeyId: IDS.missingKey,
+      }),
+      scope: Object.freeze({ facilityScope: { kind: 'district' as const } }),
+      capabilityIds: [
+        'get-event',
+        ...withheld,
+      ] as unknown as readonly AgentKeyGrantableCapabilityId[],
+      key: AgentApiKeySummarySchema.parse({
+        id: IDS.missingKey,
+        agentId: IDS.existingAgent,
+        displayName: 'Hand-built key object listing withheld grants',
+        facilityScope: { kind: 'district' },
+        capabilityIds: ['get-event', ...withheld],
+        keyPrefix: 'abcdefghijkl',
+        issuedByUserId: IDS.issuer,
+        issuedAt: '2026-08-10T18:00:00.000Z',
+        expiresAt: null,
+        revokedAt: null,
+      }),
+    });
+
+    expect(service.authorizeCapability(authenticated, 'get-event')).toBe(
+      'get-event',
+    );
+    for (const capabilityId of withheld) {
+      expect(() =>
+        service.authorizeCapability(authenticated, capabilityId),
+      ).toThrow(errorWith('CAPABILITY_NOT_GRANTED', 403));
     }
   });
 

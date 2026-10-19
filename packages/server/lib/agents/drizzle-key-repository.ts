@@ -6,7 +6,7 @@ import {
   FacilityScopeSchema,
   IdempotencyKeySchema,
   TimestampSchema,
-  isAgentGrantableCapabilityId,
+  isAgentKeyGrantableCapabilityId,
   type AgentApiKey,
   type AgentApiKeyRevocation,
   type AgentApiKeySummary,
@@ -314,7 +314,11 @@ async function persistIssuedKey(
   inputValue: PersistIssuedAgentApiKeyInput,
 ): Promise<PersistIssuedAgentApiKeyResult> {
   const key = AgentApiKeySchema.parse(inputValue.key);
-  const capabilityIds = key.capabilityIds.filter(isAgentGrantableCapabilityId);
+  // Persistence refuses to write a grant outside the allowlist even though the
+  // retained row vocabulary (the PostgreSQL enum) would accept it.
+  const capabilityIds = key.capabilityIds.filter(
+    isAgentKeyGrantableCapabilityId,
+  );
   if (capabilityIds.length !== key.capabilityIds.length) {
     throw new AgentApiKeyRepositoryIntegrityError();
   }
