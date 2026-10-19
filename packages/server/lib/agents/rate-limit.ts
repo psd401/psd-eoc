@@ -12,13 +12,15 @@ import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
  * bursts); it is not a precise meter. Restarting an instance resets its
  * windows.
  *
- * The per-minute budget is charged when a request is authorized. The hourly
- * budget for costly calls is charged at dispatch, where the document is
- * rendered or the row persisted: a request refused for budget never reaches
- * the capability. Charging at dispatch also keeps the one-minute health
- * canary clear of it, because the canary authorizes
- * `create-activation-preview` on a long-lived gateway but executes it inside
- * a per-run transactional gateway that is rolled back and discarded.
+ * The per-minute budget is charged as soon as the key is authenticated,
+ * before the protected-action check, so a key looping on a human-only alias
+ * is bounded like any other caller. The hourly budget for costly calls is
+ * charged at dispatch, where the document is rendered or the row persisted:
+ * a request refused for budget never reaches the capability. Charging at
+ * dispatch also keeps the one-minute health canary clear of it, because the
+ * canary authorizes `create-activation-preview` on a long-lived gateway but
+ * executes it inside a per-run transactional gateway that is rolled back and
+ * discarded.
  */
 export const AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE = 60;
 export const AGENT_RATE_LIMIT_MINUTE_WINDOW_MS = 60 * 1_000;
@@ -38,15 +40,22 @@ const costlyCapabilityIds = new Set<string>(
 
 export type AgentRequestLimitWindow = 'per-minute' | 'per-hour';
 
+/**
+ * What a refused request was trying to do. Refusals are audited once per
+ * lockout and kind, so a refused protected-action attempt is always recorded
+ * even when an ordinary read was refused first in the same lockout.
+ */
+export type AgentRequestKind = 'request' | 'protected-action';
+
 export interface AgentRequestRefusal {
   readonly kind: 'refused';
   readonly window: AgentRequestLimitWindow;
   /** Whole seconds until the oldest counted request leaves the window. */
   readonly retryAfterSeconds: number;
   /**
-   * True for the first refusal since the key was last admitted. The gateway
-   * audits only those, so a key that keeps sending past its budget cannot
-   * grow the audit chain faster than its admitted budget allows.
+   * True for the first refusal of this request kind since the key was last
+   * admitted. The gateway audits only those, so a key that keeps sending past
+   * its budget cannot grow the audit chain faster than its admitted budget.
    */
   readonly firstRefusal: boolean;
 }
@@ -57,7 +66,11 @@ export type AgentRequestLimitDecision =
 /** Decides, and when admitted records, one authenticated request. */
 export interface AgentRequestLimiter {
   /** Per-minute budget, charged once the key is authenticated. */
-  admit(apiKeyId: string, now: Date): AgentRequestLimitDecision;
+  admit(
+    apiKeyId: string,
+    now: Date,
+    requestKind?: AgentRequestKind,
+  ): AgentRequestLimitDecision;
   /** Hourly costly budget, charged at dispatch; admits any other capability. */
   admitCostly(
     apiKeyId: string,
@@ -89,8 +102,8 @@ export class AgentGatewayRateLimitError extends Error {
 interface SlidingWindow {
   /** Admission times (ms) still inside the window. */
   admitted: number[];
-  /** Whether the last decision for this window was a refusal. */
-  refusing: boolean;
+  /** Request kinds refused since the last admission. */
+  readonly refused: Set<string>;
 }
 
 interface KeyWindows {
@@ -123,7 +136,8 @@ function prune(window: SlidingWindow, cutoff: number): void {
  */
 function decide(
   window: SlidingWindow,
-  kind: AgentRequestLimitWindow,
+  windowKind: AgentRequestLimitWindow,
+  requestKind: string,
   limit: number,
   windowMs: number,
   now: number,
@@ -131,15 +145,15 @@ function decide(
   prune(window, now - windowMs);
   if (window.admitted.length < limit) {
     window.admitted.push(now);
-    window.refusing = false;
+    window.refused.clear();
     return ADMITTED;
   }
   const oldest = Math.min(...window.admitted);
-  const firstRefusal = !window.refusing;
-  window.refusing = true;
+  const firstRefusal = !window.refused.has(requestKind);
+  window.refused.add(requestKind);
   return Object.freeze({
     kind: 'refused',
-    window: kind,
+    window: windowKind,
     retryAfterSeconds: Math.max(
       1,
       Math.ceil((oldest + windowMs - now) / 1_000),
@@ -169,8 +183,8 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
     let windows = keys.get(apiKeyId);
     if (windows === undefined) {
       windows = {
-        minute: { admitted: [], refusing: false },
-        hour: { admitted: [], refusing: false },
+        minute: { admitted: [], refused: new Set() },
+        hour: { admitted: [], refused: new Set() },
       };
       keys.set(apiKeyId, windows);
     }
@@ -178,11 +192,12 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
   }
 
   const limiter: AgentRequestLimiter = {
-    admit(apiKeyId, nowValue) {
+    admit(apiKeyId, nowValue, requestKind = 'request') {
       const now = validClock(nowValue);
       return decide(
         windowsFor(apiKeyId, now).minute,
         'per-minute',
+        requestKind,
         AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE,
         AGENT_RATE_LIMIT_MINUTE_WINDOW_MS,
         now,
@@ -194,6 +209,7 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
       return decide(
         windowsFor(apiKeyId, now).hour,
         'per-hour',
+        'costly',
         AGENT_RATE_LIMIT_COSTLY_REQUESTS_PER_HOUR,
         AGENT_RATE_LIMIT_HOUR_WINDOW_MS,
         now,

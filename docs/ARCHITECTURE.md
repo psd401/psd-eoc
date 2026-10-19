@@ -78,6 +78,9 @@ under the key, but only the first refusal of each lockout for either budget:
 later refusals in that lockout are answered without an audit row, so a key
 sending past its budget cannot grow the audit chain faster than its admitted
 budget.
+Protected-action aliases sit inside the same budget: within it every attempt
+is audited `HUMAN_ONLY_REQUIRED`, and past it the lockout's refusal fact is a
+`human-only-rejection` naming the action, so the signal is never lost.
 Authentication, one indexed read, still runs for every request. The limiter is
 in memory and per server process: with up to four App Runner instances, one
 key's effective ceiling is up to four times each constant, and an instance

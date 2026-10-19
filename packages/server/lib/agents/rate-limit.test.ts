@@ -90,6 +90,33 @@ describe('agent request limiter', () => {
     ).toMatchObject({ kind: 'refused', firstRefusal: true });
   });
 
+  test('tracks the first refusal per request kind inside one lockout', () => {
+    const limiter = createAgentRequestLimiter();
+    for (
+      let index = 0;
+      index < AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
+      index += 1
+    ) {
+      limiter.admit(KEYS.first, at(0));
+    }
+    expect(limiter.admit(KEYS.first, at(1))).toMatchObject({
+      kind: 'refused',
+      firstRefusal: true,
+    });
+    expect(limiter.admit(KEYS.first, at(2), 'protected-action')).toMatchObject({
+      kind: 'refused',
+      firstRefusal: true,
+    });
+    expect(limiter.admit(KEYS.first, at(3), 'protected-action')).toMatchObject({
+      kind: 'refused',
+      firstRefusal: false,
+    });
+    expect(limiter.admit(KEYS.first, at(4), 'request')).toMatchObject({
+      kind: 'refused',
+      firstRefusal: false,
+    });
+  });
+
   test('reports at least one second so Retry-After is never zero', () => {
     const limiter = createAgentRequestLimiter();
     for (

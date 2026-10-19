@@ -366,32 +366,70 @@ describe('agent gateway request budget', () => {
     expect(dispatches).toEqual(['export-event-summary']);
   });
 
-  test('still audits a protected action attempt as human-only once the budget is spent', async () => {
+  test('bounds protected-action attempts with the same budget without losing their signal', async () => {
     const { gateway, audits, dispatches } = harness();
+    const protectedRequest = (sequence: number) => ({
+      credential: CREDENTIALS.first,
+      capabilityId: 'start-real-incident',
+      requestId: requestId(sequence),
+      serverTime: SERVER_TIME,
+    });
+
+    // Within budget every attempt is recorded as a human-only rejection.
+    for (let sequence = 1; sequence <= 3; sequence += 1) {
+      await expect(
+        gateway.authorize(protectedRequest(sequence)),
+      ).rejects.toMatchObject({
+        status: 403,
+        reasonCode: 'HUMAN_ONLY_REQUIRED',
+      });
+    }
+    expect(audits).toHaveLength(3);
+    expect(audits[2]).toMatchObject({
+      category: 'human-only-rejection',
+      actionIds: ['start-real-incident'],
+      reasonCode: 'HUMAN_ONLY_REQUIRED',
+    });
+
+    // Those attempts spent budget like any other request.
     for (
-      let sequence = 1;
+      let sequence = 4;
       sequence <= AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE;
       sequence += 1
     ) {
       await gateway.authorize(listRequest(CREDENTIALS.first, sequence));
     }
-
     await expect(
-      gateway.authorize({
-        credential: CREDENTIALS.first,
-        capabilityId: 'start-real-incident',
-        requestId: requestId(AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE + 1),
-        serverTime: SERVER_TIME,
-      }),
-    ).rejects.toMatchObject({ status: 403, reasonCode: 'HUMAN_ONLY_REQUIRED' });
+      gateway.authorize(
+        listRequest(
+          CREDENTIALS.first,
+          AGENT_RATE_LIMIT_REQUESTS_PER_MINUTE + 1,
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(audits).toHaveLength(4);
+    expect(audits[3]).toMatchObject({
+      category: 'access-denial',
+      actionIds: [],
+      reasonCode: 'RATE_LIMITED',
+    });
 
-    expect(audits).toEqual([
-      expect.objectContaining({
-        category: 'human-only-rejection',
-        actionIds: ['start-real-incident'],
-        reasonCode: 'HUMAN_ONLY_REQUIRED',
-      }),
-    ]);
+    // Past budget a protected-action attempt is refused, and even after a
+    // read was refused first, the lockout still records one fact naming it.
+    for (let sequence = 62; sequence <= 70; sequence += 1) {
+      await expect(
+        gateway.authorize(protectedRequest(sequence)),
+      ).rejects.toMatchObject({ status: 429, code: 'RATE_LIMITED' });
+    }
+    expect(audits).toHaveLength(5);
+    expect(audits[4]).toMatchObject({
+      category: 'human-only-rejection',
+      action: 'start-event',
+      actionIds: ['start-real-incident'],
+      outcome: 'denied',
+      requestId: requestId(62),
+      reasonCode: 'RATE_LIMITED',
+    });
     expect(dispatches).toEqual([]);
   });
 

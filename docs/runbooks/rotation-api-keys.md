@@ -74,8 +74,10 @@ the facts for that key just before each one to see what it was doing.
 - `CAPABILITY_NOT_GRANTED` denials in the same run point to a consumer that
   is probing for grants it does not hold. Treat the key as a suspected
   compromise and revoke it first.
-- A human-only attempt is always recorded as `HUMAN_ONLY_REQUIRED`, never
-  hidden behind `RATE_LIMITED`, and is **SEV-0** on its own.
+- A human-only attempt within the key's budget is recorded as
+  `HUMAN_ONLY_REQUIRED`; past the budget it is refused, and the lockout's
+  one fact is a `human-only-rejection` with reason code `RATE_LIMITED`
+  naming the action. Either is **SEV-0** on its own.
 - Refusals from several keys at once, or the same key on every instance, are
   a capacity signal rather than a key problem.
 

@@ -245,9 +245,7 @@ function denialAudit(
 ): CapabilityAuditEvent {
   return Object.freeze({
     category:
-      input.reasonCode === 'HUMAN_ONLY_REQUIRED'
-        ? 'human-only-rejection'
-        : 'access-denial',
+      input.actionIds.length > 0 ? 'human-only-rejection' : 'access-denial',
     action: input.capabilityId,
     actionIds: input.actionIds,
     confirmationId: null,
@@ -375,6 +373,39 @@ export class AgentRestGateway {
       throw error;
     }
 
+    // The per-minute budget applies as soon as the key is known, so every
+    // refusal is attributable and a key looping on a protected-action alias
+    // is bounded like any other caller. A refused request never reaches the
+    // dispatcher. Only the first refusal of a lockout is audited, per request
+    // kind: each append takes the global audit lock and adds a permanent
+    // row, so auditing every refusal would let a key grow the chain at its
+    // send rate, while a refused protected-action attempt still leaves a
+    // human-only-rejection fact naming the action.
+    const admission = this.limiter.admit(
+      authenticated.actor.apiKeyId,
+      request.serverTime,
+      route.actionIds.length > 0 ? 'protected-action' : 'request',
+    );
+    if (admission.kind === 'refused') {
+      if (admission.firstRefusal) {
+        await this.dependencies.audit.append(
+          denialAudit(authenticated, {
+            capabilityId: route.capabilityId,
+            actionIds: route.actionIds,
+            requestId: request.requestId,
+            serverTime: request.serverTime,
+            reasonCode: 'RATE_LIMITED',
+          }),
+        );
+      }
+      throw new AgentGatewayRateLimitError(
+        admission.window,
+        admission.retryAfterSeconds,
+      );
+    }
+
+    // Within budget, every protected-action attempt is recorded as what it
+    // is; the runbook treats one such fact as SEV-0 on its own.
     if (route.actionIds.length > 0) {
       await this.dependencies.audit.append(
         denialAudit(authenticated, {
@@ -388,35 +419,6 @@ export class AgentRestGateway {
       throw new AgentGatewayError(
         'HUMAN_ONLY_REQUIRED',
         'This action requires an authenticated human in PSD EOC.',
-      );
-    }
-
-    // The per-minute budget applies once the key is known, so every refusal
-    // is attributable, and after the human-only check above, so a protected
-    // action attempt is always audited as what it is rather than as a
-    // rate-limit refusal. A refused request never reaches the dispatcher.
-    // Only the first refusal of a lockout is audited: each append takes the
-    // global audit lock and adds a permanent row, so auditing every refusal
-    // would let a key grow the chain at its send rate.
-    const admission = this.limiter.admit(
-      authenticated.actor.apiKeyId,
-      request.serverTime,
-    );
-    if (admission.kind === 'refused') {
-      if (admission.firstRefusal) {
-        await this.dependencies.audit.append(
-          denialAudit(authenticated, {
-            capabilityId: route.capabilityId,
-            actionIds: [],
-            requestId: request.requestId,
-            serverTime: request.serverTime,
-            reasonCode: 'RATE_LIMITED',
-          }),
-        );
-      }
-      throw new AgentGatewayRateLimitError(
-        admission.window,
-        admission.retryAfterSeconds,
       );
     }
 
