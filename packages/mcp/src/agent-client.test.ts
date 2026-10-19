@@ -1,11 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import { HUMAN_ONLY_ACTION_IDS } from '@psd-eoc/contracts';
+import {
+  HUMAN_ONLY_ACTION_IDS,
+  IdempotencyKeySchema,
+} from '@psd-eoc/contracts';
 
 import {
   AgentApiCallError,
   AgentApiClient,
   AgentApiConfigurationError,
   callMcpToolByUnknownName,
+  deriveIdempotencyKey,
   readAgentApiConfig,
 } from './agent-client';
 import { MCP_TOOLS } from './manifest';
@@ -289,5 +293,85 @@ describe('AgentApiClient', () => {
     expect(error).toBeInstanceOf(AgentApiCallError);
     expect((error as Error).message).not.toContain(secretDetail);
     expect(JSON.stringify(error)).not.toContain(secretDetail);
+  });
+});
+
+describe('MCP mutation idempotency keys', () => {
+  function keyCapturingClient() {
+    const keys: string[] = [];
+    const client = new AgentApiClient(
+      Object.freeze({
+        baseUrl: 'https://eoc.example.test/api/agent/v1',
+        apiKey: 'psd_agent_test-key.1',
+      }),
+      {
+        fetch: (async (_input: unknown, init: RequestInit = {}) => {
+          keys.push(new Headers(init.headers).get('idempotency-key') ?? '');
+          return Response.json(
+            {
+              code: 'INTERNAL_ERROR',
+              message: 'Not deployed.',
+              requestId: IDS.request,
+              retryable: false,
+              fieldErrors: [],
+            },
+            { status: 503 },
+          );
+        }) as unknown as typeof fetch,
+      },
+    );
+    return { client, keys };
+  }
+
+  test('sends the same key for identical calls and a different key for different input', async () => {
+    const { client, keys } = keyCapturingClient();
+    const otherPreview = '10000000-0000-4000-8000-000000000006';
+
+    for (const activationPreviewId of [
+      IDS.preview,
+      IDS.preview,
+      otherPreview,
+    ]) {
+      await expect(
+        client.call('prepare-activation', { activationPreviewId }),
+      ).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    }
+
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).toMatch(/^mcp-[a-f0-9]{64}$/u);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
+    for (const key of keys) {
+      expect(IdempotencyKeySchema.safeParse(key).success).toBe(true);
+    }
+  });
+
+  test('derives the key from content, not key order or capability alone', () => {
+    const ordered = deriveIdempotencyKey('update-event-type-draft', {
+      draftId: IDS.preview,
+      expectedDraftRevision: 2,
+      name: 'Lockdown',
+    });
+    expect(
+      deriveIdempotencyKey('update-event-type-draft', {
+        name: 'Lockdown',
+        expectedDraftRevision: 2,
+        draftId: IDS.preview,
+      }),
+    ).toBe(ordered);
+    expect(
+      deriveIdempotencyKey('update-event-type-draft', {
+        draftId: IDS.preview,
+        expectedDraftRevision: 3,
+        name: 'Lockdown',
+      }),
+    ).not.toBe(ordered);
+    expect(
+      deriveIdempotencyKey('create-event-type-draft', {
+        draftId: IDS.preview,
+        expectedDraftRevision: 2,
+        name: 'Lockdown',
+      }),
+    ).not.toBe(ordered);
   });
 });

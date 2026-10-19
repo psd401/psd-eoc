@@ -23,6 +23,11 @@ import {
   type AgentApiKeyService,
   type AuthenticatedAgentApiKey,
 } from './keys';
+import {
+  AgentGatewayRateLimitError,
+  createAgentRequestLimiter,
+  type AgentRequestLimiter,
+} from './rate-limit';
 
 const protectedActionCapability = Object.freeze({
   'start-real-incident': 'start-event',
@@ -75,6 +80,12 @@ export interface AgentGatewayDependencies {
   >;
   readonly dispatcher: AgentCapabilityDispatcher;
   readonly audit: AgentGatewayAuditSink;
+  /**
+   * Per-key request budget. Defaults to one fresh in-memory limiter per
+   * gateway; the production runtime builds one gateway per process, so the
+   * budget is per App Runner instance (see `./rate-limit.ts`).
+   */
+  readonly limiter?: AgentRequestLimiter;
 }
 
 export interface AgentGatewayRequest {
@@ -236,14 +247,13 @@ function denialAudit(
     actionIds: readonly HumanOnlyActionId[];
     requestId: string;
     serverTime: Date;
-    reasonCode: 'CAPABILITY_NOT_GRANTED' | 'HUMAN_ONLY_REQUIRED';
+    reasonCode:
+      'CAPABILITY_NOT_GRANTED' | 'HUMAN_ONLY_REQUIRED' | 'RATE_LIMITED';
   }>,
 ): CapabilityAuditEvent {
   return Object.freeze({
     category:
-      input.reasonCode === 'HUMAN_ONLY_REQUIRED'
-        ? 'human-only-rejection'
-        : 'access-denial',
+      input.actionIds.length > 0 ? 'human-only-rejection' : 'access-denial',
     action: input.capabilityId,
     actionIds: input.actionIds,
     confirmationId: null,
@@ -309,7 +319,9 @@ function auditReasonCode(error: unknown): string {
 function auditOutcome(error: unknown): 'denied' | 'failure' {
   if (typeof error !== 'object' || error === null) return 'failure';
   const status = Reflect.get(error, 'status');
-  return status === 401 || status === 403 ? 'denied' : 'failure';
+  return status === 401 || status === 403 || status === 429
+    ? 'denied'
+    : 'failure';
 }
 
 function executionAudit(
@@ -338,7 +350,11 @@ function executionAudit(
  * action aliases, and dispatches with server-owned agent identity and scope.
  */
 export class AgentRestGateway {
-  public constructor(private readonly dependencies: AgentGatewayDependencies) {}
+  private readonly limiter: AgentRequestLimiter;
+
+  public constructor(private readonly dependencies: AgentGatewayDependencies) {
+    this.limiter = dependencies.limiter ?? createAgentRequestLimiter();
+  }
 
   /** Authenticates first so all later parsing and execution has an audit identity. */
   public async authorize(
@@ -365,6 +381,39 @@ export class AgentRestGateway {
       throw error;
     }
 
+    // The per-minute budget applies as soon as the key is known, so every
+    // refusal is attributable and a key looping on a protected-action alias
+    // is bounded like any other caller. A refused request never reaches the
+    // dispatcher. Only the first refusal of a lockout is audited, per request
+    // kind: each append takes the global audit lock and adds a permanent
+    // row, so auditing every refusal would let a key grow the chain at its
+    // send rate, while a refused protected-action attempt still leaves a
+    // human-only-rejection fact naming the action.
+    const admission = this.limiter.admit(
+      authenticated.actor.apiKeyId,
+      request.serverTime,
+      route.actionIds.length > 0 ? 'protected-action' : 'request',
+    );
+    if (admission.kind === 'refused') {
+      if (admission.firstRefusal) {
+        await this.dependencies.audit.append(
+          denialAudit(authenticated, {
+            capabilityId: route.capabilityId,
+            actionIds: route.actionIds,
+            requestId: request.requestId,
+            serverTime: request.serverTime,
+            reasonCode: 'RATE_LIMITED',
+          }),
+        );
+      }
+      throw new AgentGatewayRateLimitError(
+        admission.window,
+        admission.retryAfterSeconds,
+      );
+    }
+
+    // Within budget, every protected-action attempt is recorded as what it
+    // is; the runbook treats one such fact as SEV-0 on its own.
     if (route.actionIds.length > 0) {
       await this.dependencies.audit.append(
         denialAudit(authenticated, {
@@ -411,6 +460,8 @@ export class AgentRestGateway {
   /**
    * Parses and executes only after authorization, appending one ingress audit
    * for every authenticated canonical call, including validation failures.
+   * The one exception is a repeated budget refusal inside a lockout, which is
+   * answered without a row so a refused key cannot grow the audit chain.
    */
   public async executeAuthorized(
     call: AuthorizedAgentGatewayCall,
@@ -422,6 +473,7 @@ export class AgentRestGateway {
         ? Object.freeze({ acceptCanonicalRequestAudit: true })
         : undefined;
     let targetFacilityId: string | null = null;
+    let repeatedRefusal = false;
     try {
       const request = await prepare();
       const definition = defineCapability(call.capabilityId);
@@ -453,6 +505,22 @@ export class AgentRestGateway {
         },
         call.capabilityId,
       );
+      // The hourly budget for costly calls is charged here, where the
+      // document would be rendered or the row persisted. The ingress audit
+      // in the catch below records the first refusal of a lockout only, as
+      // authorize() does for the per-minute budget.
+      const costlyAdmission = this.limiter.admitCostly(
+        call.authenticated.actor.apiKeyId,
+        call.capabilityId,
+        call.serverTime,
+      );
+      if (costlyAdmission.kind === 'refused') {
+        repeatedRefusal = !costlyAdmission.firstRefusal;
+        throw new AgentGatewayRateLimitError(
+          costlyAdmission.window,
+          costlyAdmission.retryAfterSeconds,
+        );
+      }
       let parsed: unknown;
       try {
         const output = await this.dependencies.dispatcher.execute(
@@ -479,11 +547,17 @@ export class AgentRestGateway {
       );
       return parsed;
     } catch (error) {
-      const outcome = auditOutcome(error);
-      await this.dependencies.audit.append(
-        executionAudit(call, outcome, auditReasonCode(error), targetFacilityId),
-        auditOptions,
-      );
+      if (!repeatedRefusal) {
+        await this.dependencies.audit.append(
+          executionAudit(
+            call,
+            auditOutcome(error),
+            auditReasonCode(error),
+            targetFacilityId,
+          ),
+          auditOptions,
+        );
+      }
       throw error;
     }
   }
