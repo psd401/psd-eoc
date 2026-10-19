@@ -42,7 +42,9 @@ export const AgentCapabilityGrantSchema = AgentKeyGrantableCapabilityIdSchema;
 /**
  * Owns an agent API-key issuance request. Actor, issuance time, key material,
  * and authorization are server-owned; the caller supplies only the intended
- * name, bounded facility/capability scope, and optional lifetime.
+ * name, bounded facility/capability scope, and a bounded lifetime. Every
+ * issued key expires: the lifetime is required and capped at 366 days, so
+ * neither the admin form nor any other caller can mint a key with no expiry.
  */
 export const IssueAgentApiKeyInputSchema = z
   .object({
@@ -61,8 +63,7 @@ export const IssueAgentApiKeyInputSchema = z
       .number()
       .int()
       .positive()
-      .max(366 * 24 * 60 * 60)
-      .nullable(),
+      .max(366 * 24 * 60 * 60),
   })
   .strict()
   .readonly();

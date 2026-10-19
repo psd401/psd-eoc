@@ -384,10 +384,9 @@ export class AgentApiKeyService {
         'The API-key issuer does not match the authenticated actor.',
       );
     }
-    const expiresAt =
-      input.expiresInSeconds === null
-        ? null
-        : addSeconds(issuedAt, input.expiresInSeconds);
+    // The contract requires a bounded lifetime, so an issued key always
+    // carries an expiry; only a retained row from before that rule can be null.
+    const expiresAt = addSeconds(issuedAt, input.expiresInSeconds);
     const generated = createCredential();
     const agentId = input.agentId ?? randomUUID();
     const key = AgentApiKeySchema.parse({
@@ -400,7 +399,7 @@ export class AgentApiKeyService {
       credentialDigest: digestAgentApiKeyCredential(generated.credential),
       issuedByUserId,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: expiresAt?.toISOString() ?? null,
+      expiresAt: expiresAt.toISOString(),
       revokedAt: null,
     });
 

@@ -282,7 +282,7 @@ describe('AgentApiKeyService', () => {
         agentId: IDS.existingAgent,
         facilityScope: { kind: 'district' },
         capabilityIds: ['list-facilities'],
-        expiresInSeconds: null,
+        expiresInSeconds: 86_400,
       }),
       IDS.issuer,
       mutation(IDS.issuer),
@@ -291,8 +291,68 @@ describe('AgentApiKeyService', () => {
     expect(issuance.key.agentId).toBe(IDS.existingAgent);
     expect(issuance.key.facilityScope).toEqual({ kind: 'district' });
     expect(issuance.key.capabilityIds).toEqual(['list-facilities']);
-    expect(issuance.key.expiresAt).toBeNull();
+    expect(issuance.key.expiresAt).toBe('2026-08-11T18:00:00.000Z');
     expect(repository.lastPersistInput?.createAgent).toBe(false);
+  });
+
+  test('refuses to issue a key without a bounded expiry', async () => {
+    const repository = new InMemoryAgentApiKeyRepository();
+    const service = new AgentApiKeyService({ repository });
+    const withoutExpiry = Object.fromEntries(
+      Object.entries(issueInput()).filter(
+        ([key]) => key !== 'expiresInSeconds',
+      ),
+    );
+
+    for (const input of [
+      { ...issueInput(), expiresInSeconds: null },
+      withoutExpiry,
+      issueInput({ expiresInSeconds: 0 }),
+      issueInput({ expiresInSeconds: 366 * 24 * 60 * 60 + 1 }),
+    ]) {
+      await expect(
+        service.issue(input, IDS.issuer, mutation(IDS.issuer)),
+      ).rejects.toBeInstanceOf(ZodError);
+    }
+    expect(repository.keys.size).toBe(0);
+    expect(repository.lastPersistInput).toBeNull();
+  });
+
+  test('still authenticates and lists a retained key issued before expiry became mandatory', async () => {
+    const repository = new InMemoryAgentApiKeyRepository();
+    const service = new AgentApiKeyService({
+      repository,
+      now: () => new Date('2026-08-10T18:00:00.000Z'),
+    });
+    const keyPrefix = 'retainedkey1';
+    const credential = `${AGENT_API_KEY_CREDENTIAL_MARKER}${keyPrefix}.${'r'.repeat(43)}`;
+    repository.seedAgent(IDS.existingAgent);
+    const retained = AgentApiKeySchema.parse({
+      id: IDS.missingKey,
+      agentId: IDS.existingAgent,
+      displayName: 'Key retained from before expiry became mandatory',
+      facilityScope: { kind: 'district' },
+      capabilityIds: ['list-facilities'],
+      keyPrefix,
+      credentialDigest: digestAgentApiKeyCredential(credential),
+      issuedByUserId: IDS.issuer,
+      issuedAt: '2026-01-10T18:00:00.000Z',
+      expiresAt: null,
+      revokedAt: null,
+    });
+    repository.keys.set(retained.id, retained);
+
+    const authenticated = await service.authenticate(credential);
+    expect(authenticated.key.expiresAt).toBeNull();
+    expect(authenticated.capabilityIds).toEqual(['list-facilities']);
+
+    const page = await service.list({
+      agentId: null,
+      includeRevoked: false,
+      cursor: null,
+      limit: 10,
+    });
+    expect(page.items.map((item) => item.expiresAt)).toEqual([null]);
   });
 
   test('authenticates to the canonical actor and exact facility/capability scope', async () => {

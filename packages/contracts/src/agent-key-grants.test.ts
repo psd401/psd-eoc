@@ -101,7 +101,7 @@ function issueInput(capabilityIds: readonly string[]) {
     displayName: 'Synthetic allowlist agent',
     facilityScope: { kind: 'district' },
     capabilityIds,
-    expiresInSeconds: null,
+    expiresInSeconds: 7_776_000,
   };
 }
 
