@@ -13,7 +13,7 @@ jobs:
     # Forks have neither the private reusable workflow nor its token, so the
     # job runs only in the upstream repository.
     if: github.repository == 'psd401/psd-eoc' && github.actor != 'dependabot[bot]'
-    uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@main
+    uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     with:
       max_turns: 40
       # A drizzle migration regenerates a whole schema snapshot — 0027 is 10,437
@@ -56,4 +56,4 @@ jobs:
     name: claude-review
     permissions: {}
     if: github.repository == 'psd401/psd-eoc' && github.actor == 'dependabot[bot]'
-    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@main
+    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0

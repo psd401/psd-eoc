@@ -7,9 +7,7 @@ permissions:
   contents: read
 jobs:
   psd-ci:
-    # @main is deliberate: org-owned reusable; central bumps must propagate
-    # (psd-dev-standards standards/06). zizmor: ignore[unpinned-uses]
-    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@main # zizmor: ignore[unpinned-uses]
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     with:
       # pdftotext (Poppler) is required: the unit gate fails on any runtime
       # skip, and pdf.test.ts skips its 6 rendering tests without it. Same
