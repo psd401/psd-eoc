@@ -61,6 +61,7 @@ Typecheck one workspace with `bun run --cwd packages/server typecheck` (or `pack
 - Never edit an applied migration or run a down migration; journals, audit and delivery evidence are append-only ([data model](domain/data-model.md)).
 - No district literals in `.ts` source; tenant values live in git-ignored `infra/cdk.local.json` ([configuration and readiness](operations/configuration-and-readiness.md)).
 - Deployment is only a local `cdk deploy`; never add a GitHub deployment workflow ([infrastructure](operations/infrastructure.md)).
+- GitHub Actions `uses:` references are pinned to full commit SHAs with a version comment; keep new or bumped actions pinned the same way ([verification and testing](testing/verification-and-testing.md#ci-githubworkflowsciyml)).
 - Mobile changes must land and be verified on both iOS and Android ([mobile app](integrations/mobile-app.md)).
 - Do not hand-edit this wiki's generated pages; the OpenWiki workflow (`.github/workflows/openwiki-update.yml`) regenerates them.
 
