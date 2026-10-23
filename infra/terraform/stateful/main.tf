@@ -5,6 +5,25 @@ locals {
   client_secret_name = "/psd-eoc/partner-user-pool-client"
 }
 
+# The district's sending identity is shared with every other district sender,
+# so this root reads it rather than owning it. Planning fails here, before the
+# pool changes, if the identity is missing or not yet verified for sending.
+data "aws_sesv2_email_identity" "district" {
+  email_identity = var.ses_identity_domain
+}
+
+# Cognito sends DEVELOPER-configured mail through this role, which allows only
+# ses:SendEmail and ses:SendRawEmail. It is one per account, so it outlives
+# this pool: deleting it would stop every SES-backed user pool in the account.
+resource "aws_iam_service_linked_role" "cognito_email" {
+  aws_service_name = "email.cognito-idp.amazonaws.com"
+  description      = "Lets Cognito user pools send email through the account's verified SES identities."
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 # Non-district first responders never appear in the district's Google
 # directory, so they cannot be admitted through the staff sign-in. They get
 # their own user pool: separate directory, separate credentials, and no
@@ -60,16 +79,27 @@ resource "aws_cognito_user_pool" "partner" {
     }
   }
 
-  # Cognito's own mailbox, deliberately: this pool sends invitations and
-  # one-time passwords only, and its daily allowance covers that. Moving
-  # partner mail onto the district's SES identity is a separate change with its
-  # own IAM grant and verified-identity prerequisite.
+  # The district's own SES identity, not Cognito's mailbox. Email one-time
+  # passwords "require Essentials feature plan or higher and Amazon SES email
+  # configuration" (Cognito developer guide, user-pool-email.html), so with
+  # COGNITO_DEFAULT the EMAIL_OTP factor above could never deliver a code.
+  # Cognito sends through its email service-linked role below; the SES account
+  # must be out of the sandbox in this region before partners can be emailed.
   email_configuration {
-    email_sending_account = "COGNITO_DEFAULT"
+    email_sending_account = "DEVELOPER"
+    source_arn            = data.aws_sesv2_email_identity.district.arn
+    from_email_address    = var.partner_email_from_address
   }
+
+  depends_on = [aws_iam_service_linked_role.cognito_email]
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition     = data.aws_sesv2_email_identity.district.verified_for_sending_status
+      error_message = "The SES identity is not verified for sending; Cognito cannot email partners from it."
+    }
   }
 }
 

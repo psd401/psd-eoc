@@ -1,14 +1,25 @@
 // Credential-free plan of this root. Mocked providers mean nothing is created,
 // read, or authenticated, so this runs in `bun run check` and in CI.
-mock_provider "aws" {}
+mock_provider "aws" {
+  // The district identity as a real plan reads it: verified, in this account
+  // and region.
+  mock_data "aws_sesv2_email_identity" {
+    defaults = {
+      arn                         = "arn:aws:ses:us-east-2:123456789012:identity/example.invalid"
+      verified_for_sending_status = true
+    }
+  }
+}
 
 variables {
-  aws_account_id           = "123456789012"
-  aws_region               = "us-east-2"
-  environment              = "production"
-  owner                    = "technology@example.invalid"
-  source_repository_url    = "https://code.example.invalid/example/eoc"
-  passkey_relying_party_id = "eoc.example.invalid"
+  aws_account_id             = "123456789012"
+  aws_region                 = "us-east-2"
+  environment                = "production"
+  owner                      = "technology@example.invalid"
+  source_repository_url      = "https://code.example.invalid/example/eoc"
+  passkey_relying_party_id   = "eoc.example.invalid"
+  ses_identity_domain        = "example.invalid"
+  partner_email_from_address = "EOC Alerts <eoc-alerts@example.invalid>"
 }
 
 run "partner_pool_plan" {
@@ -86,9 +97,52 @@ run "partner_pool_plan" {
   // asserts the handoff's shape: exactly the three parameters the stack reads,
   // and no fourth value such as the secret itself.
   assert {
-    condition = join(",", sort(keys(output.stack_parameters))) == "PartnerUserPoolClientId,PartnerUserPoolClientSecretArn,PartnerUserPoolId"
+    condition     = join(",", sort(keys(output.stack_parameters))) == "PartnerUserPoolClientId,PartnerUserPoolClientSecretArn,PartnerUserPoolId"
     error_message = "The stack handoff must carry exactly the pool id, client id, and secret ARN."
   }
+
+  // Email one-time passwords need the pool's own SES configuration; Cognito's
+  // default mailbox cannot send them.
+  assert {
+    condition = (
+      aws_cognito_user_pool.partner.email_configuration[0].email_sending_account == "DEVELOPER" &&
+      aws_cognito_user_pool.partner.email_configuration[0].source_arn == "arn:aws:ses:us-east-2:123456789012:identity/example.invalid" &&
+      aws_cognito_user_pool.partner.email_configuration[0].from_email_address == "EOC Alerts <eoc-alerts@example.invalid>"
+    )
+    error_message = "Partner email must go through the district's verified SES identity."
+  }
+
+  assert {
+    condition     = aws_iam_service_linked_role.cognito_email.aws_service_name == "email.cognito-idp.amazonaws.com"
+    error_message = "Cognito needs its email service-linked role to send through SES."
+  }
+}
+
+// An identity that SES has not verified would leave every partner without a
+// code, so the plan stops before touching the pool.
+run "unverified_ses_identity_is_refused" {
+  command = plan
+
+  override_data {
+    target = data.aws_sesv2_email_identity.district
+    values = {
+      arn                         = "arn:aws:ses:us-east-2:123456789012:identity/example.invalid"
+      verified_for_sending_status = false
+    }
+  }
+
+  expect_failures = [aws_cognito_user_pool.partner]
+}
+
+// The From address must belong to the identity Cognito sends with.
+run "from_address_outside_identity_is_refused" {
+  command = plan
+
+  variables {
+    partner_email_from_address = "eoc-alerts@elsewhere.invalid"
+  }
+
+  expect_failures = [var.partner_email_from_address]
 }
 
 // A domain without a dot is not a deliverable owner address.

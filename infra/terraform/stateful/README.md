@@ -93,12 +93,37 @@ Partner email addresses live in the pool, not in state. The
 
 ## Email delivery
 
-The pool sends its invitations and one-time passwords through Cognito's own
-mailbox (`COGNITO_DEFAULT`), whose daily allowance covers invitations and
-sign-in codes for a responder roster. Moving partner mail onto the district's
-SES identity is a separate change: it needs a verified identity, a `FromEmail`
-that the identity's `ses:FromAddress` condition accepts, and an IAM grant for
-Cognito.
+Email one-time passwords "require Essentials feature plan or higher and Amazon
+SES email configuration"
+([Cognito email settings](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-email.html)),
+so the pool sends through the district's SES identity (`DEVELOPER`), never
+Cognito's own mailbox. The root:
+
+- reads the existing domain identity named by `ses_identity_domain` (the stack's
+  `psdEoc:sesIdentityDomain`) and refuses to plan if SES has not verified it
+  for sending — the identity is shared with other district senders, so this
+  root never owns it;
+- creates Cognito's email service-linked role,
+  `AWSServiceRoleForAmazonCognitoIdpEmailService`, which may only call
+  `ses:SendEmail` and `ses:SendRawEmail`. It is one per account and outlives
+  this pool. The apply role needs `iam:CreateServiceLinkedRole`, limited by
+  `iam:AWSServiceName = email.cognito-idp.amazonaws.com` (approved
+  2026-10-23; the role itself comes from `state-bootstrap`);
+- sends from `partner_email_from_address`, which must be an address in that
+  domain. The tenant uses the stack's own sender, `psdEoc:sesFromDisplayName`
+  and `psdEoc:sesFromAddress` as `Name <address>` (product owner,
+  2026-10-23), so partners see one sender for invitations, codes and alerts.
+
+Before the first apply, the SES account in the pool's region must be out of the
+sandbox; in the sandbox Cognito "can't send messages to your users' email
+addresses" (same page). `infra/src/ops/ses-production-access.ts --check`
+reports it read-only; see
+[docs/runbooks/email-setup.md](../../../docs/runbooks/email-setup.md).
+
+No SES configuration set is attached. The stack's `psd-eoc-transactional` set
+publishes every event to the alert-delivery callback, which accepts only mail
+carrying its own correlation tags; Cognito's mail carries none, so each
+one-time-password email would be refused and land in the dead-letter queue.
 
 ## Changing the relying-party id
 
