@@ -663,6 +663,21 @@ export class PsdEocStack extends Stack {
         },
       ],
     });
+    // A dark data-plane deployment runs no server, so a supplied partner pool
+    // would only park a Cognito grant on an idle role and read as enabled.
+    new CfnRule(this, 'PartnerUserPoolRequiresLiveApplication', {
+      assertions: [
+        {
+          assert: Fn.conditionEquals(
+            provisionApplication.valueAsString,
+            'true',
+          ),
+          assertDescription:
+            'A supplied partner user pool requires ProvisionApplication=true.',
+        },
+      ],
+      ruleCondition: everyPartnerParameterIsSupplied,
+    });
     new CfnRule(this, 'DirectPushRequiresWorkerAndEvidence', {
       assertions: [
         {

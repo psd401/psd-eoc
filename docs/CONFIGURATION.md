@@ -213,7 +213,8 @@ stack_parameters` prints the values to supply. Supplying all three turns on the
 runtime's partner configuration and its scoped Cognito and secret-read grants;
 supplying some but not all is refused at validation by the
 `PartnerUserPoolSelectionIsComplete` rule, rather than deploying a sign-in that
-can never complete. The client secret itself is never a deployment value: the
+can never complete. The `PartnerUserPoolRequiresLiveApplication` rule also
+refuses a supplied pool unless `ProvisionApplication=true`. The client secret itself is never a deployment value: the
 stack passes only its ARN, and the service reads the value at runtime.
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility

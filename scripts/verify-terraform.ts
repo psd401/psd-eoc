@@ -18,15 +18,31 @@ const repositoryRoot = resolve(import.meta.dir, '..');
 /** Every AWS Terraform root, relative to the repository. */
 const AWS_TERRAFORM_ROOTS = ['infra/terraform/stateful'] as const;
 
+/** A root's pinned Terraform line, e.g. `1.16` for `~> 1.16.0`. */
+interface TerraformLine {
+  readonly major: number;
+  readonly minor: number;
+}
+
 /**
- * The Terraform line the roots pin. Kept next to the `required_version`
- * constraint in `versions.tf`: a mismatch between the two is the failure this
- * script exists to report in one line instead of as an init error.
+ * Reads the line from the root's own `required_version`, so `versions.tf` is
+ * the one place the version lives.
  */
-const REQUIRED_TERRAFORM_MAJOR = 1;
-const REQUIRED_TERRAFORM_MINOR = 16;
-/** The container used when no local Terraform satisfies the constraint. */
-const TERRAFORM_IMAGE = 'hashicorp/terraform:1.16.5';
+function readPinnedLine(root: string): TerraformLine {
+  const versions = readFileSync(
+    resolve(repositoryRoot, root, 'versions.tf'),
+    'utf8',
+  );
+  const match = /required_version\s*=\s*"~>\s*(\d+)\.(\d+)\.\d+"/.exec(
+    versions,
+  );
+  if (match === null) {
+    throw new Error(
+      `${root}/versions.tf must pin required_version = "~> MAJOR.MINOR.PATCH".`,
+    );
+  }
+  return { major: Number(match[1]), minor: Number(match[2]) };
+}
 
 async function spawn(
   command: readonly string[],
@@ -54,7 +70,7 @@ async function spawn(
   return { code: await child.exited, output: `${stdout}${stderr}` };
 }
 
-async function localTerraformSatisfiesConstraint(): Promise<boolean> {
+async function localTerraformMatches(line: TerraformLine): Promise<boolean> {
   const { code, output } = await spawn(
     ['terraform', 'version', '-json'],
     repositoryRoot,
@@ -69,29 +85,19 @@ async function localTerraformSatisfiesConstraint(): Promise<boolean> {
     return false;
   }
   const [major, minor] = version.split('.').map(Number);
-  return (
-    major === REQUIRED_TERRAFORM_MAJOR && minor === REQUIRED_TERRAFORM_MINOR
-  );
+  return major === line.major && minor === line.minor;
 }
 
-/** Fails loudly when `versions.tf` and this script disagree on the line. */
-function assertPinnedVersionMatches(root: string): void {
-  const expected = `"~> ${String(REQUIRED_TERRAFORM_MAJOR)}.${String(
-    REQUIRED_TERRAFORM_MINOR,
-  )}.0"`;
-  const versions = readFileSync(
-    resolve(repositoryRoot, root, 'versions.tf'),
-    'utf8',
-  );
-  if (!versions.includes(`required_version = ${expected}`)) {
-    throw new Error(
-      `${root}/versions.tf must pin required_version = ${expected}; update scripts/verify-terraform.ts together with it.`,
+async function verifyRoot(root: string): Promise<void> {
+  const line = readPinnedLine(root);
+  const useLocal = await localTerraformMatches(line);
+  // The minor-line tag always satisfies `~> MAJOR.MINOR.0`.
+  const image = `hashicorp/terraform:${String(line.major)}.${String(line.minor)}`;
+  if (!useLocal) {
+    console.info(
+      `No local Terraform ${String(line.major)}.${String(line.minor)}; using ${image}.`,
     );
   }
-}
-
-async function verifyRoot(root: string, useLocal: boolean): Promise<void> {
-  assertPinnedVersionMatches(root);
   const cwd = resolve(repositoryRoot, root);
   const invoke = (args: readonly string[]): readonly string[] =>
     useLocal
@@ -104,7 +110,7 @@ async function verifyRoot(root: string, useLocal: boolean): Promise<void> {
           `${repositoryRoot}:/workspace`,
           '--workdir',
           `/workspace/${root}`,
-          TERRAFORM_IMAGE,
+          image,
           ...args,
         ];
   for (const args of [
@@ -122,16 +128,8 @@ async function verifyRoot(root: string, useLocal: boolean): Promise<void> {
 }
 
 if (import.meta.main) {
-  const useLocal = await localTerraformSatisfiesConstraint();
-  if (!useLocal) {
-    console.info(
-      `No local Terraform ${String(REQUIRED_TERRAFORM_MAJOR)}.${String(
-        REQUIRED_TERRAFORM_MINOR,
-      )}; using ${TERRAFORM_IMAGE}.`,
-    );
-  }
   for (const root of AWS_TERRAFORM_ROOTS) {
-    await verifyRoot(root, useLocal);
+    await verifyRoot(root);
   }
   console.info('AWS Terraform roots are formatted, valid, and plan cleanly.');
 }

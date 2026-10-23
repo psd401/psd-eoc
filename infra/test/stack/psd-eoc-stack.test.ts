@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'bun:test';
 import { App, IgnoreStrategy } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -764,6 +767,40 @@ describe('partner user pool boundary', () => {
     expect(String(assertion.AssertDescription)).toContain(
       'must be supplied together',
     );
+  });
+
+  it('refuses a supplied partner pool on a dark data-plane deployment', () => {
+    const rule = asRecord(
+      asRecord(synthesized.Rules).PartnerUserPoolRequiresLiveApplication,
+    );
+    expect(asRecord(rule.RuleCondition)).toEqual({
+      'Fn::And': PARTNER_PARAMETERS.map((parameter) => ({
+        'Fn::Not': [{ 'Fn::Equals': [{ Ref: parameter }, 'UNCONFIGURED'] }],
+      })),
+    });
+    const assertion = asRecord(asArray(rule.Assertions)[0]);
+    expect(asRecord(assertion.Assert)).toEqual({
+      'Fn::Equals': [{ Ref: 'ProvisionApplication' }, 'true'],
+    });
+  });
+
+  // The Terraform root names the secret and this stack's allowed pattern pins
+  // the same path. Renaming one side alone would reject every real ARN at
+  // deploy time; catch it here instead.
+  it('pins the secret path the Terraform root creates', () => {
+    const mainTf = readFileSync(
+      resolve(import.meta.dir, '../../terraform/stateful/main.tf'),
+      'utf8',
+    );
+    const secretName = /client_secret_name\s*=\s*"([^"]+)"/.exec(mainTf)?.[1];
+    if (secretName === undefined) {
+      throw new Error('main.tf no longer declares local.client_secret_name.');
+    }
+    const pattern = String(
+      asRecord(asRecord(synthesized.Parameters).PartnerUserPoolClientSecretArn)
+        .AllowedPattern,
+    );
+    expect(pattern).toContain(`:secret:${secretName}-[A-Za-z0-9]{6})$`);
   });
 
   it('scopes the Cognito grant to the named pool and gates it on the condition', () => {
