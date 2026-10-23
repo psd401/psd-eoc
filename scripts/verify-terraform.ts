@@ -60,7 +60,9 @@ async function localTerraformSatisfiesConstraint(): Promise<boolean> {
     return false;
   }
   const [major, minor] = version.split('.').map(Number);
-  return major === REQUIRED_TERRAFORM_MAJOR && minor === REQUIRED_TERRAFORM_MINOR;
+  return (
+    major === REQUIRED_TERRAFORM_MAJOR && minor === REQUIRED_TERRAFORM_MINOR
+  );
 }
 
 /** Fails loudly when `versions.tf` and this script disagree on the line. */
