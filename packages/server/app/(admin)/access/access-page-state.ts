@@ -21,6 +21,10 @@ const STATUS_MESSAGES = Object.freeze({
     'The partner was disabled and can no longer use PSD EOC, but disabling their sign-in account is not confirmed yet. Retry the pending change from the partner list.',
   'partner-reconciled': 'The pending partner change was completed.',
   'partner-invitation-sent': 'The invitation email was sent again.',
+  'partner-renewed':
+    'The partner was renewed for one year from today. The previous admission is kept as history.',
+  'partner-renew-pending':
+    'The partner was renewed, but the renewal email or sign-in account is not confirmed yet. Retry the pending change from the partner list.',
 } as const);
 
 export interface AccessAdminCursorState {

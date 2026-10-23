@@ -32,10 +32,16 @@ export interface PartnerDirectory {
 
 /** Sends one branded account email to one partner. */
 export interface PartnerMailer {
-  send(
-    message: Readonly<{ to: string; subject: string; textBody: string }>,
-  ): Promise<void>;
+  send(message: PartnerMailMessage): Promise<void>;
 }
+
+/** One account email. `replyTo` routes a reply, such as a renewal request. */
+export type PartnerMailMessage = Readonly<{
+  to: string | readonly string[];
+  subject: string;
+  textBody: string;
+  replyTo?: readonly string[];
+}>;
 
 export interface PartnerProviders {
   readonly mode: 'aws' | 'synthetic';
@@ -194,9 +200,7 @@ export class SesPartnerMailer implements PartnerMailer {
     }),
   ) {}
 
-  public async send(
-    message: Readonly<{ to: string; subject: string; textBody: string }>,
-  ): Promise<void> {
+  public async send(message: PartnerMailMessage): Promise<void> {
     const content = buildAccountEmailContent(
       message,
       this.configuration.branding,
@@ -209,7 +213,13 @@ export class SesPartnerMailer implements PartnerMailer {
             senderDisplayName === null
               ? this.configuration.fromEmailAddress
               : `"${senderDisplayName}" <${this.configuration.fromEmailAddress}>`,
-          Destination: { ToAddresses: [message.to] },
+          Destination: {
+            ToAddresses:
+              typeof message.to === 'string' ? [message.to] : [...message.to],
+          },
+          ...(message.replyTo === undefined || message.replyTo.length === 0
+            ? {}
+            : { ReplyToAddresses: [...message.replyTo] }),
           Content: {
             Simple: {
               Subject: { Data: content.subject, Charset: 'UTF-8' },

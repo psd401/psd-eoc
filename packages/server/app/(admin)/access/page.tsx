@@ -98,6 +98,7 @@ export default async function AccessPage({
           admittedAccounts: admittedAccounts.items,
           partners: partners.items,
           partnerAccessConfigured: resolvePartnerProviders() !== null,
+          partnerReviewedAt: new Date().toISOString(),
           cursors,
         }}
       />

@@ -20,12 +20,7 @@ import {
   type AdminQueryMetadata,
 } from '../../../lib/capabilities/admin';
 import type { ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
-import {
-  applicationOrigin,
-  displayTimeZone,
-  organizationName,
-  staffHostedDomain,
-} from '../../../lib/config/deployment';
+import { staffHostedDomain } from '../../../lib/config/deployment';
 import {
   disablePartner,
   invitePartner,
@@ -35,7 +30,10 @@ import {
   projectPartnerAccess,
   reconcilePartnerAccess,
 } from '../../../lib/partners/access';
-import type { PartnerMessageContext } from '../../../lib/partners/messages';
+import {
+  partnerMessageContext,
+  type PartnerMessageContext,
+} from '../../../lib/partners/messages';
 import {
   PartnerProviderError,
   requirePartnerProviders,
@@ -131,16 +129,6 @@ function staffDomainOrNull(): string | null {
   } catch {
     return null;
   }
-}
-
-export function partnerMessageContext(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
-): PartnerMessageContext {
-  return Object.freeze({
-    organizationName: organizationName(environment),
-    applicationOrigin: applicationOrigin(environment),
-    displayTimeZone: displayTimeZone(environment),
-  });
 }
 
 async function admissionReplay(

@@ -256,6 +256,8 @@ async function issuePartner(
     displayName: string;
     invitedByUserId: string;
     now: Date;
+    /** When the admission was granted; defaults to `now`. */
+    admittedAt?: Date;
     statePath: string;
   }>,
 ): Promise<void> {
@@ -264,7 +266,7 @@ async function issuePartner(
     displayName: input.displayName,
     agency: 'Synthetic Fire District',
     invitedByUserId: input.invitedByUserId,
-    admittedAt: input.now,
+    admittedAt: input.admittedAt ?? input.now,
   });
   const issued = await issueSyntheticPartnerSession(connection.db, {
     email: input.email,
@@ -690,6 +692,25 @@ async function main(): Promise<void> {
       invitedByUserId: districtAdministrator.userId,
       now,
       statePath: join(createdStateDirectory, 'partner.json'),
+    });
+    // Issue #596. The clock is injected through the admission date: one
+    // admitted a year and a day ago has expired (no sweep has run), and one
+    // admitted 360 days ago expires in five days and is renewed in the flow.
+    await issuePartner(opened, {
+      email: 'expired@agency.example.invalid',
+      displayName: 'Synthetic Expired Responder',
+      invitedByUserId: districtAdministrator.userId,
+      now,
+      admittedAt: new Date(now.getTime() - 366 * DAY_MILLISECONDS),
+      statePath: join(createdStateDirectory, 'partner-expired.json'),
+    });
+    await issuePartner(opened, {
+      email: 'renew-me@agency.example.invalid',
+      displayName: 'Synthetic Renewing Responder',
+      invitedByUserId: districtAdministrator.userId,
+      now,
+      admittedAt: new Date(now.getTime() - 360 * DAY_MILLISECONDS),
+      statePath: join(createdStateDirectory, 'partner-renew.json'),
     });
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
     const issue344EventId = await createSyntheticDrill(

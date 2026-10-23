@@ -29,6 +29,8 @@ export type AccessAdminViewModel =
       partners: readonly PartnerAccessRecord[];
       /** Whether this deployment has a partner identity provider. */
       partnerAccessConfigured: boolean;
+      /** When the partner inactivity review was computed. */
+      partnerReviewedAt: string;
       cursors: AccessAdminCursorState;
     }>;
 
@@ -604,6 +606,7 @@ export function AccessAdminView({
         configured={view.partnerAccessConfigured}
         csrfToken={csrfToken}
         partners={view.partners}
+        reviewedAt={view.partnerReviewedAt}
       />
       <UsersAndRoles
         csrfToken={csrfToken}

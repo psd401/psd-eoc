@@ -153,15 +153,22 @@ access decisions each enforce.
   supersedes the old one. Every session read asks whether the partner's
   current admission is unended and unexpired, so ending or expiring it
   refuses the next request.
-- Administrators invite, disable, correct, and re-invite partners on the Access
+- Administrators invite, disable, renew, and re-invite partners on the Access
   page. The admission write commits first; the identity-provider change and
   the invitation email follow and are recorded as confirmed facts, so a gap
   between the two is visible on the page and a retry completes it.
-- Partner account mail is the one email the application
+- Partner account mail (invitation, the one expiry notice 14 days ahead, and
+  the administrators' quarterly review) is the one email the application
   runtime sends itself, through SES in the alert email's branded shell,
   restricted to the deployment's sender address and present only while
   partner access is configured. Alerts reach people only through the email
   worker.
+- A daily scheduled task (`scripts/operations/sweep-partner-access.ts`) ends
+  admissions past their expiry as the system, cuts the partner out of the app,
+  completes pending provider changes, sends the notice, and sends the
+  quarterly review. It writes partner records directly through `lib/partners`
+  rather than running a capability. Inactivity is reviewed, never acted on:
+  nothing disables a partner automatically except expiry.
 
 ## Data and delivery truth
 

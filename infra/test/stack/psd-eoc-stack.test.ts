@@ -803,6 +803,33 @@ describe('partner user pool boundary', () => {
     expect(pattern).toContain(`:secret:${secretName}-[A-Za-z0-9]{6})$`);
   });
 
+  it('gives the partner-access sweep only disable, sign-out, and partner mail, gated on the condition', () => {
+    const [entry] = resourceEntries('AWS::IAM::Policy').filter(([logicalId]) =>
+      logicalId.includes('PartnerSweepAccess'),
+    );
+    if (entry === undefined) {
+      throw new Error('Missing the partner-access sweep policy.');
+    }
+    const [, policy] = entry;
+    expect(policy.Condition).toBe('ShouldUsePartnerUserPool');
+    const statements = asArray(
+      asRecord(properties(policy).PolicyDocument).Statement,
+    ).map(asRecord);
+    expect(
+      statements.flatMap((statement) => asStringArray(statement.Action)).sort(),
+    ).toEqual([
+      'cognito-idp:AdminDisableUser',
+      'cognito-idp:AdminUserGlobalSignOut',
+      'ses:SendEmail',
+    ]);
+    const mail = statements.find((statement) =>
+      asStringArray(statement.Action).includes('ses:SendEmail'),
+    );
+    expect(mail?.Condition).toEqual({
+      StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS },
+    });
+  });
+
   it('scopes the Cognito grant to the named pool and gates it on the condition', () => {
     const [entry] = resourceEntries('AWS::IAM::Policy').filter(([logicalId]) =>
       logicalId.includes('PartnerUserPoolAccess'),
@@ -890,29 +917,35 @@ describe('partner user pool boundary', () => {
     ).toEqual({ Ref: 'PartnerUserPoolClientSecretArn' });
     // The ARN is configuration; the value behind it is read at runtime under
     // the conditioned grant. Nothing partner-shaped is a plaintext secret in
-    // the service or in any task definition.
+    // the service or in any task definition. The partner-access sweep task
+    // names the pool, which it disables expired accounts in, and nothing of
+    // the app client.
     const serializedTaskDefinitions = JSON.stringify(
       resourceEntries('AWS::ECS::TaskDefinition'),
     );
-    expect(serializedTaskDefinitions).not.toContain('PartnerUserPool');
+    expect(serializedTaskDefinitions).not.toContain('PartnerUserPoolClient');
   });
 
-  // The parameter-absent deploy adds only the App Runner service's three
-  // UNCONFIGURED partner environment entries. The conditioned grant
-  // disappears, and no other resource mentions a partner parameter.
-  it('confines an unconfigured deployment to the gated grant and the service env', () => {
+  // The parameter-absent deploy adds only the App Runner service's
+  // UNCONFIGURED partner environment entries and the partner-access sweep,
+  // whose schedule is disabled. Both conditioned grants disappear, and no
+  // other resource mentions a partner parameter.
+  it('confines an unconfigured deployment to the gated grants, the service env, and the disabled sweep', () => {
     const gated = Object.entries(resources)
       .filter(
         ([, resource]) =>
           asRecord(resource).Condition === 'ShouldUsePartnerUserPool',
       )
-      .map(([logicalId]) => logicalId);
-    expect(gated).toHaveLength(1);
-    const gatedPolicy = gated[0];
-    if (gatedPolicy === undefined) {
-      throw new Error('Missing the gated partner policy.');
+      .map(([logicalId]) => logicalId)
+      .sort();
+    expect(gated).toHaveLength(2);
+    const gatedPolicy = gated.find((id) =>
+      id.includes('PartnerUserPoolAccess'),
+    );
+    const sweepPolicy = gated.find((id) => id.includes('PartnerSweepAccess'));
+    if (gatedPolicy === undefined || sweepPolicy === undefined) {
+      throw new Error('Missing a gated partner policy.');
     }
-    expect(gatedPolicy).toContain('PartnerUserPoolAccess');
 
     const referencing = Object.entries(resources)
       .filter(([, resource]) =>
@@ -920,7 +953,28 @@ describe('partner user pool boundary', () => {
       )
       .map(([logicalId]) => logicalId)
       .sort();
-    expect(referencing).toEqual([gatedPolicy, 'AppRunnerService'].sort());
+    const sweepTask = referencing.find((id) =>
+      id.startsWith('PartnerSweepTaskDefinition'),
+    );
+    const sweepSchedule = referencing.find((id) =>
+      id.startsWith('PartnerSweepSchedule'),
+    );
+    if (sweepTask === undefined || sweepSchedule === undefined) {
+      throw new Error('Missing the partner-access sweep task or schedule.');
+    }
+    expect(referencing).toEqual(
+      [
+        gatedPolicy,
+        sweepPolicy,
+        sweepTask,
+        sweepSchedule,
+        'AppRunnerService',
+      ].sort(),
+    );
+    // The schedule runs only while partner access is configured.
+    expect(properties(asRecord(resources[sweepSchedule])).State).toEqual({
+      'Fn::If': ['ShouldUsePartnerUserPool', 'ENABLED', 'DISABLED'],
+    });
 
     // No output republishes the pool, the client, or the secret ARN.
     expect(JSON.stringify(synthesized.Outputs)).not.toContain(
@@ -938,7 +992,8 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::AppRunner::AutoScalingConfiguration', 1);
     template.resourceCountIs('AWS::AppRunner::VpcConnector', 1);
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 6);
+    // Seven: the six before partner access, plus the partner-access sweep.
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 7);
     template.resourceCountIs('AWS::ECS::Service', 4);
     // Nine log groups: bootstrap/access sync, deployment bootstrap, push, SMS,
     // email send, email callback, Aurora failover, router, and alarm mailer.
@@ -3394,6 +3449,7 @@ describe('configured-unverified provider readiness boundary', () => {
     ).toEqual([
       'psd-eoc-access-membership-sync-every-two-hours',
       'psd-eoc-aurora-failover-events',
+      'psd-eoc-partner-access-sweep-daily',
       'psd-eoc-sms-delivery-events',
       'psd-eoc-sms-opt-out-reconciliation',
     ]);
@@ -3487,18 +3543,21 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedTemplate).not.toContain('DATABASE_SECRET_ARN');
     // SES send authority exists on the alarm mailer, the isolated email
     // worker, and — for partner account mail only, while partner access is
-    // configured — the App Runner runtime. Every one is From-address scoped.
+    // configured — the App Runner runtime and the daily partner-access sweep.
+    // Every one is From-address scoped.
     const sesSenders = resourceEntries('AWS::IAM::Policy').filter(
       ([, resource]) =>
         JSON.stringify(properties(resource).PolicyDocument).includes(
           'ses:SendEmail',
         ),
     );
-    expect(sesSenders).toHaveLength(3);
-    const runtimeSender = sesSenders.find(([logicalId]) =>
-      logicalId.includes('PartnerUserPoolAccess'),
-    );
-    expect(runtimeSender?.[1].Condition).toBe('ShouldUsePartnerUserPool');
+    expect(sesSenders).toHaveLength(4);
+    for (const fragment of ['PartnerUserPoolAccess', 'PartnerSweepAccess']) {
+      const partnerSender = sesSenders.find(([logicalId]) =>
+        logicalId.includes(fragment),
+      );
+      expect(partnerSender?.[1].Condition).toBe('ShouldUsePartnerUserPool');
+    }
     const senderConditions = sesSenders.map(
       ([, resource]) =>
         asArray(asRecord(properties(resource).PolicyDocument).Statement)

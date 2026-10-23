@@ -72,4 +72,67 @@ test.describe('partner-access', () => {
       await partnerContext.close();
     }
   });
+
+  test('expired partner is refused', async ({ browser, page }) => {
+    const partnerContext = await browser.newContext({
+      storageState: statePath('partner-expired.json'),
+    });
+    try {
+      // The session itself is current; the admission behind it expired five
+      // days ago and no sweep has run. The very first request is refused.
+      const partnerPage = await partnerContext.newPage();
+      // A lapsed authorization is refused as forbidden (a revoked session
+      // would be unauthenticated): the session exists, its admission does not.
+      const response = await partnerPage.request.get('/api/sms-consent');
+      expect(response.status()).toBe(403);
+    } finally {
+      await partnerContext.close();
+    }
+    await page.goto('/access');
+    await expect(
+      page
+        .getByRole('region', { name: 'Partners' })
+        .getByRole('row', { name: /Synthetic Expired Responder/u }),
+    ).toContainText('Expired');
+  });
+
+  test('admin renews partner', async ({ browser, page }) => {
+    const partnerContext = await browser.newContext({
+      storageState: statePath('partner-renew.json'),
+    });
+    try {
+      const partnerPage = await partnerContext.newPage();
+      expect((await partnerPage.request.get('/api/sms-consent')).status()).toBe(
+        200,
+      );
+
+      await page.goto('/access');
+      await page
+        .getByRole('button', {
+          name: 'Renew renew-me@agency.example.invalid for one year',
+        })
+        .click();
+      await expect(page.getByRole('status')).toContainText(
+        'The partner was renewed for one year from today.',
+      );
+      const nextYear = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000)
+        .toISOString()
+        .slice(0, 7);
+      const rows = page
+        .getByRole('region', { name: 'Partners' })
+        .getByRole('row', { name: /Synthetic Renewing Responder/u });
+      // The new admission, expiring a year from today, and the replaced one.
+      await expect(rows).toHaveCount(2);
+      await expect(rows.first()).toContainText(nextYear);
+      await expect(rows.nth(1)).toContainText('Replaced');
+      await expectAxeClean(page);
+
+      // Renewal keeps the partner's open session working.
+      expect((await partnerPage.request.get('/api/sms-consent')).status()).toBe(
+        200,
+      );
+    } finally {
+      await partnerContext.close();
+    }
+  });
 });
