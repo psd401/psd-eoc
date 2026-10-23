@@ -1,6 +1,6 @@
 # AWS CDK to Terraform migration plan
 
-**Status:** proposal, not approved. No infrastructure change or deploy is part
+**Status:** proposal; seven decisions recorded 2026-10-23, the rest not approved. No infrastructure change or deploy is part
 of this document. Every phase below needs the product owner's approval before
 it starts.
 
@@ -16,6 +16,21 @@ place for it.
 `infra/src/stack/psd-eoc-stack.ts` and `infra/src/monitoring.ts`. The Google
 Cloud roots under `infra/gcp` are already Terraform and only get version
 alignment.
+
+## Decisions (product owner, 2026-10-23)
+
+- Terraform lives in this repository at `infra/terraform/`. The responder
+  Cognito pool is its first resource.
+- The state bucket is created here, by an `infra/terraform/state-bootstrap`
+  root.
+- Plan, import and apply run through CI (08 PR flow), not from a laptop. The
+  CI design is part of this migration.
+- No rehearsal account. Rehearsal is replaced by automated tests (phase 1
+  and phase 3).
+- The bootstrap gate is a `terraform_data` resource with `local-exec`.
+- `psd:data-classification` uses the `partner-pii` value proposed in
+  psd-dev-standards PR #143 (08 v0.3, draft).
+- `infra/gcp` stays as it is; no other Google work is planned.
 
 ## Evidence used
 
@@ -120,7 +135,8 @@ infra/
   It is the first resource in `infra/terraform/` and goes in `stateful/`. It
   ships before this migration finishes, so it creates the `stateful/` root
   with the backend, providers, `default_tags` and the pool only; the state
-  bucket (open question 1) must exist before its first apply. Its pool ID
+  bucket and CI roles from `state-bootstrap` must exist before its first
+  apply. Its pool ID
   and client ID reach App Runner as new CloudFormation parameters until phase
   5, then as `terraform_remote_state` outputs. The migrated resources are later
   imported into the same root, so nothing about the Cognito work is redone.
@@ -141,10 +157,13 @@ infra/
 - Follow the `infra/gcp` pattern: the checked-in backend names a deliberately
   unusable bucket, and the wrapper passes the real one with
   `-backend-config=bucket=<value>` from the local tenant file.
-- The state bucket is created outside these roots. 13-aws-accounts phase 1 puts
-  one state bucket per account in the org-infrastructure repository; if that
-  is not ready, a tiny `infra/terraform/state-bootstrap` root with local state
-  (as `infra/gcp/bootstrap` does) creates it. Open question 1.
+- The state bucket is created by `infra/terraform/state-bootstrap`, a small
+  root with local state, like `infra/gcp/bootstrap`. It also creates the
+  GitHub OIDC provider and the plan and apply roles that CI uses (phase 1).
+  Its local state holds no secret and is kept outside the repository. This
+  differs from 13-aws-accounts phase 1, which puts state buckets in the
+  org-infrastructure repository; that repository can adopt the bucket later
+  with an import block.
 - State will contain secret-adjacent values (the review sign-in digest and the
   on-call SMS number in plain text, the Aurora endpoint). It never contains
   secret values: no `aws_secretsmanager_secret_version`, and Aurora's
@@ -185,32 +204,43 @@ off.
   `infra/terraform/app/catalog.auto.tfvars.json` (or stay read from `cdk.json` by the
   wrapper until CDK is removed).
 - `deploy.auto.tfvars.example` lists every switch with its safe value.
+- **CI needs the same values.** The repository is public, so tenant and
+  switch values cannot be committed. Proposed: a GitHub environment
+  (`production`) holds `tenant.auto.tfvars.json` and `deploy.auto.tfvars`
+  contents as environment secrets, which only the plan and apply jobs read.
+  A switch change is then an environment edit followed by a plan, not a PR
+  diff. Open question 7.
 - The `docs-contract:template-parameters` list checked by
   `bun run verify:docs` becomes a `docs-contract:terraform-variables` list
   checked against `variables.tf`.
 
 ## Phases
 
-### Phase 0 — decisions and rehearsal account
+### Phase 0 — remaining decisions
 
 - Answer the open questions below.
-- Choose where to rehearse. Recommendation: deploy the CDK stack with the
-  example tenant into a non-production account and run phases 2–5 there
-  end to end before production. 13-aws-accounts plans `psd-nonprod`; it does
-  not exist yet.
-- Exit: written answers; rehearsal account chosen.
+- Exit: written answers.
 
-### Phase 1 — Terraform scaffolding (no AWS writes)
+### Phase 1 — Terraform scaffolding and CI
 
-- Create `infra/terraform/{stateful,app,scripts}` with providers, backend stub,
-  typed and described variables, and the tenant wrapper.
-- CI: `terraform fmt -check`, `validate`, `tflint`, and `terraform test` with
-  mocked providers (the `infra/gcp/firebase` pattern), run from
-  `bun run check`. Checkov and conftest when the shared `iac-checks` workflow
-  exists.
-- Align `infra/gcp` `required_version` and CI's Terraform 1.9.8 to 1.16 in the
-  same phase, as a separate PR.
-- Exit: `bun run check` passes; no cloud credential used.
+- `infra/terraform/state-bootstrap`: state bucket (versioned, KMS, public
+  access blocked), GitHub OIDC provider, a read-only plan role and an apply
+  role. The role trust `sub` is pinned to
+  `repo:psd401/psd-eoc:environment:production` for apply and to pull
+  requests for plan. Applied once by a person with an administrator session;
+  that is the only local apply in the migration (open question 8).
+- Create `infra/terraform/{stateful,app,scripts}` with providers, backend
+  stub, typed and described variables, and the tenant wrapper.
+- `bun run check`: `terraform fmt -check`, `validate`, `tflint`, and
+  `terraform test` with mocked providers (the `infra/gcp/firebase` pattern).
+  No cloud credential.
+- Workflow `terraform.yml`: on pull requests touching `infra/terraform/**`,
+  plan with the read-only role and post it as a sticky comment; on merge to
+  `main`, apply the saved plan in the `production` environment with required
+  approval and `concurrency` per state. Checkov and conftest join when the
+  shared `iac-checks` workflow exists.
+- Exit: `bun run check` passes; the Cognito pool's PR plans in CI and applies
+  on merge.
 
 ### Phase 2 — Retain everything in CDK
 
@@ -247,6 +277,12 @@ off.
 - Leave `default_tags` off and add `ignore_changes` on Lambda and canary code
   for this step, so the first plan can show no changes.
 - Run `terraform plan` read-only while CloudFormation still owns everything.
+- **Coverage test (replaces the rehearsal):** a bun test in `bun run check`
+  synthesizes the CDK stack and fails unless every non-helper logical ID
+  maps to exactly one Terraform address in a committed mapping file, and
+  every import block's address appears in that file. A resource left out of
+  the HCL then fails CI before the stack is deleted.
+- The import plan runs in CI on the pull request with the read-only role.
 - Exit: both roots plan with **0 to add, 0 to change, 0 to destroy** and only
   imports. Any diff is fixed in HCL, not accepted.
 
@@ -258,8 +294,8 @@ Run in one maintenance window, with no deploy in between:
 2. Turn off termination protection and delete the `PsdEoc` stack.
    CloudFormation deletes only the helpers and leaves every retained resource.
 3. Check every physical ID from the phase 3 inventory still exists.
-4. `terraform apply` the `stateful/` imports, then the `app/` imports. Imports
-   are state-only.
+4. Merge the import pull request; CI applies the `stateful/` imports, then the
+   `app/` imports, after environment approval. Imports are state-only.
 5. Plan both roots again: zero changes.
 6. Smoke-test: health URL, a drill on the review facility, alarms in `OK`.
 
@@ -269,18 +305,20 @@ Notes:
   order applies to the import applies. `stateful/` goes first because `app/`
   reads its outputs. Imports change no resource, and `prevent_destroy` plus
   the zero-change plan cover the replacement risk the rule guards against.
-  This is a deviation that needs approval (open question 6).
+  This is a deviation that needs approval (open question 1).
 - The `SecretTargetAttachment` only wrote host and port into the admin
   secret's JSON; the value stays. Rotation is not configured.
 - Retained resources keep CloudFormation's `aws:cloudformation:*` tags.
   Terraform ignores `aws:` tags.
 - Rollback: before step 2, stop. After step 2 there is no practical way back
   to CloudFormation (`cdk import` of ~240 resources); the path is fix-forward
-  in Terraform. This is why phase 0 rehearses first.
+  in Terraform. With no rehearsal account, the coverage test, the zero-change
+  plan, and the phase 2 `get-template` check are the only safeguards before
+  the stack is deleted.
 
 ### Phase 5 — deploys run through Terraform
 
-- **Image:** the deploy script builds `packages/server/container/psd-eoc.Dockerfile`
+- **Image:** the CI apply job builds `packages/server/container/psd-eoc.Dockerfile`
   for `linux/amd64` with the same build args, pushes to `psd-eoc/server` by
   source SHA tag, and passes the resulting digest as
   `application_image_digest`. Images in the CDK asset repository stay there
@@ -289,9 +327,8 @@ Notes:
   digest runs a bun script that starts the bootstrap task, waits, and fails on
   a non-zero exit. App Runner, the four workers and the access-sync schedule
   `depends_on` it, so a failed migration stops the apply before promotion, as
-  the custom resource does today. Alternative if provisioners are not allowed:
-  the wrapper applies the bootstrap task definition, runs the task, then
-  applies the rest.
+  the custom resource does today. The apply role needs `ecs:RunTask`,
+  `ecs:DescribeTasks` and `iam:PassRole` for the bootstrap roles.
 - **Rollback quiescence:** a `precondition` on App Runner reads the send
   services with `data "aws_ecs_service"` and refuses an older digest unless
   every send switch is `false` and every send service is at zero.
@@ -303,7 +340,9 @@ Notes:
 - Remove `ignore_changes` on Lambda code; the next plan updates the functions
   in place from `archive_file`.
 - Update `docs/CONFIGURATION.md`, `infra/README.md`, the runbooks that name
-  `cdk deploy`, and the readiness register.
+  `cdk deploy`, and the readiness register. `docs/CONFIGURATION.md` and
+  `infra/README.md` state today that GitHub Actions is not a deployment
+  surface; that changes.
 
 ### Phase 6 — remove CDK and close standard gaps
 
@@ -313,7 +352,7 @@ Notes:
   `synth:example` with a mocked `terraform test` that plans the example
   tenant, so portability stays proven without credentials.
 - Do not delete the account's `CDKToolkit` bootstrap stack; other CDK apps may
-  share it (open question 8).
+  share it (open question 3).
 - Gaps found against standards 08 and 12, each its own reviewed PR **after**
   the zero-change import, never folded into it:
   - Log retention is 14 days on 8 groups, unset on 1 (12 rule 5: prod 90).
@@ -334,7 +373,9 @@ Notes:
 | Channel switches lost between applies turn notifications off                        | Switch variables have no default; missing tfvars fails the plan                                          |
 | A provider lacks an `SMSVOICE` resource or import support                           | `awscc` fallback; verify in phase 1 before phase 2                                                       |
 | Secret values land in state                                                         | No secret versions in Terraform; `ignore_changes` on Aurora password; state bucket access limited        |
-| No automatic rollback after a failed apply                                          | Small applies; bootstrap gate before promotion; phase 4 rehearsed                                        |
+| No automatic rollback after a failed apply                                          | Small applies; bootstrap gate before promotion; coverage test and zero-change plan before phase 4        |
+| No rehearsal account                                                                | Coverage test; zero-change plan in CI; `get-template` check; stop before stack deletion if any fails     |
+| CI apply role is a new prod credential path                                         | OIDC only, `sub` pinned to the `production` environment, required approval, permission boundary          |
 | Window between stack deletion and import apply leaves resources unowned             | Single window, no deploys; inventory check                                                               |
 | Synthetics canary import needs its code zip and may show an update                  | `ignore_changes` on code during import; build the zip from `infra/lambda/canary` afterwards              |
 | SNS SMS subscriptions or confirmations behave differently on import                 | Import by ARN; verify `aws sns list-subscriptions-by-topic` before and after                             |
@@ -343,6 +384,7 @@ Notes:
 
 ## How this fits `infra/gcp`
 
+- `infra/gcp` stays where it is and keeps its current scripts.
 - Same tool, separate states and backends: GCP stays on GCS, AWS uses S3.
 - Same tenant pattern: variables without defaults fed from the git-ignored
   `cdk.local.json` by a wrapper, and a deliberately unusable checked-in
@@ -355,23 +397,19 @@ Notes:
 
 ## Open questions
 
-1. State bucket: org-infra repo (13 phase 1) or a local `state-bootstrap` root
-   here?
-2. Who runs plan/import/apply on prod? 08 says CI with OIDC and environment
-   approval, agents never locally; today Claude runs local `cdk deploy`.
-3. Add a deploy workflow (08 PR flow) as part of this, or keep local deploys
-   until 13 phase 1?
-4. Rehearsal account: wait for `psd-nonprod`, or use a sandbox once with the
-   example tenant?
-5. `terraform_data` + local-exec bootstrap gate OK, or two-step wrapper?
-6. Accept stateful-first import order (deviation from "Aurora last")?
-7. Keep old tag keys (`Application`, `DataScope`, …) next to `psd:*`, or drop?
-8. Other CDK apps in this account/region using `CDKToolkit`?
-9. `psd:data-classification` value: `internal`, `student-pii`, or the
-   `partner-pii` value requested for first responders?
-10. The Cognito pool lands before phase 4. OK to add interim CFN
-    parameters for its IDs?
-11. Standards 08/12/13 are unapproved drafts; migrate to v0.2 as written?
-12. Fold standard-12 gap fixes (arm64, 90-day logs, endpoints) into phase 6, or
-    track separately?
-13. Move `infra/gcp` under `infra/terraform/gcp` too, or keep it where it is?
+Answered 2026-10-23: state bucket location, who applies, deploy workflow,
+rehearsal account, bootstrap gate, data classification, and `infra/gcp`
+placement (see Decisions). Still open:
+
+1. Accept stateful-first import order (deviation from 08 "Aurora last")?
+2. Keep old tag keys (`Application`, `DataScope`, …) next to `psd:*`, or drop?
+3. Other CDK apps in this account/region using `CDKToolkit`?
+4. OK to add interim CFN parameters for the Cognito pool IDs before phase 4?
+5. Standards 08/12/13 are unapproved drafts; migrate to v0.2/v0.3 as written?
+6. Standard-12 gap fixes (arm64, 90-day logs, endpoints) in phase 6, or
+   tracked separately?
+7. CI tenant and switch values: GitHub `production` environment secrets OK?
+8. Who applies `state-bootstrap` once locally (it creates the CI roles)?
+9. `partner-pii` vs `student-pii`: 08 v0.3 says take the most restrictive
+   value present. Can event text in Aurora contain student data? If yes, the
+   tag is `student-pii`.
