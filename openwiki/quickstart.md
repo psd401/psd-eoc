@@ -61,7 +61,7 @@ Typecheck one workspace with `bun run --cwd packages/server typecheck` (or `pack
 - Contracts first: change `packages/contracts` (Zod) before consumers; there is one capability layer shared by web, REST, MCP and mobile ([capability engine](architecture/capability-engine.md)).
 - Never edit an applied migration or run a down migration; journals, audit and delivery evidence are append-only ([data model](domain/data-model.md)).
 - No district literals in `.ts` source; tenant values live in git-ignored `infra/cdk.local.json` ([configuration and readiness](operations/configuration-and-readiness.md)).
-- Deployment is only a local `cdk deploy` (and, for the AWS Terraform stateful root, a local `terraform apply` by the product owner); never add a GitHub deployment workflow ([infrastructure](operations/infrastructure.md)).
+- Deployment follows psd-dev-standards 08: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval, which is not built yet; the one local Terraform apply is the product owner's one-time `state-bootstrap` run ([infrastructure](operations/infrastructure.md#deploy-model-and-ordering)).
 - GitHub Actions `uses:` references are pinned to full commit SHAs with a version comment; keep new or bumped actions pinned the same way ([verification and testing](testing/verification-and-testing.md#ci-githubworkflowsciyml)).
 - Mobile changes must land and be verified on both iOS and Android ([mobile app](integrations/mobile-app.md)).
 - Do not hand-edit this wiki's generated pages; the OpenWiki workflow (`.github/workflows/openwiki-update.yml`) regenerates them.

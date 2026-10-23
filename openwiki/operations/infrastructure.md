@@ -1,9 +1,9 @@
 ---
 type: Operations Guide
 title: AWS CDK infrastructure, deployment, and monitoring
-description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the local-only direct deploy rule, bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
+description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the psd-dev-standards 08 deployment split (local direct cdk deploy, CI-only Terraform apply behind the production environment), bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
 tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda, cognito, partner-access]
-timestamp: 2026-10-23T00:00:00Z
+timestamp: 2026-10-23T15:27:14-07:00
 openwiki:
   roles: [operations, architecture, delivery]
   change_kinds: [infrastructure, deployment, monitoring, identity]
@@ -30,7 +30,8 @@ openwiki:
     - infra/test/source-revision.test.ts
     - infra/terraform/stateful/tests/partner_user_pool.tftest.hcl
   invariants:
-    - Deployment happens only via a locally authenticated direct cdk deploy; no CI deployment workflow, environment, secret, or OIDC role may exist.
+    - The CDK stack is deployed only by a human's direct cdk deploy from a locally authenticated, short-lived AWS session; no workflow deploys CDK, CloudFormation, App Runner, or a container image.
+    - Terraform roots apply only from CI behind the GitHub production environment approval, through an OIDC role pinned to that environment (psd-dev-standards 08); the one local apply is the one-time state-bootstrap run by the product owner.
     - CloudFormation promotes web and worker services only after the bootstrap task exits successfully.
     - Tenant identity lives in git-ignored infra/cdk.local.json, never in source.
     - Alarms that treat missing data as breaching are deployed only with a publisher.
@@ -78,7 +79,10 @@ sequenceDiagram
 
 Caption: promotion is gated on bootstrap success (`bootstrap-deployment` Lambda + `scripts/operations/bootstrap.ts`).
 
-- `infra/package.json` `deploy` sets `PSD_EOC_ENFORCE_DEPLOYMENT_TARGET=true`; `readDeploymentTarget` (`infra/src/stack/config.ts`) verifies account, region and origin; `source-revision.ts` embeds the exact commit and refuses dirty trees. There is **no** build/push/migrate/promote command and **no** GitHub deployment workflow (AGENTS.md §5–6; `.github/workflows` only verify/synthesize). Note `docs/ARCHITECTURE.md` still mentions protected GitHub environment variables/OIDC in its "Configuration boundaries" paragraph; this contradicts `docs/CONFIGURATION.md` and AGENTS.md. Trust the latter.
+- **Two deployment paths, one per tool** (psd-dev-standards 08, recorded in [AGENTS.md](../../AGENTS.md) §5–6 and [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) "Direct CDK deployment boundary"):
+  - **CDK** deploys only when a human runs `infra/package.json` `deploy` from a locally authenticated, short-lived AWS session. No workflow deploys the stack. Agents prepare the pinned worktree and `cdk diff`, then hand the command to a human.
+  - **Terraform** applies only from CI, after a pull request shows the plan and the GitHub `production` environment approval gates the apply. The OIDC role is pinned to that environment, and nobody applies Terraform from a laptop. This pipeline is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md) and is not built, so no Terraform root is applied today.
+- `infra/package.json` `deploy` sets `PSD_EOC_ENFORCE_DEPLOYMENT_TARGET=true`; `readDeploymentTarget` (`infra/src/stack/config.ts`) verifies account, region and origin; `source-revision.ts` embeds the exact commit and refuses dirty trees. There is **no** build/push/migrate/promote command. `.github/workflows` only verifies and synthesizes, and it does not deploy the stack.
 - Rollback and bootstrap images are deliberately separate (`docs/learnings/workflow/2026-08-22-separate-rollback-and-bootstrap-images.md`); rollback procedure: `docs/runbooks/rollback.md`, release: `docs/runbooks/release.md`.
 - Tenant context: committed `infra/cdk.json` (feature flags, threats, synthetic groups) plus git-ignored `infra/cdk.local.json` (shape `cdk.local.example.json`); `tenant-context.ts` `readTenantContext` merges them. `bin/synthesize-example.ts` builds a second reserved district to prove portability without credentials.
 
@@ -92,7 +96,7 @@ Terraform defines the Google project/APIs, the read-only Groups reader service a
 
 ## Partner first-responder directory (Terraform stateful root)
 
-Non-district first responders (fire districts, police departments) are not in the district's Google directory, so they cannot be admitted through staff sign-in without weakening the staff boundary ([identity and access](../domain/identity-and-access.md)). Their identities live in a separate Amazon Cognito user pool, defined in the first AWS Terraform root, `infra/terraform/stateful` ([its README](../../infra/terraform/stateful/README.md)). The root is applied by hand by the product owner; no CI job applies it. `scripts/verify-terraform.ts` (`bun run verify:terraform`) checks it credential-free.
+Non-district first responders (fire districts, police departments) are not in the district's Google directory, so they cannot be admitted through staff sign-in without weakening the staff boundary ([identity and access](../domain/identity-and-access.md)). Their identities live in a separate Amazon Cognito user pool, defined in the first AWS Terraform root, `infra/terraform/stateful` ([its README](../../infra/terraform/stateful/README.md)). Under psd-dev-standards 08 this root applies only from CI, behind the GitHub `production` environment approval; that pipeline is phase 1 of the [migration plan](#proposed-terraform-migration-not-started) and is not built, so the root is not applied yet. `scripts/verify-terraform.ts` (`bun run verify:terraform`) checks it credential-free.
 
 What the root declares (`main.tf`):
 
@@ -136,7 +140,8 @@ Change navigation:
 - Consult this section before changing a partner parameter pattern, the Cognito pool or client settings, the secret path, or the stack's partner IAM policy. A change to the secret path must change `main.tf`, the stack's allowed pattern, and the stack test together.
 - Renaming a `stack_parameters` key must also rename the matching `PartnerUserPool*` parameter in `infra/src/stack/psd-eoc-stack.ts`. The `partner_pool_plan` run asserts the exact key set, and the stack test pins the parameter side, so a one-sided rename fails one of them.
 - Narrow checks: `bun run verify:terraform` (fmt, validate, mocked `terraform test` on `partner_user_pool.tftest.hcl`) and `bun test infra/test/stack/psd-eoc-stack.test.ts`. Run `bun run --cwd infra synth:example` for stack wiring.
-- Scope boundary: `terraform apply`, `cdk deploy`, and `terraform init` against a real backend are product-owner actions and never belong in automation. The checked-in backend bucket is a deliberately unusable placeholder.
+- Scope boundary: agents never run `apply`, `deploy`, or `import` against a real account (AGENTS.md §5). `cdk deploy` stays a human's local action. Terraform applies belong to the CI pipeline behind the `production` approval, not to agent or ad-hoc local runs, and `terraform init` against a real backend is human-run. The checked-in backend bucket is a deliberately unusable placeholder.
+- Guard: `scripts/verify-documentation.test.ts` (`forbids workflows that deploy the CDK stack or its images`) fails if a workflow deploys CDK, CloudFormation, App Runner, or an image, and it fails if source documents restate the pre-standard "no GitHub deployment environment or OIDC role" rule.
 - Documentation drift: the stateful README states the handoff as one contract with the stack, so keep [configuration and readiness](configuration-and-readiness.md) and this section consistent with it.
 
 ## Proposed Terraform migration (not started)
@@ -146,7 +151,7 @@ Change navigation:
 Key decisions the plan records:
 
 - **Two roots, split by data risk:** `stateful/` (Aurora, KMS, S3, secret containers, SQS, SES config set, SMS resources, ECR, log groups, the responder Cognito pool) and `app/` (IAM, App Runner, ECS, Lambdas, EventBridge, alarms, dashboard, canary, Route 53). Every `stateful/` resource carries `prevent_destroy`; `app/` reads `stateful/` outputs and never the reverse.
-- **Tenant values and switches leave CFN parameters:** switches become tfvars variables with no default, so a missing file fails the plan instead of turning channels off. `infra/cdk.local.json` stays the tenant file during the transition. CI reads values from the GitHub `production` environment, which changes the current "no GitHub deployment" rule ([see the convention in the quickstart](../quickstart.md#working-conventions)).
+- **Tenant values and switches leave CFN parameters:** switches become tfvars variables with no default, so a missing file fails the plan instead of turning channels off. `infra/cdk.local.json` stays the tenant file during the transition. CI reads values from the GitHub `production` environment, as the plan decided. The Terraform side of that is already the standard (CI-only apply behind `production`); the `PsdEoc` CDK stack keeps its local `cdk deploy` path until phase 5 ([working conventions](../quickstart.md#working-conventions)).
 - **Secrets stay out of state:** no `aws_secretsmanager_secret_version`; Aurora `master_password` is `ignore_changes`. The partner stateful root is the one existing exception, documented [above](#partner-first-responder-directory-terraform-stateful-root).
 - **Phase gates:** each phase has an exit condition, and the zero-change import plan (0 add, 0 change, 0 destroy) is the critical gate before the CloudFormation stack is deleted.
 
@@ -159,7 +164,7 @@ flowchart LR
   P5 --> P6["6 Remove CDK and close standard gaps"]
 ```
 
-Caption: phase order from the plan. Phase 4 is the irreversible step (after it, the path back is fix-forward in Terraform); phase 5 is when the GitHub Actions deployment rule changes.
+Caption: phase order from the plan. Phase 4 is the irreversible step (after it, the path back is fix-forward in Terraform); phase 5 is when the stack's deploys move from local `cdk deploy` to Terraform applied through CI.
 
 Change navigation for this proposal:
 
@@ -174,3 +179,10 @@ Change navigation for this proposal:
 - **Lambda change:** Lambdas are plain `.mjs` under `infra/lambda/*` with matching `infra/test/*-runtime.test.ts`; keep `index.d.mts` in step.
 - **Partner pool or handoff change:** update `infra/terraform/stateful` and the matching `PartnerUserPool*` parameter pattern together, then run `bun run verify:terraform` and `bun test infra/test/stack/psd-eoc-stack.test.ts`; update [configuration and readiness](configuration-and-readiness.md) if a parameter or its meaning changes.
 - **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
+eter or its meaning changes.
+- **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
+figuration-and-readiness.md) if a parameter or its meaning changes.
+- **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
+eter or its meaning changes.
+- **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
+run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.

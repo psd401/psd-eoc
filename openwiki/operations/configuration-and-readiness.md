@@ -92,5 +92,4 @@ Guides for people rather than responders: `docs/guides/first-administrator.md` (
 
 ## Known documentation drift (prefer source)
 
-- `docs/ARCHITECTURE.md` ("Configuration boundaries") says protected production authority lives in GitHub environment variables/secrets and OIDC role policy. That contradicts `AGENTS.md` §5–6, `docs/CONFIGURATION.md` ("Direct CDK deployment boundary") and `infra/README.md`: deployment is only a local `cdk deploy`, with no GitHub deployment environment or role.
 - `packages/mobile/README.md` still describes a protected per-build allowlist for push registration. It was removed and `docs/CONFIGURATION.md` says it is deliberately absent; see [mobile app](../integrations/mobile-app.md).
