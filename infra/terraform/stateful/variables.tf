@@ -65,3 +65,36 @@ variable "passkey_relying_party_id" {
     error_message = "passkey_relying_party_id must be a public hostname."
   }
 }
+
+variable "ses_identity_domain" {
+  description = <<-EOT
+    The verified SES domain identity, in this account and region, that partner
+    invitations and one-time passwords are sent from. The same domain the
+    stack's psdEoc:sesIdentityDomain names.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)+$", var.ses_identity_domain))
+    error_message = "ses_identity_domain must be a domain name."
+  }
+}
+
+variable "partner_email_from_address" {
+  description = <<-EOT
+    The From address on partner email, optionally with a display name, such as
+    "EOC Alerts <eoc-alerts@example.invalid>". It must be an address in
+    ses_identity_domain.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^([^<>]+ <)?[^@<>[:space:]]+@[a-z0-9][a-z0-9.-]+>?$", var.partner_email_from_address))
+    error_message = "partner_email_from_address must be an email address, optionally as \"Name <address>\"."
+  }
+
+  validation {
+    condition     = endswith(lower(trimsuffix(var.partner_email_from_address, ">")), "@${var.ses_identity_domain}")
+    error_message = "partner_email_from_address must be an address in ses_identity_domain."
+  }
+}
