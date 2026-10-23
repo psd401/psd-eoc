@@ -1,0 +1,3 @@
+bucket = "replace-with-tenant-terraform-state-bucket"
+key    = "psd-eoc/terraform/stateful.tfstate"
+region = "us-east-2"

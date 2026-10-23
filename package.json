@@ -26,6 +26,7 @@
     "verify:workspaces": "bun scripts/verify-workspaces.ts",
     "verify:config": "bun scripts/verify-example-config.ts",
     "verify:docs": "bun scripts/verify-documentation.ts",
+    "verify:terraform": "bun scripts/verify-terraform.ts",
     "typecheck": "bun run verify:workspaces && bun run --filter '*' typecheck",
     "build": "bun run --cwd packages/server build",
     "test": "bun run test:full",
@@ -55,7 +56,7 @@
     "test:e2e:mobile:ios": "bun packages/mobile/e2e/run.ts ios",
     "test:e2e:mobile:android": "bun packages/mobile/e2e/run.ts android",
     "test:e2e:mobile:verify": "bun run --cwd packages/mobile e2e:verify",
-    "check": "bun run format:check && bun run lint && bun run verify:config && bun run verify:docs && bun run typecheck && bun run build && bun run test:full"
+    "check": "bun run format:check && bun run lint && bun run verify:config && bun run verify:docs && bun run verify:terraform && bun run typecheck && bun run build && bun run test:full"
   },
   "devDependencies": {
     "@eslint/js": "9.35.0",
