@@ -13,6 +13,8 @@ current sources; the subdirectories below hold guides, runbooks, and history.
   direct CDK deployment parameter index.
 - [Operational readiness](INTEGRATIONS.md) — the only current source for
   deployed-stack, DNS, OIDC, alarm, provider, and mobile readiness.
+- [AWS CDK to Terraform migration plan](terraform-migration-plan.md) —
+  proposed, unapproved plan for moving the AWS stack to Terraform.
 
 ## Subdirectories
 
