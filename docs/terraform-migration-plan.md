@@ -1,6 +1,6 @@
 # AWS CDK to Terraform migration plan
 
-**Status:** proposal; seven decisions recorded 2026-10-23, the rest not approved. No infrastructure change or deploy is part
+**Status:** proposal; decisions recorded 2026-10-23, three questions open. No infrastructure change or deploy is part
 of this document. Every phase below needs the product owner's approval before
 it starts.
 
@@ -31,6 +31,19 @@ alignment.
 - `psd:data-classification` uses the `partner-pii` value proposed in
   psd-dev-standards PR #143 (08 v0.3, draft).
 - `infra/gcp` stays as it is; no other Google work is planned.
+- CI reads tenant and switch values from GitHub `production` environment
+  secrets.
+- The product owner applies `state-bootstrap` once, locally, with an
+  administrator session.
+- Aurora holds no student data, so `partner-pii` is the most restrictive
+  value present and is the tag.
+- `stateful/` imports first, then `app/` (deviation from 08 "Aurora last",
+  accepted).
+- The old tag keys (`Application`, `DataClassification`, `DataScope`,
+  `Environment`, `ExpectedAwsAccountAlias`, `ManagedBy`) stay next to
+  `psd:*`.
+- Interim CloudFormation parameters carry the Cognito pool IDs to App Runner
+  until phase 5.
 
 ## Evidence used
 
@@ -205,11 +218,11 @@ off.
   wrapper until CDK is removed).
 - `deploy.auto.tfvars.example` lists every switch with its safe value.
 - **CI needs the same values.** The repository is public, so tenant and
-  switch values cannot be committed. Proposed: a GitHub environment
+  switch values cannot be committed. A GitHub environment
   (`production`) holds `tenant.auto.tfvars.json` and `deploy.auto.tfvars`
   contents as environment secrets, which only the plan and apply jobs read.
   A switch change is then an environment edit followed by a plan, not a PR
-  diff. Open question 7.
+  diff.
 - The `docs-contract:template-parameters` list checked by
   `bun run verify:docs` becomes a `docs-contract:terraform-variables` list
   checked against `variables.tf`.
@@ -228,7 +241,8 @@ off.
   role. The role trust `sub` is pinned to
   `repo:psd401/psd-eoc:environment:production` for apply and to pull
   requests for plan. Applied once by a person with an administrator session;
-  that is the only local apply in the migration (open question 8).
+  that is the only local apply in the migration, and the product owner runs
+  it.
 - Create `infra/terraform/{stateful,app,scripts}` with providers, backend
   stub, typed and described variables, and the tenant wrapper.
 - `bun run check`: `terraform fmt -check`, `validate`, `tflint`, and
@@ -305,7 +319,7 @@ Notes:
   order applies to the import applies. `stateful/` goes first because `app/`
   reads its outputs. Imports change no resource, and `prevent_destroy` plus
   the zero-change plan cover the replacement risk the rule guards against.
-  This is a deviation that needs approval (open question 1).
+  The product owner accepted this deviation on 2026-10-23.
 - The `SecretTargetAttachment` only wrote host and port into the admin
   secret's JSON; the value stays. Rotation is not configured.
 - Retained resources keep CloudFormation's `aws:cloudformation:*` tags.
@@ -334,7 +348,7 @@ Notes:
   every send switch is `false` and every send service is at zero.
 - First Terraform deploy re-uses the running digest (no-op), then one real
   release.
-- Add `psd:*` `default_tags` in its own PR. Check App Runner service and VPC
+- Add `psd:*` `default_tags` in its own PR, keeping the old tag keys. Check App Runner service and VPC
   connector tags update in place in the plan (in CloudFormation they force
   replacement, which is why the CDK code pins them).
 - Remove `ignore_changes` on Lambda code; the next plan updates the functions
@@ -351,8 +365,9 @@ Notes:
   `infra/lambda/*` sources and their runtime tests. Replace
   `synth:example` with a mocked `terraform test` that plans the example
   tenant, so portability stays proven without credentials.
-- Do not delete the account's `CDKToolkit` bootstrap stack; other CDK apps may
-  share it (open question 3).
+- Do not delete the account's `CDKToolkit` bootstrap stack. Whether other CDK
+  apps share it is unknown; the read-only CI role lists the region's stacks
+  before anyone proposes removing it, and removal is a separate decision.
 - Gaps found against standards 08 and 12, each its own reviewed PR **after**
   the zero-change import, never folded into it:
   - Log retention is 14 days on 8 groups, unset on 1 (12 rule 5: prod 90).
@@ -397,19 +412,12 @@ Notes:
 
 ## Open questions
 
-Answered 2026-10-23: state bucket location, who applies, deploy workflow,
-rehearsal account, bootstrap gate, data classification, and `infra/gcp`
-placement (see Decisions). Still open:
+All questions asked on 2026-10-23 are answered (see Decisions) except these:
 
-1. Accept stateful-first import order (deviation from 08 "Aurora last")?
-2. Keep old tag keys (`Application`, `DataScope`, …) next to `psd:*`, or drop?
-3. Other CDK apps in this account/region using `CDKToolkit`?
-4. OK to add interim CFN parameters for the Cognito pool IDs before phase 4?
-5. Standards 08/12/13 are unapproved drafts; migrate to v0.2/v0.3 as written?
-6. Standard-12 gap fixes (arm64, 90-day logs, endpoints) in phase 6, or
-   tracked separately?
-7. CI tenant and switch values: GitHub `production` environment secrets OK?
-8. Who applies `state-bootstrap` once locally (it creates the CI roles)?
-9. `partner-pii` vs `student-pii`: 08 v0.3 says take the most restrictive
-   value present. Can event text in Aurora contain student data? If yes, the
-   tag is `student-pii`.
+1. Does any other CDK app in the account and region use `CDKToolkit`?
+   Unknown; checked from CI before phase 6 (no local AWS session was
+   available on 2026-10-23).
+2. Standards 08/12/13 are unapproved drafts. Migrate to them as written
+   (08 v0.3 if PR #143 merges)?
+3. Standard-12 gap fixes (arm64, 90-day logs, gateway endpoints, noncurrent
+   expiration) as phase 6 PRs, or tracked separately?
