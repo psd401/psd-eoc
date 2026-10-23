@@ -102,14 +102,22 @@ Cognito's own mailbox. The root:
 - creates Cognito's email service-linked role,
   `AWSServiceRoleForAmazonCognitoIdpEmailService`, which may only call
   `ses:SendEmail` and `ses:SendRawEmail`. It is one per account and outlives
-  this pool. The apply role needs `iam:CreateServiceLinkedRole` for
-  `email.cognito-idp.amazonaws.com`;
+  this pool. The apply role needs `iam:CreateServiceLinkedRole`, limited by
+  `iam:AWSServiceName = email.cognito-idp.amazonaws.com` (approved
+  2026-10-23; the role itself comes from `state-bootstrap`);
 - sends from `partner_email_from_address`, which must be an address in that
-  domain.
+  domain. The tenant uses the stack's own sender, `psdEoc:sesFromDisplayName`
+  and `psdEoc:sesFromAddress` as `Name <address>` (product owner,
+  2026-10-23), so partners see one sender for invitations, codes and alerts.
 
 Before the first apply, the SES account in the pool's region must be out of the
 sandbox; in the sandbox Cognito "can't send messages to your users' email
-addresses" (same page). `infra/src/ops/ses-production-access.ts --check`
+addresses" (same page).
+
+No SES configuration set is attached. The stack's `psd-eoc-transactional` set
+publishes every event to the alert-delivery callback, which accepts only mail
+carrying its own correlation tags; Cognito's mail carries none, so each
+one-time-password email would be refused and land in the dead-letter queue. `infra/src/ops/ses-production-access.ts --check`
 reports it read-only; see
 [docs/runbooks/email-setup.md](../../../docs/runbooks/email-setup.md).
 
