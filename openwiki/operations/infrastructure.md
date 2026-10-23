@@ -18,6 +18,7 @@ openwiki:
     - infra/lambda
     - infra/gcp
     - infra/terraform/stateful
+    - infra/src/ops/ses-production-access.ts
     - scripts/verify-terraform.ts
     - packages/server/scripts/operations/bootstrap.ts
   symbols: [PsdEocStack, readDeploymentTarget, readTenantContext, configureInfrastructureMonitoring, configureMonitoring, APPLICATION_IMAGE_EXCLUDES, ShouldUsePartnerUserPool, AppRunnerPartnerUserPoolAccess]
@@ -37,6 +38,7 @@ openwiki:
     - Alarms that treat missing data as breaching are deployed only with a publisher.
     - Partner user pool access is granted only when all three PartnerUserPool* parameters are supplied; a partial set fails validation.
     - The Terraform root's only handoff output is stack_parameters, keyed by the stack's PartnerUserPool* parameter names; the run partner_pool_plan asserts that exact key set.
+    - Partner email is sent only through the district's SES identity (DEVELOPER); the plan refuses an identity that is not verified for sending, and a From address outside ses_identity_domain.
     - The partner client secret is passed to the runtime only as an ARN and is never a service environment value or stack output.
   validation_commands:
     - bun run --cwd infra synth:example
@@ -100,12 +102,23 @@ Non-district first responders (fire districts, police departments) are not in th
 
 What the root declares (`main.tf`):
 
-- `aws_cognito_user_pool.partner`: Essentials tier, email as the only identity, `EMAIL_OTP` and `WEB_AUTHN` as the only first factors, `mfa_configuration = "OFF"`, admin-invite only, passkeys bound to a relying-party id with `user_verification = "required"`, admin-only recovery, `COGNITO_DEFAULT` mail, and no hosted-UI domain or federation. Deletion protection and `prevent_destroy` are set.
+- `aws_cognito_user_pool.partner`: Essentials tier, email as the only identity, `EMAIL_OTP` and `WEB_AUTHN` as the only first factors, `mfa_configuration = "OFF"`, admin-invite only, passkeys bound to a relying-party id with `user_verification = "required"`, admin-only recovery, `DEVELOPER` mail through the district SES identity (see [email delivery](#email-delivery-developer-ses-identity)), and no hosted-UI domain or federation. Deletion protection and `prevent_destroy` are set.
 - `aws_cognito_user_pool_client.server`: one confidential client (`generate_secret = true`), `ALLOW_USER_AUTH` and `ALLOW_REFRESH_TOKEN_AUTH` only, so no password flow exists.
 - `aws_secretsmanager_secret.partner_client` at the fixed path `/psd-eoc/partner-user-pool-client`, and `aws_secretsmanager_secret_version.partner_client`, which stores the client id, the client secret, and the pool id as JSON.
+- `aws_iam_service_linked_role.cognito_email` (`email.cognito-idp.amazonaws.com`): the account-wide role Cognito uses to send through SES. It has `prevent_destroy`, because deleting it would stop every SES-backed user pool in the account.
 - Input `owner` (the `psd:owner` tag) must be an email address whose domain has at least one dot (`variables.tf`). A dotless address such as `technology@example` is refused at validation; the mocked run `owner_requires_a_dotted_domain` pins this.
 
 The root's `outputs.tf` has one output, `stack_parameters`, keyed by the stack's own parameter names: `PartnerUserPoolId`, `PartnerUserPoolClientId`, and `PartnerUserPoolClientSecretArn`. It is the only handoff; the earlier standalone outputs and the unused pool ARN output were removed, so nothing downstream reads them. No output carries the secret value.
+
+### Email delivery (DEVELOPER, SES identity)
+
+Email one-time passwords require the pool's own SES configuration, so Cognito's default mailbox could never deliver a code. The pool therefore sends through the district's SES identity, and the root has these inputs and checks:
+
+- `ses_identity_domain` names the existing SES domain identity (the stack's `psdEoc:sesIdentityDomain`). The root reads it with `data "aws_sesv2_email_identity"` and never owns it, because other district senders share it. The pool's `precondition` refuses the plan when the identity is not `verified_for_sending_status`.
+- `partner_email_from_address` is the From address, optionally `Name <address>`. Its validation requires the address to end in `@` plus `ses_identity_domain`, so the From address must come from the identity Cognito sends with. `infra/terraform/stateful/stateful.tfvars.example` shows the placeholder shape; real values stay in a file outside the repository.
+- The pool's `depends_on` orders creation after the service-linked role. The apply role needs `iam:CreateServiceLinkedRole`, limited by `iam:AWSServiceName = email.cognito-idp.amazonaws.com`; the migration plan records that grant, but the `state-bootstrap` root that would carry it is not in the repository yet.
+- Before the first real send, the SES account in the pool's region must be out of the sandbox, because in the sandbox Cognito cannot email unverified recipients. `scripts/ops/ses-production-access.ts` (source `infra/src/ops/ses-production-access.ts`) with `--check --confirm-account <id> --confirm-region <region>` reports this read-only; see [email setup runbook](../../docs/runbooks/email-setup.md).
+- No SES configuration set is attached to the pool. The stack's transactional configuration set publishes to the alert-delivery callback, which accepts only mail with its own correlation tags, so Cognito's untagged mail would be refused and dead-lettered.
 
 ### How the stack gates it
 
@@ -139,7 +152,7 @@ Change navigation:
 
 - Consult this section before changing a partner parameter pattern, the Cognito pool or client settings, the secret path, or the stack's partner IAM policy. A change to the secret path must change `main.tf`, the stack's allowed pattern, and the stack test together.
 - Renaming a `stack_parameters` key must also rename the matching `PartnerUserPool*` parameter in `infra/src/stack/psd-eoc-stack.ts`. The `partner_pool_plan` run asserts the exact key set, and the stack test pins the parameter side, so a one-sided rename fails one of them.
-- Narrow checks: `bun run verify:terraform` (fmt, validate, mocked `terraform test` on `partner_user_pool.tftest.hcl`) and `bun test infra/test/stack/psd-eoc-stack.test.ts`. Run `bun run --cwd infra synth:example` for stack wiring.
+- Narrow checks: `bun run verify:terraform` (fmt, validate, mocked `terraform test` on `partner_user_pool.tftest.hcl`) and `bun test infra/test/stack/psd-eoc-stack.test.ts`. Run `bun run --cwd infra synth:example` for stack wiring. For email changes, the relevant runs in `partner_user_pool.tftest.hcl` are `partner_pool_plan` (its assertions pin `DEVELOPER`, the identity ARN, the From address and the service-linked role), `unverified_ses_identity_is_refused` (precondition failure on an unverified identity) and `from_address_outside_identity_is_refused` (validation failure on a From address outside the domain).
 - Scope boundary: agents never run `apply`, `deploy`, or `import` against a real account (AGENTS.md §5). `cdk deploy` stays a human's local action. Terraform applies belong to the CI pipeline behind the `production` approval, not to agent or ad-hoc local runs, and `terraform init` against a real backend is human-run. The checked-in backend bucket is a deliberately unusable placeholder.
 - Guard: `scripts/verify-documentation.test.ts` (`forbids workflows that deploy the CDK stack or its images`) fails if a workflow deploys CDK, CloudFormation, App Runner, or an image, and it fails if source documents restate the pre-standard "no GitHub deployment environment or OIDC role" rule.
 - Documentation drift: the stateful README states the handoff as one contract with the stack, so keep [configuration and readiness](configuration-and-readiness.md) and this section consistent with it.
@@ -178,11 +191,5 @@ Change navigation for this proposal:
 - **New worker/queue:** also add its scoped secret, alarms in `monitoring.ts` (with DLQ runbook) and the server internal route; follow [channel workers](../integrations/channel-workers.md).
 - **Lambda change:** Lambdas are plain `.mjs` under `infra/lambda/*` with matching `infra/test/*-runtime.test.ts`; keep `index.d.mts` in step.
 - **Partner pool or handoff change:** update `infra/terraform/stateful` and the matching `PartnerUserPool*` parameter pattern together, then run `bun run verify:terraform` and `bun test infra/test/stack/psd-eoc-stack.test.ts`; update [configuration and readiness](configuration-and-readiness.md) if a parameter or its meaning changes.
+- **Partner email change (identity, From address, sending account):** change `variables.tf` validations and `main.tf` `email_configuration` together, keep the mocked `partner_pool_plan` assertions in step, then run `bun run verify:terraform`. Do not relax the verified-identity `precondition`; it is the guard that keeps a plan from creating a pool that cannot send codes.
 - **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
-eter or its meaning changes.
-- **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
-figuration-and-readiness.md) if a parameter or its meaning changes.
-- **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
-eter or its meaning changes.
-- **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
-run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
