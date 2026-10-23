@@ -2,10 +2,11 @@
 type: Operations Guide
 title: AWS CDK infrastructure, deployment, and monitoring
 description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the local-only direct deploy rule, bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
-tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda]
+tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda, cognito, partner-access]
+timestamp: 2026-10-23T00:00:00Z
 openwiki:
   roles: [operations, architecture, delivery]
-  change_kinds: [infrastructure, deployment, monitoring]
+  change_kinds: [infrastructure, deployment, monitoring, identity]
   source_paths:
     - infra/src/stack/psd-eoc-stack.ts
     - infra/src/stack/config.ts
@@ -16,8 +17,10 @@ openwiki:
     - infra/bin/synthesize-example.ts
     - infra/lambda
     - infra/gcp
+    - infra/terraform/stateful
+    - scripts/verify-terraform.ts
     - packages/server/scripts/operations/bootstrap.ts
-  symbols: [PsdEocStack, readDeploymentTarget, readTenantContext, configureInfrastructureMonitoring, configureMonitoring, APPLICATION_IMAGE_EXCLUDES]
+  symbols: [PsdEocStack, readDeploymentTarget, readTenantContext, configureInfrastructureMonitoring, configureMonitoring, APPLICATION_IMAGE_EXCLUDES, ShouldUsePartnerUserPool, AppRunnerPartnerUserPoolAccess]
   test_paths:
     - infra/test/stack/psd-eoc-stack.test.ts
     - infra/test/tenant-context.test.ts
@@ -25,14 +28,18 @@ openwiki:
     - infra/test/delivery-router-runtime.test.ts
     - infra/test/bootstrap-deployment-runtime.test.ts
     - infra/test/source-revision.test.ts
+    - infra/terraform/stateful/tests/partner_user_pool.tftest.hcl
   invariants:
     - Deployment happens only via a locally authenticated direct cdk deploy; no CI deployment workflow, environment, secret, or OIDC role may exist.
     - CloudFormation promotes web and worker services only after the bootstrap task exits successfully.
     - Tenant identity lives in git-ignored infra/cdk.local.json, never in source.
     - Alarms that treat missing data as breaching are deployed only with a publisher.
+    - Partner user pool access is granted only when all three PartnerUserPool* parameters are supplied; a partial set fails validation.
+    - The partner client secret is passed to the runtime only as an ARN and is never a service environment value or stack output.
   validation_commands:
     - bun run --cwd infra synth:example
     - bun test infra/test/stack/psd-eoc-stack.test.ts
+    - bun run verify:terraform
 ---
 
 # AWS CDK infrastructure, deployment, and monitoring
@@ -48,6 +55,7 @@ Read this before changing `infra/`, queue/worker wiring, alarms, or deploy behav
 - **SES/SMS:** SES configuration set, event destination, SNS topic → callback queue; AWS End User Messaging pool, opt-out list, protect configuration and an EventBridge rule for delivery events; an SMS opt-out schedule.
 - **Storage:** private media bucket with an optional GuardDuty Malware Protection plan (role has a CFN condition because plan creation validates bucket ownership).
 - **Operations:** KMS-encrypted operations/critical/recovery alarm topics, `alarm-mailer` Lambda (sends alarm email via SES instead of SNS email subscriptions, which can silently deactivate), `bootstrap-deployment` custom-resource Lambdas (start/check bootstrap, rollback image validation and quiescence), `failover-metric`, `metrics-collector`, `canary`.
+- **Partner access (optional):** three `PartnerUserPool*` parameters (pool id, app-client id, client-secret ARN) default to `UNCONFIGURED`. Supplying all three sets the `ShouldUsePartnerUserPool` condition, which enables the `AppRunnerPartnerUserPoolAccess` policy (scoped Cognito actions on the one named pool, and `secretsmanager:GetSecretValue` on the one ARN) and the three `PSD_EOC_PARTNER_USER_POOL_*` runtime variables. The pool itself is not in this stack; see [partner first-responder directory](#partner-first-responder-directory-terraform-stateful-root).
 - Other resources: ECR repository, optional custom domain, Google OIDC/cookie/API-salt secrets, Expo token and direct APNs/FCM credential secrets.
 
 ## Deploy model and ordering
@@ -81,15 +89,63 @@ Two entry points: `configureInfrastructureMonitoring` (live; alarms on AWS-publi
 
 Terraform defines the Google project/APIs, the read-only Groups reader service account and least-privilege bindings; `scripts/run-guarded.sh` is the only supported launcher (pins operator env, validates project and AWS caller). `firebase/` is an isolated Terraform root for Android FCM, tested offline in `infra/test/gcp`. Credentials never enter Terraform state or the repo. See [identity](../domain/identity-and-access.md) for how the Groups reader is used. The migration plan below leaves these roots unchanged.
 
+## Partner first-responder directory (Terraform stateful root)
+
+Non-district first responders (fire districts, police departments) are not in the district's Google directory, so they cannot be admitted through staff sign-in without weakening the staff boundary ([identity and access](../domain/identity-and-access.md)). Their identities live in a separate Amazon Cognito user pool, defined in the first AWS Terraform root, `infra/terraform/stateful` ([its README](../../infra/terraform/stateful/README.md)). The root is applied by hand by the product owner; no CI job applies it. `scripts/verify-terraform.ts` (`bun run verify:terraform`) checks it credential-free.
+
+What the root declares (`main.tf`):
+
+- `aws_cognito_user_pool.partner`: Essentials tier, email as the only identity, `EMAIL_OTP` and `WEB_AUTHN` as the only first factors, `mfa_configuration = "OFF"`, admin-invite only, passkeys bound to a relying-party id with `user_verification = "required"`, admin-only recovery, `COGNITO_DEFAULT` mail, and no hosted-UI domain or federation. Deletion protection and `prevent_destroy` are set.
+- `aws_cognito_user_pool_client.server`: one confidential client (`generate_secret = true`), `ALLOW_USER_AUTH` and `ALLOW_REFRESH_TOKEN_AUTH` only, so no password flow exists.
+- `aws_secretsmanager_secret.partner_client` at the fixed path `/psd-eoc/partner-user-pool-client`, and `aws_secretsmanager_secret_version.partner_client`, which stores the client id, the client secret, and the pool id as JSON.
+
+The root's `outputs.tf` emits `stack_parameters`, which carries exactly the three values the stack consumes: `PartnerUserPoolId`, `PartnerUserPoolClientId`, and `PartnerUserPoolClientSecretArn`. No output carries the secret value.
+
+### How the stack gates it
+
+The stack's three parameters default to `UNCONFIGURED`, the same sentinel convention as the SMS inputs ([configuration and readiness](configuration-and-readiness.md)). Validation rules, not the runtime, enforce the combinations:
+
+<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: a semicolon inside a label breaks rendering; rephrase the label. -->
+```text
+flowchart TD
+  P["PartnerUserPoolId, ClientId, ClientSecretArn"] --> A{"all three UNCONFIGURED or all three supplied?"}
+  A -- "no (partial)" --> R1["Rule PartnerUserPoolSelectionIsComplete refuses deploy"]
+  A -- "yes, all supplied" --> B{"ProvisionApplication = true?"}
+  B -- "no" --> R2["Rule PartnerUserPoolRequiresLiveApplication refuses deploy"]
+  B -- "yes" --> C["ShouldUsePartnerUserPool true: scoped IAM policy and env vars"]
+  A -- "yes, all UNCONFIGURED" --> D["No partner grant; env carries UNCONFIGURED"]
+```
+
+Caption: partner access is on only when every identifier is supplied and a live App Runner application exists.
+
+Runtime invariants the stack tests pin (`describe('partner user pool boundary')` in `infra/test/stack/psd-eoc-stack.test.ts`):
+
+- The `PartnerUserPoolClientSecretArn` allowed pattern accepts only the `/psd-eoc/partner-user-pool-client` path with the six-character generated suffix. A name without that suffix can never match the read grant. The test `pins the secret path the Terraform root creates` reads `main.tf`, so renaming one side alone fails the suite.
+- The Cognito grant names one pool through `PartnerUserPoolId`, with the actions `AdminCreateUser`, `AdminDisableUser`, `AdminInitiateAuth`, `AdminRespondToAuthChallenge`, `StartWebAuthnRegistration`, and `CompleteWebAuthnRegistration`. No delete and no wildcard pool.
+- The client secret reaches the service only as an ARN reference, and no output republishes the pool, client, or secret ARN.
+
+Current state, which matters for every change here:
+
+- No server code reads `PSD_EOC_PARTNER_USER_POOL_*` (a search of `packages/` finds nothing). Partner sign-in is configuration only; the server-side path is tracked as issue #593. Today the only sign-in is Google OIDC for staff.
+- The stateful root writes the client secret into a Secrets Manager version and therefore into Terraform state. This deliberately departs from the migration plan's rule that no secret version enters state; the stateful README records why (Cognito generates the secret, so Terraform reads it back regardless). The state bucket must therefore be treated as secret-bearing.
+- The readiness status `configured-unverified` for partner sign-in is recorded only in [docs/INTEGRATIONS.md](../../docs/INTEGRATIONS.md). Nothing was applied to any account as of 2026-10-23.
+
+Change navigation:
+
+- Consult this section before changing a partner parameter pattern, the Cognito pool or client settings, the secret path, or the stack's partner IAM policy. A change to the secret path must change `main.tf`, the stack's allowed pattern, and the stack test together.
+- Narrow checks: `bun run verify:terraform` (fmt, validate, mocked `terraform test` on `partner_user_pool.tftest.hcl`) and `bun test infra/test/stack/psd-eoc-stack.test.ts`. Run `bun run --cwd infra synth:example` for stack wiring.
+- Scope boundary: `terraform apply`, `cdk deploy`, and `terraform init` against a real backend are product-owner actions and never belong in automation. The checked-in backend bucket is a deliberately unusable placeholder.
+- Documentation drift: the stateful README states the handoff as one contract with the stack, so keep [configuration and readiness](configuration-and-readiness.md) and this section consistent with it.
+
 ## Proposed Terraform migration (not started)
 
-`docs/terraform-migration-plan.md` is a proposal, status "no phase has started", with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. That directory does not exist yet, so the CDK code and the deploy model above remain the source of truth. Do not implement any phase from this page; read the plan itself first.
+`docs/terraform-migration-plan.md` is a proposal, status "no phase has started", with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. Only the `stateful/` root exists, and it holds just the partner pool described [above](#partner-first-responder-directory-terraform-stateful-root); the `app/`, `scripts/`, and `state-bootstrap/` roots from the plan do not exist. The CDK code and the deploy model above remain the source of truth for everything else. Do not implement any phase from this page; read the plan itself first.
 
 Key decisions the plan records:
 
 - **Two roots, split by data risk:** `stateful/` (Aurora, KMS, S3, secret containers, SQS, SES config set, SMS resources, ECR, log groups, the responder Cognito pool) and `app/` (IAM, App Runner, ECS, Lambdas, EventBridge, alarms, dashboard, canary, Route 53). Every `stateful/` resource carries `prevent_destroy`; `app/` reads `stateful/` outputs and never the reverse.
 - **Tenant values and switches leave CFN parameters:** switches become tfvars variables with no default, so a missing file fails the plan instead of turning channels off. `infra/cdk.local.json` stays the tenant file during the transition. CI reads values from the GitHub `production` environment, which changes the current "no GitHub deployment" rule ([see the convention in the quickstart](../quickstart.md#working-conventions)).
-- **Secrets stay out of state:** no `aws_secretsmanager_secret_version`; Aurora `master_password` is `ignore_changes`.
+- **Secrets stay out of state:** no `aws_secretsmanager_secret_version`; Aurora `master_password` is `ignore_changes`. The partner stateful root is the one existing exception, documented [above](#partner-first-responder-directory-terraform-stateful-root).
 - **Phase gates:** each phase has an exit condition, and the zero-change import plan (0 add, 0 change, 0 destroy) is the critical gate before the CloudFormation stack is deleted.
 
 ```mermaid
@@ -106,7 +162,7 @@ Caption: phase order from the plan. Phase 4 is the irreversible step (after it, 
 Change navigation for this proposal:
 
 - Consult the plan's Phases and Risks sections before any infra change that might collide with migration (the plan asks to freeze CDK infrastructure changes between phase 2 and phase 4).
-- Current validation is unchanged: `bun run --cwd infra typecheck` and `bun run --cwd infra synth:example`. The plan's `bun run check` additions (`terraform fmt`, `validate`, `tflint`, mocked `terraform test`) do not exist yet.
+- Current validation: `bun run --cwd infra typecheck` and `bun run --cwd infra synth:example` for CDK, plus `bun run verify:terraform` (`terraform fmt -check`, `validate`, and mocked `terraform test` for each AWS root, run inside `bun run check`). `tflint` and the planned `terraform.yml` workflow do not exist yet.
 - Related docs the plan says will need updates in phase 5: `docs/CONFIGURATION.md`, `infra/README.md`, the runbooks that name `cdk deploy`, and the readiness register ([configuration and readiness](configuration-and-readiness.md)).
 
 ## Change recipes
@@ -114,4 +170,5 @@ Change navigation for this proposal:
 - **New AWS resource/parameter:** add in `psd-eoc-stack.ts`, add the parameter to the `docs-contract:cdk-context`/parameter lists in `docs/CONFIGURATION.md` (otherwise `bun run verify:docs` fails), extend `psd-eoc-stack.test.ts`, run `bun run --cwd infra synth:example`.
 - **New worker/queue:** also add its scoped secret, alarms in `monitoring.ts` (with DLQ runbook) and the server internal route; follow [channel workers](../integrations/channel-workers.md).
 - **Lambda change:** Lambdas are plain `.mjs` under `infra/lambda/*` with matching `infra/test/*-runtime.test.ts`; keep `index.d.mts` in step.
+- **Partner pool or handoff change:** update `infra/terraform/stateful` and the matching `PartnerUserPool*` parameter pattern together, then run `bun run verify:terraform` and `bun test infra/test/stack/psd-eoc-stack.test.ts`; update [configuration and readiness](configuration-and-readiness.md) if a parameter or its meaning changes.
 - **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.

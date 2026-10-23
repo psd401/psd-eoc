@@ -3,7 +3,7 @@ type: Operations Guide
 title: Tenant configuration, readiness register, and runbooks
 description: Where district-specific configuration lives (CDK context manifest, git-ignored cdk.local.json, runtime environment variables, mobile identifiers), how provider activation is gated, where current deployment and provider readiness is recorded, and how the runbook set is organized.
 tags: [configuration, tenant, readiness, runbooks, open-source]
-timestamp: 2026-10-20T00:00:00Z
+timestamp: 2026-10-23T00:00:00Z
 openwiki:
   roles: [operations, delivery]
   change_kinds: [configuration, documentation-contract]
@@ -14,6 +14,8 @@ openwiki:
     - infra/cdk.json
     - infra/cdk.local.example.json
     - infra/src/tenant-context.ts
+    - infra/src/stack/psd-eoc-stack.ts
+    - infra/terraform/stateful/outputs.tf
     - packages/server/lib/config/deployment.ts
     - scripts/verify-documentation.ts
     - scripts/verify-example-config.ts
@@ -42,7 +44,7 @@ PSD EOC is open source and built so any district can run it on its own AWS accou
 | --- | --- | --- |
 | Shared CDK context | `infra/cdk.json` | Committed. Feature flags, the threat list, synthetic test groups only. |
 | Tenant manifest | git-ignored `infra/cdk.local.json`, shape in `infra/cdk.local.example.json` | Every `psdEoc:*` key (organization name, hosted domain, application origin, facilities, neighborhoods, SES sender, SMS support contact, GCP project values, iOS bundle ID, monitoring runbook base URL, etc.). Read by `infra/src/tenant-context.ts` (`readTenantContext`). The AWS account ID, SMS support phone and GCP billing account never enter the repository. |
-| CloudFormation parameters | passed to `cdk deploy --parameters` | Enable flags such as `EnableExpoPushWorker`, direct-push enablement, protected secrets paths; indexed in `docs/CONFIGURATION.md`. A proposed (unstarted) migration would turn these into typed Terraform variables with no defaults, fed from git-ignored tfvars and a GitHub `production` environment; see [proposed Terraform migration](infrastructure.md#proposed-terraform-migration-not-started). |
+| CloudFormation parameters | passed to `cdk deploy --parameters` | Enable flags such as `EnableExpoPushWorker`, direct-push enablement, protected secrets paths; indexed in `docs/CONFIGURATION.md`. The three `PartnerUserPool*` parameters default to `UNCONFIGURED` and take their values from `terraform output stack_parameters` of the stateful root; they are all-or-nothing and gated as described in [partner first-responder directory](infrastructure.md#partner-first-responder-directory-terraform-stateful-root). A proposed (unstarted) migration would turn these into typed Terraform variables with no defaults, fed from git-ignored tfvars and a GitHub `production` environment; see [proposed Terraform migration](infrastructure.md#proposed-terraform-migration-not-started). |
 | Server runtime environment | env vars read in `packages/server/lib/config/deployment.ts` | `GOOGLE_OIDC_APPLICATION_ORIGIN`, `GOOGLE_OIDC_HOSTED_DOMAIN`, `PSD_EOC_DISPLAY_TIME_ZONE`, `PSD_EOC_IOS_BUNDLE_ID`, `PSD_EOC_ORGANIZATION_NAME`, privacy/SMS contact values, `DATABASE_*`. Readers accept an injected environment so tests can assert fail-closed behavior. |
 | Mobile build config | `packages/mobile/app.json`, `eas.json`, `EXPO_PUBLIC_*` | Replaced per district fork; bundle ID must match `psdEoc:iosBundleId`. See [mobile app](../integrations/mobile-app.md). |
 | Database rows | facilities, group sources, event types, channel configuration | Seeded by the deployment bootstrap ([infrastructure](infrastructure.md)); see [data model](../domain/data-model.md). |
