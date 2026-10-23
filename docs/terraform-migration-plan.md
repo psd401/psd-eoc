@@ -1,6 +1,6 @@
 # AWS CDK to Terraform migration plan
 
-**Status:** proposal; decisions recorded 2026-10-23, three questions open. No infrastructure change or deploy is part
+**Status:** proposal with every open question answered on 2026-10-23. No phase has started. No infrastructure change or deploy is part
 of this document. Every phase below needs the product owner's approval before
 it starts.
 
@@ -44,6 +44,14 @@ alignment.
   `psd:*`.
 - Interim CloudFormation parameters carry the Cognito pool IDs to App Runner
   until phase 5.
+- The migration follows standards 08 (v0.3 once psd-dev-standards PR #143
+  merges), 12 and 13 as written, although they are unapproved drafts.
+- The standard-12 gap fixes are phase 6 pull requests.
+- `CDKToolkit` stays. psd-maps (its `ci.yml` sets `CDK_DEFAULT_ACCOUNT` and
+  `CDK_DEFAULT_REGION`) and psd401-prr (`infra/cdk/README.md`) deploy CDK
+  stacks to the same account and region with the default bootstrap
+  qualifier, so they share it. Checked 2026-10-23 from those repositories'
+  committed files, not from AWS.
 
 ## Evidence used
 
@@ -231,7 +239,7 @@ off.
 
 ### Phase 0 — remaining decisions
 
-- Answer the open questions below.
+- Done 2026-10-23 (see Decisions).
 - Exit: written answers.
 
 ### Phase 1 — Terraform scaffolding and CI
@@ -365,11 +373,10 @@ Notes:
   `infra/lambda/*` sources and their runtime tests. Replace
   `synth:example` with a mocked `terraform test` that plans the example
   tenant, so portability stays proven without credentials.
-- Do not delete the account's `CDKToolkit` bootstrap stack. Whether other CDK
-  apps share it is unknown; the read-only CI role lists the region's stacks
-  before anyone proposes removing it, and removal is a separate decision.
-- Gaps found against standards 08 and 12, each its own reviewed PR **after**
-  the zero-change import, never folded into it:
+- Do not delete the account's `CDKToolkit` bootstrap stack; psd-maps and
+  psd401-prr use it.
+- Gaps found against standards 08 and 12 are fixed in this phase, each its
+  own reviewed PR **after** the zero-change import, never folded into it:
   - Log retention is 14 days on 8 groups, unset on 1 (12 rule 5: prod 90).
   - Lambda functions and all six ECS task definitions are x86_64 (rule 9). The
     image build is `linux/amd64` today.
@@ -412,12 +419,4 @@ Notes:
 
 ## Open questions
 
-All questions asked on 2026-10-23 are answered (see Decisions) except these:
-
-1. Does any other CDK app in the account and region use `CDKToolkit`?
-   Unknown; checked from CI before phase 6 (no local AWS session was
-   available on 2026-10-23).
-2. Standards 08/12/13 are unapproved drafts. Migrate to them as written
-   (08 v0.3 if PR #143 merges)?
-3. Standard-12 gap fixes (arm64, 90-day logs, gateway endpoints, noncurrent
-   expiration) as phase 6 PRs, or tracked separately?
+None. Every question was answered on 2026-10-23; see Decisions.
