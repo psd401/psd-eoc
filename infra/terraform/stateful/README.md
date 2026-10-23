@@ -112,14 +112,14 @@ Cognito's own mailbox. The root:
 
 Before the first apply, the SES account in the pool's region must be out of the
 sandbox; in the sandbox Cognito "can't send messages to your users' email
-addresses" (same page).
+addresses" (same page). `infra/src/ops/ses-production-access.ts --check`
+reports it read-only; see
+[docs/runbooks/email-setup.md](../../../docs/runbooks/email-setup.md).
 
 No SES configuration set is attached. The stack's `psd-eoc-transactional` set
 publishes every event to the alert-delivery callback, which accepts only mail
 carrying its own correlation tags; Cognito's mail carries none, so each
-one-time-password email would be refused and land in the dead-letter queue. `infra/src/ops/ses-production-access.ts --check`
-reports it read-only; see
-[docs/runbooks/email-setup.md](../../../docs/runbooks/email-setup.md).
+one-time-password email would be refused and land in the dead-letter queue.
 
 ## Changing the relying-party id
 
