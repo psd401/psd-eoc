@@ -99,7 +99,7 @@ so removing them with the stack has no side effect.
 
 ```text
 infra/
-  aws/
+  terraform/            # AWS Terraform (product owner decision, 2026-10-23)
     modules/            # only if the PSD module library is not ready
     stateful/           # one state: network, Aurora, KMS, S3, secrets (containers only),
                         #   SQS, SES config set, SMS resources, ECR, log groups,
@@ -117,8 +117,10 @@ infra/
 - `app/` reads `stateful/` outputs through `terraform_remote_state`. Nothing in
   `stateful/` reads `app/`.
 - **First-responder Cognito pool:** a user pool is stateful (users, passkeys).
-  It goes in `stateful/`. If it ships before this migration, it creates the
-  `stateful/` root with only the backend, providers and the pool. Its pool ID
+  It is the first resource in `infra/terraform/` and goes in `stateful/`. It
+  ships before this migration finishes, so it creates the `stateful/` root
+  with the backend, providers, `default_tags` and the pool only; the state
+  bucket (open question 1) must exist before its first apply. Its pool ID
   and client ID reach App Runner as new CloudFormation parameters until phase
   5, then as `terraform_remote_state` outputs. The migrated resources are later
   imported into the same root, so nothing about the Cognito work is redone.
@@ -135,13 +137,13 @@ infra/
 
 - One S3 backend per account and environment, `use_lockfile = true`, bucket
   versioning on, KMS encryption, public access blocked (08 State rules).
-- Keys: `psd-eoc/aws/stateful.tfstate` and `psd-eoc/aws/app.tfstate`.
+- Keys: `psd-eoc/terraform/stateful.tfstate` and `psd-eoc/terraform/app.tfstate`.
 - Follow the `infra/gcp` pattern: the checked-in backend names a deliberately
   unusable bucket, and the wrapper passes the real one with
   `-backend-config=bucket=<value>` from the local tenant file.
 - The state bucket is created outside these roots. 13-aws-accounts phase 1 puts
   one state bucket per account in the org-infrastructure repository; if that
-  is not ready, a tiny `infra/aws/state-bootstrap` root with local state
+  is not ready, a tiny `infra/terraform/state-bootstrap` root with local state
   (as `infra/gcp/bootstrap` does) creates it. Open question 1.
 - State will contain secret-adjacent values (the review sign-in digest and the
   on-call SMS number in plain text, the Aurora endpoint). It never contains
@@ -176,11 +178,11 @@ off.
   tenant file during the transition, because `infra/gcp/scripts/tenant.ts` and
   `scripts/ops` already read it. A bun wrapper generates
   `tenant.auto.tfvars.json` from it on every run; `.gitignore` gains
-  `infra/aws/**/*.auto.tfvars*` and `*.tfvars` with `!*.tfvars.example`
+  `infra/terraform/**/*.auto.tfvars*` and `*.tfvars` with `!*.tfvars.example`
   exceptions. Renaming the file (for example `tenant.local.json`) is a later,
   separate change.
 - `cdk.json`'s committed threats and synthetic groups move to a committed
-  `infra/aws/app/catalog.auto.tfvars.json` (or stay read from `cdk.json` by the
+  `infra/terraform/app/catalog.auto.tfvars.json` (or stay read from `cdk.json` by the
   wrapper until CDK is removed).
 - `deploy.auto.tfvars.example` lists every switch with its safe value.
 - The `docs-contract:template-parameters` list checked by
@@ -200,7 +202,7 @@ off.
 
 ### Phase 1 — Terraform scaffolding (no AWS writes)
 
-- Create `infra/aws/{stateful,app,scripts}` with providers, backend stub,
+- Create `infra/terraform/{stateful,app,scripts}` with providers, backend stub,
   typed and described variables, and the tenant wrapper.
 - CI: `terraform fmt -check`, `validate`, `tflint`, and `terraform test` with
   mocked providers (the `infra/gcp/firebase` pattern), run from
@@ -367,8 +369,9 @@ Notes:
 8. Other CDK apps in this account/region using `CDKToolkit`?
 9. `psd:data-classification` value: `internal`, `student-pii`, or the
    `partner-pii` value requested for first responders?
-10. Cognito pool before or after phase 4? If before, OK to add interim CFN
+10. The Cognito pool lands before phase 4. OK to add interim CFN
     parameters for its IDs?
 11. Standards 08/12/13 are unapproved drafts; migrate to v0.2 as written?
 12. Fold standard-12 gap fixes (arm64, 90-day logs, endpoints) into phase 6, or
     track separately?
+13. Move `infra/gcp` under `infra/terraform/gcp` too, or keep it where it is?
