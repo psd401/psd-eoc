@@ -90,3 +90,14 @@ run "partner_pool_plan" {
     error_message = "The stack handoff must carry exactly the pool id, client id, and secret ARN."
   }
 }
+
+// A domain without a dot is not a deliverable owner address.
+run "owner_requires_a_dotted_domain" {
+  command = plan
+
+  variables {
+    owner = "technology@example"
+  }
+
+  expect_failures = [var.owner]
+}
