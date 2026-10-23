@@ -119,7 +119,10 @@ describe('documentation contract', () => {
     expect(verifyDocumentation()).toEqual([]);
   });
 
-  test('forbids repository-hosted deployment workflows', () => {
+  // psd-dev-standards 08: Terraform applies from CI behind the production
+  // environment through an OIDC role, but the CDK stack, CloudFormation, App
+  // Runner, and container images are never deployed by a workflow.
+  test('forbids workflows that deploy the CDK stack or its images', () => {
     const repository = join(import.meta.dir, '..');
     const workflows = join(repository, '.github', 'workflows');
     const workflowFiles = readdirSync(workflows).filter((file) =>
@@ -146,9 +149,6 @@ describe('documentation contract', () => {
       /\.github\/workflows\/deploy/iu,
       /\bAWS_DEPLOY_[A-Z0-9_]+\b/u,
       /\bActions\s*→\s*Deploy\b/iu,
-      /\bGitHub Actions OIDC\b/iu,
-      /\bGitHub OIDC (?:deploy|deployment|role)\b/iu,
-      /\bnormal OIDC workflow\b/iu,
       /\bsupported `Deploy` workflow\b/iu,
       /(?:\bissue\s+|\[)#31\b/iu,
       /^\s*31\.\s+Failure drills\b/imu,

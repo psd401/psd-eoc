@@ -21,21 +21,24 @@ It performs no AWS, Google, DNS, store, or notification-provider call.
 
 ## Deployment
 
-Deployment has one path: from the repository root, run the single
-`bun run --cwd infra deploy -- PsdEoc` command with a locally authenticated,
-short-lived AWS session and the required parameters in
+The CDK stack has one deployment path: a human runs, from the repository root,
+the single `bun run --cwd infra deploy -- PsdEoc` command with a locally
+authenticated, short-lived AWS session and the required parameters in
 [docs/CONFIGURATION.md](../docs/CONFIGURATION.md). That command builds and
 publishes the CDK image asset, runs the database bootstrap, and promotes the
 services only after bootstrap succeeds. There is no separate build, push,
-migration, or promotion command. GitHub Actions, repository environments,
-repository variables, repository secrets, and GitHub OIDC roles are not
-deployment surfaces. The deploy script intrinsically refuses a dirty Git
+migration, or promotion command, and no workflow deploys the CDK stack. Agents
+prepare the pinned worktree and `cdk diff` but never run the deploy. The deploy
+script intrinsically refuses a dirty Git
 worktree so the image's source revision always identifies its exact contents.
 
-Resources Terraform owns are the one exception: the stateful root in
-[terraform/stateful](terraform/stateful/README.md) is applied with a direct,
-local `terraform apply`, never from CI. Apply it before supplying its outputs
-to the stack.
+Resources Terraform owns follow the org IaC standard instead: the stateful
+root in [terraform/stateful](terraform/stateful/README.md) applies only from
+CI, behind the `production` environment approval, through an OIDC role pinned
+to that environment. That pipeline is phase 1 of the
+[migration plan](../docs/terraform-migration-plan.md) and does not exist yet,
+so nothing applies the root today. Apply it before supplying its outputs to
+the stack.
 
 ## Alarm response runbooks
 

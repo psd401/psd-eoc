@@ -100,13 +100,24 @@ Follow these unless the product owner says otherwise:
 
 These are real failure patterns from this repo's history. Avoid them.
 
-- **Deployment is not a repository workflow.** Never add a GitHub deployment
-  workflow, deployment environment, deployment secrets or variables, OIDC
-  deployment role, or issue asking for one. Production infrastructure is
-  deployed only from a locally authenticated shell with a direct `cdk deploy`
-  command, plus a direct `terraform apply` of `infra/terraform/stateful` for
-  the resources Terraform owns. CI may verify and synthesize; it may never
-  deploy.
+- **Deployment follows the org IaC standard.** psd-dev-standards
+  [08-iac](https://github.com/psd401/psd-dev-standards/blob/main/standards/08-iac.md)
+  sets two paths, and there is no third:
+  - **Terraform** applies only from CI. The pull request shows the plan, a
+    GitHub `production` environment approval gates the apply, and the apply
+    runs through an OIDC role pinned to that environment. Nobody applies
+    Terraform locally and nobody holds long-lived cloud keys. The one
+    exception is the one-time `infra/terraform/state-bootstrap` apply, run by
+    a human administrator, that creates the state bucket and those CI roles
+    ([migration plan](docs/terraform-migration-plan.md), phase 1).
+  - **CDK**, until a stack migrates to Terraform, deploys only from a human's
+    locally authenticated, short-lived AWS session with a direct
+    `cdk deploy`. No workflow deploys CDK, CloudFormation, App Runner, or a
+    container image.
+- **Agents never run `apply`, `deploy`, or `import` against a real account.**
+  An agent prepares the change: a pinned clean worktree, a `cdk diff` or
+  plan, and the exact command. A human runs it, and the agent verifies the
+  result afterwards.
 - **Failure drills do not own infrastructure.** Never add a repository-hosted
   failure-drill stack, deployment workflow, or fault-injection runtime.
 - **Don't split work into micro-issues.** If a task needs four files changed,
@@ -131,10 +142,9 @@ These are real failure patterns from this repo's history. Avoid them.
 
 ## 6. Production
 
-The product owner approves production changes by asking for them. Deployment
-is only a direct `cdk deploy`, plus a direct `terraform apply` of
-`infra/terraform/stateful`, from a locally authenticated AWS session. GitHub
-Actions, repository environments, repository variables, repository secrets,
-and GitHub OIDC roles must never be part of deployment. When a deploy or
-infrastructure change is risky, say what will happen in plain language before
-you run it, then run it.
+The product owner approves production changes by asking for them. CDK deploys
+from a human's locally authenticated AWS session with a direct `cdk deploy`;
+Terraform applies only from CI behind the `production` environment approval
+(section 5). Agents prepare and verify deploys but never run them. When a
+deploy or infrastructure change is risky, say what will happen in plain
+language before the human runs it.
