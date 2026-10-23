@@ -3,7 +3,7 @@ type: Testing Guide
 title: Verification gate, test layout, and narrow validation
 description: How PSD EOC verifies changes - the bun run check gate, sharded Bun test runner with per-shard synthetic PostgreSQL, test naming conventions (unit, database, integration, native, e2e), synthetic-district preload, documentation and workspace contracts, CI jobs, and the narrowest validation per area.
 tags: [testing, ci, bun, postgres, e2e, gate]
-timestamp: 2026-10-20T00:00:00Z
+timestamp: 2026-10-23T00:00:00Z
 openwiki:
   roles: [testing, delivery, workflow]
   change_kinds: [test, validation, ci]
@@ -41,14 +41,15 @@ The repository has one authoritative gate and many narrow checks. Use the narrow
 
 ## The gate: `bun run check`
 
-Runs, in order: `format:check` (Prettier over package.json, configs, `.github`, packages, workers, infra, scripts, docs, root md) → `lint` (`eslint . --max-warnings 0`) → `verify:config` → `verify:docs` → `typecheck` (`verify:workspaces` then every workspace's `typecheck`; infra's also synthesizes the example district) → `build` (Next.js production build of `packages/server`) → `test:full` (`scripts/test.ts` then `test:mobile`). It needs Docker (synthetic PostgreSQL), Bun 1.4.2 and Poppler's `pdftotext`. No `@ts-ignore` or lint-suppression comments are allowed.
+Runs, in order: `format:check` (Prettier over package.json, configs, `.github`, packages, workers, infra, scripts, docs, root md) → `lint` (`eslint . --max-warnings 0`) → `verify:config` → `verify:docs` → `verify:terraform` → `typecheck` (`verify:workspaces` then every workspace's `typecheck`; infra's also synthesizes the example district) → `build` (Next.js production build of `packages/server`) → `test:full` (`scripts/test.ts` then `test:mobile`). It needs Docker (synthetic PostgreSQL), Bun 1.4.2 and Poppler's `pdftotext`; the `verify:terraform` stage uses a local Terraform or Docker (see below). No `@ts-ignore` or lint-suppression comments are allowed.
 
 ```mermaid
 flowchart LR
   A[format:check] --> B[lint]
   B --> C[verify:config]
   C --> D[verify:docs]
-  D --> E[typecheck + verify:workspaces]
+  D --> T[verify:terraform]
+  T --> E[typecheck + verify:workspaces]
   E --> F[build server]
   F --> G[test.ts sharded Bun tests]
   G --> H[test:mobile native-config + jest]
@@ -85,11 +86,12 @@ Structural guard tests worth knowing: `capabilities/execution-boundary.test.ts` 
 
 - `verify:workspaces` (`scripts/verify-workspaces.ts`): every TypeScript source has an owning workspace package, every package with TypeScript is in the root `workspaces`, has a `typecheck` script and a `tsconfig.json` (tests in `verify-workspaces.test.ts`). Adding a new package or script directory means updating root `package.json` workspaces.
 - `verify:docs` (`scripts/verify-documentation.ts`): documentation contract over the repository's Markdown, excluding the generated `openwiki/` tree — see [configuration and readiness](../operations/configuration-and-readiness.md#documentation-contracts-why-docs-edits-can-fail-the-gate).
+- `verify:terraform` (`scripts/verify-terraform.ts`): for each AWS Terraform root (currently only `infra/terraform/stateful`), runs `init -backend=false`, `fmt -check`, `validate`, and `test`. The Terraform line comes from that root's `versions.tf` (`~> 1.16.0`); it uses a local `terraform` only when its major.minor matches, otherwise the matching `hashicorp/terraform` Docker image. Providers are mocked, so no cloud credential is read or used. The partner pool's mocked plan is described in [infrastructure](../operations/infrastructure.md#partner-first-responder-directory-terraform-stateful-root). The Firebase root under `infra/gcp/firebase` is tested separately in `infra/test/gcp`.
 - `scripts/check-applied-migrations.ts <base> <head>`: CI refuses edits/deletes of migrations or journal entries already on the base branch ([data model](../domain/data-model.md)).
 
 ## CI (`.github/workflows/ci.yml`)
 
-`changes` classifies the PR diff (docs/workflow-only changes skip the expensive jobs; push to `main` runs everything). Jobs: `gate` (fresh-clone README path: start DB, migrate, seed, start the documented web app, run `bun run check`, issue-278 lifecycle and issue-43 direct-push cutover verifications, synthesize a second-district config); `migrations`; `workflows` (actionlint); `browser` (operator browser flows on a production build); `mobile` (Expo compatibility, React runtime, native project generation with safety-config greps); `native-e2e` (reusable `mobile-e2e.yml`, only with the `mobile-e2e` or `direct-push-cutover` label or manual dispatch — macOS runners are costly). `psd-ci.yml` (org-standard) runs the static half plus `bun run test:unit`. Every third-party `uses:` reference is pinned to a full commit SHA with a version comment (the one unpinned reference is the local `./.github/workflows/mobile-e2e.yml` call in `ci.yml`), and the OpenWiki reusable workflow in `openwiki-update.yml` is pinned to a tagged release rather than `@main`. Nothing in this repository's scripts or tests enforces the pins; when adding or bumping an action, pin it to a SHA yourself and keep the version comment. The `workflows` job runs actionlint only when workflow files change. There is no deployment workflow by design ([infrastructure](../operations/infrastructure.md)).
+`changes` classifies the PR diff (docs/workflow-only changes skip the expensive jobs; push to `main` runs everything). Jobs: `gate` (installs Terraform 1.16.5 through `hashicorp/setup-terraform` for the credential-free plan tests; fresh-clone README path: start DB, migrate, seed, start the documented web app, run `bun run check` (which includes `verify:terraform`), issue-278 lifecycle and issue-43 direct-push cutover verifications, synthesize a second-district config); `migrations`; `workflows` (actionlint); `browser` (operator browser flows on a production build); `mobile` (Expo compatibility, React runtime, native project generation with safety-config greps); `native-e2e` (reusable `mobile-e2e.yml`, only with the `mobile-e2e` or `direct-push-cutover` label or manual dispatch — macOS runners are costly). `psd-ci.yml` (org-standard) runs the static half plus `bun run test:unit`. Every third-party `uses:` reference is pinned to a full commit SHA with a version comment (the one unpinned reference is the local `./.github/workflows/mobile-e2e.yml` call in `ci.yml`), and the OpenWiki reusable workflow in `openwiki-update.yml` is pinned to a tagged release rather than `@main`. Nothing in this repository's scripts or tests enforces the pins; when adding or bumping an action, pin it to a SHA yourself and keep the version comment. The `workflows` job runs actionlint only when workflow files change. There is no deployment workflow by design ([infrastructure](../operations/infrastructure.md)).
 
 ## Narrowest validation by change area
 
@@ -100,7 +102,9 @@ Structural guard tests worth knowing: `capabilities/execution-boundary.test.ts` 
 | Worker | `bun test workers/<channel>` | durable store/route involved → matching server `*.integration.test.ts` (send-time currency: `packages/server/lib/notify/batch-lifecycle.integration.test.ts`, `email-runtime-store.integration.test.ts`) |
 | Mobile logic | `bun test packages/mobile/src/<area>`; native screens `bun run --cwd packages/mobile test:native -- --testPathPattern <name>` | behavior change → both `bun packages/mobile/e2e/run.ts ios` and `android` |
 | Infra | `bun test infra/test/<file>`; `bun run --cwd infra synth:example` | whole stack asserts → `bun test infra/test/stack` |
+| AWS Terraform (`infra/terraform/**`) | `bun run verify:terraform` | the stack's partner parameters or secret path change → also `bun test infra/test/stack/psd-eoc-stack.test.ts` |
 | Docs | `bun run verify:docs` | — |
 | Formatting | `bun run format:check` (or `bun run format` to fix) | — |
 
 Do not run the full gate or e2e suites by default; run them when a change crosses package boundaries, touches migrations/seed data, the Next.js build output (the production build is exercised by `browser` and `build`), or a public contract used by several runtimes. Write tests for real/drill separation and for the human-only boundary whenever a change could blur them ([event lifecycle](../domain/event-lifecycle-and-activation.md)).
+e](../domain/event-lifecycle-and-activation.md)).
