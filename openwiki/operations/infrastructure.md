@@ -35,6 +35,7 @@ openwiki:
     - Tenant identity lives in git-ignored infra/cdk.local.json, never in source.
     - Alarms that treat missing data as breaching are deployed only with a publisher.
     - Partner user pool access is granted only when all three PartnerUserPool* parameters are supplied; a partial set fails validation.
+    - The Terraform root's only handoff output is stack_parameters, keyed by the stack's PartnerUserPool* parameter names; the run partner_pool_plan asserts that exact key set.
     - The partner client secret is passed to the runtime only as an ARN and is never a service environment value or stack output.
   validation_commands:
     - bun run --cwd infra synth:example
@@ -98,22 +99,22 @@ What the root declares (`main.tf`):
 - `aws_cognito_user_pool.partner`: Essentials tier, email as the only identity, `EMAIL_OTP` and `WEB_AUTHN` as the only first factors, `mfa_configuration = "OFF"`, admin-invite only, passkeys bound to a relying-party id with `user_verification = "required"`, admin-only recovery, `COGNITO_DEFAULT` mail, and no hosted-UI domain or federation. Deletion protection and `prevent_destroy` are set.
 - `aws_cognito_user_pool_client.server`: one confidential client (`generate_secret = true`), `ALLOW_USER_AUTH` and `ALLOW_REFRESH_TOKEN_AUTH` only, so no password flow exists.
 - `aws_secretsmanager_secret.partner_client` at the fixed path `/psd-eoc/partner-user-pool-client`, and `aws_secretsmanager_secret_version.partner_client`, which stores the client id, the client secret, and the pool id as JSON.
+- Input `owner` (the `psd:owner` tag) must be an email address whose domain has at least one dot (`variables.tf`). A dotless address such as `technology@example` is refused at validation; the mocked run `owner_requires_a_dotted_domain` pins this.
 
-The root's `outputs.tf` emits `stack_parameters`, which carries exactly the three values the stack consumes: `PartnerUserPoolId`, `PartnerUserPoolClientId`, and `PartnerUserPoolClientSecretArn`. No output carries the secret value.
+The root's `outputs.tf` has one output, `stack_parameters`, keyed by the stack's own parameter names: `PartnerUserPoolId`, `PartnerUserPoolClientId`, and `PartnerUserPoolClientSecretArn`. It is the only handoff; the earlier standalone outputs and the unused pool ARN output were removed, so nothing downstream reads them. No output carries the secret value.
 
 ### How the stack gates it
 
 The stack's three parameters default to `UNCONFIGURED`, the same sentinel convention as the SMS inputs ([configuration and readiness](configuration-and-readiness.md)). Validation rules, not the runtime, enforce the combinations:
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: a semicolon inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart TD
   P["PartnerUserPoolId, ClientId, ClientSecretArn"] --> A{"all three UNCONFIGURED or all three supplied?"}
   A -- "no (partial)" --> R1["Rule PartnerUserPoolSelectionIsComplete refuses deploy"]
   A -- "yes, all supplied" --> B{"ProvisionApplication = true?"}
   B -- "no" --> R2["Rule PartnerUserPoolRequiresLiveApplication refuses deploy"]
   B -- "yes" --> C["ShouldUsePartnerUserPool true: scoped IAM policy and env vars"]
-  A -- "yes, all UNCONFIGURED" --> D["No partner grant; env carries UNCONFIGURED"]
+  A -- "yes, all UNCONFIGURED" --> D["No partner grant, env carries UNCONFIGURED"]
 ```
 
 Caption: partner access is on only when every identifier is supplied and a live App Runner application exists.
@@ -133,6 +134,7 @@ Current state, which matters for every change here:
 Change navigation:
 
 - Consult this section before changing a partner parameter pattern, the Cognito pool or client settings, the secret path, or the stack's partner IAM policy. A change to the secret path must change `main.tf`, the stack's allowed pattern, and the stack test together.
+- Renaming a `stack_parameters` key must also rename the matching `PartnerUserPool*` parameter in `infra/src/stack/psd-eoc-stack.ts`. The `partner_pool_plan` run asserts the exact key set, and the stack test pins the parameter side, so a one-sided rename fails one of them.
 - Narrow checks: `bun run verify:terraform` (fmt, validate, mocked `terraform test` on `partner_user_pool.tftest.hcl`) and `bun test infra/test/stack/psd-eoc-stack.test.ts`. Run `bun run --cwd infra synth:example` for stack wiring.
 - Scope boundary: `terraform apply`, `cdk deploy`, and `terraform init` against a real backend are product-owner actions and never belong in automation. The checked-in backend bucket is a deliberately unusable placeholder.
 - Documentation drift: the stateful README states the handoff as one contract with the stack, so keep [configuration and readiness](configuration-and-readiness.md) and this section consistent with it.
