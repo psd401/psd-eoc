@@ -22,6 +22,8 @@ import {
   executeListAdmittedAccountsCapability,
   executeListUsersCapability,
 } from './capabilities';
+import { executeListPartnersCapability } from './partner-capabilities';
+import { resolvePartnerProviders } from '../../../lib/partners/providers';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -49,7 +51,7 @@ export default async function AccessPage({
   const parameters = await searchParams;
   try {
     const cursors = normalizeAccessAdminCursorState(parameters);
-    const [accessGroups, users, facilities, admittedAccounts] =
+    const [accessGroups, users, facilities, admittedAccounts, partners] =
       await Promise.all([
         executeListGroupSourcesCapability({
           authenticated,
@@ -79,6 +81,10 @@ export default async function AccessPage({
           authenticated,
           query: { includeRevoked: true },
         }),
+        executeListPartnersCapability({
+          authenticated,
+          query: { includeEnded: true },
+        }),
       ]);
     return (
       <AccessAdminView
@@ -90,6 +96,8 @@ export default async function AccessPage({
           users,
           facilities: facilities.items,
           admittedAccounts: admittedAccounts.items,
+          partners: partners.items,
+          partnerAccessConfigured: resolvePartnerProviders() !== null,
           cursors,
         }}
       />

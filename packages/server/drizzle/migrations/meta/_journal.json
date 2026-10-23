@@ -421,6 +421,13 @@
       "when": 1792792141986,
       "tag": "0059_partner_identity_and_admissions",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1792793528989,
+      "tag": "0060_partner_provider_syncs_and_notices",
+      "breakpoints": true
     }
   ]
 }

@@ -22,6 +22,7 @@ import {
   groupSources,
   mediaRecords,
   mediaUploadIntents,
+  partnerAdmissions,
   rosterSnapshots,
   rosterSourceConfigurations,
 } from '../db/schema';
@@ -42,6 +43,7 @@ import {
 } from '../lib/capabilities/events';
 import type { TrustedCapabilityInvocation } from '../lib/capabilities/engine';
 import { createDisposableDatabase } from '../lib/testing/database';
+import { issueSyntheticPartnerSession } from '../lib/testing/partner-session';
 
 const SERVER_ROOT = resolve(import.meta.dir, '..');
 const REPOSITORY_ROOT = resolve(SERVER_ROOT, '../..');
@@ -188,9 +190,31 @@ async function issueIdentity(
       ),
     },
   });
-  const expires = Math.floor(Date.parse(result.session.expiresAt) / 1_000);
-  await writeFile(
+  await writeBrowserSessionState(
     input.statePath,
+    credential,
+    result.session.expiresAt,
+  );
+  return {
+    userId: result.user.id,
+    actor: {
+      kind: 'human',
+      userId: result.user.id,
+      sessionId: result.session.id,
+    },
+    connectivityEpochId: result.connectivityEpoch.id,
+  };
+}
+
+/** Writes the cookies a signed-in browser carries for one session. */
+async function writeBrowserSessionState(
+  statePath: string,
+  credential: string,
+  expiresAt: string,
+): Promise<void> {
+  const expires = Math.floor(Date.parse(expiresAt) / 1_000);
+  await writeFile(
+    statePath,
     JSON.stringify({
       cookies: [
         {
@@ -218,15 +242,40 @@ async function issueIdentity(
     }),
     { encoding: 'utf8', mode: 0o600 },
   );
-  return {
-    userId: result.user.id,
-    actor: {
-      kind: 'human',
-      userId: result.user.id,
-      sessionId: result.session.id,
-    },
-    connectivityEpochId: result.connectivityEpoch.id,
-  };
+}
+
+/**
+ * A partner admitted by the district administrator, with a signed-in browser
+ * session, for the flow that disables them. The session rows are the ones a
+ * partner sign-in writes; partner sign-in itself is a later change.
+ */
+async function issuePartner(
+  connection: PostgresDatabaseConnection,
+  input: Readonly<{
+    email: string;
+    displayName: string;
+    invitedByUserId: string;
+    now: Date;
+    statePath: string;
+  }>,
+): Promise<void> {
+  await connection.db.insert(partnerAdmissions).values({
+    email: input.email,
+    displayName: input.displayName,
+    agency: 'Synthetic Fire District',
+    invitedByUserId: input.invitedByUserId,
+    admittedAt: input.now,
+  });
+  const issued = await issueSyntheticPartnerSession(connection.db, {
+    email: input.email,
+    displayName: input.displayName,
+    now: input.now,
+  });
+  await writeBrowserSessionState(
+    input.statePath,
+    issued.credential,
+    new Date(input.now.getTime() + DAY_MILLISECONDS).toISOString(),
+  );
 }
 
 function invocation(
@@ -635,6 +684,13 @@ async function main(): Promise<void> {
     if (districtAdministrator === undefined) {
       throw new Error('The synthetic district administrator was not issued.');
     }
+    await issuePartner(opened, {
+      email: 'disable-me@agency.example.invalid',
+      displayName: 'Synthetic Disabled Responder',
+      invitedByUserId: districtAdministrator.userId,
+      now,
+      statePath: join(createdStateDirectory, 'partner.json'),
+    });
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
     const issue344EventId = await createSyntheticDrill(
       opened,
@@ -713,6 +769,9 @@ async function main(): Promise<void> {
           PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE:
             'synthetic-e2e-ses-verification-reference',
           GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
+          // Synthetic partner identity provider and mailer: nothing leaves
+          // the machine. A deployed stack cannot carry this pool id.
+          PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
         },
         stdin: 'inherit',
         stdout: 'inherit',

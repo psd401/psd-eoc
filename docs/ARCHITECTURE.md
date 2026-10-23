@@ -139,6 +139,30 @@ key's effective ceiling is up to four times each constant, and an instance
 restart resets its windows. The constants live in
 `packages/server/lib/agents/rate-limit.ts`.
 
+## Partner access
+
+Responders from outside the district (partners) sign in through a separate
+identity provider, never Google. A person is identified by issuer and
+subject, and `partner` is held alone: no access group grants it and no partner
+holds a staff role, which contracts, database triggers, and the server's
+access decisions each enforce.
+
+- A partner is let in only by a partner admission. Admissions and their
+  endings are append-only; `expires_at` is computed by the database one year
+  after admission. A renewal or a corrected address is a new admission that
+  supersedes the old one. Every session read asks whether the partner's
+  current admission is unended and unexpired, so ending or expiring it
+  refuses the next request.
+- Administrators invite, disable, correct, and re-invite partners on the Access
+  page. The admission write commits first; the identity-provider change and
+  the invitation email follow and are recorded as confirmed facts, so a gap
+  between the two is visible on the page and a retry completes it.
+- Partner account mail is the one email the application
+  runtime sends itself, through SES in the alert email's branded shell,
+  restricted to the deployment's sender address and present only while
+  partner access is configured. Alerts reach people only through the email
+  worker.
+
 ## Data and delivery truth
 
 - Staff data only; no student, guardian, schedule, or reunification data.

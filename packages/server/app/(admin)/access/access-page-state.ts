@@ -11,6 +11,16 @@ const STATUS_MESSAGES = Object.freeze({
     'The admission was revoked. The next sign-in with that address is refused.',
   'user-scope-updated':
     "The person's facility scope was updated. It applies to their next request.",
+  'partner-invited':
+    'The partner was invited. Their sign-in account is ready and the invitation email was sent.',
+  'partner-invite-pending':
+    'The partner was admitted, but their sign-in account or invitation email is not confirmed yet. Retry the pending change from the partner list.',
+  'partner-disabled':
+    'The partner was disabled. Their sessions were signed out, their alerts stopped, and their sign-in account was disabled.',
+  'partner-disable-pending':
+    'The partner was disabled and can no longer use PSD EOC, but disabling their sign-in account is not confirmed yet. Retry the pending change from the partner list.',
+  'partner-reconciled': 'The pending partner change was completed.',
+  'partner-invitation-sent': 'The invitation email was sent again.',
 } as const);
 
 export interface AccessAdminCursorState {

@@ -26,14 +26,53 @@ import {
   executeSetUserFacilityScopeCapability,
 } from '../capabilities';
 import {
+  executeDisablePartnerCapability,
+  executeInvitePartnerCapability,
+  executeReconcilePartnerAccessCapability,
+} from '../partner-capabilities';
+import {
   parseAdmitAccountForm,
+  parseInvitePartnerForm,
+  parsePartnerAdmissionForm,
   parseRevokeAdmittedAccountForm,
   parseSetUserFacilityScopeForm,
+  reconcileCommand,
 } from './request';
+import { AdminCapabilityError } from '../../../../lib/capabilities/admin';
+import { resolvePartnerProviders } from '../../../../lib/partners/providers';
 
 export const dynamic = 'force-dynamic';
 
 const COMMON_FIELDS = ['csrfToken', 'idempotencyKey', 'intent'] as const;
+
+/**
+ * The provider and email half of a partner change, run after the admission
+ * write has committed. Its own failure is not the change's failure: the
+ * admission stands, the Access page shows the step as pending, and retrying
+ * it completes the change. Only a refusal (not a provider error) is surfaced.
+ */
+async function reconcileAfter(
+  authenticated: Parameters<
+    typeof executeReconcilePartnerAccessCapability
+  >[0]['authenticated'],
+  partnerAdmissionId: string,
+  idempotencyKey: string,
+  resendInvitation: boolean,
+): Promise<boolean> {
+  try {
+    const record = await executeReconcilePartnerAccessCapability({
+      authenticated,
+      command: reconcileCommand(partnerAdmissionId, resendInvitation),
+      metadata: { idempotencyKey: `${idempotencyKey}:reconcile` },
+    });
+    return record.providerPendingStep === null;
+  } catch (error) {
+    if (error instanceof AdminCapabilityError && error.code !== 'CONFLICT') {
+      throw error;
+    }
+    return false;
+  }
+}
 
 function parseActive(value: string): boolean {
   if (value === 'true') return true;
@@ -98,6 +137,66 @@ export async function POST(request: Request): Promise<Response> {
           metadata: { idempotencyKey },
         });
         return adminSuccessRedirect(request, '/access', 'admission-revoked');
+      }
+      case 'invite-partner': {
+        // Refuse before writing anything when this deployment cannot reach a
+        // partner identity provider at all.
+        if (resolvePartnerProviders() === null) {
+          throw new AdminFormError(
+            'Partner access is not configured on this deployment.',
+          );
+        }
+        const command = parseInvitePartnerForm(form);
+        const admission = await executeInvitePartnerCapability({
+          authenticated,
+          command,
+          metadata: { idempotencyKey },
+        });
+        const complete = await reconcileAfter(
+          authenticated,
+          admission.id,
+          idempotencyKey,
+          false,
+        );
+        return adminSuccessRedirect(
+          request,
+          '/access',
+          complete ? 'partner-invited' : 'partner-invite-pending',
+        );
+      }
+      case 'disable-partner': {
+        const { partnerAdmissionId } = parsePartnerAdmissionForm(form);
+        await executeDisablePartnerCapability({
+          authenticated,
+          command: { partnerAdmissionId },
+          metadata: { idempotencyKey },
+        });
+        const complete = await reconcileAfter(
+          authenticated,
+          partnerAdmissionId,
+          idempotencyKey,
+          false,
+        );
+        return adminSuccessRedirect(
+          request,
+          '/access',
+          complete ? 'partner-disabled' : 'partner-disable-pending',
+        );
+      }
+      case 'reconcile-partner':
+      case 'resend-partner-invitation': {
+        const { partnerAdmissionId } = parsePartnerAdmissionForm(form);
+        const resend = intent === 'resend-partner-invitation';
+        await executeReconcilePartnerAccessCapability({
+          authenticated,
+          command: reconcileCommand(partnerAdmissionId, resend),
+          metadata: { idempotencyKey },
+        });
+        return adminSuccessRedirect(
+          request,
+          '/access',
+          resend ? 'partner-invitation-sent' : 'partner-reconciled',
+        );
       }
       case 'set-user-facility-scope': {
         const command = parseSetUserFacilityScopeForm(form);

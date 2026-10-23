@@ -28,6 +28,8 @@ import {
   NotificationPurposeSchema,
   OutboxStatusSchema,
   PartnerAdmissionEndingReasonSchema,
+  PartnerNoticeKindSchema,
+  PartnerProviderActionSchema,
   PushPlatformSchema,
   RoleSchema,
   RosterPopulationSchema,
@@ -69,6 +71,8 @@ import {
   notificationPurposeEnum,
   outboxStatusEnum,
   partnerAdmissionEndingReasonEnum,
+  partnerNoticeKindEnum,
+  partnerProviderActionEnum,
   pushPlatformEnum,
   roleEnum,
   rosterPopulationEnum,
@@ -124,6 +128,8 @@ const enumExpectations = [
     partnerAdmissionEndingReasonEnum,
     PartnerAdmissionEndingReasonSchema.options,
   ],
+  [partnerProviderActionEnum, PartnerProviderActionSchema.options],
+  [partnerNoticeKindEnum, PartnerNoticeKindSchema.options],
 ] as const;
 
 interface MigrationSnapshot {

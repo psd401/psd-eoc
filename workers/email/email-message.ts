@@ -192,3 +192,63 @@ export function buildEmailMessageContent(
     inlineImages: Object.freeze([EMAIL_LOGO]),
   });
 }
+
+/**
+ * Builds the branded multipart content for an account email — an invitation
+ * or an access notice to one person — rather than an emergency notification.
+ * Same brand bar, logo, and footer link as notifications, but no real/drill
+ * banner and no roster wording, since the message is about the reader's own
+ * access. The subject and plaintext are sent exactly as given.
+ */
+export function buildAccountEmailContent(
+  message: Readonly<{ subject: string; textBody: string }>,
+  branding: EmailBranding,
+): EmailMessageContent {
+  if (
+    message.subject.trim().length === 0 ||
+    message.subject.length > 200 ||
+    /[\r\n]/u.test(message.subject) ||
+    message.textBody.trim().length === 0 ||
+    message.textBody.length > 10_000
+  ) {
+    throw new EmailMessageError();
+  }
+  const organizationName = escapeHtml(branding.organizationName);
+  const applicationOrigin = escapeHtml(branding.applicationOrigin);
+  const htmlBody = [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="color-scheme" content="light">',
+    `<title>${escapeHtml(message.subject)}</title>`,
+    '</head>',
+    '<body style="margin: 0; background: #f3f4f6; color: #111827; font-family: Arial, Helvetica, sans-serif; font-size: 18px; line-height: 1.5;">',
+    '<main style="box-sizing: border-box; max-width: 680px; margin: 0 auto; background: #ffffff;">',
+    `<header style="padding: 16px 24px; background: ${BRAND_BAR_BACKGROUND}; color: #ffffff;">`,
+    `<img src="cid:${EMAIL_LOGO_CONTENT_ID}" width="48" height="48" alt="" style="display: inline-block; width: 48px; height: 48px; border: 0; border-radius: 10px; vertical-align: middle;">`,
+    '<span style="display: inline-block; margin-left: 12px; vertical-align: middle;">',
+    '<span style="display: block; color: #ffffff; font-size: 20px; font-weight: bold; line-height: 1.2;">PSD EOC</span>',
+    `<span style="display: block; color: #cbd5e1; font-size: 14px; line-height: 1.4;">Account notice from ${organizationName}</span>`,
+    '</span>',
+    '</header>',
+    '<section aria-label="Message" style="padding: 24px;">',
+    `<h1 style="margin: 0 0 16px; font-size: 24px; line-height: 1.25;">${escapeHtml(message.subject)}</h1>`,
+    renderParagraphs(message.textBody),
+    '</section>',
+    '<footer style="padding: 16px 24px 24px; border-top: 1px solid #e5e7eb; color: #4b5563; font-size: 14px; line-height: 1.5;">',
+    `<p style="margin: 0 0 8px;">Sent by PSD EOC, ${organizationName}'s emergency notification system, about your own access to it.</p>`,
+    `<p style="margin: 0;"><a href="${applicationOrigin}" style="color: #174a7e;">Open PSD EOC</a></p>`,
+    '</footer>',
+    '</main>',
+    '</body>',
+    '</html>',
+  ].join('\n');
+  return Object.freeze({
+    subject: message.subject,
+    textBody: message.textBody,
+    htmlBody,
+    inlineImages: Object.freeze([EMAIL_LOGO]),
+  });
+}

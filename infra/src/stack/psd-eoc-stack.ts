@@ -3276,10 +3276,12 @@ export class PsdEocStack extends Stack {
     //
     // Scoped to the one pool the parameters name. The actions are the ones the
     // partner flows need and nothing else: an administrator invites a
-    // responder and can disable them again, the server runs the choice-based
-    // sign-in on their behalf as a confidential client, and a signed-in
-    // responder enrolls one passkey. No delete, no listing of other pools, no
-    // authority over the staff directory.
+    // responder (create, or read and re-enable an existing account on a
+    // re-invite) and can disable them again (sign them out everywhere, then
+    // disable), the server runs the choice-based sign-in on their behalf as a
+    // confidential client, and a signed-in responder enrolls one passkey. No
+    // delete, no listing of other pools, no authority over the staff
+    // directory.
     const partnerUserPoolAccessPolicy = new iam.Policy(
       this,
       'AppRunnerPartnerUserPoolAccess',
@@ -3290,6 +3292,9 @@ export class PsdEocStack extends Stack {
             actions: [
               'cognito-idp:AdminCreateUser',
               'cognito-idp:AdminDisableUser',
+              'cognito-idp:AdminEnableUser',
+              'cognito-idp:AdminGetUser',
+              'cognito-idp:AdminUserGlobalSignOut',
               'cognito-idp:AdminInitiateAuth',
               'cognito-idp:AdminRespondToAuthChallenge',
               'cognito-idp:StartWebAuthnRegistration',
@@ -3308,6 +3313,21 @@ export class PsdEocStack extends Stack {
           new iam.PolicyStatement({
             actions: ['secretsmanager:GetSecretValue'],
             resources: [partnerUserPoolClientSecretArn.valueAsString],
+          }),
+          // Partner account mail — the invitation, the expiry notice, and the
+          // administrators' quarterly review — is the one email the runtime
+          // sends itself, in the same branded shell as alerts. Limited to the
+          // deployment's own sender address and identity, sent without the
+          // alert configuration set so its events never enter alert delivery
+          // evidence, and present only while partner access is configured.
+          // Alerts still reach people only through the email worker.
+          new iam.PolicyStatement({
+            actions: ['ses:SendEmail'],
+            conditions: {
+              StringEquals: { 'ses:FromAddress': sesFromAddress },
+            },
+            resources: [emailIdentityArn],
+            sid: 'SendOnlyPartnerAccountEmail',
           }),
         ],
       },
@@ -3498,6 +3518,20 @@ export class PsdEocStack extends Stack {
                   name: 'PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN',
                   value: partnerUserPoolClientSecretArn.valueAsString,
                 },
+                // The sender partner account mail uses: the same address and
+                // display name the email worker sends alerts from.
+                {
+                  name: 'PSD_EOC_SES_FROM_ADDRESS',
+                  value: sesFromAddress,
+                },
+                ...(sesFromDisplayName === null
+                  ? []
+                  : [
+                      {
+                        name: 'PSD_EOC_SES_FROM_DISPLAY_NAME',
+                        value: sesFromDisplayName,
+                      },
+                    ]),
                 {
                   name: 'DATABASE_DRIVER',
                   value: 'postgres',
