@@ -61,7 +61,7 @@ Source of truth is `AGENTS.md` (the product owner's session instruction outranks
 - **Deny by default**, server-side, scoped by role (`staff`/`admin`) and facility.
 - **Provider acceptance ≠ delivery ≠ human receipt**; ambiguity stays `unknown`.
 - **Contracts first, one capability layer, no side-door mutation path.**
-- **Deployment is local `cdk deploy` only**: never add a GitHub deployment workflow, environment, secret or OIDC role. (`docs/ARCHITECTURE.md` "Configuration boundaries" still mentions GitHub environment variables/OIDC for protected authority; that text conflicts with `AGENTS.md` §5–6 and `docs/CONFIGURATION.md` "Direct CDK deployment boundary", which state no GitHub deployment participates. Prefer the latter.)
+- **Deployment follows psd-dev-standards 08**: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval, and that pipeline is not built yet ([infrastructure](../operations/infrastructure.md#deploy-model-and-ordering)).
 - **iOS and Android stay in sync**; verify both (`bun packages/mobile/e2e/run.ts ios|android`).
 - Bun only (`bun install/run/test`), never npm/npx/node.
 
