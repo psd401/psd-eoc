@@ -79,7 +79,35 @@ Two entry points: `configureInfrastructureMonitoring` (live; alarms on AWS-publi
 
 ## Google Cloud identity (`infra/gcp`)
 
-Terraform defines the Google project/APIs, the read-only Groups reader service account and least-privilege bindings; `scripts/run-guarded.sh` is the only supported launcher (pins operator env, validates project and AWS caller). `firebase/` is an isolated Terraform root for Android FCM, tested offline in `infra/test/gcp`. Credentials never enter Terraform state or the repo. See [identity](../domain/identity-and-access.md) for how the Groups reader is used.
+Terraform defines the Google project/APIs, the read-only Groups reader service account and least-privilege bindings; `scripts/run-guarded.sh` is the only supported launcher (pins operator env, validates project and AWS caller). `firebase/` is an isolated Terraform root for Android FCM, tested offline in `infra/test/gcp`. Credentials never enter Terraform state or the repo. See [identity](../domain/identity-and-access.md) for how the Groups reader is used. The migration plan below leaves these roots unchanged.
+
+## Proposed Terraform migration (not started)
+
+`docs/terraform-migration-plan.md` is a proposal, status "no phase has started", with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. That directory does not exist yet, so the CDK code and the deploy model above remain the source of truth. Do not implement any phase from this page; read the plan itself first.
+
+Key decisions the plan records:
+
+- **Two roots, split by data risk:** `stateful/` (Aurora, KMS, S3, secret containers, SQS, SES config set, SMS resources, ECR, log groups, the responder Cognito pool) and `app/` (IAM, App Runner, ECS, Lambdas, EventBridge, alarms, dashboard, canary, Route 53). Every `stateful/` resource carries `prevent_destroy`; `app/` reads `stateful/` outputs and never the reverse.
+- **Tenant values and switches leave CFN parameters:** switches become tfvars variables with no default, so a missing file fails the plan instead of turning channels off. `infra/cdk.local.json` stays the tenant file during the transition. CI reads values from the GitHub `production` environment, which changes the current "no GitHub deployment" rule ([see the convention in the quickstart](../quickstart.md#working-conventions)).
+- **Secrets stay out of state:** no `aws_secretsmanager_secret_version`; Aurora `master_password` is `ignore_changes`.
+- **Phase gates:** each phase has an exit condition, and the zero-change import plan (0 add, 0 change, 0 destroy) is the critical gate before the CloudFormation stack is deleted.
+
+```mermaid
+flowchart LR
+  P1["1 Scaffolding and CI"] --> P2["2 Retain everything in CDK"]
+  P2 --> P3["3 HCL and zero-change import plan"]
+  P3 --> P4["4 Delete CFN stack and import state"]
+  P4 --> P5["5 Deploys through Terraform"]
+  P5 --> P6["6 Remove CDK and close standard gaps"]
+```
+
+Caption: phase order from the plan. Phase 4 is the irreversible step (after it, the path back is fix-forward in Terraform); phase 5 is when the GitHub Actions deployment rule changes.
+
+Change navigation for this proposal:
+
+- Consult the plan's Phases and Risks sections before any infra change that might collide with migration (the plan asks to freeze CDK infrastructure changes between phase 2 and phase 4).
+- Current validation is unchanged: `bun run --cwd infra typecheck` and `bun run --cwd infra synth:example`. The plan's `bun run check` additions (`terraform fmt`, `validate`, `tflint`, mocked `terraform test`) do not exist yet.
+- Related docs the plan says will need updates in phase 5: `docs/CONFIGURATION.md`, `infra/README.md`, the runbooks that name `cdk deploy`, and the readiness register ([configuration and readiness](configuration-and-readiness.md)).
 
 ## Change recipes
 
@@ -87,4 +115,3 @@ Terraform defines the Google project/APIs, the read-only Groups reader service a
 - **New worker/queue:** also add its scoped secret, alarms in `monitoring.ts` (with DLQ runbook) and the server internal route; follow [channel workers](../integrations/channel-workers.md).
 - **Lambda change:** Lambdas are plain `.mjs` under `infra/lambda/*` with matching `infra/test/*-runtime.test.ts`; keep `index.d.mts` in step.
 - **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
-eploy`, or Terraform apply from automation.

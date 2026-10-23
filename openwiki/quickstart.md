@@ -27,7 +27,7 @@ Two rules shape every change (details in [architecture overview](architecture/ov
 | Integrations | [Channel workers](integrations/channel-workers.md) | Email, SMS and push workers, retries, provider adapters |
 | Integrations | [Agent API and MCP](integrations/agent-api-and-mcp.md) | Agent keys, REST gateway, rate limits, MCP server |
 | Integrations | [Mobile app](integrations/mobile-app.md) | Expo app, secure session, push registration, E2E |
-| Operations | [Infrastructure](operations/infrastructure.md) | CDK stack, Lambdas, monitoring, GCP, deploy rules |
+| Operations | [Infrastructure](operations/infrastructure.md) | CDK stack, Lambdas, monitoring, GCP, deploy rules, proposed Terraform migration |
 | Operations | [Configuration and readiness](operations/configuration-and-readiness.md) | Tenant manifest, env, readiness register, runbooks, doc drift |
 | Testing | [Verification and testing](testing/verification-and-testing.md) | `bun run check`, sharded tests, database tests, CI jobs |
 
@@ -73,6 +73,10 @@ Areas identified but not yet documented in depth:
 - SMS consent flow (`packages/server/lib/capabilities/sms-consent.ts`, `packages/server/app/api/sms-consent`, `app/(app)/text-alerts`): only summarized in the notification pipeline and mobile pages.
 - Operator tooling in `scripts/ops` (`appstore/`, `sms-registration/`, `groups-inventory*.ts`, `ses-*.ts`) and `packages/server/scripts/operations/bootstrap.ts`: referenced but not walked through.
 - Google Cloud Terraform and Firebase under `infra/gcp`: summarized in infrastructure only.
+- Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
+- Map and location rendering (`packages/server/lib/map`, `location-map.tsx`): not documented.
+
+gcp`: summarized in infrastructure only.
 - Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
 - Map and location rendering (`packages/server/lib/map`, `location-map.tsx`): not documented.
 
