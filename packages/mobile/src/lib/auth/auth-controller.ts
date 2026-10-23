@@ -1,10 +1,11 @@
-import type {
-  ConnectivityEpochId,
-  DeviceEnrollmentId,
-  MobileSessionResponse,
-  SessionId,
-  SessionEstablishmentResult,
-  UserId,
+import {
+  sessionAuthorizationUsableUntil,
+  type ConnectivityEpochId,
+  type DeviceEnrollmentId,
+  type MobileSessionResponse,
+  type SessionId,
+  type SessionEstablishmentResult,
+  type UserId,
 } from '@psd-eoc/contracts';
 
 import {
@@ -112,7 +113,7 @@ function locallyUsableSession(
   const nowMilliseconds = now.getTime();
   const expiresAt = Date.parse(session.session.expiresAt);
   const graceUntil = Date.parse(
-    session.session.authorization.membershipGraceUntil,
+    sessionAuthorizationUsableUntil(session.session.authorization),
   );
   return (
     Number.isFinite(expiresAt) &&
@@ -128,7 +129,7 @@ function locallyUsableSession(
 function localSessionDeadline(session: SessionEstablishmentResult): number {
   return Math.min(
     Date.parse(session.session.expiresAt),
-    Date.parse(session.session.authorization.membershipGraceUntil),
+    Date.parse(sessionAuthorizationUsableUntil(session.session.authorization)),
   );
 }
 

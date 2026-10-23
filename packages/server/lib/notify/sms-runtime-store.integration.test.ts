@@ -718,6 +718,8 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
         await transaction.insert(users).values({
           id: fixture.userId,
           googleSubject: `synthetic-sms-runtime-${fixture.userId}`,
+          identityIssuer: 'https://accounts.google.com',
+          identitySubject: `synthetic-sms-runtime-${fixture.userId}`,
           email: `sms-runtime-${fixture.userId}@example.invalid`,
           displayName: 'Synthetic SMS Runtime Verifier',
           facilityScopeKind: 'district',

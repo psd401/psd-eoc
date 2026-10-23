@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema, paginatedSchema } from './api';
-import { RoleSchema, TimestampSchema, UuidSchema } from './shared';
+import { StaffRoleSchema, TimestampSchema, UuidSchema } from './shared';
 
 /**
  * Owns the stable identifier for a configured group source. Source purpose,
@@ -144,7 +144,7 @@ const groupSourceMetadataShape = {
  * notified, not who may sign in, so their role is always null and the database
  * holds them to that with a check constraint.
  */
-const accessRoleShape = { grantedRole: RoleSchema };
+const accessRoleShape = { grantedRole: StaffRoleSchema };
 const noGrantedRoleShape = { grantedRole: z.null() };
 
 const googleGroupDetailsShape = {

@@ -236,6 +236,8 @@ async function seedStrictBaseline(
     await transaction.insert(users).values({
       id: USER_ID,
       googleSubject: 'synthetic-test-google-subject',
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: 'synthetic-test-google-subject',
       email: RECOVERY_EMAIL,
       displayName: 'Synthetic Integration Administrator',
       facilityScopeKind: 'district',

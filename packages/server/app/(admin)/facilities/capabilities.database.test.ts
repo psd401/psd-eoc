@@ -364,7 +364,7 @@ function bootstrapSessionRequest(input: {
   const responseDigest = digest(`response:${input.label}`);
   const principal = {
     kind: 'oidc-callback' as const,
-    subjectDigest: digest(input.user.googleSubject),
+    subjectDigest: digest(input.user.googleSubject ?? ''),
     responseDigest,
   };
   return Object.freeze({
@@ -551,6 +551,8 @@ async function persistAdministratorIdentity(
     .values({
       id: authenticated.actor.userId,
       googleSubject: `issue-26-admin-subject-${suffix}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `issue-26-admin-subject-${suffix}`,
       email: `issue-26-admin-${suffix}@example.invalid`,
       displayName: `Issue 26 synthetic administrator ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -2347,6 +2349,8 @@ describeWithDatabase('facilities administrator database flow', () => {
     await database.insert(users).values({
       id: roleTargetId,
       googleSubject: `issue-26-subject-${suffix}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `issue-26-subject-${suffix}`,
       email: `issue-26-role-${suffix}@example.invalid`,
       displayName: `Issue 26 synthetic staff ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -2359,6 +2363,8 @@ describeWithDatabase('facilities administrator database flow', () => {
     await database.insert(users).values({
       id: rolelessContactId,
       googleSubject: `issue-26-contact-${suffix}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `issue-26-contact-${suffix}`,
       email: `issue-26-contact-${suffix}@example.invalid`,
       displayName: `Issue 26 synthetic contact ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -2368,6 +2374,8 @@ describeWithDatabase('facilities administrator database flow', () => {
     await database.insert(users).values({
       id: inaccessibleAdministratorId,
       googleSubject: inaccessibleAdministratorSubject,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: inaccessibleAdministratorSubject,
       email: `issue-26-inaccessible-admin-${suffix}@example.invalid`,
       displayName: `Issue 26 inaccessible administrator ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',

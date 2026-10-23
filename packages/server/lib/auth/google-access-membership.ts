@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import { staffRosterEmail } from '../config/staff-email';
 
 import {
-  RoleSchema,
+  StaffRoleSchema,
   StaffRosterEmailSchema,
   TimestampSchema,
-  type Role,
+  type StaffRole,
 } from '@psd-eoc/contracts';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
@@ -149,7 +149,7 @@ export class AccessMembershipEvaluationError extends Error {
 export interface DesignatedAccessGroup {
   readonly groupSourceId: string;
   readonly email: string;
-  readonly grantedRole: Role | null;
+  readonly grantedRole: StaffRole | null;
   /**
    * True for a building source registered before Google held its group: no
    * Google Group ID is recorded yet. Google answering "not found" for such
@@ -163,7 +163,7 @@ export const DesignatedAccessGroupSchema = z
   .object({
     groupSourceId: z.string().uuid(),
     email: StaffRosterEmailSchema,
-    grantedRole: RoleSchema.nullable(),
+    grantedRole: StaffRoleSchema.nullable(),
     waiting: z.boolean().default(false),
   })
   .strict()
@@ -175,7 +175,7 @@ export interface EvaluatedAccessGroup {
   readonly groupEmail: string;
   /** Null only for a waiting group Google does not hold yet. */
   readonly googleGroupId: string | null;
-  readonly grantedRole: Role | null;
+  readonly grantedRole: StaffRole | null;
   readonly memberEmails: readonly string[];
 }
 

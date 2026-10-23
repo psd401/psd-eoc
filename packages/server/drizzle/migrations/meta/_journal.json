@@ -414,6 +414,13 @@
       "when": 1792380018082,
       "tag": "0058_event_type_draft_discard",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1792792141986,
+      "tag": "0059_partner_identity_and_admissions",
+      "breakpoints": true
     }
   ]
 }

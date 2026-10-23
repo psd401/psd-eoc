@@ -4615,6 +4615,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         timing: 'BEFORE',
         event: 'UPDATE',
       },
+      // Migration 0059: `partner` is granted only to a non-Google identity
+      // and a staff role only to a Google one.
+      {
+        table: 'user_role_changes',
+        name: 'user_role_changes_partner_exclusive',
+        timing: 'BEFORE',
+        event: 'INSERT',
+      },
       {
         table: 'user_role_changes',
         name: 'user_role_changes_sequence_guard',
@@ -4624,11 +4632,13 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     ]);
     for (const trigger of triggers) {
       expect(trigger.action_statement).toContain(
-        trigger.event_manipulation === 'INSERT'
-          ? 'psd_eoc_guard_user_role_change_insert'
-          : trigger.event_manipulation === 'UPDATE'
-            ? 'psd_eoc_reject_immutable_mutation'
-            : 'psd_eoc_reject_delete',
+        trigger.trigger_name === 'user_role_changes_partner_exclusive'
+          ? 'psd_eoc_guard_partner_role_exclusive'
+          : trigger.event_manipulation === 'INSERT'
+            ? 'psd_eoc_guard_user_role_change_insert'
+            : trigger.event_manipulation === 'UPDATE'
+              ? 'psd_eoc_reject_immutable_mutation'
+              : 'psd_eoc_reject_delete',
       );
     }
 

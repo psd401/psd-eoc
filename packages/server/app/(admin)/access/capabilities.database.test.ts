@@ -87,6 +87,8 @@ async function persistSession(authenticated: AuthenticatedSession) {
     .values({
       id: authenticated.actor.userId,
       googleSubject: `scope-actor-${suffix}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `scope-actor-${suffix}`,
       email: `scope-actor-${suffix}@example.invalid`,
       displayName: `Scope actor ${suffix}`,
       facilityScopeKind: 'district',
@@ -125,6 +127,8 @@ async function persistPerson(): Promise<string> {
     .values({
       id,
       googleSubject: `scope-person-${id.slice(0, 8)}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `scope-person-${id.slice(0, 8)}`,
       email: `scope-person-${id.slice(0, 8)}@example.invalid`,
       displayName: `Scope person ${id.slice(0, 8)}`,
       facilityScopeKind: 'district',

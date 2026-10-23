@@ -363,6 +363,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: googleSubject,
       email: `issue-26-session-${suffix}@example.invalid`,
       displayName: `Issue 26 session user ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -456,6 +458,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: googleSubject,
       email: `issue-23-push-revoke-${suffix}@example.invalid`,
       displayName: `Issue 23 push revoke ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -673,6 +677,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: googleSubject,
       email: `issue-26-app-role-session-${suffix}@example.invalid`,
       displayName: `Issue 26 app role user ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -758,7 +764,10 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       // A session is pinned to nothing. Authorization asks the trusted groups
       // about the present on every request, so there is no generation to
       // record and nothing to stamp.
-      expect(result.session.authorization.membershipSnapshotId).toBeNull();
+      expect(result.session.authorization).toMatchObject({
+        kind: 'group-membership',
+        membershipSnapshotId: null,
+      });
 
       const updatePrivileges = databaseExecuteRows<SnapshotUpdatePrivilegeRow>(
         await roleConnection.db.execute<SnapshotUpdatePrivilegeRow>(sql`
@@ -852,6 +861,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: googleSubject,
       email: `issue-26-bootstrap-lock-${suffix}@example.invalid`,
       displayName: `Issue 26 bootstrap candidate ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -1009,6 +1020,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: googleSubject,
       email: `issue-23-concurrent-refresh-${suffix}@example.invalid`,
       displayName: `Issue 23 concurrent refresh ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -1174,6 +1187,8 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       await database.insert(users).values({
         id: userId,
         googleSubject,
+        identityIssuer: 'https://accounts.google.com',
+        identitySubject: googleSubject,
         email: `issue-23-revoke-recovery-${suffix}@example.invalid`,
         displayName: `Issue 23 revoke recovery ${suffix.slice(0, 8)}`,
         facilityScopeKind: 'district',

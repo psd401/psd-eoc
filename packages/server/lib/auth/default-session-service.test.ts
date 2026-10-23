@@ -332,6 +332,7 @@ describe('session credential read batching', () => {
               null,
               IDS.user,
               googleSubject,
+              'https://accounts.google.com',
               'synthetic.issue-193@example.invalid',
               'Synthetic Issue 193 Administrator',
               'district',

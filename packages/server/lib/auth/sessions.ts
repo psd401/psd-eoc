@@ -32,6 +32,7 @@ import {
   type SessionEstablishmentResult,
   type SessionRevocation,
   type VerifiedCurrentRefreshCredential,
+  type SessionAuthorization,
 } from '@psd-eoc/contracts';
 import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
@@ -78,6 +79,11 @@ import {
   appendDevicePushTokenUnregistrations,
   supersedeOtherAccountsOnInstallation,
 } from './installation-handoff';
+import {
+  decidePartnerAccess,
+  isPartnerIdentityIssuer,
+  partnerAccessAsAccessDecision,
+} from './partner-admission';
 import { decideAccess } from './trusted-group-access';
 
 const SECOND_MS = 1_000;
@@ -582,30 +588,44 @@ function authorizeStoredSession(
       'Cached membership evidence cannot come from the future.',
     );
   }
-  const usingIssuanceEvidence =
-    context.membershipSnapshotId ===
-    result.session.authorization.membershipSnapshotId;
-  const membershipValidUntil = usingIssuanceEvidence
-    ? Date.parse(result.session.authorization.membershipValidUntil)
-    : addSeconds(
-        context.membershipCapturedAt,
-        policy.membershipTtlSeconds,
-      ).getTime();
-  const graceUntil = usingIssuanceEvidence
-    ? Date.parse(result.session.authorization.membershipGraceUntil)
-    : membershipValidUntil + policy.membershipGraceSeconds * SECOND_MS;
-  if (now.getTime() >= graceUntil) {
-    throw new SessionAccessError(
-      'MEMBERSHIP_GRACE_EXPIRED',
-      'Cached Google Group membership is beyond its outage grace window.',
-    );
+  const authorization = result.session.authorization;
+  let membershipState: 'fresh' | 'grace';
+  if (authorization.kind === 'partner-admission') {
+    // A partner admission was read for this request, so there is no cached
+    // evidence to age and no outage grace: the admission is either current
+    // now or the request is refused. The read already refused an ended or
+    // expired one; this restates the expiry so no caller can skip it.
+    if (now.getTime() >= Date.parse(authorization.admissionExpiresAt)) {
+      throw new SessionAccessError(
+        'INVALID_MEMBERSHIP_EVIDENCE',
+        'The partner admission has expired.',
+      );
+    }
+    membershipState = 'fresh';
+  } else {
+    const usingIssuanceEvidence =
+      context.membershipSnapshotId === authorization.membershipSnapshotId;
+    const membershipValidUntil = usingIssuanceEvidence
+      ? Date.parse(authorization.membershipValidUntil)
+      : addSeconds(
+          context.membershipCapturedAt,
+          policy.membershipTtlSeconds,
+        ).getTime();
+    const graceUntil = usingIssuanceEvidence
+      ? Date.parse(authorization.membershipGraceUntil)
+      : membershipValidUntil + policy.membershipGraceSeconds * SECOND_MS;
+    if (now.getTime() >= graceUntil) {
+      throw new SessionAccessError(
+        'MEMBERSHIP_GRACE_EXPIRED',
+        'Cached Google Group membership is beyond its outage grace window.',
+      );
+    }
+    membershipState = now.getTime() < membershipValidUntil ? 'fresh' : 'grace';
   }
   const effectiveScope = intersectScopes(
     result.user.facilityScope,
     context.membershipScope,
   );
-  const membershipState =
-    now.getTime() < membershipValidUntil ? 'fresh' : 'grace';
   return Object.freeze({
     actor: Object.freeze({
       kind: 'human' as const,
@@ -1263,7 +1283,7 @@ export class DrizzleSessionStore implements SessionStore {
    * holder is still in a trusted group.
    */
   private async loadTrustedMembership(
-    user: Readonly<{ id: string; googleSubject: string; email: string }>,
+    user: Readonly<{ id: string; email: string; identityIssuer: string }>,
     now: Date,
     database: Pick<Database, 'select'> = this.database,
   ): Promise<
@@ -1276,14 +1296,22 @@ export class DrizzleSessionStore implements SessionStore {
       roles: readonly Role[];
     }>
   > {
-    const decision = await decideAccess(database as Database, {
-      email: user.email,
-      checkedAt: now,
-    });
+    const decision = isPartnerIdentityIssuer(user.identityIssuer)
+      ? partnerAccessAsAccessDecision(
+          await decidePartnerAccess(database, {
+            email: user.email,
+            checkedAt: now,
+          }),
+          now,
+        )
+      : await decideAccess(database as Database, {
+          email: user.email,
+          checkedAt: now,
+        });
     if (!decision.granted) {
       throw new SessionAccessError(
         'INVALID_MEMBERSHIP_EVIDENCE',
-        'The session holder is no longer in a trusted access group.',
+        'The session holder is no longer in a trusted access group or partner admission.',
       );
     }
     const scopes = await database
@@ -1352,6 +1380,7 @@ export class DrizzleSessionStore implements SessionStore {
         user: {
           id: users.id,
           googleSubject: users.googleSubject,
+          identityIssuer: users.identityIssuer,
           email: users.email,
           displayName: users.displayName,
           facilityScopeKind: users.facilityScopeKind,
@@ -1401,10 +1430,23 @@ export class DrizzleSessionStore implements SessionStore {
     // and `membershipAccessActive` false, which never authorizes a request but
     // does keep the session visible to an administrator who needs to revoke
     // it. Throwing instead made a removed person's sessions unreachable.
-    const decision = await decideAccess(database as Database, {
-      email: userRow.email,
-      checkedAt: now,
-    });
+    //
+    // A partner is a different question with the same shape: is this
+    // person's admission current right now. It is never answered by a group.
+    const partner = isPartnerIdentityIssuer(userRow.identityIssuer);
+    const partnerDecision = partner
+      ? await decidePartnerAccess(database, {
+          email: userRow.email,
+          checkedAt: now,
+        })
+      : null;
+    const decision =
+      partnerDecision === null
+        ? await decideAccess(database as Database, {
+            email: userRow.email,
+            checkedAt: now,
+          })
+        : partnerAccessAsAccessDecision(partnerDecision, now);
     const roles = decision.granted ? decision.roles : [];
     const membershipAccessActive = decision.granted;
     const facilityRows = await database
@@ -1517,19 +1559,36 @@ export class DrizzleSessionStore implements SessionStore {
         'The expected connectivity epoch does not exist.',
       );
     }
+    let authorization: SessionAuthorization;
+    if (partnerDecision === null) {
+      authorization = {
+        kind: 'group-membership',
+        source: 'google-group-snapshot',
+        membershipSnapshotId: sessionRow.membershipSnapshotId,
+        membershipValidUntil: timestamp(sessionRow.membershipValidUntil),
+        membershipGraceUntil: timestamp(sessionRow.membershipGraceUntil),
+      };
+    } else if (partnerDecision.admission !== null) {
+      authorization = {
+        kind: 'partner-admission',
+        partnerAdmissionId: partnerDecision.admission.id,
+        admissionExpiresAt: partnerDecision.admission.expiresAt,
+      };
+    } else {
+      // A partner identity is only ever created through an admission, so a
+      // partner with none at all is a broken identity graph, not a refusal.
+      throw new SessionAccessError(
+        'INVALID_CREDENTIAL',
+        'The partner session has no admission.',
+      );
+    }
     const session = SessionSchema.parse({
       id: sessionRow.id,
       userId: sessionRow.userId,
       deviceEnrollmentId: sessionRow.deviceEnrollmentId,
       createdAt: timestamp(sessionRow.createdAt),
       expiresAt: timestamp(sessionRow.expiresAt),
-      authorization: {
-        kind: 'group-membership',
-        source: 'google-group-snapshot',
-        membershipSnapshotId: sessionRow.membershipSnapshotId,
-        membershipValidUntil: timestamp(sessionRow.membershipValidUntil),
-        membershipGraceUntil: timestamp(sessionRow.membershipGraceUntil),
-      },
+      authorization,
       revokedAt:
         sessionRow.revokedAt === null
           ? (revocation?.revokedAt ?? null)
@@ -1925,9 +1984,10 @@ export class DrizzleSessionStore implements SessionStore {
           .select({
             id: users.id,
             googleSubject: users.googleSubject,
-            // Needed to re-check trusted-group membership on rotation: access
-            // is decided by the groups this address is in.
+            // Needed to re-check access on rotation: a staff address by the
+            // groups it is in, a partner by its admission.
             email: users.email,
+            identityIssuer: users.identityIssuer,
             disabledAt: users.disabledAt,
           })
           .from(users)

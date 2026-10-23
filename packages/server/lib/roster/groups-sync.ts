@@ -1657,7 +1657,13 @@ export function createDrizzleRosterSyncStore(
         .where(inArray(users.id, batch))
         .orderBy(asc(users.id))
         .for('share');
-      rows.forEach((row) => googleSubjects.set(row.id, row.googleSubject));
+      // A partner has no Google subject and is never a staff-roster
+      // recipient, so it can never be the owner of a staff endpoint.
+      rows.forEach((row) => {
+        if (row.googleSubject !== null) {
+          googleSubjects.set(row.id, row.googleSubject);
+        }
+      });
     }
 
     const enrollmentIds = [
@@ -1968,6 +1974,9 @@ export function createDrizzleRosterSyncStore(
             .from(users)
             .where(and(identityPredicate, isNull(users.disabledAt)));
           for (const row of userRows) {
+            // Only Google staff identities are roster contacts; a partner
+            // shares no identity key with any roster recipient.
+            if (row.googleSubject === null) continue;
             const staffEmail = staffRosterEmail().parse(row.staffEmail);
             const existing = contactMap.get(row.googleSubject);
             if (
@@ -2029,7 +2038,10 @@ export function createDrizzleRosterSyncStore(
             typeof pushRows
           >();
           for (const row of pushRows) {
-            const contact = contactMap.get(row.googleSubject);
+            const contact =
+              row.googleSubject === null
+                ? undefined
+                : contactMap.get(row.googleSubject);
             if (contact !== undefined && row.platform !== 'web') {
               const selectionKey = `${row.deviceEnrollmentId}:${row.platform}`;
               const registrations =
@@ -2071,7 +2083,10 @@ export function createDrizzleRosterSyncStore(
             }
             const row = selected[0];
             if (row !== undefined) {
-              const contact = contactMap.get(row.googleSubject);
+              const contact =
+                row.googleSubject === null
+                  ? undefined
+                  : contactMap.get(row.googleSubject);
               if (contact === undefined) continue;
               if (
                 contact.pushEndpoints.some((endpoint) => endpoint.id === row.id)
@@ -2109,7 +2124,10 @@ export function createDrizzleRosterSyncStore(
             and(isNull(staffSmsConsents.withdrawnAt), isNull(users.disabledAt)),
           );
         for (const row of consentRows) {
-          const contact = contactMap.get(row.googleSubject);
+          const contact =
+            row.googleSubject === null
+              ? undefined
+              : contactMap.get(row.googleSubject);
           if (contact === undefined) continue;
           if (contact.smsEndpoints.length > 0) {
             throw new RosterSyncError(

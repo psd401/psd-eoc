@@ -205,7 +205,7 @@ export function decodeUserPageCursor(
   }
 }
 
-const ROLE_DISPLAY_ORDER: readonly Role[] = ['admin', 'staff'];
+const ROLE_DISPLAY_ORDER: readonly Role[] = ['admin', 'staff', 'partner'];
 
 /**
  * A membership read recently enough to authorize a sign-in, by the same rule

@@ -12,6 +12,7 @@ import {
 import {
   hasUniqueStrings,
   isAtOrAfter,
+  isExclusiveRoleSet,
   RoleSchema,
   TimestampSchema,
   UuidSchema,
@@ -92,10 +93,38 @@ export type SetUserFacilityScopeInput = z.infer<
   typeof SetUserFacilityScopeInputSchema
 >;
 
+/**
+ * The issuer of every district staff identity. A person is identified by
+ * issuer and subject together; the Google subject alone identified people only
+ * while Google was the sole issuer.
+ */
+export const GOOGLE_IDENTITY_ISSUER = 'https://accounts.google.com';
+
+/** An OpenID Connect issuer: an HTTPS URL, compared exactly. */
+export const IdentityIssuerSchema = z
+  .string()
+  .max(255)
+  .url()
+  .refine((value) => value.startsWith('https://'), {
+    message: 'An identity issuer must be an HTTPS URL.',
+  });
+
+/** Identity issuer inferred from {@link IdentityIssuerSchema}. */
+export type IdentityIssuer = z.infer<typeof IdentityIssuerSchema>;
+
+/** The issuer-scoped subject identifier an identity provider asserts. */
+export const IdentitySubjectSchema = z.string().trim().min(1).max(255);
+
 export const UserSchema = z
   .object({
     id: UserIdSchema,
-    googleSubject: z.string().trim().min(1).max(255),
+    /**
+     * The Google subject of a district staff identity, and null for a partner,
+     * who is identified by another issuer. Kept under this name because
+     * installed mobile builds parse it; the full identity key is issuer plus
+     * subject and lives on the server.
+     */
+    googleSubject: IdentitySubjectSchema.nullable(),
     email: z
       .string()
       .trim()
@@ -115,6 +144,9 @@ export const UserSchema = z
       .refine((roles) => new Set(roles).size === roles.length, {
         message: 'User roles must be unique.',
       })
+      .refine(isExclusiveRoleSet, {
+        message: 'A partner holds no staff or administrator role.',
+      })
       .readonly(),
     facilityScope: FacilityScopeSchema,
     createdAt: TimestampSchema,
@@ -122,6 +154,13 @@ export const UserSchema = z
   })
   .strict()
   .superRefine((user, context) => {
+    if (user.roles.includes('partner') && user.googleSubject !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A Google staff identity cannot hold the partner role.',
+        path: ['roles'],
+      });
+    }
     if (user.disabledAt && !isAtOrAfter(user.disabledAt, user.createdAt)) {
       context.addIssue({
         code: 'custom',
@@ -499,9 +538,10 @@ export type MembershipSource = z.infer<typeof MembershipSourceSchema>;
 
 /**
  * Owns the complete Google Group authorization evidence used to issue one
- * session. Designated group membership is mandatory for every user and role.
+ * staff session. Designated group membership is mandatory for every staff user
+ * and role.
  */
-export const SessionAuthorizationSchema = z
+export const GroupMembershipSessionAuthorizationSchema = z
   .object({
     kind: z.literal('group-membership'),
     source: MembershipSourceSchema,
@@ -518,8 +558,48 @@ export const SessionAuthorizationSchema = z
   .strict()
   .readonly();
 
+/**
+ * Owns the authorization of a partner session: the partner admission that
+ * lets this person in right now. It is derived on every session read from the
+ * person's current admission, never stored as a grant, so ending or expiring
+ * the admission refuses the very next request, and an administrator's renewal
+ * keeps an open session working.
+ */
+export const PartnerAdmissionSessionAuthorizationSchema = z
+  .object({
+    kind: z.literal('partner-admission'),
+    partnerAdmissionId: UuidSchema,
+    admissionExpiresAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/**
+ * Owns truthful session-authorization provenance: Google group membership for
+ * staff, a partner admission for a partner. Staff payloads are unchanged, so
+ * installed mobile builds, which know only the group variant, keep parsing
+ * every staff session.
+ */
+export const SessionAuthorizationSchema = z.discriminatedUnion('kind', [
+  GroupMembershipSessionAuthorizationSchema,
+  PartnerAdmissionSessionAuthorizationSchema,
+]);
+
 /** Session authorization evidence inferred from its schema. */
 export type SessionAuthorization = z.infer<typeof SessionAuthorizationSchema>;
+
+/**
+ * The last instant a session's sign-in evidence lets it be used without the
+ * server: the Google membership grace for staff, the admission expiry for a
+ * partner. A client stops treating a cached session as usable after it.
+ */
+export function sessionAuthorizationUsableUntil(
+  authorization: SessionAuthorization,
+): string {
+  return authorization.kind === 'partner-admission'
+    ? authorization.admissionExpiresAt
+    : authorization.membershipGraceUntil;
+}
 
 /**
  * Owns a long-lived, device-bound session lifecycle. Cached group membership
@@ -546,7 +626,10 @@ export const SessionSchema = z
         path: ['expiresAt'],
       });
     }
+    // A partner session carries no Google membership windows; its admission
+    // is re-checked on every read instead.
     if (
+      session.authorization.kind === 'group-membership' &&
       !isAtOrAfter(
         session.authorization.membershipValidUntil,
         session.createdAt,
@@ -559,6 +642,7 @@ export const SessionSchema = z
       });
     }
     if (
+      session.authorization.kind === 'group-membership' &&
       !isAtOrAfter(
         session.authorization.membershipGraceUntil,
         session.authorization.membershipValidUntil,

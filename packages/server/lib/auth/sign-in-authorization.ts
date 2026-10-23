@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
-import { UserSchema, type User } from '@psd-eoc/contracts';
+import {
+  GOOGLE_IDENTITY_ISSUER,
+  UserSchema,
+  type User,
+} from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
 import { userFacilityScopes, users } from '../../db/schema';
@@ -81,7 +85,14 @@ export async function authorizeSignIn(
         disabledAt: users.disabledAt,
       })
       .from(users)
-      .where(eq(users.googleSubject, input.googleSubject))
+      // A person is their issuer and subject together. This path only ever
+      // completes a Google sign-in, so the issuer is Google's.
+      .where(
+        and(
+          eq(users.identityIssuer, GOOGLE_IDENTITY_ISSUER),
+          eq(users.identitySubject, input.googleSubject),
+        ),
+      )
       .limit(1);
 
     if (existing !== undefined && existing.disabledAt !== null) {
@@ -102,6 +113,8 @@ export async function authorizeSignIn(
           .values({
             id: randomUUID(),
             googleSubject: input.googleSubject,
+            identityIssuer: GOOGLE_IDENTITY_ISSUER,
+            identitySubject: input.googleSubject,
             email,
             displayName: input.displayName,
             facilityScopeKind: 'district',

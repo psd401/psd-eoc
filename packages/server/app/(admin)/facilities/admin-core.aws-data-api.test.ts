@@ -291,6 +291,8 @@ class FakeRdsDataClient {
           [
             { stringValue: USER_ID },
             { stringValue: 'synthetic-google-subject-2670' },
+            { stringValue: 'https://accounts.google.com' },
+            { stringValue: 'synthetic-google-subject-2670' },
             { stringValue: 'synthetic-admin@example.invalid' },
             { stringValue: 'Synthetic Administrator' },
             { stringValue: 'district' },
@@ -299,6 +301,8 @@ class FakeRdsDataClient {
           ],
           [
             { stringValue: SECOND_USER_ID },
+            { stringValue: 'synthetic-google-subject-2675' },
+            { stringValue: 'https://accounts.google.com' },
             { stringValue: 'synthetic-google-subject-2675' },
             { stringValue: 'synthetic-operator@example.invalid' },
             { stringValue: 'Synthetic Operator' },
@@ -766,6 +770,12 @@ class FakeRdsDataClient {
         records: [
           [
             { stringValue: userId },
+            {
+              stringValue: isSecondUser
+                ? 'synthetic-google-subject-2675'
+                : 'synthetic-google-subject-2670',
+            },
+            { stringValue: 'https://accounts.google.com' },
             {
               stringValue: isSecondUser
                 ? 'synthetic-google-subject-2675'

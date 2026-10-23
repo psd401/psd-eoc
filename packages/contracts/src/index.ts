@@ -19,6 +19,7 @@ export * from './journal';
 export * from './media';
 export * from './mcp';
 export * from './notification';
+export * from './partner-admission';
 export * from './push-runtime';
 export * from './readiness';
 export * from './report';
