@@ -107,9 +107,10 @@ These are real failure patterns from this repo's history. Avoid them.
     GitHub `production` environment approval gates the apply, and the apply
     runs through an OIDC role pinned to that environment. Nobody applies
     Terraform locally and nobody holds long-lived cloud keys. The one
-    exception is the one-time `infra/terraform/state-bootstrap` apply, run by
-    a human administrator, that creates the state bucket and those CI roles
-    ([migration plan](docs/terraform-migration-plan.md), phase 1).
+    exception is the one-time apply of `infra/terraform/state-bootstrap`,
+    which phase 1 of the [migration plan](docs/terraform-migration-plan.md)
+    will create: the product owner runs it once to create the state bucket
+    and those CI roles.
   - **CDK**, until a stack migrates to Terraform, deploys only from a human's
     locally authenticated, short-lived AWS session with a direct
     `cdk deploy`. No workflow deploys CDK, CloudFormation, App Runner, or a
