@@ -93,6 +93,9 @@ resource "aws_cognito_user_pool_client" "server" {
 
   supported_identity_providers = ["COGNITO"]
 
+  # Explicit rather than left to API defaults. A failed sign-in never reveals
+  # whether a partner address is enrolled, and refresh tokens stay revocable
+  # so disabling a partner can end the sessions they already hold.
   prevent_user_existence_errors = "ENABLED"
   enable_token_revocation       = true
 
@@ -122,6 +125,8 @@ resource "aws_secretsmanager_secret" "partner_client" {
   name        = local.client_secret_name
   description = "Partner Cognito app-client credential read by the server at runtime."
 
+  # The longest window Secrets Manager allows: a mistaken delete of the
+  # credential every partner sign-in depends on stays restorable for 30 days.
   recovery_window_in_days = 30
 
   lifecycle {
