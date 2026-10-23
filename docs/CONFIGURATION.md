@@ -148,10 +148,13 @@ names are:
 
 ## Direct CDK deployment boundary
 
-The repository has no deployment workflow and no GitHub deployment
-environment, variables, secrets, or OIDC role. An operator authenticates to
-AWS locally with short-lived credentials and supplies deployment values
-directly to `cdk deploy`. Sensitive values remain in AWS Secrets Manager or the
+No workflow deploys the CDK stack. A human operator authenticates to AWS
+locally with short-lived credentials and supplies deployment values directly
+to `cdk deploy`; agents prepare and verify that deploy but never run it.
+Terraform roots are the other path: under psd-dev-standards 08 they apply only
+from CI, behind the GitHub `production` environment approval, through an OIDC
+role pinned to that environment. That pipeline is phase 1 of the
+[migration plan](terraform-migration-plan.md) and is not built yet. Sensitive values remain in AWS Secrets Manager or the
 operator's local environment and are never committed.
 
 CDK derives the exact Git commit from the local checkout, refuses a dirty

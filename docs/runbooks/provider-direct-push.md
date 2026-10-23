@@ -38,7 +38,7 @@ queued for replay. Provider acceptance is not device delivery.
 ## Activate and cut over
 
 1. Set the retained credential evidence reference, then enable the direct
-   runtime through the protected deployment workflow while both cutovers still
+   runtime with a direct `cdk deploy` run by a human operator while both cutovers still
    select Expo. Confirm startup and sanitized heartbeat evidence without a
    provider send.
 2. In the authenticated integration settings, choose **Enabled** for
