@@ -119,7 +119,10 @@ describe('documentation contract', () => {
     expect(verifyDocumentation()).toEqual([]);
   });
 
-  test('forbids repository-hosted deployment workflows', () => {
+  // psd-dev-standards 08: Terraform applies from CI behind the production
+  // environment through an OIDC role, but the CDK stack, CloudFormation, App
+  // Runner, and container images are never deployed by a workflow.
+  test('forbids workflows that deploy the CDK stack or its images', () => {
     const repository = join(import.meta.dir, '..');
     const workflows = join(repository, '.github', 'workflows');
     const workflowFiles = readdirSync(workflows).filter((file) =>
@@ -146,9 +149,6 @@ describe('documentation contract', () => {
       /\.github\/workflows\/deploy/iu,
       /\bAWS_DEPLOY_[A-Z0-9_]+\b/u,
       /\bActions\s*→\s*Deploy\b/iu,
-      /\bGitHub Actions OIDC\b/iu,
-      /\bGitHub OIDC (?:deploy|deployment|role)\b/iu,
-      /\bnormal OIDC workflow\b/iu,
       /\bsupported `Deploy` workflow\b/iu,
       /(?:\bissue\s+|\[)#31\b/iu,
       /^\s*31\.\s+Failure drills\b/imu,
@@ -159,6 +159,29 @@ describe('documentation contract', () => {
         expect(contents).not.toMatch(pattern);
       }
     }
+
+    // psd-dev-standards 08 wording. Checked against source documents only:
+    // the generated openwiki/ tree restates them and is regenerated after a
+    // merge, so it may briefly carry the pre-standard rule.
+    const staleDeploymentRules = [
+      // OIDC belongs to the Terraform CI path only, never to a CDK deploy.
+      /\bOIDC\b[^.]{0,120}\bcdk\s+deploy\b/iu,
+      /\bcdk\s+deploy\b[^.]{0,120}\bOIDC\b/iu,
+      // The pre-standard rule that banned the Terraform CI path outright.
+      /\bno\s+(?:GitHub\s+)?(?:deployment\s+environment|OIDC\s+(?:deploy(?:ment)?\s+)?role)\b/iu,
+      /\bOIDC\s+roles?\s+(?:must\s+never|are\s+not)\b/iu,
+    ];
+    for (const file of currentMarkdownFiles(repository)) {
+      const contents = readFileSync(file, 'utf8');
+      for (const pattern of staleDeploymentRules) {
+        expect(contents).not.toMatch(pattern);
+      }
+    }
+    const agents = readFileSync(join(repository, 'AGENTS.md'), 'utf8');
+    expect(agents).toContain(
+      'Agents never run `apply`, `deploy`, or `import` against a real account.',
+    );
+    expect(agents).toMatch(/\*\*Terraform\*\* applies only from CI\./u);
   });
 
   test('maps every monitoring alarm anchor to a current procedure', () => {

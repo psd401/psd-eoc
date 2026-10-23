@@ -39,8 +39,12 @@ terraform plan -var-file=/protected/path/stateful.tfvars
 ```
 
 Copy `backend.hcl.example` and `stateful.tfvars.example` outside the repository
-first and replace every placeholder. Applying this root against the live
-account is a product-owner action; nothing in the repository applies it.
+first and replace every placeholder. Under psd-dev-standards 08 this root
+applies only from CI: the pull request shows the plan, the `production`
+environment approval gates the apply, and an OIDC role pinned to that
+environment runs it. Nobody applies it locally. That pipeline is phase 1 of
+the [migration plan](../../../docs/terraform-migration-plan.md) and is not
+built, so the root is not applied.
 
 The credential-free plan — what `bun run verify:terraform` and CI run — needs
 no backend and no AWS credential at all:
