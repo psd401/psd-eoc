@@ -153,6 +153,8 @@ async function insertSyntheticAdminSession(
   await database.insert(users).values({
     id: ADMIN_ACTOR.userId,
     googleSubject: `synthetic-admin-${suffix}`,
+    identityIssuer: 'https://accounts.google.com',
+    identitySubject: `synthetic-admin-${suffix}`,
     email: `synthetic.admin.${suffix}@example.invalid`,
     displayName: 'Synthetic Administrator',
     facilityScopeKind: 'district',
@@ -522,6 +524,8 @@ describeWithDatabase('event journal database guarantees', () => {
     await database.insert(users).values({
       id: authorId,
       googleSubject: `synthetic-author-name-${suffix}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `synthetic-author-name-${suffix}`,
       email: `synthetic.author.${suffix}@example.invalid`,
       displayName: 'Dana Reyes',
       facilityScopeKind: 'district',
@@ -1938,6 +1942,8 @@ describeWithDatabase('event journal database guarantees', () => {
     await fixtureDatabase.insert(users).values({
       id: HUMAN_ACTOR.userId,
       googleSubject: `synthetic-issue77-${suffix}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `synthetic-issue77-${suffix}`,
       email: `synthetic.issue77.${suffix}@example.invalid`,
       displayName: 'Synthetic Issue 77 Staff Operator',
       facilityScopeKind: 'district',

@@ -201,7 +201,11 @@ export async function completeAppReviewSignIn(
     .from(users)
     .where(eq(users.email, email))
     .limit(1);
-  if (account === undefined || account.disabledAt !== null) {
+  if (
+    account === undefined ||
+    account.disabledAt !== null ||
+    account.googleSubject === null
+  ) {
     throw new AppReviewSignInError(
       'ACCOUNT_NOT_READY',
       'The review account is not set up on this deployment.',

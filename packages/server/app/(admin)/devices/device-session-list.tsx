@@ -127,9 +127,15 @@ export function DeviceSessionList({
                     const renderedAtMs = Date.parse(renderedAt);
                     const expired =
                       renderedAtMs >= Date.parse(session.expiresAt);
+                    // A staff session's sign-in evidence lasts until its
+                    // membership grace ends; a partner's until its admission
+                    // expires.
+                    const evidenceUntil =
+                      session.authorization.kind === 'partner-admission'
+                        ? session.authorization.admissionExpiresAt
+                        : session.authorization.membershipGraceUntil;
                     const issuanceMembershipExpired =
-                      renderedAtMs >=
-                      Date.parse(session.authorization.membershipGraceUntil);
+                      renderedAtMs >= Date.parse(evidenceUntil);
                     const status = revoked
                       ? 'Revoked'
                       : expired
@@ -141,11 +147,7 @@ export function DeviceSessionList({
                       <tr key={session.id}>
                         <td>{readableDate(session.createdAt)}</td>
                         <td>{readableDate(session.expiresAt)}</td>
-                        <td>
-                          {readableDate(
-                            session.authorization.membershipGraceUntil,
-                          )}
-                        </td>
+                        <td>{readableDate(evidenceUntil)}</td>
                         <td>{status}</td>
                         <td>
                           <button

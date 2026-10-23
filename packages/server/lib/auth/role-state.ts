@@ -36,6 +36,7 @@ export interface RoleChangeFact {
 const ROLE_ORDER: Readonly<Record<Role, number>> = Object.freeze({
   staff: 0,
   admin: 1,
+  partner: 2,
 });
 
 /**

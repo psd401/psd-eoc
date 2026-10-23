@@ -200,7 +200,8 @@ names, file formats, or one blanket DAN for the database. The inventory is:
   facility/source provenance, minimized recipient endpoints, and sync
   outcomes/failures. Public examples never include contact or token data.
 - `identity-device-and-session-lifecycle`
-  Staff accounts, roles and scopes, access snapshots, device enrollment,
+  Staff and partner accounts, partner admissions and how each ended, roles
+  and scopes, access snapshots, device enrollment,
   session and credential lifecycle, push-token lifecycle, and agent/API-key
   lifecycle.
 - `configuration-and-governance`

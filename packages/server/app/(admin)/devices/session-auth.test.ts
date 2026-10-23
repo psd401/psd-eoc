@@ -1128,12 +1128,11 @@ describe('transport and policy boundaries', () => {
       },
       issuedAt,
     );
-    expect(issued.result.session.authorization.membershipValidUntil).toBe(
-      '2026-08-07T09:10:00.000Z',
-    );
-    expect(issued.result.session.authorization.membershipGraceUntil).toBe(
-      '2026-08-07T09:30:00.000Z',
-    );
+    expect(issued.result.session.authorization).toMatchObject({
+      kind: 'group-membership',
+      membershipValidUntil: '2026-08-07T09:10:00.000Z',
+      membershipGraceUntil: '2026-08-07T09:30:00.000Z',
+    });
 
     const refreshed = await executeRefreshSessionCapability({
       service,
@@ -1283,6 +1282,8 @@ describeWithDatabase(
           {
             id: fixture.userId,
             googleSubject: fixture.googleSubject,
+            identityIssuer: 'https://accounts.google.com',
+            identitySubject: fixture.googleSubject,
             email: fixture.email,
             displayName: 'Synthetic Session Administrator',
             facilityScopeKind: 'facilities',
@@ -1292,6 +1293,8 @@ describeWithDatabase(
           {
             id: fixture.targetUserId,
             googleSubject: fixture.targetGoogleSubject,
+            identityIssuer: 'https://accounts.google.com',
+            identitySubject: fixture.targetGoogleSubject,
             email: fixture.targetEmail,
             displayName: 'Synthetic Removed Staff Member',
             facilityScopeKind: 'facilities',
@@ -1433,9 +1436,10 @@ describeWithDatabase(
           refreshAt,
         );
         expect(authenticated.membershipState).toBe('fresh');
-        expect(
-          authenticated.result.session.authorization.membershipSnapshotId,
-        ).toBe(issuanceSnapshotId);
+        expect(authenticated.result.session.authorization).toMatchObject({
+          kind: 'group-membership',
+          membershipSnapshotId: issuanceSnapshotId,
+        });
         expect(renewedSnapshotId).not.toBe(issuanceSnapshotId);
         // The access group places them, not the stored limit: a sign-in
         // group grants the district on every request.

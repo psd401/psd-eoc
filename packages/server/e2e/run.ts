@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { IdempotencyPrincipalSchema, type Role } from '@psd-eoc/contracts';
+import { IdempotencyPrincipalSchema, type StaffRole } from '@psd-eoc/contracts';
 import { inArray } from 'drizzle-orm';
 
 import {
@@ -86,7 +86,7 @@ interface IssuedIdentity {
 
 function accessGroup(
   id: string,
-  role: Role,
+  role: StaffRole,
   capturedAt: Date,
 ): typeof groupSources.$inferInsert {
   return {

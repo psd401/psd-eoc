@@ -28,17 +28,27 @@ import {
   idempotencyStatusEnum,
   humanConfirmationStatusEnum,
   invocationSourceEnum,
+  partnerAdmissionEndingReasonEnum,
 } from './enums';
 
 import { auditCode, digest, occurredAt } from './shared';
 
 import { facilities } from './configuration';
-/** Minimized staff identities. There is deliberately no student identity table. */
+/**
+ * Minimized staff and partner identities. There is deliberately no student
+ * identity table.
+ *
+ * A person is identified by issuer and subject together. `google_subject` is
+ * the subject of a Google identity and null for any other issuer; it stays
+ * because shipped code and installed mobile builds still read it.
+ */
 export const users = pgTable(
   'users',
   {
     id: uuid('id').defaultRandom().primaryKey(),
-    googleSubject: varchar('google_subject', { length: 255 }).notNull(),
+    googleSubject: varchar('google_subject', { length: 255 }),
+    identityIssuer: varchar('identity_issuer', { length: 255 }).notNull(),
+    identitySubject: varchar('identity_subject', { length: 255 }).notNull(),
     email: varchar('email', { length: 320 }).notNull(),
     displayName: varchar('display_name', { length: 160 }).notNull(),
     facilityScopeKind: facilityScopeKindEnum('facility_scope_kind').notNull(),
@@ -47,6 +57,15 @@ export const users = pgTable(
   },
   (table) => [
     uniqueIndex('users_google_subject_uq').on(table.googleSubject),
+    uniqueIndex('users_identity_uq').on(
+      table.identityIssuer,
+      table.identitySubject,
+    ),
+    check(
+      'users_google_subject_is_google_identity',
+      sql`(${table.identityIssuer} = 'https://accounts.google.com') = (${table.googleSubject} is not null)
+        and (${table.googleSubject} is null or ${table.googleSubject} = ${table.identitySubject})`,
+    ),
     uniqueIndex('users_email_lower_uq').on(sql`lower(${table.email})`),
     check(
       'users_normalized_email',
@@ -115,6 +134,98 @@ export const admittedAccounts = pgTable(
     check(
       'admitted_accounts_revoked_after_admission',
       sql`${table.revokedAt} is null or ${table.revokedAt} >= ${table.admittedAt}`,
+    ),
+  ],
+);
+
+/**
+ * People outside the district admitted to sign in as partners.
+ *
+ * Append-only. An admission is never edited: it ends with a row in
+ * `partner_admission_endings`, and a renewal or a corrected address is a new
+ * admission naming the one it supersedes. `expires_at` is computed by the
+ * database, one year after admission, so no writer can set or extend it. At
+ * most one admission per address is unended, which a deferred constraint
+ * trigger checks at commit.
+ */
+export const partnerAdmissions = pgTable(
+  'partner_admissions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    email: varchar('email', { length: 320 }).notNull(),
+    displayName: varchar('display_name', { length: 160 }).notNull(),
+    agency: varchar('agency', { length: 160 }).notNull(),
+    invitedByUserId: uuid('invited_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    admittedAt: occurredAt('admitted_at').defaultNow().notNull(),
+    expiresAt: occurredAt('expires_at')
+      .notNull()
+      .generatedAlwaysAs(
+        sql`((admitted_at at time zone 'UTC') + interval '1 year') at time zone 'UTC'`,
+      ),
+    supersedesAdmissionId: uuid('supersedes_admission_id'),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.supersedesAdmissionId],
+      foreignColumns: [table.id],
+      name: 'partner_admissions_supersedes_fk',
+    }).onDelete('restrict'),
+    uniqueIndex('partner_admissions_supersedes_uq').on(
+      table.supersedesAdmissionId,
+    ),
+    index('partner_admissions_email_idx').on(table.email),
+    check(
+      'partner_admissions_normalized_email',
+      sql`${table.email} = lower(${table.email})
+        and ${table.email} = btrim(${table.email})
+        and length(${table.email}) between 3 and 320
+        and ${table.email} ~ '^[^[:space:]@]+@[^[:space:]@]+$'`,
+    ),
+    check(
+      'partner_admissions_display_name_present',
+      sql`length(btrim(${table.displayName})) > 0`,
+    ),
+    check(
+      'partner_admissions_agency_present',
+      sql`length(btrim(${table.agency})) > 0`,
+    ),
+    check(
+      'partner_admissions_not_self_superseding',
+      sql`${table.supersedesAdmissionId} is null or ${table.supersedesAdmissionId} <> ${table.id}`,
+    ),
+  ],
+);
+
+/**
+ * How each partner admission ended: one row per admission, never changed.
+ * `expired` is the system's ending and carries no actor; `disabled` and
+ * `superseded` are an administrator's and always name one.
+ */
+export const partnerAdmissionEndings = pgTable(
+  'partner_admission_endings',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    partnerAdmissionId: uuid('partner_admission_id').notNull(),
+    reason: partnerAdmissionEndingReasonEnum('reason').notNull(),
+    endedByUserId: uuid('ended_by_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+    }),
+    endedAt: occurredAt('ended_at').defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.partnerAdmissionId],
+      foreignColumns: [partnerAdmissions.id],
+      name: 'partner_admission_endings_admission_fk',
+    }).onDelete('restrict'),
+    uniqueIndex('partner_admission_endings_admission_uq').on(
+      table.partnerAdmissionId,
+    ),
+    check(
+      'partner_admission_endings_actor_matches_reason',
+      sql`(${table.reason} = 'expired') = (${table.endedByUserId} is null)`,
     ),
   ],
 );

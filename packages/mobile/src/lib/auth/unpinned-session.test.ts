@@ -38,14 +38,22 @@ describe('a session that is not pinned to a snapshot', () => {
     };
 
     const parsed = SessionEstablishmentResultSchema.parse(unpinned);
-    expect(parsed.session.authorization.membershipSnapshotId).toBeNull();
-    expect(parsed.session.authorization.kind).toBe('group-membership');
+    expect(parsed.session.authorization).toMatchObject({
+      kind: 'group-membership',
+      membershipSnapshotId: null,
+    });
     expect(parsed.session.id).toBe(pinned.session.id);
   });
 
   test('still parses when the server sends one', () => {
     const parsed = SessionEstablishmentResultSchema.parse(sessionFixture());
-    expect(parsed.session.authorization.membershipSnapshotId).not.toBeNull();
+    expect(parsed.session.authorization).toMatchObject({
+      kind: 'group-membership',
+    });
+    expect(
+      parsed.session.authorization.kind === 'group-membership' &&
+        parsed.session.authorization.membershipSnapshotId,
+    ).toBeTruthy();
   });
 
   test('the app reads nothing from it', async () => {

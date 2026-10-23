@@ -1,6 +1,10 @@
 import { and, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 
-import { RoleSchema, type FacilityScope, type Role } from '@psd-eoc/contracts';
+import {
+  StaffRoleSchema,
+  type FacilityScope,
+  type Role,
+} from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
 import { admittedAccounts, groupMembers, groupSources } from '../../db/schema';
@@ -203,7 +207,9 @@ export async function decideAccess(
     usable.map((group) =>
       group.purpose === 'building'
         ? ('staff' as const)
-        : RoleSchema.parse(group.grantedRole),
+        : // A group grants a staff role and never `partner`; the database
+          // refuses such a group, and this refuses one that slipped past it.
+          StaffRoleSchema.parse(group.grantedRole),
     ),
   );
   if (admittedAccountId !== null) roles.add('staff');

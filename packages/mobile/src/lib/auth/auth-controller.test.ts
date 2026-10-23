@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { MobileSessionResponse } from '@psd-eoc/contracts';
+import {
+  sessionAuthorizationUsableUntil,
+  type MobileSessionResponse,
+} from '@psd-eoc/contracts';
 
 import {
   AuthenticatedApiError,
@@ -688,7 +691,7 @@ describe('mobile auth controller', () => {
     expect(auth.getSnapshot().phase).toBe('offline-cached');
 
     const graceDeadline = Date.parse(
-      sessionFixture().session.authorization.membershipGraceUntil,
+      sessionAuthorizationUsableUntil(sessionFixture().session.authorization),
     );
     expect(timer.latestDelay()).toBe(graceDeadline - TEST_NOW.getTime());
     currentTime = new Date(graceDeadline);
@@ -720,7 +723,9 @@ describe('mobile auth controller', () => {
       session: sessionFixture(),
     });
     currentTime = new Date(
-      Date.parse(sessionFixture().session.authorization.membershipGraceUntil),
+      Date.parse(
+        sessionAuthorizationUsableUntil(sessionFixture().session.authorization),
+      ),
     );
 
     expect(() => auth.assertMutationAllowed()).toThrow(
@@ -1136,7 +1141,9 @@ describe('mobile auth controller', () => {
     await pending.started;
 
     currentTime = new Date(
-      Date.parse(sessionFixture().session.authorization.membershipGraceUntil),
+      Date.parse(
+        sessionAuthorizationUsableUntil(sessionFixture().session.authorization),
+      ),
     );
     timer.fireLatest();
     expect(pending.signal().aborted).toBe(true);

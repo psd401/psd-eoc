@@ -135,6 +135,8 @@ describeWithDatabase('app review sign-in against the database', () => {
     await database().insert(users).values({
       id: randomUUID(),
       googleSubject: REVIEW_SUBJECT,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: REVIEW_SUBJECT,
       email: REVIEW_EMAIL,
       displayName: 'App review account',
       facilityScopeKind: 'district',
@@ -149,6 +151,8 @@ describeWithDatabase('app review sign-in against the database', () => {
     await database().insert(users).values({
       id: adminId,
       googleSubject: 'app-review-admitting-admin',
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: 'app-review-admitting-admin',
       email: 'admitting-admin@example.invalid',
       displayName: 'Admitting administrator',
       facilityScopeKind: 'district',

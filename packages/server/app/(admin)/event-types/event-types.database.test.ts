@@ -1964,6 +1964,8 @@ describeWithDatabase('event-type database versioning', () => {
     await db.insert(users).values({
       id: issuerId,
       googleSubject: `synthetic-reviewer-${issuerId}`,
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: `synthetic-reviewer-${issuerId}`,
       email: `reviewer-${issuerId.slice(0, 8)}@example.invalid`,
       displayName: 'Synthetic Reviewer',
       facilityScopeKind: 'district',

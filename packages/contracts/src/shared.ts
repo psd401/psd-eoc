@@ -19,10 +19,31 @@ export type Uuid = z.infer<typeof UuidSchema>;
  * single source of truth without an import cycle — `identity` re-exports it, so
  * every existing importer is unaffected.
  */
-export const RoleSchema = z.enum(['staff', 'admin']);
+export const RoleSchema = z.enum(['staff', 'admin', 'partner']);
 
-/** Release-one user role inferred from {@link RoleSchema}. */
+/** User role inferred from {@link RoleSchema}. */
 export type Role = z.infer<typeof RoleSchema>;
+
+/**
+ * Roles a district Google identity can hold. An access group grants one of
+ * these and never `partner`: a partner is a person outside the district who
+ * signs in through a separate identity provider and is let in only by a
+ * partner admission, so no group membership can make somebody a partner and
+ * no partner admission can make somebody staff.
+ */
+export const StaffRoleSchema = RoleSchema.exclude(['partner']);
+
+/** Staff-identity role inferred from {@link StaffRoleSchema}. */
+export type StaffRole = z.infer<typeof StaffRoleSchema>;
+
+/**
+ * True when a role set never mixes `partner` with a staff role. A partner holds
+ * `partner` alone; staff and administrators never hold it. The database and the
+ * server's access decisions enforce the same rule independently.
+ */
+export function isExclusiveRoleSet(roles: readonly Role[]): boolean {
+  return !roles.includes('partner') || roles.length === 1;
+}
 
 /**
  * Owns the canonical absolute timestamp wire representation. Domain records

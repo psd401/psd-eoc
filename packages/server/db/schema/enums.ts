@@ -25,6 +25,7 @@ import {
   NotificationChannelSchema,
   NotificationPurposeSchema,
   OutboxStatusSchema,
+  PartnerAdmissionEndingReasonSchema,
   PushPlatformSchema,
   RoleSchema,
   RosterPopulationSchema,
@@ -362,4 +363,8 @@ export const humanConfirmationStatusEnum = contractPgEnum(
 export const rosterSyncOutcomeEnum = contractPgEnum(
   'roster_sync_outcome',
   contractEnumValues(RosterSyncOutcomeSchema.options),
+);
+export const partnerAdmissionEndingReasonEnum = contractPgEnum(
+  'partner_admission_ending_reason',
+  contractEnumValues(PartnerAdmissionEndingReasonSchema.options),
 );

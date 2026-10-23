@@ -126,6 +126,8 @@ describeWithDatabase('trusted group access', () => {
     await opened.db.insert(users).values({
       id: ADMITTER,
       googleSubject: 'admitter-subject',
+      identityIssuer: 'https://accounts.google.com',
+      identitySubject: 'admitter-subject',
       email: 'admitter@example.invalid',
       displayName: 'Admitting administrator',
       facilityScopeKind: 'district',

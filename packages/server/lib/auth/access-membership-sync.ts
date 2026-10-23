@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   ActorSchema,
   IdempotencyKeySchema,
-  RoleSchema,
+  StaffRoleSchema,
   registerCapabilityHandler,
   StaffRosterEmailSchema,
   SyncAccessMembershipInputSchema,
@@ -63,7 +63,7 @@ const EvaluatedAccessGroupSchema = z
     // Null for a building group: it says who is at a school, not what they
     // may do. `group_sources_access_role_present` is the authority on which
     // purposes may carry a role.
-    grantedRole: RoleSchema.nullable(),
+    grantedRole: StaffRoleSchema.nullable(),
     memberEmails: z
       .array(StaffRosterEmailSchema)
       .max(MAX_EVALUATED_MEMBERS)

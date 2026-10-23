@@ -212,6 +212,8 @@ describeWithDatabase('default message template publication', () => {
         {
           id: ADMIN_USER_ID,
           googleSubject: 'synthetic-templates-admin-subject',
+          identityIssuer: 'https://accounts.google.com',
+          identitySubject: 'synthetic-templates-admin-subject',
           email: ADMIN_EMAIL,
           displayName: 'Synthetic Templates Administrator',
           facilityScopeKind: 'district',
@@ -221,6 +223,8 @@ describeWithDatabase('default message template publication', () => {
         {
           id: STAFF_USER_ID,
           googleSubject: 'synthetic-templates-staff-subject',
+          identityIssuer: 'https://accounts.google.com',
+          identitySubject: 'synthetic-templates-staff-subject',
           email: 'templates.staff@example.invalid',
           displayName: 'Synthetic Templates Staff',
           facilityScopeKind: 'district',

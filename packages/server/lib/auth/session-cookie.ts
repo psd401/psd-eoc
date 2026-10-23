@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomInt } from 'node:crypto';
 
 import {
   CompleteOidcSignInInputSchema,
+  GOOGLE_IDENTITY_ISSUER,
   IdempotencyKeySchema,
   IdempotencyPrincipalSchema,
   SessionEstablishmentResultSchema,
@@ -679,13 +680,19 @@ function assertPersistableIdempotency(
         .update(JSON.stringify(principal.data), 'utf8')
         .digest('hex')
     : null;
-  const subjectDigest = createHash('sha256')
-    .update(request.user.googleSubject, 'utf8')
-    .digest('hex');
+  // Only a Google identity completes OIDC sign-in here; a partner, whose
+  // Google subject is null, never reaches this persistence path.
+  const subjectDigest =
+    request.user.googleSubject === null
+      ? null
+      : createHash('sha256')
+          .update(request.user.googleSubject, 'utf8')
+          .digest('hex');
   if (
     !IdempotencyKeySchema.safeParse(request.idempotency.key).success ||
     !principal.success ||
     principal.data.kind !== 'oidc-callback' ||
+    subjectDigest === null ||
     principal.data.subjectDigest !== subjectDigest ||
     request.idempotency.key !== `oidc:${principal.data.responseDigest}` ||
     request.idempotency.principalDigest !== expectedPrincipalDigest ||
@@ -811,6 +818,7 @@ export function createDrizzleInitialWebSessionStore(
               .for('share');
             if (
               persistedUser === undefined ||
+              persistedUser.identityIssuer !== GOOGLE_IDENTITY_ISSUER ||
               persistedUser.googleSubject !== request.user.googleSubject ||
               persistedUser.disabledAt !== null
             ) {

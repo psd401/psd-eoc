@@ -121,6 +121,8 @@ describeWithDatabase('event audience resolved from the domain', () => {
       {
         id: ENROLLED_USER,
         googleSubject: 'subject-enrolled',
+        identityIssuer: 'https://accounts.google.com',
+        identitySubject: 'subject-enrolled',
         email: ENROLLED,
         displayName: 'Enrolled Person',
         facilityScopeKind: 'district',
@@ -128,6 +130,8 @@ describeWithDatabase('event audience resolved from the domain', () => {
       {
         id: REVOKED_USER,
         googleSubject: 'subject-revoked',
+        identityIssuer: 'https://accounts.google.com',
+        identitySubject: 'subject-revoked',
         email: REVOKED_DEVICE,
         displayName: 'Revoked Device Person',
         facilityScopeKind: 'district',
@@ -135,6 +139,8 @@ describeWithDatabase('event audience resolved from the domain', () => {
       {
         id: DISABLED_USER,
         googleSubject: 'subject-disabled',
+        identityIssuer: 'https://accounts.google.com',
+        identitySubject: 'subject-disabled',
         email: DISABLED_ACCOUNT,
         displayName: 'Disabled Person',
         facilityScopeKind: 'district',

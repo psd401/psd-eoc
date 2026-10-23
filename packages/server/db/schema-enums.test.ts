@@ -27,6 +27,7 @@ import {
   NotificationChannelSchema,
   NotificationPurposeSchema,
   OutboxStatusSchema,
+  PartnerAdmissionEndingReasonSchema,
   PushPlatformSchema,
   RoleSchema,
   RosterPopulationSchema,
@@ -67,6 +68,7 @@ import {
   notificationChannelEnum,
   notificationPurposeEnum,
   outboxStatusEnum,
+  partnerAdmissionEndingReasonEnum,
   pushPlatformEnum,
   roleEnum,
   rosterPopulationEnum,
@@ -118,6 +120,10 @@ const enumExpectations = [
   [idempotencyStatusEnum, IdempotencyStatusSchema.options],
   [humanConfirmationStatusEnum, HumanConfirmationStatusSchema.options],
   [rosterSyncOutcomeEnum, RosterSyncOutcomeSchema.options],
+  [
+    partnerAdmissionEndingReasonEnum,
+    PartnerAdmissionEndingReasonSchema.options,
+  ],
 ] as const;
 
 interface MigrationSnapshot {

@@ -177,6 +177,8 @@ describeWithDatabase('sign-in authorization', () => {
       .values({
         id: admitter,
         googleSubject: `admitter-${admitter}`,
+        identityIssuer: 'https://accounts.google.com',
+        identitySubject: `admitter-${admitter}`,
         email: `admitter-${admitter.slice(0, 8)}@example.invalid`,
         displayName: 'Admitting administrator',
         facilityScopeKind: 'district',

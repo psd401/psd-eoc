@@ -602,6 +602,8 @@ describeWithDatabase('PostgreSQL email runtime store', () => {
         await transaction.insert(users).values({
           id: fixture.userId,
           googleSubject: `synthetic-email-runtime-${fixture.userId}`,
+          identityIssuer: 'https://accounts.google.com',
+          identitySubject: `synthetic-email-runtime-${fixture.userId}`,
           email: `email-runtime-${fixture.userId}@example.invalid`,
           displayName: 'Synthetic Email Runtime Verifier',
           facilityScopeKind: 'district',

@@ -1,5 +1,7 @@
 import { sql } from 'drizzle-orm';
 
+import type { StaffRole } from '@psd-eoc/contracts';
+
 import {
   boolean,
   check,
@@ -165,7 +167,7 @@ export const groupSources = pgTable(
     active: boolean('active').default(true).notNull(),
     // Access sources only. The role every member of this group receives, so a
     // deployment configures who administers instead of compiling it in.
-    grantedRole: roleEnum('granted_role'),
+    grantedRole: roleEnum('granted_role').$type<StaffRole>(),
     // When this group's membership was last read from the provider. Sign-in
     // refuses membership that has gone stale, which is the only temporal
     // question it needs to ask — there is no global generation to agree on.
@@ -196,6 +198,12 @@ export const groupSources = pgTable(
       ) or (
         ${table.purpose} <> 'access' and ${table.grantedRole} is null
       )`,
+    ),
+    // A group grants a staff role, never `partner`: partners are admitted
+    // one by one, never through a group.
+    check(
+      'group_sources_granted_role_not_partner',
+      sql`${table.grantedRole} is null or ${table.grantedRole}::text <> 'partner'`,
     ),
     check(
       'group_sources_valid_variant',
