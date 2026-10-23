@@ -47,7 +47,7 @@ function readPinnedLine(root: string): TerraformLine {
 async function spawn(
   command: readonly string[],
   cwd: string,
-): Promise<{ code: number; output: string }> {
+): Promise<{ code: number; output: string; stdout: string }> {
   let child;
   try {
     child = Bun.spawn([...command], {
@@ -61,17 +61,23 @@ async function spawn(
     return {
       code: 127,
       output: `${command[0] ?? ''} was not found on PATH.\n`,
+      stdout: '',
     };
   }
   const [stdout, stderr] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
-  return { code: await child.exited, output: `${stdout}${stderr}` };
+  return {
+    code: await child.exited,
+    output: `${stdout}${stderr}`,
+    stdout,
+  };
 }
 
 async function localTerraformMatches(line: TerraformLine): Promise<boolean> {
-  const { code, output } = await spawn(
+  // Parse stdout alone: a stderr warning must not force the container path.
+  const { code, stdout } = await spawn(
     ['terraform', 'version', '-json'],
     repositoryRoot,
   );
@@ -79,7 +85,7 @@ async function localTerraformMatches(line: TerraformLine): Promise<boolean> {
   let version: string;
   try {
     version = String(
-      (JSON.parse(output) as { terraform_version?: unknown }).terraform_version,
+      (JSON.parse(stdout) as { terraform_version?: unknown }).terraform_version,
     );
   } catch {
     return false;

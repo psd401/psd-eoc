@@ -883,10 +883,10 @@ describe('partner user pool boundary', () => {
     expect(serializedTaskDefinitions).not.toContain('PartnerUserPool');
   });
 
-  // The parameter-absent deploy must be today's deploy. Only the conditioned
-  // grant may disappear; every other resource that mentions a partner
-  // parameter would otherwise change shape when the defaults are left alone.
-  it('leaves an unconfigured deployment unchanged apart from the gated grant', () => {
+  // The parameter-absent deploy adds only the App Runner service's three
+  // UNCONFIGURED partner environment entries. The conditioned grant
+  // disappears, and no other resource mentions a partner parameter.
+  it('confines an unconfigured deployment to the gated grant and the service env', () => {
     const gated = Object.entries(resources)
       .filter(
         ([, resource]) =>

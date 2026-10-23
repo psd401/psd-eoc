@@ -11,6 +11,9 @@ terraform {
     bucket       = "replace-with-tenant-terraform-state-bucket"
     key          = "psd-eoc/terraform/stateful.tfstate"
     use_lockfile = true
+    # This state holds the partner client secret. Its KMS key arrives in
+    # the protected backend.hcl together with the bucket.
+    encrypt = true
   }
 
   required_providers {
