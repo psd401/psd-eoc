@@ -32,12 +32,21 @@ async function spawn(
   command: readonly string[],
   cwd: string,
 ): Promise<{ code: number; output: string }> {
-  const child = Bun.spawn([...command], {
-    cwd,
-    env: process.env,
-    stderr: 'pipe',
-    stdout: 'pipe',
-  });
+  let child;
+  try {
+    child = Bun.spawn([...command], {
+      cwd,
+      env: process.env,
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+  } catch {
+    // Bun.spawn throws when the executable is not on PATH at all.
+    return {
+      code: 127,
+      output: `${command[0] ?? ''} was not found on PATH.\n`,
+    };
+  }
   const [stdout, stderr] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
