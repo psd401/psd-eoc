@@ -183,6 +183,9 @@ The current synthesized stack contains exactly these parameters:
 - `InitialMobileTransitionEmailSha256`
 - `OperationsTeamAlarmEmail`
 - `OperationsTeamAlarmSmsNumber`
+- `PartnerUserPoolClientId`
+- `PartnerUserPoolClientSecretArn`
+- `PartnerUserPoolId`
 - `ProvisionApplication`
 - `ProvisionAwsEumSmsResources`
 - `PushProviderCutover`
@@ -201,6 +204,18 @@ the app-store review account's email and its review code, joined by a newline,
 turns on the review sign-in described in
 [the app store review runbook](runbooks/app-store-review.md); supplying
 `disabled` again turns it off.
+
+The three `PartnerUserPool*` parameters carry the non-district first-responder
+Cognito user pool, which is defined in Terraform
+([infra/terraform/stateful](../infra/terraform/stateful/README.md)) rather than
+in this stack. All three default to `UNCONFIGURED`, and `terraform output
+stack_parameters` prints the values to supply. Supplying all three turns on the
+runtime's partner configuration and its scoped Cognito and secret-read grants;
+supplying some but not all is refused at validation by the
+`PartnerUserPoolSelectionIsComplete` rule, rather than deploying a sign-in that
+can never complete. The `PartnerUserPoolRequiresLiveApplication` rule also
+refuses a supplied pool unless `ProvisionApplication=true`. The client secret itself is never a deployment value: the
+stack passes only its ARN, and the service reads the value at runtime.
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
 parameter and has a default. Push and SMS workers, direct-provider enablement,

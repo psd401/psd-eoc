@@ -104,7 +104,9 @@ These are real failure patterns from this repo's history. Avoid them.
   workflow, deployment environment, deployment secrets or variables, OIDC
   deployment role, or issue asking for one. Production infrastructure is
   deployed only from a locally authenticated shell with a direct `cdk deploy`
-  command. CI may verify and synthesize; it may never deploy.
+  command, plus a direct `terraform apply` of `infra/terraform/stateful` for
+  the resources Terraform owns. CI may verify and synthesize; it may never
+  deploy.
 - **Failure drills do not own infrastructure.** Never add a repository-hosted
   failure-drill stack, deployment workflow, or fault-injection runtime.
 - **Don't split work into micro-issues.** If a task needs four files changed,
@@ -130,7 +132,8 @@ These are real failure patterns from this repo's history. Avoid them.
 ## 6. Production
 
 The product owner approves production changes by asking for them. Deployment
-is only a direct `cdk deploy` from a locally authenticated AWS session. GitHub
+is only a direct `cdk deploy`, plus a direct `terraform apply` of
+`infra/terraform/stateful`, from a locally authenticated AWS session. GitHub
 Actions, repository environments, repository variables, repository secrets,
 and GitHub OIDC roles must never be part of deployment. When a deploy or
 infrastructure change is risky, say what will happen in plain language before

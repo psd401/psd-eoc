@@ -186,9 +186,15 @@ infra/
   org-infrastructure repository; that repository can adopt the bucket later
   with an import block.
 - State will contain secret-adjacent values (the review sign-in digest and the
-  on-call SMS number in plain text, the Aurora endpoint). It never contains
-  secret values: no `aws_secretsmanager_secret_version`, and Aurora's
-  `master_password` stays unset with `ignore_changes`.
+  on-call SMS number in plain text, the Aurora endpoint). Aurora's
+  `master_password` stays unset with `ignore_changes`, and no imported secret
+  gets an `aws_secretsmanager_secret_version`.
+- One exception: the partner pool's app client secret. Cognito generates it,
+  so it lands in `stateful.tfstate` as a computed attribute of
+  `aws_cognito_user_pool_client` whether or not the root also writes it to
+  Secrets Manager. The root writes the version so no manual copy step exists.
+  Treat `stateful.tfstate` as secret-bearing from that point on: only the plan
+  and apply roles read the bucket, and no output exposes the value.
 
 ## Parameters to variables
 

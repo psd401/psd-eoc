@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'bun:test';
 import { App, IgnoreStrategy } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -699,6 +702,219 @@ describe('deployment boundary', () => {
   });
 });
 
+describe('partner user pool boundary', () => {
+  const PARTNER_PARAMETERS = [
+    'PartnerUserPoolId',
+    'PartnerUserPoolClientId',
+    'PartnerUserPoolClientSecretArn',
+  ] as const;
+
+  it('declares the Terraform handoff as three optional parameters', () => {
+    const parameters = asRecord(synthesized.Parameters);
+    expect(asRecord(parameters.PartnerUserPoolId)).toMatchObject({
+      AllowedPattern: `^(UNCONFIGURED|${AWS_REGION}_[A-Za-z0-9]{1,24})$`,
+      Default: 'UNCONFIGURED',
+      Type: 'String',
+    });
+    expect(asRecord(parameters.PartnerUserPoolClientId)).toMatchObject({
+      AllowedPattern: '^(UNCONFIGURED|[a-z0-9]{16,64})$',
+      Default: 'UNCONFIGURED',
+      Type: 'String',
+    });
+    // The complete ARN, pinned to the one secret path the Terraform root
+    // creates. An ARN without the generated suffix can never match the read
+    // grant, and the service then fails to start with no stated cause.
+    expect(asRecord(parameters.PartnerUserPoolClientSecretArn)).toMatchObject({
+      AllowedPattern: `^(UNCONFIGURED|arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/partner-user-pool-client-[A-Za-z0-9]{6})$`,
+      Default: 'UNCONFIGURED',
+      NoEcho: true,
+      Type: 'String',
+    });
+  });
+
+  it('turns partner access on only when all three parameters are supplied', () => {
+    const condition = asRecord(
+      asRecord(synthesized.Conditions).ShouldUsePartnerUserPool,
+    );
+    expect(condition).toEqual({
+      'Fn::And': PARTNER_PARAMETERS.map((parameter) => ({
+        'Fn::Not': [{ 'Fn::Equals': [{ Ref: parameter }, 'UNCONFIGURED'] }],
+      })),
+    });
+  });
+
+  // Two of three looks configured, grants nothing, and would fail at a
+  // partner's first sign-in instead of at the deploy.
+  it('refuses a partially supplied partner configuration', () => {
+    const rule = asRecord(
+      asRecord(synthesized.Rules).PartnerUserPoolSelectionIsComplete,
+    );
+    const assertion = asRecord(asArray(rule.Assertions)[0]);
+    expect(asRecord(assertion.Assert)).toEqual({
+      'Fn::Or': [
+        {
+          'Fn::And': PARTNER_PARAMETERS.map((parameter) => ({
+            'Fn::Equals': [{ Ref: parameter }, 'UNCONFIGURED'],
+          })),
+        },
+        {
+          'Fn::And': PARTNER_PARAMETERS.map((parameter) => ({
+            'Fn::Not': [{ 'Fn::Equals': [{ Ref: parameter }, 'UNCONFIGURED'] }],
+          })),
+        },
+      ],
+    });
+    expect(String(assertion.AssertDescription)).toContain(
+      'must be supplied together',
+    );
+  });
+
+  it('refuses a supplied partner pool on a dark data-plane deployment', () => {
+    const rule = asRecord(
+      asRecord(synthesized.Rules).PartnerUserPoolRequiresLiveApplication,
+    );
+    expect(asRecord(rule.RuleCondition)).toEqual({
+      'Fn::And': PARTNER_PARAMETERS.map((parameter) => ({
+        'Fn::Not': [{ 'Fn::Equals': [{ Ref: parameter }, 'UNCONFIGURED'] }],
+      })),
+    });
+    const assertion = asRecord(asArray(rule.Assertions)[0]);
+    expect(asRecord(assertion.Assert)).toEqual({
+      'Fn::Equals': [{ Ref: 'ProvisionApplication' }, 'true'],
+    });
+  });
+
+  // The Terraform root names the secret and this stack's allowed pattern pins
+  // the same path. Renaming one side alone would reject every real ARN at
+  // deploy time; catch it here instead.
+  it('pins the secret path the Terraform root creates', () => {
+    const mainTf = readFileSync(
+      resolve(import.meta.dir, '../../terraform/stateful/main.tf'),
+      'utf8',
+    );
+    const secretName = /client_secret_name\s*=\s*"([^"]+)"/.exec(mainTf)?.[1];
+    if (secretName === undefined) {
+      throw new Error('main.tf no longer declares local.client_secret_name.');
+    }
+    const pattern = String(
+      asRecord(asRecord(synthesized.Parameters).PartnerUserPoolClientSecretArn)
+        .AllowedPattern,
+    );
+    expect(pattern).toContain(`:secret:${secretName}-[A-Za-z0-9]{6})$`);
+  });
+
+  it('scopes the Cognito grant to the named pool and gates it on the condition', () => {
+    const [entry] = resourceEntries('AWS::IAM::Policy').filter(([logicalId]) =>
+      logicalId.includes('PartnerUserPoolAccess'),
+    );
+    if (entry === undefined) {
+      throw new Error('Missing the partner user pool access policy.');
+    }
+    const [, policy] = entry;
+    expect(policy.Condition).toBe('ShouldUsePartnerUserPool');
+    expect(properties(policy).Roles).toEqual([
+      {
+        Ref: roleLogicalIdForServicePrincipal('tasks.apprunner.amazonaws.com'),
+      },
+    ]);
+    const statements = asArray(
+      asRecord(properties(policy).PolicyDocument).Statement,
+    ).map(asRecord);
+    const [cognito, secret] = statements;
+    if (cognito === undefined || secret === undefined) {
+      throw new Error('Expected a Cognito statement and a secret statement.');
+    }
+    expect(asStringArray(cognito.Action).sort()).toEqual([
+      'cognito-idp:AdminCreateUser',
+      'cognito-idp:AdminDisableUser',
+      'cognito-idp:AdminInitiateAuth',
+      'cognito-idp:AdminRespondToAuthChallenge',
+      'cognito-idp:CompleteWebAuthnRegistration',
+      'cognito-idp:StartWebAuthnRegistration',
+    ]);
+    // One pool, named by the parameter: never a wildcard that would reach the
+    // staff directory or any other district pool.
+    expect(cognito.Resource).toEqual({
+      'Fn::Join': [
+        '',
+        [
+          `arn:aws:cognito-idp:${AWS_REGION}:${AWS_ACCOUNT}:userpool/`,
+          { Ref: 'PartnerUserPoolId' },
+        ],
+      ],
+    });
+    expect(asStringArray(secret.Action)).toEqual([
+      'secretsmanager:GetSecretValue',
+    ]);
+    expect(secret.Resource).toEqual({
+      Ref: 'PartnerUserPoolClientSecretArn',
+    });
+  });
+
+  it('delivers the client secret by ARN reference, never as a service value', () => {
+    const service = properties(onlyResource('AWS::AppRunner::Service'));
+    const configuration = asRecord(
+      asRecord(
+        asRecord(asRecord(service.SourceConfiguration).ImageRepository)
+          .ImageConfiguration,
+      ),
+    );
+    const variables = new Map(
+      asArray(configuration.RuntimeEnvironmentVariables).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.Value];
+      }),
+    );
+    expect(variables.get('PSD_EOC_PARTNER_USER_POOL_ID')).toEqual({
+      Ref: 'PartnerUserPoolId',
+    });
+    expect(variables.get('PSD_EOC_PARTNER_USER_POOL_CLIENT_ID')).toEqual({
+      Ref: 'PartnerUserPoolClientId',
+    });
+    expect(
+      variables.get('PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN'),
+    ).toEqual({ Ref: 'PartnerUserPoolClientSecretArn' });
+    // The ARN is configuration; the value behind it is read at runtime under
+    // the conditioned grant. Nothing partner-shaped is a plaintext secret in
+    // the service or in any task definition.
+    const serializedTaskDefinitions = JSON.stringify(
+      resourceEntries('AWS::ECS::TaskDefinition'),
+    );
+    expect(serializedTaskDefinitions).not.toContain('PartnerUserPool');
+  });
+
+  // The parameter-absent deploy adds only the App Runner service's three
+  // UNCONFIGURED partner environment entries. The conditioned grant
+  // disappears, and no other resource mentions a partner parameter.
+  it('confines an unconfigured deployment to the gated grant and the service env', () => {
+    const gated = Object.entries(resources)
+      .filter(
+        ([, resource]) =>
+          asRecord(resource).Condition === 'ShouldUsePartnerUserPool',
+      )
+      .map(([logicalId]) => logicalId);
+    expect(gated).toHaveLength(1);
+    const gatedPolicy = gated[0];
+    if (gatedPolicy === undefined) {
+      throw new Error('Missing the gated partner policy.');
+    }
+    expect(gatedPolicy).toContain('PartnerUserPoolAccess');
+
+    const referencing = Object.entries(resources)
+      .filter(([, resource]) =>
+        JSON.stringify(resource).includes('PartnerUserPool'),
+      )
+      .map(([logicalId]) => logicalId)
+      .sort();
+    expect(referencing).toEqual([gatedPolicy, 'AppRunnerService'].sort());
+
+    // No output republishes the pool, the client, or the secret ARN.
+    expect(JSON.stringify(synthesized.Outputs)).not.toContain(
+      'PartnerUserPool',
+    );
+  });
+});
+
 describe('minimal isolated resource shape', () => {
   it('creates one bounded native application, bootstrap, and conditional provider topology', () => {
     template.resourceCountIs('AWS::ECR::Repository', 1);
@@ -1248,6 +1464,12 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_EMAIL_WORKER_ENABLED',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
+        // The partner directory's three identifiers. The secret ARN is a
+        // reference, not a credential: the runtime fetches the value through
+        // it, so no partner secret is a service environment value.
+        'PSD_EOC_PARTNER_USER_POOL_CLIENT_ID',
+        'PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN',
+        'PSD_EOC_PARTNER_USER_POOL_ID',
         'PSD_EOC_ORGANIZATION_NAME',
         'PSD_EOC_PUSH_PROVIDER_CUTOVER',
         'PSD_EOC_PRIVACY_CONTACT_URL',
@@ -1669,6 +1891,18 @@ describe('App Runner runtime safety boundary', () => {
 
     expect(actions).toEqual(
       [
+        // Partner access, scoped to the Terraform-owned user pool the
+        // parameters name and granted only when all three are supplied: an
+        // administrator invites and disables a responder, the server runs the
+        // choice-based sign-in as a confidential client, and a signed-in
+        // responder enrolls one passkey. No delete and no authority over the
+        // staff directory.
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminInitiateAuth',
+        'cognito-idp:AdminRespondToAuthChallenge',
+        'cognito-idp:CompleteWebAuthnRegistration',
+        'cognito-idp:StartWebAuthnRegistration',
         // The three s3 actions are the private media bucket and nothing else:
         // the runtime signs upload and read grants, writes the sanitized
         // object, and reads the malware-scan tag. There is no DeleteObject --

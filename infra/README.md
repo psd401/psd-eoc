@@ -32,6 +32,11 @@ repository variables, repository secrets, and GitHub OIDC roles are not
 deployment surfaces. The deploy script intrinsically refuses a dirty Git
 worktree so the image's source revision always identifies its exact contents.
 
+Resources Terraform owns are the one exception: the stateful root in
+[terraform/stateful](terraform/stateful/README.md) is applied with a direct,
+local `terraform apply`, never from CI. Apply it before supplying its outputs
+to the stack.
+
 ## Alarm response runbooks
 
 CloudWatch alarm descriptions append the stable anchors below to the configured

@@ -42,7 +42,11 @@ import {
   aws_smsvoice as smsvoice,
   custom_resources as customResources,
 } from 'aws-cdk-lib';
-import type { CfnResource, StackProps } from 'aws-cdk-lib';
+import type {
+  CfnResource,
+  ICfnRuleConditionExpression,
+  StackProps,
+} from 'aws-cdk-lib';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
 import type { Construct } from 'constructs';
 
@@ -105,6 +109,14 @@ const EMAIL_QUEUE_MAX_RECEIVES = 5;
 const CURRENT_CDK_ASSET = 'CURRENT_CDK_ASSET';
 const CDK_ASSET_REPOSITORY = 'CDK_ASSET_REPOSITORY';
 const LEGACY_APPLICATION_REPOSITORY = 'LEGACY_APPLICATION_REPOSITORY';
+/**
+ * The sentinel an optional deployment input carries when it is not configured.
+ *
+ * A readable sentinel rather than an empty string: the runtime environment
+ * then shows why a channel is off instead of an unexplained blank, and
+ * CloudFormation's own allowed patterns can refuse a value that is neither.
+ */
+const UNCONFIGURED = 'UNCONFIGURED';
 export const APPLICATION_IMAGE_EXCLUDES = Object.freeze([
   '.git',
   '.github',
@@ -398,6 +410,56 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    // The partner directory for non-district first responders, defined in
+    // Terraform (infra/terraform/stateful) because a user pool holds
+    // identities and passkeys and must outlive this stack's migration to
+    // Terraform. Until App Runner moves too, its three identifiers cross the
+    // boundary as parameters, like every other channel switch.
+    //
+    // All three default to UNCONFIGURED, which is the convention the SMS
+    // inputs already use: a sentinel rather than an empty string, so the
+    // runtime environment carries a readable value instead of a blank one and
+    // today's deployment is unchanged when partner access is not configured.
+    const partnerUserPoolId = new CfnParameter(this, 'PartnerUserPoolId', {
+      allowedPattern: `^(UNCONFIGURED|${region}_[A-Za-z0-9]{1,24})$`,
+      constraintDescription:
+        'Use the partner user pool id from the Terraform stateful root, which is region-prefixed, or UNCONFIGURED.',
+      default: UNCONFIGURED,
+      description:
+        'Cognito user pool id for non-district first responders. UNCONFIGURED leaves partner access off.',
+      type: 'String',
+    });
+    const partnerUserPoolClientId = new CfnParameter(
+      this,
+      'PartnerUserPoolClientId',
+      {
+        allowedPattern: '^(UNCONFIGURED|[a-z0-9]{16,64})$',
+        constraintDescription:
+          'Use the partner server app-client id from the Terraform stateful root, or UNCONFIGURED.',
+        default: UNCONFIGURED,
+        description:
+          'Confidential app-client id the server uses against the partner user pool.',
+        type: 'String',
+      },
+    );
+    const partnerUserPoolClientSecretArn = new CfnParameter(
+      this,
+      'PartnerUserPoolClientSecretArn',
+      {
+        // Pinned to the one path the Terraform root creates, and to the
+        // complete ARN. An ARN without the generated six-character suffix can
+        // never match the read grant, which fails the service at start with a
+        // ResourceInitializationError that names no cause (issue #271).
+        allowedPattern: `^(UNCONFIGURED|arn:${partition}:secretsmanager:${region}:${account}:secret:/psd-eoc/partner-user-pool-client-[A-Za-z0-9]{6})$`,
+        constraintDescription:
+          'Use the complete ARN of the /psd-eoc/partner-user-pool-client secret in the approved account and region, or UNCONFIGURED.',
+        default: UNCONFIGURED,
+        description:
+          'Complete ARN of the partner app-client credential. The server reads the value at runtime; the value itself is never a deployment input.',
+        noEcho: true,
+        type: 'String',
+      },
+    );
     // The first trusted group. Without it a rebuilt deployment admits nobody,
     // because the page that configures access groups sits behind sign-in. Empty
     // by default so an already-configured district passes nothing; supplying
@@ -559,6 +621,63 @@ export class PsdEocStack extends Stack {
         ),
       },
     );
+    const partnerUserPoolParameters = [
+      partnerUserPoolId,
+      partnerUserPoolClientId,
+      partnerUserPoolClientSecretArn,
+    ] as const;
+    const partnerParameterIsSupplied = (
+      parameter: CfnParameter,
+    ): ICfnRuleConditionExpression =>
+      Fn.conditionNot(
+        Fn.conditionEquals(parameter.valueAsString, UNCONFIGURED),
+      );
+    const partnerParameterIsAbsent = (
+      parameter: CfnParameter,
+    ): ICfnRuleConditionExpression =>
+      Fn.conditionEquals(parameter.valueAsString, UNCONFIGURED);
+    const everyPartnerParameterIsSupplied = Fn.conditionAnd(
+      ...partnerUserPoolParameters.map(partnerParameterIsSupplied),
+    );
+    const shouldUsePartnerUserPool = new CfnCondition(
+      this,
+      'ShouldUsePartnerUserPool',
+      { expression: everyPartnerParameterIsSupplied },
+    );
+    // Two of three is the dangerous state: it looks configured, grants
+    // nothing, and fails at the first partner sign-in rather than at the
+    // deploy. Refuse it at validation instead. The expression is repeated
+    // rather than referencing ShouldUsePartnerUserPool because the Rules
+    // section cannot reference a condition.
+    new CfnRule(this, 'PartnerUserPoolSelectionIsComplete', {
+      assertions: [
+        {
+          assert: Fn.conditionOr(
+            Fn.conditionAnd(
+              ...partnerUserPoolParameters.map(partnerParameterIsAbsent),
+            ),
+            everyPartnerParameterIsSupplied,
+          ),
+          assertDescription:
+            'Partner user pool id, app-client id, and client-secret ARN must be supplied together; leave all three UNCONFIGURED to keep partner access off.',
+        },
+      ],
+    });
+    // A dark data-plane deployment runs no server, so a supplied partner pool
+    // would only park a Cognito grant on an idle role and read as enabled.
+    new CfnRule(this, 'PartnerUserPoolRequiresLiveApplication', {
+      assertions: [
+        {
+          assert: Fn.conditionEquals(
+            provisionApplication.valueAsString,
+            'true',
+          ),
+          assertDescription:
+            'A supplied partner user pool requires ProvisionApplication=true.',
+        },
+      ],
+      ruleCondition: everyPartnerParameterIsSupplied,
+    });
     new CfnRule(this, 'DirectPushRequiresWorkerAndEvidence', {
       assertions: [
         {
@@ -3150,6 +3269,53 @@ export class PsdEocStack extends Stack {
       mediaAccessPolicy.node.defaultChild as iam.CfnPolicy
     ).cfnOptions.condition = shouldProvisionApplication;
 
+    // Partner access, in its own policy for the same reason the media grant
+    // is: it exists only when the three partner parameters are supplied, and a
+    // conditional statement cannot live in the role's unconditional default
+    // policy.
+    //
+    // Scoped to the one pool the parameters name. The actions are the ones the
+    // partner flows need and nothing else: an administrator invites a
+    // responder and can disable them again, the server runs the choice-based
+    // sign-in on their behalf as a confidential client, and a signed-in
+    // responder enrolls one passkey. No delete, no listing of other pools, no
+    // authority over the staff directory.
+    const partnerUserPoolAccessPolicy = new iam.Policy(
+      this,
+      'AppRunnerPartnerUserPoolAccess',
+      {
+        roles: [runtimeRole],
+        statements: [
+          new iam.PolicyStatement({
+            actions: [
+              'cognito-idp:AdminCreateUser',
+              'cognito-idp:AdminDisableUser',
+              'cognito-idp:AdminInitiateAuth',
+              'cognito-idp:AdminRespondToAuthChallenge',
+              'cognito-idp:StartWebAuthnRegistration',
+              'cognito-idp:CompleteWebAuthnRegistration',
+            ],
+            // Built from the same partition, region, and account the
+            // parameter patterns pin, so the grant and the accepted pool id
+            // can never disagree.
+            resources: [
+              `arn:${partition}:cognito-idp:${region}:${account}:userpool/${partnerUserPoolId.valueAsString}`,
+            ],
+          }),
+          // The app-client secret, read at runtime by complete ARN. The
+          // parameter is the complete ARN, so no wildcard suffix is needed or
+          // granted.
+          new iam.PolicyStatement({
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [partnerUserPoolClientSecretArn.valueAsString],
+          }),
+        ],
+      },
+    );
+    (
+      partnerUserPoolAccessPolicy.node.defaultChild as iam.CfnPolicy
+    ).cfnOptions.condition = shouldUsePartnerUserPool;
+
     const appRunnerScaling = new apprunner.CfnAutoScalingConfiguration(
       this,
       'AppRunnerScaling',
@@ -3313,6 +3479,24 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'PSD_EOC_PUSH_PROVIDER_CUTOVER',
                   value: pushProviderCutover.valueAsString,
+                },
+                // The partner directory, from the Terraform stateful root. The
+                // ARN is configuration, not a credential: the server fetches
+                // the client secret through it at runtime with the grant
+                // above, so no partner secret value is ever a service
+                // environment value. All three read UNCONFIGURED when partner
+                // access is off.
+                {
+                  name: 'PSD_EOC_PARTNER_USER_POOL_ID',
+                  value: partnerUserPoolId.valueAsString,
+                },
+                {
+                  name: 'PSD_EOC_PARTNER_USER_POOL_CLIENT_ID',
+                  value: partnerUserPoolClientId.valueAsString,
+                },
+                {
+                  name: 'PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN',
+                  value: partnerUserPoolClientSecretArn.valueAsString,
                 },
                 {
                   name: 'DATABASE_DRIVER',
