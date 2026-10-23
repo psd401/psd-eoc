@@ -59,11 +59,11 @@ server needs cross the boundary as CloudFormation parameters. `terraform
 output stack_parameters` prints exactly the three, named as the stack's
 parameters:
 
-| Terraform output                      | Stack parameter                  |
-| ------------------------------------- | -------------------------------- |
-| `partner_user_pool_id`                | `PartnerUserPoolId`              |
-| `partner_user_pool_client_id`         | `PartnerUserPoolClientId`        |
-| `partner_user_pool_client_secret_arn` | `PartnerUserPoolClientSecretArn` |
+| `stack_parameters` key           | Value                                |
+| -------------------------------- | ------------------------------------ |
+| `PartnerUserPoolId`              | The partner user pool id             |
+| `PartnerUserPoolClientId`        | The server app-client id             |
+| `PartnerUserPoolClientSecretArn` | The client credential's complete ARN |
 
 All three default to `UNCONFIGURED` in the stack. Supplying none of them leaves
 today's deployment exactly as it is; supplying some but not all is refused at

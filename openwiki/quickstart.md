@@ -27,7 +27,7 @@ Two rules shape every change (details in [architecture overview](architecture/ov
 | Integrations | [Channel workers](integrations/channel-workers.md) | Email, SMS and push workers, retries, provider adapters |
 | Integrations | [Agent API and MCP](integrations/agent-api-and-mcp.md) | Agent keys, REST gateway, rate limits, MCP server |
 | Integrations | [Mobile app](integrations/mobile-app.md) | Expo app, secure session, push registration, E2E |
-| Operations | [Infrastructure](operations/infrastructure.md) | CDK stack, Lambdas, monitoring, GCP, deploy rules, proposed Terraform migration |
+| Operations | [Infrastructure](operations/infrastructure.md) | CDK stack, Lambdas, monitoring, GCP, deploy rules, partner responder Cognito pool (Terraform), proposed Terraform migration |
 | Operations | [Configuration and readiness](operations/configuration-and-readiness.md) | Tenant manifest, env, readiness register, runbooks, doc drift |
 | Testing | [Verification and testing](testing/verification-and-testing.md) | `bun run check`, sharded tests, database tests, CI jobs |
 
@@ -50,6 +50,7 @@ Run commands from the repository root with Bun. Tests ending in `.database.test.
 | Database schema or migration | [Data model](domain/data-model.md) | `packages/server/db/schema/*.ts`, `packages/server/drizzle/migrations/` | `bun run --cwd packages/server db:generate` | `packages/server/drizzle/migration-chain.test.ts`, `packages/server/db/schema-enums.test.ts` | `bun test packages/server/drizzle/migration-chain.test.ts` then `bun scripts/check-applied-migrations.ts origin/main HEAD` |
 | Mobile screens, auth, push registration | [Mobile app](integrations/mobile-app.md) | `packages/mobile/src/app`, `src/lib/auth`, `src/lib/push`, `src/features/event-room` | `EventRoomSyncController`, `AuthPhase`, registration controller | colocated `*.test.ts`, `packages/mobile/native-tests/*.native.tsx` | `bun run --cwd packages/mobile test:bun`; both platforms via `bun packages/mobile/e2e/run.ts ios` and `android` |
 | AWS stack, queues, Lambdas, alarms, GCP | [Infrastructure](operations/infrastructure.md) | `infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`, `infra/lambda/*` | `PsdEocStack`, `configureInfrastructureMonitoring` | `infra/test/stack/psd-eoc-stack.test.ts`, `infra/test/monitoring-runtime.test.ts` | `bun run --cwd infra synth:example` (credential-free) |
+| Partner responder user pool (Terraform stateful root) and its three `PartnerUserPool*` stack parameters | [Infrastructure](operations/infrastructure.md#partner-first-responder-directory-terraform-stateful-root) | `infra/terraform/stateful/main.tf`, `infra/terraform/stateful/outputs.tf`, `infra/src/stack/psd-eoc-stack.ts` | `aws_cognito_user_pool.partner`, `aws_cognito_user_pool_client.server`, `stack_parameters`, `ShouldUsePartnerUserPool` | `infra/terraform/stateful/tests/partner_user_pool.tftest.hcl` (runs `partner_pool_plan`, `owner_requires_a_dotted_domain`), `infra/test/stack/psd-eoc-stack.test.ts` (`partner user pool boundary`) | `bun run verify:terraform` (credential-free; plus the stack test above) |
 | Tenant config, env vars, readiness register, runbooks | [Configuration and readiness](operations/configuration-and-readiness.md) | `infra/cdk.local.example.json`, `packages/server/lib/config/deployment.ts`, `docs/CONFIGURATION.md` | `readTenantContext`, `applicationOrigin` | `scripts/verify-documentation.test.ts`, `infra/test/tenant-context.test.ts` | `bun run verify:docs` and `bun run verify:config` |
 | Test harness, CI gate, synthetic database | [Verification and testing](testing/verification-and-testing.md) | `scripts/test.ts`, `scripts/test-database.ts`, `.github/workflows/ci.yml` | `discoverTestFiles`, `balanceShards`, `selectTestFiles` | `scripts/test.test.ts`, `scripts/test-database.test.ts` | `bun test scripts/test.test.ts scripts/test-database.test.ts` |
 
@@ -60,7 +61,7 @@ Typecheck one workspace with `bun run --cwd packages/server typecheck` (or `pack
 - Contracts first: change `packages/contracts` (Zod) before consumers; there is one capability layer shared by web, REST, MCP and mobile ([capability engine](architecture/capability-engine.md)).
 - Never edit an applied migration or run a down migration; journals, audit and delivery evidence are append-only ([data model](domain/data-model.md)).
 - No district literals in `.ts` source; tenant values live in git-ignored `infra/cdk.local.json` ([configuration and readiness](operations/configuration-and-readiness.md)).
-- Deployment is only a local `cdk deploy`; never add a GitHub deployment workflow ([infrastructure](operations/infrastructure.md)).
+- Deployment is only a local `cdk deploy` (and, for the AWS Terraform stateful root, a local `terraform apply` by the product owner); never add a GitHub deployment workflow ([infrastructure](operations/infrastructure.md)).
 - GitHub Actions `uses:` references are pinned to full commit SHAs with a version comment; keep new or bumped actions pinned the same way ([verification and testing](testing/verification-and-testing.md#ci-githubworkflowsciyml)).
 - Mobile changes must land and be verified on both iOS and Android ([mobile app](integrations/mobile-app.md)).
 - Do not hand-edit this wiki's generated pages; the OpenWiki workflow (`.github/workflows/openwiki-update.yml`) regenerates them.
@@ -76,7 +77,4 @@ Areas identified but not yet documented in depth:
 - Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
 - Map and location rendering (`packages/server/lib/map`, `location-map.tsx`): not documented.
 
-gcp`: summarized in infrastructure only.
-- Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
-- Map and location rendering (`packages/server/lib/map`, `location-map.tsx`): not documented.
 

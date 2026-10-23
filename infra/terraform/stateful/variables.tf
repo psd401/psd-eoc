@@ -37,7 +37,7 @@ variable "owner" {
   type        = string
 
   validation {
-    condition     = can(regex("^[^@[:space:]]+@[a-z0-9][a-z0-9.-]+$", var.owner))
+    condition     = can(regex("^[^@[:space:]]+@[a-z0-9-]+(\\.[a-z0-9-]+)+$", var.owner))
     error_message = "owner must be an email address."
   }
 }
