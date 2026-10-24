@@ -1003,9 +1003,10 @@ describe('partner user pool boundary', () => {
         return [String(pair.Name), pair.Value];
       }),
     );
-    expect(sweepEnvironment.get('PSD_EOC_SES_CONFIGURATION_SET_NAME')).toBe(
-      SES_PARTNER_CONFIGURATION_SET_NAME,
-    );
+    expect(sweepEnvironment.get('PSD_EOC_SES_CONFIGURATION_SET_NAME')).toEqual({
+      // A reference to the partner set, which orders the runtime after it.
+      Ref: expect.stringMatching(/^PartnerEmailConfigurationSet/),
+    });
 
     // No output republishes the pool, the client, or the secret ARN.
     expect(JSON.stringify(synthesized.Outputs)).not.toContain(
@@ -1589,9 +1590,10 @@ describe('App Runner runtime safety boundary', () => {
       ].sort(),
     );
     expect(variables.get('AWS_REGION')).toBe(AWS_REGION);
-    expect(variables.get('PSD_EOC_SES_CONFIGURATION_SET_NAME')).toBe(
-      SES_PARTNER_CONFIGURATION_SET_NAME,
-    );
+    expect(variables.get('PSD_EOC_SES_CONFIGURATION_SET_NAME')).toEqual({
+      // A reference to the partner set, which orders the runtime after it.
+      Ref: expect.stringMatching(/^PartnerEmailConfigurationSet/),
+    });
     expect(variables.get('DATABASE_DRIVER')).toBe('postgres');
     expect(variables.get('DATABASE_HOST')).toEqual({
       'Fn::GetAtt': ['DatabaseB269D8BB', 'Endpoint.Address'],

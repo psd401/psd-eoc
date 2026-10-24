@@ -3083,8 +3083,9 @@ export class PsdEocStack extends Stack {
           PSD_EOC_DISPLAY_TIME_ZONE: deploymentIdentity.displayTimeZone,
           PSD_EOC_ORGANIZATION_NAME: deploymentIdentity.organizationName,
           PSD_EOC_PARTNER_USER_POOL_ID: partnerUserPoolId.valueAsString,
-          PSD_EOC_SES_CONFIGURATION_SET_NAME:
-            SES_PARTNER_CONFIGURATION_SET_NAME,
+          // A reference, not the literal name, so the task definition is
+          // ordered after the set and no send can name a set not yet created.
+          PSD_EOC_SES_CONFIGURATION_SET_NAME: partnerEmailConfigurationSet.ref,
           PSD_EOC_SES_FROM_ADDRESS: sesFromAddress,
           ...(sesFromDisplayName === null
             ? {}
@@ -3756,10 +3757,11 @@ export class PsdEocStack extends Stack {
                 },
                 // The sender partner account mail uses: the same address and
                 // display name the email worker sends alerts from, through the
-                // partner configuration set rather than the alert set.
+                // partner configuration set rather than the alert set. A
+                // reference, so the service is ordered after the set.
                 {
                   name: 'PSD_EOC_SES_CONFIGURATION_SET_NAME',
-                  value: SES_PARTNER_CONFIGURATION_SET_NAME,
+                  value: partnerEmailConfigurationSet.ref,
                 },
                 {
                   name: 'PSD_EOC_SES_FROM_ADDRESS',
