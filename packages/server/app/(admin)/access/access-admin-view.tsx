@@ -2,11 +2,13 @@ import type {
   AdmittedAccount,
   Facility,
   GroupSourcePage,
+  PartnerAccessRecord,
   UserPage,
 } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
 import type { AccessAdminCursorState } from './access-page-state';
+import { PartnerAccessSection } from './access-partners-view';
 
 /** A non-admin view carries no configuration data that could be rendered. */
 export const NON_ADMIN_ACCESS_VIEW = Object.freeze({
@@ -23,6 +25,10 @@ export type AccessAdminViewModel =
       facilities: readonly Facility[];
       /** Addresses admitted without a group, current and revoked. */
       admittedAccounts: readonly AdmittedAccount[];
+      /** Partner admissions, current and ended, newest first. */
+      partners: readonly PartnerAccessRecord[];
+      /** Whether this deployment has a partner identity provider. */
+      partnerAccessConfigured: boolean;
       cursors: AccessAdminCursorState;
     }>;
 
@@ -593,6 +599,11 @@ export function AccessAdminView({
       <AdmittedAccounts
         accounts={view.admittedAccounts}
         csrfToken={csrfToken}
+      />
+      <PartnerAccessSection
+        configured={view.partnerAccessConfigured}
+        csrfToken={csrfToken}
+        partners={view.partners}
       />
       <UsersAndRoles
         csrfToken={csrfToken}

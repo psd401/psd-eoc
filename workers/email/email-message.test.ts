@@ -5,6 +5,7 @@ import {
   EMAIL_LOGO_CONTENT_ID,
   EmailBrandingError,
   EmailMessageError,
+  buildAccountEmailContent,
   buildEmailMessageContent as buildWithBranding,
   parseEmailBranding,
 } from './email-message';
@@ -244,5 +245,40 @@ describe('email message content', () => {
     expect(() => buildEmailMessageContent(drifted)).not.toThrow(
       /Synthetic response|Harbor School/u,
     );
+  });
+});
+
+describe('account email content', () => {
+  test('keeps the subject and text exact, brands the HTML, and carries no drill or incident banner', () => {
+    const content = buildAccountEmailContent(
+      {
+        subject: 'You have been invited to <PSD EOC>',
+        textBody: 'Hello & welcome.\n\nSign in at the link below.',
+      },
+      BRANDING,
+    );
+    expect(content.subject).toBe('You have been invited to <PSD EOC>');
+    expect(content.textBody).toBe(
+      'Hello & welcome.\n\nSign in at the link below.',
+    );
+    expect(content.htmlBody).toContain(`cid:${EMAIL_LOGO_CONTENT_ID}`);
+    expect(content.htmlBody).toContain('Account notice from');
+    expect(content.htmlBody).toContain('Hello &amp; welcome.');
+    expect(content.htmlBody).toContain('&lt;PSD EOC&gt;');
+    expect(content.htmlBody).not.toContain('DRILL');
+    expect(content.htmlBody).not.toContain('REAL INCIDENT');
+    expect(content.inlineImages).toHaveLength(1);
+  });
+
+  test('refuses an empty body or a subject that could inject a header', () => {
+    expect(() =>
+      buildAccountEmailContent(
+        { subject: 'A\nBcc: x', textBody: 'x' },
+        BRANDING,
+      ),
+    ).toThrow(EmailMessageError);
+    expect(() =>
+      buildAccountEmailContent({ subject: 'Hello', textBody: '  ' }, BRANDING),
+    ).toThrow(EmailMessageError);
   });
 });

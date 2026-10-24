@@ -168,3 +168,120 @@ export function partnerAdmissionStatus(
     ? 'expired'
     : 'active';
 }
+
+/**
+ * A confirmed change at the partner identity provider for one admission:
+ * the account was created or re-enabled (`enabled`), or disabled and signed
+ * out everywhere (`disabled`). The admission is what the app expects; these
+ * are what it has confirmed, so a gap between the two is visible drift.
+ */
+export const PartnerProviderActionSchema = z.enum(['enabled', 'disabled']);
+
+export type PartnerProviderAction = z.infer<typeof PartnerProviderActionSchema>;
+
+/** Email the app sends a partner about their admission. */
+export const PartnerNoticeKindSchema = z.enum(['invitation', 'expiry-notice']);
+
+export type PartnerNoticeKind = z.infer<typeof PartnerNoticeKindSchema>;
+
+/**
+ * Invites a partner, or re-invites one. `replacesAdmissionId` names the
+ * admission this one takes over from: an unended one is ended `superseded`
+ * (an address typo, or a renewal), an ended one is only linked as history
+ * (re-inviting someone who was disabled or expired). An address is never
+ * edited in place.
+ */
+export const InvitePartnerInputSchema = z
+  .object({
+    email: PartnerEmailSchema,
+    displayName: PartnerDisplayNameSchema,
+    agency: PartnerAgencySchema,
+    replacesAdmissionId: UuidSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+
+export type InvitePartnerInput = z.infer<typeof InvitePartnerInputSchema>;
+
+/** Ends one partner's admission at an administrator's decision. */
+export const DisablePartnerInputSchema = z
+  .object({ partnerAdmissionId: UuidSchema })
+  .strict()
+  .readonly();
+
+export type DisablePartnerInput = z.infer<typeof DisablePartnerInputSchema>;
+
+/**
+ * Brings the partner identity provider and the invitation email in line with
+ * one admission: an active admission needs an enabled provider account and a
+ * sent invitation, an ended one a disabled, signed-out account. Run after
+ * every partner change and again from the Access page whenever a step is
+ * still pending. `resendInvitation` sends the invitation again even when one
+ * was already sent.
+ */
+export const ReconcilePartnerAccessInputSchema = z
+  .object({
+    partnerAdmissionId: UuidSchema,
+    resendInvitation: z.boolean(),
+  })
+  .strict()
+  .readonly();
+
+export type ReconcilePartnerAccessInput = z.infer<
+  typeof ReconcilePartnerAccessInputSchema
+>;
+
+export const ListPartnersInputSchema = z
+  .object({ includeEnded: z.boolean() })
+  .strict()
+  .readonly();
+
+export type ListPartnersInput = z.infer<typeof ListPartnersInputSchema>;
+
+/**
+ * How a partner appears on the Access page. `invited` is an active admission
+ * whose partner has not signed in since it was granted; the other values are
+ * the admission's own status.
+ */
+export const PartnerAccessStatusSchema = z.enum([
+  'invited',
+  'active',
+  'disabled',
+  'expired',
+  'superseded',
+]);
+
+export type PartnerAccessStatus = z.infer<typeof PartnerAccessStatusSchema>;
+
+/**
+ * The provider step one admission still needs, if any. `enable` means the
+ * partner's provider account has not been confirmed created and enabled for
+ * this admission; `disable` means an ended admission's account has not been
+ * confirmed disabled and signed out. Null means the provider matches.
+ */
+export const PartnerProviderPendingStepSchema = z
+  .enum(['enable', 'disable'])
+  .nullable();
+
+export const PartnerAccessRecordSchema = z
+  .object({
+    admission: PartnerAdmissionSchema,
+    status: PartnerAccessStatusSchema,
+    providerPendingStep: PartnerProviderPendingStepSchema,
+    /** When the invitation was last sent; null until it has been. */
+    invitationSentAt: TimestampSchema.nullable(),
+    /** The partner's latest sign-in the app recorded; null if never. */
+    lastSignInAt: TimestampSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+
+export type PartnerAccessRecord = z.infer<typeof PartnerAccessRecordSchema>;
+
+/** Bounded: a district admits responders by the hundred, not the thousand. */
+export const PartnerAccessListSchema = z
+  .object({ items: z.array(PartnerAccessRecordSchema).max(2_000).readonly() })
+  .strict()
+  .readonly();
+
+export type PartnerAccessList = z.infer<typeof PartnerAccessListSchema>;

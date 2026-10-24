@@ -91,6 +91,15 @@ import {
   ListAdmittedAccountsInputSchema,
   RevokeAdmittedAccountInputSchema,
 } from './admitted-account';
+import {
+  DisablePartnerInputSchema,
+  InvitePartnerInputSchema,
+  ListPartnersInputSchema,
+  PartnerAccessListSchema,
+  PartnerAccessRecordSchema,
+  PartnerAdmissionSchema,
+  ReconcilePartnerAccessInputSchema,
+} from './partner-admission';
 import { ListThreatsInputSchema, ThreatPageSchema } from './threat';
 import {
   CreateGroupSourceInputSchema,
@@ -1651,6 +1660,41 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanWebAdministrationInvocationPolicy,
     inputSchema: ListAdmittedAccountsInputSchema,
     outputSchema: AdmittedAccountListSchema,
+  }),
+  // Partners — responders from outside the district — are invited and
+  // disabled by an administrator on the web, one person at a time. Never
+  // offered to agents.
+  'invite-partner': canonicalCapability({
+    id: 'invite-partner',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: InvitePartnerInputSchema,
+    outputSchema: PartnerAdmissionSchema,
+  }),
+  'disable-partner': canonicalCapability({
+    id: 'disable-partner',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: DisablePartnerInputSchema,
+    outputSchema: PartnerAdmissionSchema,
+  }),
+  'reconcile-partner-access': canonicalCapability({
+    id: 'reconcile-partner-access',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: ReconcilePartnerAccessInputSchema,
+    outputSchema: PartnerAccessRecordSchema,
+  }),
+  'list-partners': canonicalCapability({
+    id: 'list-partners',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: ListPartnersInputSchema,
+    outputSchema: PartnerAccessListSchema,
   }),
   'list-drill-records': canonicalCapability({
     id: 'list-drill-records',

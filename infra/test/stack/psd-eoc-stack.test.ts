@@ -820,15 +820,29 @@ describe('partner user pool boundary', () => {
     const statements = asArray(
       asRecord(properties(policy).PolicyDocument).Statement,
     ).map(asRecord);
-    const [cognito, secret] = statements;
-    if (cognito === undefined || secret === undefined) {
-      throw new Error('Expected a Cognito statement and a secret statement.');
+    const [cognito, secret, mail] = statements;
+    if (cognito === undefined || secret === undefined || mail === undefined) {
+      throw new Error(
+        'Expected a Cognito statement, a secret statement, and a mail statement.',
+      );
     }
+    expect(statements).toHaveLength(3);
+    // Partner account mail: send only, from the deployment's sender, to the
+    // one identity, never the alert configuration set.
+    expect(asStringArray(mail.Action)).toEqual(['ses:SendEmail']);
+    expect(mail.Condition).toEqual({
+      StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS },
+    });
+    expect(JSON.stringify(mail.Resource)).toContain(':identity/');
+    expect(JSON.stringify(mail.Resource)).not.toContain('configuration-set');
     expect(asStringArray(cognito.Action).sort()).toEqual([
       'cognito-idp:AdminCreateUser',
       'cognito-idp:AdminDisableUser',
+      'cognito-idp:AdminEnableUser',
+      'cognito-idp:AdminGetUser',
       'cognito-idp:AdminInitiateAuth',
       'cognito-idp:AdminRespondToAuthChallenge',
+      'cognito-idp:AdminUserGlobalSignOut',
       'cognito-idp:CompleteWebAuthnRegistration',
       'cognito-idp:StartWebAuthnRegistration',
     ]);
@@ -1475,6 +1489,8 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_PRIVACY_CONTACT_URL',
         'PSD_EOC_SMS_SUPPORT_EMAIL',
         'PSD_EOC_SMS_SUPPORT_PHONE',
+        'PSD_EOC_SES_FROM_ADDRESS',
+        'PSD_EOC_SES_FROM_DISPLAY_NAME',
         'PSD_EOC_SES_SNS_TOPIC_ARN',
         'PSD_EOC_SMS_DESTINATION_COUNTRY_CODE',
         'PSD_EOC_SMS_WORKER_READY',
@@ -1899,8 +1915,11 @@ describe('App Runner runtime safety boundary', () => {
         // staff directory.
         'cognito-idp:AdminCreateUser',
         'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminGetUser',
         'cognito-idp:AdminInitiateAuth',
         'cognito-idp:AdminRespondToAuthChallenge',
+        'cognito-idp:AdminUserGlobalSignOut',
         'cognito-idp:CompleteWebAuthnRegistration',
         'cognito-idp:StartWebAuthnRegistration',
         // The three s3 actions are the private media bucket and nothing else:
@@ -1913,6 +1932,11 @@ describe('App Runner runtime safety boundary', () => {
         'secretsmanager:DescribeSecret',
         'secretsmanager:GetSecretValue',
         'sns:ListSubscriptionsByTopic',
+        // Partner account mail only (invitation, expiry notice, quarterly
+        // review), From-address scoped and conditional on the partner pool;
+        // asserted in the partner policy test. Alerts still go only through
+        // the email worker.
+        'ses:SendEmail',
         'sqs:GetQueueAttributes',
         'sqs:SendMessage',
       ].sort(),
@@ -1920,15 +1944,17 @@ describe('App Runner runtime safety boundary', () => {
     expect(actions).not.toContain('s3:DeleteObject');
     // sqs:SendMessage is deliberate and is not a provider grant: an activation
     // hands its own notification batch to its own delivery queue after the
-    // event commits. Reaching a person still requires a channel worker, and the
-    // runtime has no provider write authority at all — asserted just below.
-    expect(actions).not.toContain('ses:SendEmail');
+    // event commits. Reaching a person with an alert still requires a channel
+    // worker; the runtime's only send is partner account mail.
     expect(actions).not.toContain('ses:SendRawEmail');
     expect(actions.some((action) => action.startsWith('rds-data:'))).toBe(
       false,
     );
     expect(actions.every((action) => !action.includes('*'))).toBe(true);
-    for (const forbiddenPrefix of ['events:', 'lambda:', 'ses:']) {
+    expect(actions.filter((action) => action.startsWith('ses:'))).toEqual([
+      'ses:SendEmail',
+    ]);
+    for (const forbiddenPrefix of ['events:', 'lambda:']) {
       expect(actions.some((action) => action.startsWith(forbiddenPrefix))).toBe(
         false,
       );
@@ -3459,15 +3485,20 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedTemplate).not.toContain('aws-data-api');
     expect(serializedTemplate).not.toContain('DATABASE_RESOURCE_ARN');
     expect(serializedTemplate).not.toContain('DATABASE_SECRET_ARN');
-    // SES send authority exists only on the alarm mailer and isolated email
-    // worker. App Runner remains unable to send directly.
+    // SES send authority exists on the alarm mailer, the isolated email
+    // worker, and — for partner account mail only, while partner access is
+    // configured — the App Runner runtime. Every one is From-address scoped.
     const sesSenders = resourceEntries('AWS::IAM::Policy').filter(
       ([, resource]) =>
         JSON.stringify(properties(resource).PolicyDocument).includes(
           'ses:SendEmail',
         ),
     );
-    expect(sesSenders).toHaveLength(2);
+    expect(sesSenders).toHaveLength(3);
+    const runtimeSender = sesSenders.find(([logicalId]) =>
+      logicalId.includes('PartnerUserPoolAccess'),
+    );
+    expect(runtimeSender?.[1].Condition).toBe('ShouldUsePartnerUserPool');
     const senderConditions = sesSenders.map(
       ([, resource]) =>
         asArray(asRecord(properties(resource).PolicyDocument).Statement)
@@ -3486,12 +3517,6 @@ describe('configured-unverified provider readiness boundary', () => {
         { StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS } },
       ]),
     );
-    const runtimeRole = roleLogicalIdForServicePrincipal(
-      'tasks.apprunner.amazonaws.com',
-    );
-    expect(
-      allAllowedActions(inlineStatementsForRole(runtimeRole)),
-    ).not.toContain('ses:SendEmail');
     expect(serializedTemplate).not.toContain('controlled-recipient');
   });
 

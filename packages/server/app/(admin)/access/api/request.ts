@@ -1,4 +1,7 @@
 import {
+  DisablePartnerInputSchema,
+  InvitePartnerInputSchema,
+  ReconcilePartnerAccessInputSchema,
   AdmitAccountInputSchema,
   RevokeAdmittedAccountInputSchema,
   SetUserFacilityScopeInputSchema,
@@ -60,5 +63,50 @@ export function parseRevokeAdmittedAccountForm(
   form.assertFields([...COMMON_FIELDS, 'admittedAccountId']);
   return RevokeAdmittedAccountInputSchema.parse({
     admittedAccountId: form.required('admittedAccountId'),
+  });
+}
+
+/**
+ * Reads an invite, re-invite, or address-correction form. A blank
+ * `replacesAdmissionId` is a new invitation; a filled one names the current
+ * admission the corrected address replaces.
+ */
+export function parseInvitePartnerForm(
+  form: AdminForm,
+): CapabilityInput<'invite-partner'> {
+  form.assertFields([
+    ...COMMON_FIELDS,
+    'email',
+    'displayName',
+    'agency',
+    'replacesAdmissionId',
+  ]);
+  const replaces = form.optional('replacesAdmissionId');
+  return InvitePartnerInputSchema.parse({
+    email: form.required('email'),
+    displayName: form.required('displayName'),
+    agency: form.required('agency'),
+    replacesAdmissionId:
+      replaces === null || replaces.trim() === '' ? null : replaces,
+  });
+}
+
+/** Reads a partner row's disable, resend, or retry form. */
+export function parsePartnerAdmissionForm(
+  form: AdminForm,
+): Readonly<{ partnerAdmissionId: string }> {
+  form.assertFields([...COMMON_FIELDS, 'partnerAdmissionId']);
+  return DisablePartnerInputSchema.parse({
+    partnerAdmissionId: form.required('partnerAdmissionId'),
+  });
+}
+
+export function reconcileCommand(
+  partnerAdmissionId: string,
+  resendInvitation: boolean,
+): CapabilityInput<'reconcile-partner-access'> {
+  return ReconcilePartnerAccessInputSchema.parse({
+    partnerAdmissionId,
+    resendInvitation,
   });
 }

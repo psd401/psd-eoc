@@ -26,6 +26,8 @@ import {
   NotificationPurposeSchema,
   OutboxStatusSchema,
   PartnerAdmissionEndingReasonSchema,
+  PartnerNoticeKindSchema,
+  PartnerProviderActionSchema,
   PushPlatformSchema,
   RoleSchema,
   RosterPopulationSchema,
@@ -330,6 +332,9 @@ const PERSISTED_MUTATION_CAPABILITY_ORDER = [
   'admit-account',
   'revoke-admitted-account',
   'discard-event-type-draft',
+  'invite-partner',
+  'disable-partner',
+  'reconcile-partner-access',
 ] as const;
 
 export const agentCapabilityGrantEnum = contractPgEnum(
@@ -367,4 +372,12 @@ export const rosterSyncOutcomeEnum = contractPgEnum(
 export const partnerAdmissionEndingReasonEnum = contractPgEnum(
   'partner_admission_ending_reason',
   contractEnumValues(PartnerAdmissionEndingReasonSchema.options),
+);
+export const partnerProviderActionEnum = contractPgEnum(
+  'partner_provider_action',
+  contractEnumValues(PartnerProviderActionSchema.options),
+);
+export const partnerNoticeKindEnum = contractPgEnum(
+  'partner_notice_kind',
+  contractEnumValues(PartnerNoticeKindSchema.options),
 );

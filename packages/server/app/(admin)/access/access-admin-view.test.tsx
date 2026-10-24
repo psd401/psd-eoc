@@ -7,6 +7,7 @@ import {
   type AdmittedAccount,
   type Facility,
   type GroupSourcePage,
+  type PartnerAccessRecord,
   type UserPage,
 } from '@psd-eoc/contracts';
 
@@ -149,6 +150,46 @@ function users(): UserPage {
   });
 }
 
+function partner(
+  suffix: string,
+  status: PartnerAccessRecord['status'],
+  ending: PartnerAccessRecord['admission']['ending'] = null,
+  providerPendingStep: PartnerAccessRecord['providerPendingStep'] = null,
+): PartnerAccessRecord {
+  return {
+    admission: {
+      id: `20000000-0000-4000-8000-00000000000${suffix}`,
+      email: `responder-${suffix}@agency.example.invalid`,
+      displayName: `Synthetic Responder ${suffix}`,
+      agency: 'Synthetic Fire District',
+      invitedByUserId: IDS.user,
+      admittedAt: '2026-09-01T17:00:00.000Z',
+      expiresAt: '2027-09-01T17:00:00.000Z',
+      supersedesAdmissionId: null,
+      ending,
+    },
+    status,
+    providerPendingStep,
+    invitationSentAt: '2026-09-01T17:00:00.000Z',
+    lastSignInAt: status === 'active' ? '2026-09-02T17:00:00.000Z' : null,
+  };
+}
+
+const PARTNERS: readonly PartnerAccessRecord[] = Object.freeze([
+  partner('1', 'invited', null, 'enable'),
+  partner('2', 'active'),
+  partner('3', 'disabled', {
+    reason: 'disabled',
+    endedByUserId: IDS.user,
+    endedAt: '2026-10-01T17:00:00.000Z',
+  }),
+  partner('4', 'expired', {
+    reason: 'expired',
+    endedByUserId: null,
+    endedAt: '2027-09-01T17:00:00.000Z',
+  }),
+]);
+
 function authorizedView(
   groupPage: GroupSourcePage = accessGroups(),
 ): AccessAdminViewModel {
@@ -158,6 +199,8 @@ function authorizedView(
     users: users(),
     facilities: FACILITIES,
     admittedAccounts: ADMITTED,
+    partners: PARTNERS,
+    partnerAccessConfigured: true,
     cursors: Object.freeze({
       accessGroupCursor: 'current-access-cursor',
       userCursor: 'current-user-cursor',
@@ -251,13 +294,16 @@ describe('AccessAdminView semantics', () => {
       /<input[^>]*name="intent"[^>]*value="update-access-group"/u,
     );
     // Two access-group forms, one facility-limit form per person, one
-    // revoke form for the current admission, and the admit form.
+    // revoke form for the current admission, and the admit form (6); then the
+    // partners: resend, disable and correct for each of the two current
+    // admissions, one retry for the pending one, one re-invite for each of
+    // the two ended ones, and the invite form (10).
     expect(
       html.match(/<form action="\/access\/api" method="post">/gu),
-    ).toHaveLength(6);
-    expect(html.match(/name="csrfToken"/gu)).toHaveLength(6);
-    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(6);
-    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(6);
+    ).toHaveLength(16);
+    expect(html.match(/name="csrfToken"/gu)).toHaveLength(16);
+    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(16);
+    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(16);
     expect(html).not.toContain('method="get"');
     expect(html).not.toContain('fixtureKey');
     expect(html).not.toContain('name="kind"');
@@ -356,5 +402,55 @@ describe('AccessAdminView semantics', () => {
       'href="/access?accessGroupCursor=current-access-cursor&amp;userCursor=user-cursor-safe"',
     );
     expect(html).toContain('Next page of staff accounts');
+  });
+});
+
+describe('AccessAdminView partners', () => {
+  test('keeps invited, active, disabled and expired visibly distinct', () => {
+    const html = renderToStaticMarkup(
+      <AccessAdminView csrfToken={CSRF_TOKEN} view={authorizedView()} />,
+    );
+    expect(html).toContain('id="partners-heading"');
+    expect(html).toContain('Invited — has not signed in');
+    expect(html).toContain('>Active<');
+    expect(html).toContain('Disabled 2026-10-01');
+    expect(html).toContain('Expired 2027-09-01');
+    expect(html).toContain('data-partner-status="invited"');
+    expect(html).toContain('Pending: sign-in account not yet confirmed');
+  });
+
+  test('offers resend, disable and correction only for current admissions, re-invite only for ended ones', () => {
+    const html = renderToStaticMarkup(
+      <AccessAdminView csrfToken={CSRF_TOKEN} view={authorizedView()} />,
+    );
+    expect(html).toContain(
+      'Resend invitation to responder-1@agency.example.invalid',
+    );
+    expect(html).toContain('Disable responder-2@agency.example.invalid');
+    expect(html).not.toContain('Disable responder-3@agency.example.invalid');
+    expect(html).toContain('Re-invite responder-3@agency.example.invalid');
+    expect(html).toContain('Re-invite responder-4@agency.example.invalid');
+    expect(html).not.toContain('Re-invite responder-2@agency.example.invalid');
+    expect(html).toContain(
+      'Retry pending change for responder-1@agency.example.invalid',
+    );
+    expect(html).toContain('value="invite-partner"');
+  });
+
+  test('offers no partner controls when partner access is not configured', () => {
+    const html = renderToStaticMarkup(
+      <AccessAdminView
+        csrfToken={CSRF_TOKEN}
+        view={
+          {
+            ...authorizedView(),
+            partnerAccessConfigured: false,
+          } as AccessAdminViewModel
+        }
+      />,
+    );
+    expect(html).toContain('Partner access is not configured');
+    expect(html).not.toContain('value="invite-partner"');
+    expect(html).not.toContain('value="disable-partner"');
   });
 });

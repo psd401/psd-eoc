@@ -29,6 +29,8 @@ import {
   humanConfirmationStatusEnum,
   invocationSourceEnum,
   partnerAdmissionEndingReasonEnum,
+  partnerNoticeKindEnum,
+  partnerProviderActionEnum,
 } from './enums';
 
 import { auditCode, digest, occurredAt } from './shared';
@@ -227,6 +229,70 @@ export const partnerAdmissionEndings = pgTable(
       'partner_admission_endings_actor_matches_reason',
       sql`(${table.reason} = 'expired') = (${table.endedByUserId} is null)`,
     ),
+  ],
+);
+
+/**
+ * Confirmed changes at the partner identity provider, one row per confirmed
+ * change, never edited. An admission says what the provider should hold; a
+ * row here says the app confirmed it does, so an admission without its row
+ * is drift the Access page shows and a retry completes. `performed_by_user_id`
+ * is null when the system made the change (the expiry sweep).
+ */
+export const partnerProviderSyncs = pgTable(
+  'partner_provider_syncs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    partnerAdmissionId: uuid('partner_admission_id').notNull(),
+    action: partnerProviderActionEnum('action').notNull(),
+    providerSubject: varchar('provider_subject', { length: 255 }),
+    performedByUserId: uuid('performed_by_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+    }),
+    completedAt: occurredAt('completed_at').defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.partnerAdmissionId],
+      foreignColumns: [partnerAdmissions.id],
+      name: 'partner_provider_syncs_admission_fk',
+    }).onDelete('restrict'),
+    index('partner_provider_syncs_admission_idx').on(
+      table.partnerAdmissionId,
+      table.completedAt,
+    ),
+  ],
+);
+
+/**
+ * Email sent to a partner about their admission, one row per send, never
+ * edited. At most one expiry notice per admission, so a retried sweep can
+ * never send it twice.
+ */
+export const partnerNotices = pgTable(
+  'partner_notices',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    partnerAdmissionId: uuid('partner_admission_id').notNull(),
+    kind: partnerNoticeKindEnum('kind').notNull(),
+    sentByUserId: uuid('sent_by_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+    }),
+    sentAt: occurredAt('sent_at').defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.partnerAdmissionId],
+      foreignColumns: [partnerAdmissions.id],
+      name: 'partner_notices_admission_fk',
+    }).onDelete('restrict'),
+    index('partner_notices_admission_idx').on(
+      table.partnerAdmissionId,
+      table.sentAt,
+    ),
+    uniqueIndex('partner_notices_one_expiry_notice_uq')
+      .on(table.partnerAdmissionId)
+      .where(sql`${table.kind} = 'expiry-notice'`),
   ],
 );
 
