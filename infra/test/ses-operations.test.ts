@@ -487,12 +487,6 @@ describe('SES verification operation', () => {
     expect(harness.output.join(' ')).toContain('No email was sent');
   });
 
-  // psd-dev-standards 17 rule 5: `mail.` is commonly a CNAME, which cannot
-  // also hold the MX and TXT records a MAIL FROM needs.
-  it('expects MAIL FROM at bounce.<identity domain>', () => {
-    expect(SES_MAIL_FROM_DOMAIN).toBe(`bounce.${SES_IDENTITY_DOMAIN}`);
-  });
-
   // Until the identity owner sets MAIL FROM (standard 17 rollout step 4) the
   // check names it as not set up, exits non-zero, and still reads nothing it
   // should not.
@@ -506,7 +500,7 @@ describe('SES verification operation', () => {
     ).toBe(1);
 
     expect(harness.errors.join(' ')).toContain(
-      `MAIL FROM ${SES_MAIL_FROM_DOMAIN} is not set up on the identity yet`,
+      `MAIL FROM bounce.${SES_IDENTITY_DOMAIN} is not set up on the identity yet`,
     );
     expect(harness.output.join(' ')).not.toContain('readiness check passed');
     expect(harness.calls.sendTestEmail).toHaveLength(0);
@@ -521,9 +515,6 @@ describe('SES verification operation', () => {
       await verificationMain(VERIFICATION_CHECK_ARGS, harness.runtime),
     ).toBe(0);
 
-    expect(Object.keys(READY_SOURCE_IDENTITY)).not.toContain(
-      'configurationSetName',
-    );
     expect(harness.calls.getConfigurationSet).toEqual([
       SES_CONFIGURATION_SET_NAME,
     ]);

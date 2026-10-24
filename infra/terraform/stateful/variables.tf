@@ -88,8 +88,8 @@ variable "passkey_relying_party_id" {
 
 variable "ses_identity_domain" {
   description = <<-EOT
-    The verified SES domain identity, in this account and ses_region, that partner
-    invitations and one-time passwords are sent from. The same domain the
+    The verified SES domain identity, in this account and ses_region, that
+    partner invitations and one-time passwords are sent from. The same domain the
     stack's psdEoc:sesIdentityDomain names.
   EOT
   type        = string
