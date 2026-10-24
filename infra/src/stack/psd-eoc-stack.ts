@@ -2915,6 +2915,153 @@ export class PsdEocStack extends Stack {
     }
     accessSyncCfnRule.addResourceDependency(bootstrapDeploymentResource);
 
+    // The daily partner-access run: expires admissions on their date, sends
+    // the one notice 14 days ahead, completes provider changes still pending,
+    // and once a quarter mails administrators the inactivity review. It never
+    // disables anyone for inactivity. Its own task and role, so the
+    // access-sync task keeps no authority, and its grants exist only while
+    // partner access is configured; without it the schedule stays disabled.
+    const partnerSweepTaskExecutionRole = new iam.Role(
+      this,
+      'PartnerSweepTaskExecutionRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Pulls the reviewed application image for the partner-access sweep, injects only the application database credential, and writes logs.',
+      },
+    );
+    const partnerSweepTaskRole = new iam.Role(this, 'PartnerSweepTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description:
+        'Disables expired partner accounts in the partner user pool and sends partner account mail from the deployment sender.',
+    });
+    const partnerSweepPolicy = new iam.Policy(this, 'PartnerSweepAccess', {
+      roles: [partnerSweepTaskRole],
+      statements: [
+        new iam.PolicyStatement({
+          actions: [
+            'cognito-idp:AdminDisableUser',
+            'cognito-idp:AdminUserGlobalSignOut',
+          ],
+          resources: [
+            `arn:${partition}:cognito-idp:${region}:${account}:userpool/${partnerUserPoolId.valueAsString}`,
+          ],
+        }),
+        new iam.PolicyStatement({
+          actions: ['ses:SendEmail'],
+          conditions: {
+            StringEquals: { 'ses:FromAddress': sesFromAddress },
+          },
+          resources: [emailIdentityArn],
+          sid: 'SendOnlyPartnerAccountEmail',
+        }),
+      ],
+    });
+    (
+      partnerSweepPolicy.node.defaultChild as iam.CfnPolicy
+    ).cfnOptions.condition = shouldUsePartnerUserPool;
+    const partnerSweepTaskDefinition = new ecs.FargateTaskDefinition(
+      this,
+      'PartnerSweepTaskDefinition',
+      {
+        cpu: 256,
+        executionRole: partnerSweepTaskExecutionRole,
+        family: 'psd-eoc-partner-access-sweep',
+        memoryLimitMiB: 512,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.X86_64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+        taskRole: partnerSweepTaskRole,
+      },
+    );
+    partnerSweepTaskDefinition.addVolume({ name: 'partner-sweep-tmp' });
+    const partnerSweepContainer = partnerSweepTaskDefinition.addContainer(
+      'partner-access-sweep',
+      {
+        command: [
+          'bun',
+          'packages/server/scripts/operations/sweep-partner-access.ts',
+        ],
+        environment: {
+          AWS_REGION: region,
+          DATABASE_DRIVER: 'postgres',
+          DATABASE_HOST: database.clusterEndpoint.hostname,
+          DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+          DATABASE_MAX_CONNECTIONS: '1',
+          DATABASE_NAME: DATABASE_NAME,
+          DATABASE_PORT: String(DATABASE_PORT),
+          DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
+          DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+          GOOGLE_OIDC_APPLICATION_ORIGIN: deploymentIdentity.applicationOrigin,
+          PSD_EOC_DISPLAY_TIME_ZONE: deploymentIdentity.displayTimeZone,
+          PSD_EOC_ORGANIZATION_NAME: deploymentIdentity.organizationName,
+          PSD_EOC_PARTNER_USER_POOL_ID: partnerUserPoolId.valueAsString,
+          PSD_EOC_SES_FROM_ADDRESS: sesFromAddress,
+          ...(sesFromDisplayName === null
+            ? {}
+            : { PSD_EOC_SES_FROM_DISPLAY_NAME: sesFromDisplayName }),
+          SOURCE_SHA: sourceSha,
+          TMPDIR: '/tmp',
+        },
+        essential: true,
+        image: ecs.ContainerImage.fromRegistry(applicationImageUri),
+        logging: ecs.LogDrivers.awsLogs({
+          logGroup: bootstrapLogGroup,
+          streamPrefix: 'partner-access-sweep',
+        }),
+        readonlyRootFilesystem: true,
+        secrets: {
+          DATABASE_PASSWORD: ecsSecretJsonKey(
+            databaseApplicationSecret,
+            'password',
+          ),
+          DATABASE_USERNAME: ecsSecretJsonKey(
+            databaseApplicationSecret,
+            'username',
+          ),
+        },
+      },
+    );
+    partnerSweepContainer.addMountPoints({
+      containerPath: '/tmp',
+      readOnly: false,
+      sourceVolume: 'partner-sweep-tmp',
+    });
+    applicationImage.repository.grantPull(partnerSweepTaskExecutionRole);
+    databaseApplicationSecret.grantRead(partnerSweepTaskExecutionRole);
+    const partnerSweepSchedule = new events.Rule(this, 'PartnerSweepSchedule', {
+      description:
+        'Daily partner-access run: expires admissions on their date, sends the 14-day notice, and sends the quarterly review. Never disables anyone for inactivity.',
+      enabled: true,
+      ruleName: 'psd-eoc-partner-access-sweep-daily',
+      // 14:00 UTC is early morning in every US time zone, so an admission
+      // expiring today is ended before the working day.
+      schedule: events.Schedule.expression('cron(0 14 * * ? *)'),
+    });
+    partnerSweepSchedule.addTarget(
+      new eventTargets.EcsTask({
+        assignPublicIp: false,
+        cluster: bootstrapCluster as unknown as ecs.ICluster,
+        securityGroups: [applicationSecurityGroup],
+        subnetSelection: { subnetGroupName: APPLICATION_SUBNET_GROUP_NAME },
+        taskCount: 1,
+        taskDefinition:
+          partnerSweepTaskDefinition as unknown as ecs.ITaskDefinition,
+        // Every step is idempotent per admission and per quarter, so an
+        // at-least-once redelivery repeats nothing.
+        retryAttempts: 2,
+      }),
+    );
+    const partnerSweepCfnRule = partnerSweepSchedule.node
+      .defaultChild as events.CfnRule;
+    partnerSweepCfnRule.state = Fn.conditionIf(
+      shouldUsePartnerUserPool.logicalId,
+      'ENABLED',
+      'DISABLED',
+    ).toString();
+    partnerSweepCfnRule.addResourceDependency(bootstrapDeploymentResource);
+
     const rollbackImageValidationHandler = new lambda.Function(
       this,
       'RollbackImageValidationHandler',

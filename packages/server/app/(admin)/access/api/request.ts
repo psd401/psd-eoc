@@ -80,6 +80,7 @@ export function parseInvitePartnerForm(
     'displayName',
     'agency',
     'replacesAdmissionId',
+    'renewal',
   ]);
   const replaces = form.optional('replacesAdmissionId');
   return InvitePartnerInputSchema.parse({

@@ -38,6 +38,7 @@ import {
 } from '../../../lib/capabilities/admin';
 import {
   PartnerProviderError,
+  type PartnerMailMessage,
   type PartnerProviders,
 } from '../../../lib/partners/providers';
 import {
@@ -82,7 +83,7 @@ function database(): PostgresDatabaseConnection['db'] {
 /** Records every provider call; `fail` makes the next calls throw. */
 function recordingProviders() {
   const calls: string[] = [];
-  const mail: { to: string; subject: string; textBody: string }[] = [];
+  const mail: PartnerMailMessage[] = [];
   const state = { fail: false };
   const down = () =>
     Promise.reject(

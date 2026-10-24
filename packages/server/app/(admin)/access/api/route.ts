@@ -158,10 +158,17 @@ export async function POST(request: Request): Promise<Response> {
           idempotencyKey,
           false,
         );
+        const renewal = form.optional('renewal') === 'true';
         return adminSuccessRedirect(
           request,
           '/access',
-          complete ? 'partner-invited' : 'partner-invite-pending',
+          renewal
+            ? complete
+              ? 'partner-renewed'
+              : 'partner-renew-pending'
+            : complete
+              ? 'partner-invited'
+              : 'partner-invite-pending',
         );
       }
       case 'disable-partner': {

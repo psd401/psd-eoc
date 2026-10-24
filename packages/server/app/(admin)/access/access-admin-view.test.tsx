@@ -201,6 +201,7 @@ function authorizedView(
     admittedAccounts: ADMITTED,
     partners: PARTNERS,
     partnerAccessConfigured: true,
+    partnerReviewedAt: '2026-10-20T17:00:00.000Z',
     cursors: Object.freeze({
       accessGroupCursor: 'current-access-cursor',
       userCursor: 'current-user-cursor',
@@ -295,15 +296,15 @@ describe('AccessAdminView semantics', () => {
     );
     // Two access-group forms, one facility-limit form per person, one
     // revoke form for the current admission, and the admit form (6); then the
-    // partners: resend, disable and correct for each of the two current
-    // admissions, one retry for the pending one, one re-invite for each of
-    // the two ended ones, and the invite form (10).
+    // partners: resend, disable, renew and correct for each of the two
+    // current admissions, one retry for the pending one, one re-invite for
+    // each of the two ended ones, and the invite form (12).
     expect(
       html.match(/<form action="\/access\/api" method="post">/gu),
-    ).toHaveLength(16);
-    expect(html.match(/name="csrfToken"/gu)).toHaveLength(16);
-    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(16);
-    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(16);
+    ).toHaveLength(18);
+    expect(html.match(/name="csrfToken"/gu)).toHaveLength(18);
+    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(18);
+    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(18);
     expect(html).not.toContain('method="get"');
     expect(html).not.toContain('fixtureKey');
     expect(html).not.toContain('name="kind"');
@@ -452,5 +453,33 @@ describe('AccessAdminView partners', () => {
     expect(html).toContain('Partner access is not configured');
     expect(html).not.toContain('value="invite-partner"');
     expect(html).not.toContain('value="disable-partner"');
+  });
+});
+
+describe('AccessAdminView partner review', () => {
+  test('lists never-signed-in and 90-day-inactive partners separately, and offers renewal', () => {
+    const stale = partner('5', 'active');
+    const view = {
+      ...authorizedView(),
+      partners: [
+        ...PARTNERS,
+        { ...stale, lastSignInAt: '2026-06-01T17:00:00.000Z' },
+      ],
+    } as AccessAdminViewModel;
+    const html = renderToStaticMarkup(
+      <AccessAdminView csrfToken={CSRF_TOKEN} view={view} />,
+    );
+    expect(html).toContain('Partner access review');
+    expect(html).toMatch(
+      /Invited but never signed in \(1\)[\s\S]*responder-1@agency/u,
+    );
+    expect(html).toMatch(
+      /No sign-in in the last 90 days \(1\)[\s\S]*responder-5@agency/u,
+    );
+    expect(html).toContain('nobody is disabled automatically');
+    expect(html).toContain(
+      'Renew responder-2@agency.example.invalid for one year',
+    );
+    expect(html).toContain('type="hidden" name="renewal" value="true"');
   });
 });

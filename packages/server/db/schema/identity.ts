@@ -296,6 +296,33 @@ export const partnerNotices = pgTable(
   ],
 );
 
+/**
+ * The quarterly partner access review sent to administrators, one row per
+ * quarter, never edited. The unique quarter is what makes a retried run send
+ * nothing more.
+ */
+export const partnerAccessReviews = pgTable(
+  'partner_access_reviews',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    quarter: varchar('quarter', { length: 7 }).notNull(),
+    neverSignedInCount: integer('never_signed_in_count').notNull(),
+    inactiveCount: integer('inactive_count').notNull(),
+    sentAt: occurredAt('sent_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('partner_access_reviews_quarter_uq').on(table.quarter),
+    check(
+      'partner_access_reviews_quarter_format',
+      sql`${table.quarter} ~ '^[0-9]{4}-Q[1-4]$'`,
+    ),
+    check(
+      'partner_access_reviews_counts',
+      sql`${table.neverSignedInCount} >= 0 and ${table.inactiveCount} >= 0`,
+    ),
+  ],
+);
+
 /** Explicit facility rows for users whose scope is not district-wide. */
 export const userFacilityScopes = pgTable(
   'user_facility_scopes',

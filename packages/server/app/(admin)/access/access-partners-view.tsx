@@ -3,6 +3,10 @@ import type {
   PartnerAccessStatus,
 } from '@psd-eoc/contracts';
 
+import {
+  PARTNER_INACTIVITY_DAYS,
+  partnerInactivityReview,
+} from '../../../lib/partners/sweep';
 import { AdminMutationFields } from '../facilities/admin-form-fields';
 
 const STATUS_LABELS: Readonly<Record<PartnerAccessStatus, string>> =
@@ -116,16 +120,54 @@ function InviteFields({
 }
 
 /** The Access page's Partners section: who is let in from outside the district. */
+function ReviewGroup({
+  heading,
+  records,
+  empty,
+}: Readonly<{
+  heading: string;
+  records: readonly PartnerAccessRecord[];
+  empty: string;
+}>) {
+  return (
+    <>
+      <h4>
+        {heading} ({records.length})
+      </h4>
+      {records.length === 0 ? (
+        <p>{empty}</p>
+      ) : (
+        <ul>
+          {records.map((record) => (
+            <li key={record.admission.id}>
+              {record.admission.displayName}, {record.admission.agency} (
+              {record.admission.email}) — invited{' '}
+              {day(record.admission.admittedAt)}, last sign-in{' '}
+              {record.lastSignInAt === null
+                ? 'never'
+                : day(record.lastSignInAt)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
 export function PartnerAccessSection({
   partners,
   configured,
   csrfToken,
+  reviewedAt,
 }: Readonly<{
   partners: readonly PartnerAccessRecord[];
   /** False when this deployment has no partner identity provider. */
   configured: boolean;
   csrfToken: string;
+  /** The instant the inactivity review is computed for. */
+  reviewedAt: string;
 }>) {
+  const review = partnerInactivityReview(partners, new Date(reviewedAt));
   const current = partners.filter((record) => record.admission.ending === null);
   const currentEmails = new Set(
     current.map((record) => record.admission.email),
@@ -204,6 +246,24 @@ export function PartnerAccessSection({
           </tbody>
         </table>
       </div>
+      <section aria-labelledby="partner-review-heading">
+        <h3 id="partner-review-heading">Partner access review</h3>
+        <p>
+          Partners who may no longer need access. This list is for review only;
+          nobody is disabled automatically. Administrators also receive it by
+          email each quarter.
+        </p>
+        <ReviewGroup
+          empty="Every current partner has signed in."
+          heading="Invited but never signed in"
+          records={review.neverSignedIn}
+        />
+        <ReviewGroup
+          empty={`Every partner who has signed in did so in the last ${PARTNER_INACTIVITY_DAYS} days.`}
+          heading={`No sign-in in the last ${PARTNER_INACTIVITY_DAYS} days`}
+          records={review.inactive}
+        />
+      </section>
       {configured ? (
         <>
           {current.map((record) => (
@@ -227,6 +287,34 @@ export function PartnerAccessSection({
                 intent="disable-partner"
                 label={`Disable ${record.admission.email}`}
               />
+              <form action="/access/api" method="post">
+                <AdminMutationFields csrfToken={csrfToken} />
+                <input name="intent" type="hidden" value="invite-partner" />
+                <input
+                  name="replacesAdmissionId"
+                  type="hidden"
+                  value={record.admission.id}
+                />
+                <input
+                  name="email"
+                  type="hidden"
+                  value={record.admission.email}
+                />
+                <input
+                  name="displayName"
+                  type="hidden"
+                  value={record.admission.displayName}
+                />
+                <input
+                  name="agency"
+                  type="hidden"
+                  value={record.admission.agency}
+                />
+                <input name="renewal" type="hidden" value="true" />
+                <button type="submit">
+                  Renew {record.admission.email} for one year
+                </button>
+              </form>
               <form action="/access/api" method="post">
                 <AdminMutationFields csrfToken={csrfToken} />
                 <input name="intent" type="hidden" value="invite-partner" />
