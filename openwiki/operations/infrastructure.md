@@ -3,7 +3,7 @@ type: Operations Guide
 title: AWS CDK infrastructure, deployment, and monitoring
 description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the psd-dev-standards 08 deployment split (local direct cdk deploy, CI-only Terraform apply behind the production environment), bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
 tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda, cognito, partner-access]
-timestamp: 2026-10-23T20:32:53-07:00
+timestamp: 2026-10-23T21:45:44-07:00
 openwiki:
   roles: [operations, architecture, delivery]
   change_kinds: [infrastructure, deployment, monitoring, identity]
@@ -19,6 +19,8 @@ openwiki:
     - infra/lambda
     - infra/gcp
     - infra/terraform/stateful
+    - infra/terraform/state-bootstrap
+    - .github/workflows/terraform.yml
     - infra/src/ops/ses-production-access.ts
     - infra/src/ops/ses-verification.ts
     - infra/src/ops/ses-common.ts
@@ -33,6 +35,7 @@ openwiki:
     - infra/test/bootstrap-deployment-runtime.test.ts
     - infra/test/source-revision.test.ts
     - infra/terraform/stateful/tests/partner_user_pool.tftest.hcl
+    - infra/terraform/state-bootstrap/tests/bootstrap.tftest.hcl
     - infra/test/ses-operations.test.ts
   invariants:
     - The CDK stack is deployed only by a human's direct cdk deploy from a locally authenticated, short-lived AWS session; no workflow deploys CDK, CloudFormation, App Runner, or a container image.
@@ -90,7 +93,7 @@ Caption: promotion is gated on bootstrap success (`bootstrap-deployment` Lambda 
 
 - **Two deployment paths, one per tool** (psd-dev-standards 08, recorded in [AGENTS.md](../../AGENTS.md) §5–6 and [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) "Direct CDK deployment boundary"):
   - **CDK** deploys only when a human runs `infra/package.json` `deploy` from a locally authenticated, short-lived AWS session. No workflow deploys the stack. Agents prepare the pinned worktree and `cdk diff`, then hand the command to a human.
-  - **Terraform** applies only from CI, after a pull request shows the plan and the GitHub `production` environment approval gates the apply. The OIDC role is pinned to that environment, and nobody applies Terraform from a laptop. This pipeline is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md) and is not built, so no Terraform root is applied today.
+  - **Terraform** applies only from CI: the plan job runs on `main`, and a reviewer approves the apply in the GitHub `production` environment, which is the only job the apply OIDC role trusts. Nobody applies Terraform from a laptop, except the one-time `state-bootstrap` apply. The code is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md) and is built, but no Terraform root is applied today. The pipeline and its roles are documented in [Terraform state bootstrap and CI](terraform-ci-pipeline.md).
 - `infra/package.json` `deploy` sets `PSD_EOC_ENFORCE_DEPLOYMENT_TARGET=true`; `readDeploymentTarget` (`infra/src/stack/config.ts`) verifies account, region and origin; `source-revision.ts` embeds the exact commit and refuses dirty trees. There is **no** build/push/migrate/promote command. `.github/workflows` only verifies and synthesizes, and it does not deploy the stack.
 - Rollback and bootstrap images are deliberately separate (`docs/learnings/workflow/2026-08-22-separate-rollback-and-bootstrap-images.md`); rollback procedure: `docs/runbooks/rollback.md`, release: `docs/runbooks/release.md`.
 - Tenant context: committed `infra/cdk.json` (feature flags, threats, synthetic groups) plus git-ignored `infra/cdk.local.json` (shape `cdk.local.example.json`); `tenant-context.ts` `readTenantContext` merges them. `bin/synthesize-example.ts` builds a second reserved district to prove portability without credentials.
@@ -119,7 +122,7 @@ Terraform defines the Google project/APIs, the read-only Groups reader service a
 
 ## Partner first-responder directory (Terraform stateful root)
 
-Non-district first responders (fire districts, police departments) are not in the district's Google directory, so they cannot be admitted through staff sign-in without weakening the staff boundary ([identity and access](../domain/identity-and-access.md)). Their identities live in a separate Amazon Cognito user pool, defined in the first AWS Terraform root, `infra/terraform/stateful` ([its README](../../infra/terraform/stateful/README.md)). Under psd-dev-standards 08 this root applies only from CI, behind the GitHub `production` environment approval; that pipeline is phase 1 of the [migration plan](#proposed-terraform-migration-not-started) and is not built, so the root is not applied yet. `scripts/verify-terraform.ts` (`bun run verify:terraform`) checks it credential-free.
+Non-district first responders (fire districts, police departments) are not in the district's Google directory, so they cannot be admitted through staff sign-in without weakening the staff boundary ([identity and access](../domain/identity-and-access.md)). Their identities live in a separate Amazon Cognito user pool, defined in the first AWS Terraform root, `infra/terraform/stateful` ([its README](../../infra/terraform/stateful/README.md)). Under psd-dev-standards 08 this root applies only from CI, behind the GitHub `production` environment approval. The pipeline is built ([Terraform state bootstrap and CI](terraform-ci-pipeline.md)), but the root has not been applied, and its roles and state bucket come from the `state-bootstrap` root described in the same page. `scripts/verify-terraform.ts` (`bun run verify:terraform`) checks it credential-free.
 
 What the root declares (`main.tf`):
 
@@ -198,9 +201,9 @@ Change navigation:
 - Guard: `scripts/verify-documentation.test.ts` (`forbids workflows that deploy the CDK stack or its images`) fails if a workflow deploys CDK, CloudFormation, App Runner, or an image, and it fails if source documents restate the pre-standard "no GitHub deployment environment or OIDC role" rule.
 - Documentation drift: the stateful README states the handoff as one contract with the stack, so keep [configuration and readiness](configuration-and-readiness.md) and this section consistent with it.
 
-## Proposed Terraform migration (not started)
+## Terraform migration plan (phase 1 built, not applied)
 
-`docs/terraform-migration-plan.md` is a proposal, status "no phase has started", with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. Only the `stateful/` root exists, and it holds just the partner pool described [above](#partner-first-responder-directory-terraform-stateful-root); the `app/`, `scripts/`, and `state-bootstrap/` roots from the plan do not exist. The CDK code and the deploy model above remain the source of truth for everything else. Do not implement any phase from this page; read the plan itself first.
+`docs/terraform-migration-plan.md` is a proposal with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. Phase 1 (scaffolding and CI) is built: the `state-bootstrap/` root and the `stateful/` root, plus the Terraform workflow, described in [Terraform state bootstrap and CI](terraform-ci-pipeline.md). Nothing has been applied, and no later phase has started. The `stateful/` root holds just the partner pool described [above](#partner-first-responder-directory-terraform-stateful-root); the `app/` and `scripts/` roots from the plan do not exist. The CDK code and the deploy model above remain the source of truth for everything else. Do not implement any phase from this page; read the plan itself first.
 
 Key decisions the plan records:
 
@@ -223,7 +226,7 @@ Caption: phase order from the plan. Phase 4 is the irreversible step (after it, 
 Change navigation for this proposal:
 
 - Consult the plan's Phases and Risks sections before any infra change that might collide with migration (the plan asks to freeze CDK infrastructure changes between phase 2 and phase 4).
-- Current validation: `bun run --cwd infra typecheck` and `bun run --cwd infra synth:example` for CDK, plus `bun run verify:terraform` (`terraform fmt -check`, `validate`, and mocked `terraform test` for each AWS root, run inside `bun run check`). `tflint` and the planned `terraform.yml` workflow do not exist yet.
+- Current validation: `bun run --cwd infra typecheck` and `bun run --cwd infra synth:example` for CDK, plus `bun run verify:terraform` (`terraform fmt -check`, `validate`, and mocked `terraform test` for each AWS root, run inside `bun run check`). `tflint` does not exist yet. The Terraform workflow (`.github/workflows/terraform.yml`) exists and is described in [Terraform state bootstrap and CI](terraform-ci-pipeline.md).
 - Related docs the plan says will need updates in phase 5: `docs/CONFIGURATION.md`, `infra/README.md`, the runbooks that name `cdk deploy`, and the readiness register ([configuration and readiness](configuration-and-readiness.md)).
 
 ## Change recipes
@@ -235,4 +238,5 @@ Change navigation for this proposal:
 - **Partner email change (identity, From address, sending account, configuration set):** change `variables.tf` validations and `main.tf` `email_configuration` together, keep the mocked `partner_pool_plan` assertions in step, then run `bun run verify:terraform`. Do not relax the verified-identity `precondition`; it is the guard that keeps a plan from creating a pool that cannot send codes. The configuration set, topic, key and event destination live in `ses_region` through `provider = aws.ses`; a resource added without that provider lands in `aws_region`, where the identity may not exist. Never point the pool at `psd-eoc-transactional`.
 - **Partner account mail set or event routing change:** `SES_PARTNER_*` in `infra/src/config.ts`, the `PartnerEmailConfigurationSet*`, `PartnerEmailEventsTopic` and `SendOnlyPartnerAccountEmail` wiring in `infra/src/stack/psd-eoc-stack.ts`, and `partnerEmailEventsTopic` in `infra/src/monitoring.ts`. Also check the runtime read in `resolvePartnerProviders` (`packages/server/lib/partners/providers.ts`), which must keep returning null without the set. Run `bun test infra/test/stack/psd-eoc-stack.test.ts` and `bun test packages/server/lib/partners/providers.test.ts`. A stack change that moves or renames the set also needs the matching `configurationSetFailures` scope reviewed in the readiness check below, because that check reads only `psd-eoc-transactional`.
 - **SES readiness check change:** `infra/src/ops/ses-common.ts` (the AWS reads and the `SES_*` constants) and `infra/src/ops/ses-verification.ts` (the failure messages, the gates, and `CHECKED_CONFIGURATION_SET_NAMES`, which decides which sets are read). A newly named set must be added to that list and to the stack, or the check reads a set the stack does not create. Both `--check` and the test-send path share `readSourceReadiness`, so a new check reaches both. Run `bun test infra/test/ses-operations.test.ts`; its blocker tables (`sourceBlockers`, `configurationSetBlockers`) and the MAIL FROM tests pin each failure message.
+- **Terraform CI or bootstrap change** (roles, boundary, state bucket, workflow, or the helper scripts): change the `state-bootstrap` file that owns the rule (`roles.tf`, `boundary.tf`, `permissions.tf`, `state.tf`) or the workflow job, keep `tests/bootstrap.tftest.hcl` in step, then run `bun run verify:terraform`. A change to what the apply role may do must match what `stateful/` creates in the same pull request. The workflow itself has no local test; it runs only on `main` with the `production` approval, so never validate it by applying. Details and the test-run names are in [Terraform state bootstrap and CI](terraform-ci-pipeline.md#change-navigation).
 - **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
