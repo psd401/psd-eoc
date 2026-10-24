@@ -103,7 +103,7 @@ Structural guard tests worth knowing: `capabilities/execution-boundary.test.ts` 
 | Mobile logic | `bun test packages/mobile/src/<area>`; native screens `bun run --cwd packages/mobile test:native -- --testPathPattern <name>` | behavior change → both `bun packages/mobile/e2e/run.ts ios` and `android` |
 | Infra | `bun test infra/test/<file>`; `bun run --cwd infra synth:example` | whole stack asserts → `bun test infra/test/stack` |
 | AWS Terraform (`infra/terraform/**`) | `bun run verify:terraform` | the stack's partner parameters or secret path change → also `bun test infra/test/stack/psd-eoc-stack.test.ts` |
-| SES readiness check (`infra/src/ops/ses-*.ts`) | `bun test infra/test/ses-operations.test.ts` (fake SES API; no credentials, no send) | the stack's SES configuration set or event types change → also `bun test infra/test/stack/psd-eoc-stack.test.ts` |
+| SES readiness check (`infra/src/ops/ses-*.ts`) | `bun test infra/test/ses-operations.test.ts` (fake SES API; no credentials, no send) | the stack's SES configuration set or event types change → also `bun test infra/test/stack/psd-eoc-stack.test.ts`; a partner-set change is covered by the `reports a partner set that is missing or unwatched` case in the same file |
 | Docs | `bun run verify:docs` | — |
 | Formatting | `bun run format:check` (or `bun run format` to fix) | — |
 
