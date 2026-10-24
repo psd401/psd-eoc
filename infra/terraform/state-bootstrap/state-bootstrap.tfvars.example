@@ -1,0 +1,9 @@
+# Copy outside the repository and replace every placeholder.
+aws_account_id        = "123456789012"
+aws_region            = "us-east-2"
+ses_region            = "us-east-1"
+environment           = "production"
+owner                 = "technology@example.invalid"
+source_repository_url = "https://code.example.invalid/example/eoc"
+github_subject_prefix = "repo:example@1234567/eoc@7654321"
+break_glass_role_arns = ["arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_Administrator_0123456789abcdef"]

@@ -1,6 +1,6 @@
 # AWS CDK to Terraform migration plan
 
-**Status:** proposal with every open question answered on 2026-10-23. No phase has started. No infrastructure change or deploy is part
+**Status:** proposal with every open question answered on 2026-10-23. Phase 1's code exists ([state-bootstrap](../infra/terraform/state-bootstrap/README.md) and [the Terraform workflow](../.github/workflows/terraform.yml)) and has not been applied; no later phase has started. No infrastructure change or deploy is part
 of this document. Every phase below needs the product owner's approval before
 it starts.
 
@@ -270,6 +270,14 @@ off.
   `main`, apply the saved plan in the `production` environment with required
   approval and `concurrency` per state. Checkov and conftest join when the
   shared `iac-checks` workflow exists.
+- **As built (2026-10-23): no pull-request plan with credentials.** The
+  stateful state holds the partner app-client secret, and a pull request can
+  rewrite the workflow it runs, so a plan role a pull request could assume
+  would expose that secret to any branch. The plan role trusts only `main`;
+  pull requests get the credential-free `verify:terraform` checks, and the
+  reviewer reads the `main` run's plan before approving its apply. The plan
+  summary lists addresses and actions only, because the repository is
+  public. This departs from 08 PR flow 2 (plan as a pull-request comment).
 - Exit: `bun run check` passes; the Cognito pool's PR plans in CI and applies
   on merge.
 

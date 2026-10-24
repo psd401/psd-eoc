@@ -16,7 +16,10 @@ import { resolve } from 'node:path';
 const repositoryRoot = resolve(import.meta.dir, '..');
 
 /** Every AWS Terraform root, relative to the repository. */
-const AWS_TERRAFORM_ROOTS = ['infra/terraform/stateful'] as const;
+const AWS_TERRAFORM_ROOTS = [
+  'infra/terraform/state-bootstrap',
+  'infra/terraform/stateful',
+] as const;
 
 /** A root's pinned Terraform line, e.g. `1.16` for `~> 1.16.0`. */
 interface TerraformLine {

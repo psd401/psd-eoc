@@ -41,11 +41,12 @@ terraform plan -var-file=/protected/path/stateful.tfvars
 
 Copy `backend.hcl.example` and `stateful.tfvars.example` outside the repository
 first and replace every placeholder. Under psd-dev-standards 08 this root
-applies only from CI: the pull request shows the plan, the `production`
-environment approval gates the apply, and an OIDC role pinned to that
-environment runs it. Nobody applies it locally. That pipeline is phase 1 of
-the [migration plan](../../../docs/terraform-migration-plan.md) and is not
-built, so the root is not applied.
+applies only from CI: the merged change is planned on `main`, the
+`production` environment approval gates the apply, and an OIDC role pinned to that
+environment runs it. Nobody applies it locally. That pipeline is the
+[Terraform workflow](../../../.github/workflows/terraform.yml), and its roles,
+state bucket and key come from [state-bootstrap](../state-bootstrap/README.md),
+which a person applies once before this root's first apply.
 
 The credential-free plan — what `bun run verify:terraform` and CI run — needs
 no backend and no AWS credential at all:
