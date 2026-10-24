@@ -187,18 +187,31 @@ function directoryFailure(error: unknown): PartnerProviderError {
   );
 }
 
-/** SES, at the dependency boundary, sending the same branded shell as alerts. */
+/**
+ * SES, at the dependency boundary, sending the same branded shell as alerts.
+ *
+ * Every send names the partner configuration set. A send without one falls to
+ * the shared identity's default set, which this deployment does not own and
+ * whose bounces reach no one (psd-dev-standards 17 rule 7), so there is no way
+ * to construct a mailer without it.
+ */
 export class SesPartnerMailer implements PartnerMailer {
   public constructor(
     private readonly configuration: Readonly<{
       fromEmailAddress: string;
-      configurationSetName: string | null;
+      configurationSetName: string;
       branding: EmailBranding;
     }>,
     private readonly client: Pick<SESv2Client, 'send'> = new SESv2Client({
       maxAttempts: 1,
     }),
-  ) {}
+  ) {
+    if (configuration.configurationSetName.trim().length === 0) {
+      throw new TypeError(
+        'Partner account mail requires an SES configuration set.',
+      );
+    }
+  }
 
   public async send(message: PartnerMailMessage): Promise<void> {
     const content = buildAccountEmailContent(
@@ -237,11 +250,7 @@ export class SesPartnerMailer implements PartnerMailer {
               })),
             },
           },
-          ...(this.configuration.configurationSetName === null
-            ? {}
-            : {
-                ConfigurationSetName: this.configuration.configurationSetName,
-              }),
+          ConfigurationSetName: this.configuration.configurationSetName,
           EmailTags: [{ Name: 'psd-eoc-message', Value: 'partner-account' }],
         }),
       );
@@ -278,7 +287,9 @@ export function syntheticPartnerProviders(): PartnerProviders {
 /**
  * The partner providers this deployment is configured for, or null when
  * partner access is off (the pool parameters read `UNCONFIGURED`). Real
- * providers also need the SES sender the email worker uses.
+ * providers also need the SES sender the email worker uses and the partner
+ * configuration set; without either, partner access stays off rather than
+ * sending mail whose bounces no one sees.
  */
 export function resolvePartnerProviders(
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -298,20 +309,24 @@ export function resolvePartnerProviders(
   if (fromEmailAddress === undefined || fromEmailAddress.length === 0) {
     return null;
   }
+  const configurationSetName = environment.PSD_EOC_SES_CONFIGURATION_SET_NAME;
+  if (
+    configurationSetName === undefined ||
+    configurationSetName.trim().length === 0
+  ) {
+    return null;
+  }
   const branding = parseEmailBranding({
     organizationName: organizationName(environment),
     applicationOrigin: applicationOrigin(environment),
     senderDisplayName: environment.PSD_EOC_SES_FROM_DISPLAY_NAME ?? null,
   });
-  const configurationSetName =
-    environment.PSD_EOC_SES_CONFIGURATION_SET_NAME ?? null;
   return Object.freeze({
     mode: 'aws' as const,
     directory: new CognitoPartnerDirectory(userPoolId),
     mailer: new SesPartnerMailer({
       fromEmailAddress,
-      configurationSetName:
-        configurationSetName === '' ? null : configurationSetName,
+      configurationSetName,
       branding,
     }),
   });

@@ -150,6 +150,26 @@ describe('the SES partner mailer', () => {
       'Account notice from Synthetic Example School District',
     );
   });
+
+  test('cannot be built without a configuration set', () => {
+    for (const configurationSetName of ['', '   ']) {
+      expect(
+        () =>
+          new SesPartnerMailer(
+            {
+              fromEmailAddress: 'eoc@district.example.invalid',
+              configurationSetName,
+              branding: {
+                organizationName: 'Synthetic Example School District',
+                applicationOrigin: 'https://eoc.example.invalid',
+                senderDisplayName: null,
+              },
+            },
+            recordingClient(() => ({})).client,
+          ),
+      ).toThrow(TypeError);
+    }
+  });
 });
 
 describe('partner provider configuration', () => {
@@ -157,6 +177,7 @@ describe('partner provider configuration', () => {
     PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
     GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
     PSD_EOC_SES_FROM_ADDRESS: 'eoc@district.example.invalid',
+    PSD_EOC_SES_CONFIGURATION_SET_NAME: 'synthetic-partner-set',
   };
 
   test('is off when the pool is unconfigured or absent', () => {
@@ -188,5 +209,27 @@ describe('partner provider configuration', () => {
         PSD_EOC_PARTNER_USER_POOL_ID: POOL,
       }),
     ).toBeNull();
+  });
+
+  // Without its own set, partner mail would fall to the shared identity's
+  // default set, whose bounces reach no one (psd-dev-standards 17 rule 7).
+  test('stays off for a real pool with no configuration set', () => {
+    for (const PSD_EOC_SES_CONFIGURATION_SET_NAME of [undefined, '', ' ']) {
+      expect(
+        resolvePartnerProviders({
+          ...base,
+          PSD_EOC_SES_CONFIGURATION_SET_NAME,
+          PSD_EOC_PARTNER_USER_POOL_ID: POOL,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  test('builds the SES mailer for a real pool with a configuration set', () => {
+    const providers = resolvePartnerProviders({
+      ...base,
+      PSD_EOC_PARTNER_USER_POOL_ID: POOL,
+    });
+    expect(providers?.mailer).toBeInstanceOf(SesPartnerMailer);
   });
 });
