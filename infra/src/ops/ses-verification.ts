@@ -2,6 +2,7 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_IDENTITY_DOMAIN,
   SES_MAIL_FROM_DOMAIN,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
   SES_REQUIRED_EVENT_TYPES,
   SES_TEST_FROM_ADDRESS,
   TARGET_ACCOUNT_ID,
@@ -170,21 +171,27 @@ function sourceIdentityFailures(identity: SesEmailIdentitySnapshot): string[] {
   return failures;
 }
 
-// The set alert mail names explicitly (the email worker and --send-test). A
+// The sets psd-eoc names explicitly: the alert set (the email worker and
+// --send-test) and the partner set (the server's partner-account mail). A
 // missing set fails those sends, and a set without a bounce and complaint
-// destination leaves them unwatched (standard 17 rules 7 and 8). This gate
-// covers alert mail only: the server's partner-account mail and the alarm
-// mailer still send without a set, so they use the identity owner's default
-// and nothing here checks them.
-function configurationSetFailures(set: SesConfigurationSetSnapshot): string[] {
+// destination leaves them unwatched (standard 17 rules 7 and 8). The alarm
+// mailer still sends without a set, so it uses the identity owner's default
+// and nothing here checks it.
+const CHECKED_CONFIGURATION_SET_NAMES = [
+  SES_CONFIGURATION_SET_NAME,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
+] as const;
+
+function configurationSetFailures(
+  name: string,
+  set: SesConfigurationSetSnapshot,
+): string[] {
   if (!set.exists) {
-    return [`configuration set ${SES_CONFIGURATION_SET_NAME} does not exist`];
+    return [`configuration set ${name} does not exist`];
   }
   const failures: string[] = [];
   if (set.sendingEnabled !== true) {
-    failures.push(
-      `configuration set ${SES_CONFIGURATION_SET_NAME} sending is not enabled`,
-    );
+    failures.push(`configuration set ${name} sending is not enabled`);
   }
   const published = new Set(
     set.eventDestinations
@@ -196,13 +203,11 @@ function configurationSetFailures(set: SesConfigurationSetSnapshot): string[] {
   );
   if (missing.length > 0) {
     failures.push(
-      `configuration set ${SES_CONFIGURATION_SET_NAME} has no enabled event destination for ${missing.join(', ')}`,
+      `configuration set ${name} has no enabled event destination for ${missing.join(', ')}`,
     );
   }
   if (set.suppressedReasons?.length === 0) {
-    failures.push(
-      `configuration set ${SES_CONFIGURATION_SET_NAME} turns suppression off`,
-    );
+    failures.push(`configuration set ${name} turns suppression off`);
   }
   return failures;
 }
@@ -210,11 +215,13 @@ function configurationSetFailures(set: SesConfigurationSetSnapshot): string[] {
 function assertSourceReady(
   account: SesAccountSnapshot,
   identity: SesEmailIdentitySnapshot,
-  configurationSet: SesConfigurationSetSnapshot,
+  configurationSets: ReadonlyMap<string, SesConfigurationSetSnapshot>,
 ): void {
   const failures = [
     ...sourceIdentityFailures(identity),
-    ...configurationSetFailures(configurationSet),
+    ...[...configurationSets].flatMap(([name, set]) =>
+      configurationSetFailures(name, set),
+    ),
   ];
   if (account.sendingEnabled !== true) {
     failures.unshift('account sending is not enabled');
@@ -242,10 +249,11 @@ async function readSourceReadiness(api: SesOperationsApi): Promise<{
 }> {
   const account = await api.getAccount();
   const identity = await api.getEmailIdentity(SES_IDENTITY_DOMAIN);
-  const configurationSet = await api.getConfigurationSet(
-    SES_CONFIGURATION_SET_NAME,
-  );
-  assertSourceReady(account, identity, configurationSet);
+  const configurationSets = new Map<string, SesConfigurationSetSnapshot>();
+  for (const name of CHECKED_CONFIGURATION_SET_NAMES) {
+    configurationSets.set(name, await api.getConfigurationSet(name));
+  }
+  assertSourceReady(account, identity, configurationSets);
   return { account, identity };
 }
 
@@ -284,7 +292,7 @@ export async function runVerification(
 
   if (options.mode === 'check') {
     runtime.stdout(
-      `SES readiness check passed for ${SES_IDENTITY_DOMAIN} and configuration set ${SES_CONFIGURATION_SET_NAME}; productionAccessEnabled=${String(account.productionAccessEnabled ?? 'unknown')}.`,
+      `SES readiness check passed for ${SES_IDENTITY_DOMAIN} and configuration sets ${CHECKED_CONFIGURATION_SET_NAMES.join(', ')}; productionAccessEnabled=${String(account.productionAccessEnabled ?? 'unknown')}.`,
     );
     runtime.stdout('No email was sent.');
     return;

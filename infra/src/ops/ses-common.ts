@@ -1,14 +1,17 @@
 import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
 
-import { SES_CONFIGURATION_SET_NAME } from '../config';
+import {
+  SES_CONFIGURATION_SET_NAME,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
+} from '../config';
 import {
   tenantAwsAccount,
   tenantAwsRegion,
   tenantString,
 } from '../tenant-context';
 
-export { SES_CONFIGURATION_SET_NAME };
+export { SES_CONFIGURATION_SET_NAME, SES_PARTNER_CONFIGURATION_SET_NAME };
 /** From cdk.local.json; the reserved unconfigured account refuses every call. */
 export const TARGET_ACCOUNT_ID = tenantAwsAccount();
 export const TARGET_REGION = tenantAwsRegion();
