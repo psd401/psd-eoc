@@ -3,7 +3,7 @@ type: Domain Concept
 title: "Partner access: admissions, provider sync, and expiry sweep"
 description: "How non-district first responders are admitted, refused, renewed, disabled, and expired through append-only partner admissions, a separate partner identity provider, the Access page, and the daily partner-access sweep."
 tags: [partner-access, identity, admissions, expiry, cognito, ses]
-timestamp: 2026-10-23T18:15:18-07:00
+timestamp: 2026-10-23T20:32:53-07:00
 openwiki:
   roles: [domain, operations]
   change_kinds: [identity, lifecycle, persistence, scheduled-job]
@@ -17,6 +17,7 @@ openwiki:
     - packages/server/app/(admin)/access/partner-capabilities.ts
     - packages/server/app/(admin)/access/api/route.ts
     - packages/server/scripts/operations/sweep-partner-access.ts
+    - infra/src/config.ts
   symbols: [PartnerAdmissionSchema, partnerAdmissionStatus, decidePartnerAccess, invitePartner, disablePartner, reconcilePartnerAccess, projectPartnerAccess, runPartnerAccessSweep, resolvePartnerProviders]
   test_paths:
     - packages/contracts/src/partner-admission.test.ts
@@ -26,11 +27,13 @@ openwiki:
     - packages/server/app/(admin)/access/partner-capabilities.database.test.ts
     - packages/server/app/(admin)/access/access-admin-view.test.tsx
     - packages/server/scripts/operations/sweep-partner-access.test.ts
+    - infra/test/stack/psd-eoc-stack.test.ts
   invariants:
     - A partner holds the partner role alone and is admitted only by a current partner admission, never by a Google group.
     - Partner admissions and their endings are append-only; expiry is exactly one year after admission.
     - At most one unended admission exists per address.
     - The sweep never disables a partner for inactivity.
+    - Partner mail is sent only with the partner configuration set, never the alert set; partner access stays off when that set name is missing.
   validation_commands:
     - bun test packages/contracts/src/partner-admission.test.ts packages/server/lib/partners/providers.test.ts packages/server/scripts/operations/sweep-partner-access.test.ts
 ---
@@ -104,7 +107,7 @@ Re-inviting an ended partner calls `invitePartner` with no replacement id. That 
 - `providerPendingStep`: `enable` when an active admission has no confirmed `enabled` sync; `disable` when an ended admission has no confirmed `disabled` sync and no other active admission uses the same address; null when the provider matches.
 - `invitationSentAt` and `lastSignInAt`. A sign-in is the newest server session for that non-Google identity.
 
-The provider stub used in tests is `syntheticPartnerProviders`, selected only by the synthetic pool id `SYNTHETIC`, which a deployed stack cannot carry (`resolvePartnerProviders` in `packages/server/lib/partners/providers.ts`). With the pool unconfigured (`UNCONFIGURED` or absent), `resolvePartnerProviders` returns null, the Access page omits partner controls, and the invite route refuses before writing.
+The provider stub used in tests is `syntheticPartnerProviders`, selected only by the synthetic pool id `SYNTHETIC`, which a deployed stack cannot carry (`resolvePartnerProviders` in `packages/server/lib/partners/providers.ts`). With the pool unconfigured (`UNCONFIGURED` or absent), `resolvePartnerProviders` returns null, the Access page omits partner controls, and the invite route refuses before writing. A real pool with no `PSD_EOC_SES_FROM_ADDRESS` or no `PSD_EOC_SES_CONFIGURATION_SET_NAME` also returns null, so partner access stays off rather than sending mail whose bounces no one sees.
 
 ## Sessions and access decisions
 
@@ -125,7 +128,19 @@ The script exits with status 1 when any provider change or notice is still pendi
 
 ## Partner mail
 
-Partner mail is the one provider email the web runtime sends itself. `SesPartnerMailer` (`packages/server/lib/partners/providers.ts`) builds the body with `buildAccountEmailContent` from `workers/email/email-message.ts`, which uses the alert email's branded shell but no real/drill banner. It calls SES with `FromAddress` from `PSD_EOC_SES_FROM_ADDRESS` and the `partner-account` email tag. The stack does not set a configuration set for these tasks (`PSD_EOC_SES_CONFIGURATION_SET_NAME` is never set), so partner mail never enters alert delivery evidence. Replies go to the administrator access group addresses (`administratorGroupAddresses`). Alerts still reach people only through the [channel workers](../integrations/channel-workers.md).
+Partner mail is the one provider email the web runtime sends itself. `SesPartnerMailer` (`packages/server/lib/partners/providers.ts`) builds the body with `buildAccountEmailContent` from `workers/email/email-message.ts`, which uses the alert email's branded shell but no real/drill banner. It calls SES with `FromAddress` from `PSD_EOC_SES_FROM_ADDRESS`, `ConfigurationSetName` from `PSD_EOC_SES_CONFIGURATION_SET_NAME`, and the `partner-account` email tag. The mailer's constructor throws on a blank set name, and `resolvePartnerProviders` keeps partner access off when either variable is missing, so partner mail is never sent without its own set.
+
+The stack defines that set, `psd-eoc-production-partner` (`SES_PARTNER_CONFIGURATION_SET_NAME` in `infra/src/config.ts`), and gives both the web task and the sweep task a reference to it, which also orders each task after the set. The set is never the alert set, so partner mail never enters alert delivery evidence. Its bounce, complaint and reject events go to an SNS topic that the [alarm mailer](../operations/infrastructure.md#partner-account-mail-configuration-set) forwards to the operations mailbox as raw event JSON. No code consumes those events and no suppression is recorded from them; SES account-level suppression still applies. Replies go to the administrator access group addresses (`administratorGroupAddresses`). Alerts still reach people only through the [channel workers](../integrations/channel-workers.md).
+
+```mermaid
+flowchart LR
+  Web["Web task and sweep task (SES SendEmail)"] -->|"FromAddress, ConfigurationSetName psd-eoc-production-partner"| Set["SES set psd-eoc-production-partner"]
+  Set -->|"owner-alert: BOUNCE, COMPLAINT, REJECT"| Topic["SNS PartnerEmailEventsTopic"]
+  Topic -->|"Lambda subscription"| Mailer["alarm-mailer Lambda"]
+  Mailer -->|"SES email with raw event JSON"| Ops["operations mailbox"]
+```
+
+Caption: partner mail's events reach a person through the same mailer that carries alarms, and no code reads them.
 
 Cognito's own email, the one-time-password codes it sends to a partner's address, is a different path. The partner pool sends it through the district SES identity and names its own `psd-eoc-<environment>-cognito` configuration set, never the alert set. That set's bounce, complaint and reject events go by SNS email to the owner group and are read by a person, not by the alert callback. The Terraform side is in [infrastructure](../operations/infrastructure.md#configuration-set-for-cognito-mail).
 
@@ -137,7 +152,8 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 ## Change navigation
 
 - **Where to start:** the admission rules in `packages/contracts/src/partner-admission.ts`, then `packages/server/lib/partners/access.ts` for writes and `packages/server/lib/auth/partner-admission.ts` for the per-request decision.
-- **Invariants to keep:** a partner is never granted through a group (`StaffRoleSchema`, the `group_sources` role check); an admission and its ending are never updated; expiry is computed by the database and checked by `partnerAdmissionExpiresAt`; a sign-in or session never outlives the admission; the sweep only disables provider accounts for ended admissions (its provider loop calls only `reconcilePartnerAccess` on `disable` steps); partner mail uses the deployment sender only.
+- **Invariants to keep:** a partner is never granted through a group (`StaffRoleSchema`, the `group_sources` role check); an admission and its ending are never updated; expiry is computed by the database and checked by `partnerAdmissionExpiresAt`; a sign-in or session never outlives the admission; the sweep only disables provider accounts for ended admissions (its provider loop calls only `reconcilePartnerAccess` on `disable` steps); partner mail uses the deployment sender and the partner configuration set only, never the alert set.
+- **Partner mail change (sender, set, events):** the set name lives in `infra/src/config.ts`, the stack wiring in `infra/src/stack/psd-eoc-stack.ts`, and the runtime read in `resolvePartnerProviders`. Change them together and follow the recipe in [infrastructure](../operations/infrastructure.md#change-recipes).
 - **Provider calls and IAM must match.** `CognitoPartnerDirectory` calls `AdminCreateUser`, `AdminGetUser`, `AdminEnableUser`, `AdminUserGlobalSignOut`, and `AdminDisableUser`. The web task's policy in `infra/src/stack/psd-eoc-stack.ts` grants those five. The sweep task grants only `AdminDisableUser` and `AdminUserGlobalSignOut`, because it never enables an account. Changing a provider call means changing both grants and the stack test.
 - **Adding a partner capability** follows the same surface as any admin mutation: catalog entry in `capability-catalog.ts`, handler in `partner-capabilities.ts`, id in `ADMIN_MUTATION_IDS` (`packages/server/lib/capabilities/admin.ts`), the persisted enum in `db/schema/enums.ts`, and a migration extending `mutation_capability` (migration `0060` shows the pattern). See [capability engine](../architecture/capability-engine.md#change-recipes).
 - **Changing expiry or notice timing** touches three places that must agree: the generated column in migration `0059`, `partnerAdmissionExpiresAt`, and `PARTNER_EXPIRY_NOTICE_DAYS` in `sweep.ts`.
@@ -152,6 +168,8 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 | Invite, re-invite, correction, disable, and pending provider steps | `packages/server/app/(admin)/access/partner-capabilities.database.test.ts` | `an invitation is pending until the provider and the email both confirm`, `a provider failure leaves visible drift that a retry completes`, `a corrected address replaces the admission`, `disable ends the admission, cuts the partner out at once` |
 | Sweep expiry, one notice, retry after failure, quarterly review, append-only | `packages/server/lib/partners/sweep.database.test.ts` | `sends exactly one notice 14 days before expiry`, `a failed notice is retried by the next run`, `sends the review to administrators once per quarter`, `admission rows are only ever appended by the sweep` |
 | Provider adapter: create, re-enable, sign-out before disable, safe errors, pool selection | `packages/server/lib/partners/providers.test.ts` | `re-enables an existing disabled account instead of failing`, `signs the account out everywhere, then disables it`, `is off when the pool is unconfigured or absent` |
+| Partner mail needs its own configuration set | `packages/server/lib/partners/providers.test.ts` (`the SES partner mailer`, `partner provider configuration`) | `cannot be built without a configuration set`, `stays off for a real pool with no configuration set`, `builds the SES mailer for a real pool with a configuration set` |
+| Partner mail names the partner set, never the alert set; event topic watched by the alarm mailer | `infra/test/stack/psd-eoc-stack.test.ts` | `gives partner account mail its own set with a watched bounce destination` (`configured-unverified provider readiness boundary`), and the partner grant assertions in `partner user pool boundary` |
 | Script exits quietly when unconfigured | `packages/server/scripts/operations/sweep-partner-access.test.ts` | `does nothing, and opens no database, when partner access is unconfigured` |
 | Access page controls match state | `packages/server/app/(admin)/access/access-admin-view.test.tsx` | `offers no partner controls when partner access is not configured`, `offers resend, disable and correction only for current admissions` |
 | Infrastructure grants and schedule | `infra/test/stack/psd-eoc-stack.test.ts` | `gives the partner-access sweep only disable, sign-out, and partner mail, gated on the condition`, `confines an unconfigured deployment to the gated grants, the service env, and the disabled sweep` |
@@ -180,6 +198,3 @@ Escalate when a change crosses a boundary: stack or IAM changes add `bun test in
 - Provider readiness and live verification belong in `docs/INTEGRATIONS.md`, not in this page.
 
 Related: [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#how-the-stack-gates-it) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
-cess-optional" does not exist in "../operations/infrastructure.md". Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [../operations/infrastructure.md#partner-access-optional] heading anchor "partner-access-optional" does not exist in "../operations/infrastructure.md". Fix the href or restore the target, then delete this comment. -->
-Related: [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#partner-access-optional) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
