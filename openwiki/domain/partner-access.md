@@ -125,7 +125,9 @@ The script exits with status 1 when any provider change or notice is still pendi
 
 ## Partner mail
 
-Partner mail is the one provider email the web runtime sends itself. `SesPartnerMailer` (`packages/server/lib/partners/providers.ts`) builds the body with `buildAccountEmailContent` from `workers/email/email-message.ts`, which uses the alert email's branded shell but no real/drill banner. It calls SES with `FromAddress` from `PSD_EOC_SES_FROM_ADDRESS` and the `partner-account` email tag. The stack does not set a configuration set for these tasks, so partner mail never enters alert delivery evidence. Replies go to the administrator access group addresses (`administratorGroupAddresses`). Alerts still reach people only through the [channel workers](../integrations/channel-workers.md).
+Partner mail is the one provider email the web runtime sends itself. `SesPartnerMailer` (`packages/server/lib/partners/providers.ts`) builds the body with `buildAccountEmailContent` from `workers/email/email-message.ts`, which uses the alert email's branded shell but no real/drill banner. It calls SES with `FromAddress` from `PSD_EOC_SES_FROM_ADDRESS` and the `partner-account` email tag. The stack does not set a configuration set for these tasks (`PSD_EOC_SES_CONFIGURATION_SET_NAME` is never set), so partner mail never enters alert delivery evidence. Replies go to the administrator access group addresses (`administratorGroupAddresses`). Alerts still reach people only through the [channel workers](../integrations/channel-workers.md).
+
+Cognito's own email, the one-time-password codes it sends to a partner's address, is a different path. The partner pool sends it through the district SES identity and names its own `psd-eoc-<environment>-cognito` configuration set, never the alert set. That set's bounce, complaint and reject events go by SNS email to the owner group and are read by a person, not by the alert callback. The Terraform side is in [infrastructure](../operations/infrastructure.md#configuration-set-for-cognito-mail).
 
 ## Known gaps
 
@@ -177,5 +179,7 @@ Escalate when a change crosses a boundary: stack or IAM changes add `bun test in
 - No partner data goes into staff tables, group sources, or staff roles, and no partner email goes through the alert configuration set.
 - Provider readiness and live verification belong in `docs/INTEGRATIONS.md`, not in this page.
 
+Related: [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#how-the-stack-gates-it) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+cess-optional" does not exist in "../operations/infrastructure.md". Fix the href or restore the target, then delete this comment. -->
 <!-- openwiki: broken internal link [../operations/infrastructure.md#partner-access-optional] heading anchor "partner-access-optional" does not exist in "../operations/infrastructure.md". Fix the href or restore the target, then delete this comment. -->
 Related: [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#partner-access-optional) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
