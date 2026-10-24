@@ -3,6 +3,7 @@
 # `-var-file=/protected/path/stateful.tfvars`. Never commit a real tenant file.
 aws_account_id           = "123456789012"
 aws_region               = "us-east-2"
+ses_region               = "us-east-1"
 environment              = "production"
 owner                    = "technology@example.invalid"
 source_repository_url    = "https://code.example.invalid/example/eoc"

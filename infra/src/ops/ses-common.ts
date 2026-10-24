@@ -22,7 +22,23 @@ export const SES_IDENTITY_DOMAIN = tenantString(
   /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
   { fallback: 'unconfigured.invalid' },
 );
-export const SES_MAIL_FROM_DOMAIN = `mail.${SES_IDENTITY_DOMAIN}`;
+/**
+ * psd-dev-standards 17 rule 5: `bounce.<identity domain>`, approved
+ * 2026-10-23. Never `mail.`: a district's `mail.` host is commonly a CNAME
+ * (often to a hosted mail provider), and a CNAME cannot also hold the MX and TXT
+ * records a custom MAIL FROM needs. The identity owner sets it, not psd-eoc
+ * (rule 2); this repository only reads it.
+ */
+export const SES_MAIL_FROM_DOMAIN = `bounce.${SES_IDENTITY_DOMAIN}`;
+/**
+ * The events psd-eoc's own configuration set must publish (standard 17
+ * rule 7). The set's destination publishes more; these are the minimum.
+ */
+export const SES_REQUIRED_EVENT_TYPES = [
+  'BOUNCE',
+  'COMPLAINT',
+  'REJECT',
+] as const;
 export const SES_CLIENT_MAX_ATTEMPTS = 1;
 export const SES_TEST_FROM_ADDRESS = `verification@${SES_IDENTITY_DOMAIN}`;
 /** The district's public website: the origin of its privacy contact page. */
@@ -61,7 +77,6 @@ export interface SesAccountSnapshot {
 }
 
 export interface SesEmailIdentitySnapshot {
-  readonly configurationSetName?: string;
   readonly dkimSigningEnabled?: boolean;
   readonly dkimStatus?: string;
   readonly identityType?: string;
@@ -70,6 +85,22 @@ export interface SesEmailIdentitySnapshot {
   readonly verificationStatus?: string;
   readonly verifiedForSendingStatus?: boolean;
 }
+
+export interface SesEventDestinationSnapshot {
+  readonly enabled: boolean;
+  readonly matchingEventTypes: readonly string[];
+}
+
+/** `exists: false` is SES's NotFoundException, reported rather than thrown. */
+export type SesConfigurationSetSnapshot =
+  | { readonly exists: false }
+  | {
+      readonly eventDestinations: readonly SesEventDestinationSnapshot[];
+      readonly exists: true;
+      readonly sendingEnabled?: boolean;
+      /** Undefined when the set does not override account suppression. */
+      readonly suppressedReasons?: readonly string[];
+    };
 
 export interface ProductionAccessRequest {
   readonly additionalContactEmailAddresses: string[];
@@ -91,6 +122,7 @@ export interface TestEmailRequest {
 export interface SesOperationsApi {
   getAccount(): Promise<SesAccountSnapshot>;
   getCallerIdentity(): Promise<CallerIdentity>;
+  getConfigurationSet(name: string): Promise<SesConfigurationSetSnapshot>;
   getEmailIdentity(identity: string): Promise<SesEmailIdentitySnapshot>;
   putAccountDetails(input: ProductionAccessRequest): Promise<void>;
   sendTestEmail(
@@ -234,14 +266,50 @@ export async function createAwsSesOperationsApi(): Promise<SesOperationsApi> {
       };
     },
 
+    async getConfigurationSet(name) {
+      const read = Promise.all([
+        ses.send(
+          new sesSdk.GetConfigurationSetCommand({
+            ConfigurationSetName: name,
+          }),
+        ),
+        ses.send(
+          new sesSdk.GetConfigurationSetEventDestinationsCommand({
+            ConfigurationSetName: name,
+          }),
+        ),
+      ]);
+      let set: Awaited<typeof read>[0];
+      let destinations: Awaited<typeof read>[1];
+      try {
+        [set, destinations] = await read;
+      } catch (error) {
+        if (error instanceof sesSdk.NotFoundException) {
+          return { exists: false };
+        }
+        throw error;
+      }
+      const suppressedReasons = set.SuppressionOptions?.SuppressedReasons;
+      return {
+        eventDestinations: (destinations.EventDestinations ?? []).map(
+          (destination) => ({
+            enabled: destination.Enabled === true,
+            matchingEventTypes: destination.MatchingEventTypes ?? [],
+          }),
+        ),
+        exists: true,
+        ...(set.SendingOptions?.SendingEnabled === undefined
+          ? {}
+          : { sendingEnabled: set.SendingOptions.SendingEnabled }),
+        ...(suppressedReasons === undefined ? {} : { suppressedReasons }),
+      };
+    },
+
     async getEmailIdentity(identity) {
       const output = await ses.send(
         new sesSdk.GetEmailIdentityCommand({ EmailIdentity: identity }),
       );
       return {
-        ...(output.ConfigurationSetName === undefined
-          ? {}
-          : { configurationSetName: output.ConfigurationSetName }),
         ...(output.DkimAttributes?.SigningEnabled === undefined
           ? {}
           : { dkimSigningEnabled: output.DkimAttributes.SigningEnabled }),

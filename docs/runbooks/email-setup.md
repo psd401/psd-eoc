@@ -7,9 +7,12 @@ region, sender domain, secret references, and deployment inputs come from
 
 ## Boundaries
 
-- The CDK source defines the retained SES identity, DKIM and MAIL FROM records,
-  configuration set, event destination, and fail-closed worker permissions.
-  Source definitions and synthesis are not deployment evidence.
+- The CDK source defines the retained configuration set, event destination,
+  and fail-closed worker permissions. The SES identity, its DKIM records and
+  its MAIL FROM (`bounce.<identity domain>`) belong to the identity's owner,
+  not this repository (psd-dev-standards 17 rule 2): psd-eoc reads them and
+  never sets the identity's default configuration set. Source definitions and
+  synthesis are not deployment evidence.
 - `scripts/ops/ses-production-access.ts` owns bounded production-access
   request handling. `scripts/ops/ses-verification.ts` owns read-only checks and
   the separately guarded synthetic send path.
@@ -22,8 +25,13 @@ region, sender domain, secret references, and deployment inputs come from
 1. Confirm the exact protected account/region, configured sender identity,
    hosted zones, retained resources, current readiness row, and rollback point.
 2. Use read-only inventory first. Verify account sending state, identity,
-   DKIM, MAIL FROM, configuration-set binding, worker permission, and event
-   evidence independently.
+   DKIM, MAIL FROM, the `psd-eoc-transactional` set and its event destination
+   (alert mail names it explicitly), worker permission, and event evidence
+   independently. `ses-verification.ts --check` reports a MAIL FROM the
+   identity owner has not set up yet as not ready. It covers alert mail only:
+   partner-account mail and the alarm mailer still send without a
+   configuration set, so they use the identity owner's default and the check
+   does not see them.
 3. Apply infrastructure only through direct `cdk deploy` as described in
    [CONFIGURATION.md](../CONFIGURATION.md). Do not create parallel identities,
    zones, configuration sets, or manual send permissions.

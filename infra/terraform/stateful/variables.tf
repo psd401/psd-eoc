@@ -22,6 +22,22 @@ variable "aws_region" {
   }
 }
 
+variable "ses_region" {
+  description = <<-EOT
+    The AWS region that holds ses_identity_domain and therefore the partner
+    pool's SES configuration set, topic and key. It may differ from
+    aws_region when Cognito's region table allows that pairing; for example a
+    us-east-2 pool may send through a us-east-1 identity. The account must be
+    out of the SES sandbox in this region.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z]{2}(-gov)?-[a-z]+-[0-9]$", var.ses_region))
+    error_message = "ses_region must be an AWS region identifier such as us-east-1."
+  }
+}
+
 variable "environment" {
   description = "Deployment environment name carried in the psd:environment tag."
   type        = string
@@ -33,7 +49,11 @@ variable "environment" {
 }
 
 variable "owner" {
-  description = "Address of the team accountable for this deployment; the psd:owner tag."
+  description = <<-EOT
+    Address of the team accountable for this deployment: the psd:owner tag and
+    the one email subscriber to partner email bounce, complaint and reject
+    events.
+  EOT
   type        = string
 
   validation {
@@ -68,8 +88,8 @@ variable "passkey_relying_party_id" {
 
 variable "ses_identity_domain" {
   description = <<-EOT
-    The verified SES domain identity, in this account and region, that partner
-    invitations and one-time passwords are sent from. The same domain the
+    The verified SES domain identity, in this account and ses_region, that
+    partner invitations and one-time passwords are sent from. The same domain the
     stack's psdEoc:sesIdentityDomain names.
   EOT
   type        = string
