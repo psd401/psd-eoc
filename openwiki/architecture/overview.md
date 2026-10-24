@@ -28,7 +28,7 @@ Bun workspaces (`package.json`: `packages/*`, `workers`, `infra`, `infra/gcp`, `
 | `packages/mobile` | Expo SDK 57 app for iOS and Android | Business-rule forks, offline real actions | [mobile app](../integrations/mobile-app.md) |
 | `packages/mcp` | MCP adapter (stdio and Streamable HTTP) over the agent REST API | DB/provider access, human-only actions | [agent API and MCP](../integrations/agent-api-and-mcp.md) |
 | `workers` | Email, SMS and push channel workers plus shared at-least-once processing | Activation authority, recipient reconstruction | [channel workers](../integrations/channel-workers.md) |
-| `infra` | AWS CDK stack, Lambdas (`infra/lambda/*`), monitoring, GCP Terraform (`infra/gcp`), AWS Terraform stateful root for the partner responder pool (`infra/terraform/stateful`) | Tenant identity in source | [infrastructure](../operations/infrastructure.md) |
+| `infra` | AWS CDK stack, Lambdas (`infra/lambda/*`), monitoring, GCP Terraform (`infra/gcp`), AWS Terraform roots for the partner responder pool (`infra/terraform/stateful`) and the CI state bootstrap (`infra/terraform/state-bootstrap`), plus the Terraform CI workflow (`.github/workflows/terraform.yml`) | Tenant identity in source | [infrastructure](../operations/infrastructure.md) |
 | `scripts` | Test gate, doc/config verifiers, operator tooling (`scripts/ops`) | Unattended live-provider writes | [verification](../testing/verification-and-testing.md) |
 
 ## Runtime flow in one picture
@@ -61,7 +61,7 @@ Source of truth is `AGENTS.md` (the product owner's session instruction outranks
 - **Deny by default**, server-side, scoped by role (`staff`/`admin`) and facility.
 - **Provider acceptance ≠ delivery ≠ human receipt**; ambiguity stays `unknown`.
 - **Contracts first, one capability layer, no side-door mutation path.**
-- **Deployment follows psd-dev-standards 08**: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval, and that pipeline is not built yet ([infrastructure](../operations/infrastructure.md#deploy-model-and-ordering)).
+- **Deployment follows psd-dev-standards 08**: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval; that pipeline is built but has not run against any account ([infrastructure](../operations/infrastructure.md#deploy-model-and-ordering), [Terraform state bootstrap and CI](../operations/terraform-ci-pipeline.md)).
 - **iOS and Android stay in sync**; verify both (`bun packages/mobile/e2e/run.ts ios|android`).
 - Bun only (`bun install/run/test`), never npm/npx/node.
 
