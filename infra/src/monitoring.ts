@@ -88,6 +88,11 @@ export interface MonitoringProps {
    * knowing; they no longer reach the phone.
    */
   readonly recoveryAlarmTopic: sns.ITopic;
+  /**
+   * Bounces, complaints, and rejections of partner account mail. Mailed to
+   * the operations team like a recovery: worth reading, never a page.
+   */
+  readonly partnerEmailEventsTopic?: sns.ITopic;
   readonly database: rds.DatabaseCluster;
   readonly displayTimeZone: string;
   readonly delivery: QueueWithDeadLetterQueue;
@@ -2015,6 +2020,12 @@ function configureMembershipSyncMonitoring(
   }
 }
 
+function mailOnlyTopics(props: MonitoringProps): readonly sns.ITopic[] {
+  return props.partnerEmailEventsTopic === undefined
+    ? [props.recoveryAlarmTopic]
+    : [props.recoveryAlarmTopic, props.partnerEmailEventsTopic];
+}
+
 export function configureInfrastructureMonitoring(
   scope: Construct,
   props: MonitoringProps,
@@ -2022,7 +2033,7 @@ export function configureInfrastructureMonitoring(
   configureAlarmRecipients(
     scope,
     [props.operationsAlarmTopic, props.criticalAlarmTopic],
-    [props.recoveryAlarmTopic],
+    mailOnlyTopics(props),
     props.sesIdentityDomain,
   );
   allowScopedCloudWatchAlarmPublish(scope, [
@@ -2055,7 +2066,7 @@ export function configureMonitoring(
   configureAlarmRecipients(
     scope,
     [props.operationsAlarmTopic, props.criticalAlarmTopic],
-    [props.recoveryAlarmTopic],
+    mailOnlyTopics(props),
     props.sesIdentityDomain,
   );
   allowScopedCloudWatchAlarmPublish(scope, [

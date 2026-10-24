@@ -40,6 +40,8 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
+  SES_PARTNER_EVENT_TOPIC_NAME,
 } from '../../src/config';
 import { AURORA_MAX_CAPACITY_ACU } from '../../src/monitoring';
 
@@ -828,6 +830,14 @@ describe('partner user pool boundary', () => {
     expect(mail?.Condition).toEqual({
       StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS },
     });
+    // The identity and the partner set, never the alert set: a send without
+    // its own set would fall to the identity's default (standard 17 rule 7).
+    const resources = JSON.stringify(mail?.Resource);
+    expect(resources).toContain(':identity/');
+    expect(resources).toContain(
+      `:configuration-set/${SES_PARTNER_CONFIGURATION_SET_NAME}`,
+    );
+    expect(resources).not.toContain(SES_CONFIGURATION_SET_NAME);
   });
 
   it('scopes the Cognito grant to the named pool and gates it on the condition', () => {
@@ -855,13 +865,19 @@ describe('partner user pool boundary', () => {
     }
     expect(statements).toHaveLength(3);
     // Partner account mail: send only, from the deployment's sender, to the
-    // one identity, never the alert configuration set.
+    // one identity through the partner configuration set, never the alert
+    // configuration set.
     expect(asStringArray(mail.Action)).toEqual(['ses:SendEmail']);
     expect(mail.Condition).toEqual({
       StringEquals: { 'ses:FromAddress': SES_FROM_ADDRESS },
     });
     expect(JSON.stringify(mail.Resource)).toContain(':identity/');
-    expect(JSON.stringify(mail.Resource)).not.toContain('configuration-set');
+    expect(JSON.stringify(mail.Resource)).toContain(
+      `:configuration-set/${SES_PARTNER_CONFIGURATION_SET_NAME}`,
+    );
+    expect(JSON.stringify(mail.Resource)).not.toContain(
+      SES_CONFIGURATION_SET_NAME,
+    );
     expect(asStringArray(cognito.Action).sort()).toEqual([
       'cognito-idp:AdminCreateUser',
       'cognito-idp:AdminDisableUser',
@@ -975,6 +991,22 @@ describe('partner user pool boundary', () => {
     expect(properties(asRecord(resources[sweepSchedule])).State).toEqual({
       'Fn::If': ['ShouldUsePartnerUserPool', 'ENABLED', 'DISABLED'],
     });
+    // The sweep's expiry notices and quarterly review name the partner set.
+    const sweepContainer = asRecord(
+      asArray(
+        properties(asRecord(resources[sweepTask])).ContainerDefinitions,
+      )[0],
+    );
+    const sweepEnvironment = new Map(
+      asArray(sweepContainer.Environment).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.Value];
+      }),
+    );
+    expect(sweepEnvironment.get('PSD_EOC_SES_CONFIGURATION_SET_NAME')).toEqual({
+      // A reference to the partner set, which orders the runtime after it.
+      Ref: expect.stringMatching(/^PartnerEmailConfigurationSet/),
+    });
 
     // No output republishes the pool, the client, or the secret ARN.
     expect(JSON.stringify(synthesized.Outputs)).not.toContain(
@@ -1008,11 +1040,13 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::SecretsManager::Secret', 15);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
-    template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
-    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 1);
-    // Four topics: SES event evidence, the two paging routes, and the
-    // recovery route that carries every alarm's OK transition.
-    template.resourceCountIs('AWS::SNS::Topic', 4);
+    // Two sets: alert mail, and partner account mail.
+    template.resourceCountIs('AWS::SES::ConfigurationSet', 2);
+    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 2);
+    // Five topics: SES event evidence, partner mail bounces and complaints,
+    // the two paging routes, and the recovery route that carries every
+    // alarm's OK transition.
+    template.resourceCountIs('AWS::SNS::Topic', 5);
 
     const repository = properties(onlyResource('AWS::ECR::Repository'));
     expect(repository.RepositoryName).toBe(SERVER_REPOSITORY_NAME);
@@ -1544,6 +1578,8 @@ describe('App Runner runtime safety boundary', () => {
         'PSD_EOC_PRIVACY_CONTACT_URL',
         'PSD_EOC_SMS_SUPPORT_EMAIL',
         'PSD_EOC_SMS_SUPPORT_PHONE',
+        // Partner account mail's own set; see the partner policy tests.
+        'PSD_EOC_SES_CONFIGURATION_SET_NAME',
         'PSD_EOC_SES_FROM_ADDRESS',
         'PSD_EOC_SES_FROM_DISPLAY_NAME',
         'PSD_EOC_SES_SNS_TOPIC_ARN',
@@ -1554,6 +1590,10 @@ describe('App Runner runtime safety boundary', () => {
       ].sort(),
     );
     expect(variables.get('AWS_REGION')).toBe(AWS_REGION);
+    expect(variables.get('PSD_EOC_SES_CONFIGURATION_SET_NAME')).toEqual({
+      // A reference to the partner set, which orders the runtime after it.
+      Ref: expect.stringMatching(/^PartnerEmailConfigurationSet/),
+    });
     expect(variables.get('DATABASE_DRIVER')).toBe('postgres');
     expect(variables.get('DATABASE_HOST')).toEqual({
       'Fn::GetAtt': ['DatabaseB269D8BB', 'Endpoint.Address'],
@@ -3522,9 +3562,10 @@ describe('configured-unverified provider readiness boundary', () => {
       resourceEntries('AWS::SNS::Subscription')
         .map(([, resource]) => String(properties(resource).Protocol))
         .sort(),
-      // Three mailer subscriptions and two SMS ones: the recovery topic mails
-      // but never texts, so a recovery cannot page anybody.
-    ).toEqual(['lambda', 'lambda', 'lambda', 'sms', 'sms', 'sqs']);
+      // Four mailer subscriptions and two SMS ones: the recovery topic and
+      // the partner mail bounce topic mail but never text, so neither can page
+      // anybody.
+    ).toEqual(['lambda', 'lambda', 'lambda', 'lambda', 'sms', 'sms', 'sqs']);
     expect(
       Object.values(resources)
         .map((resource) => String(asRecord(resource).Type))
@@ -3579,8 +3620,99 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedTemplate).not.toContain('controlled-recipient');
   });
 
+  // psd-dev-standards 17 rule 7: partner account mail names its own set,
+  // whose bounces, complaints, and rejections reach a person.
+  it('gives partner account mail its own set with a watched bounce destination', () => {
+    const setResource = resourceEntries('AWS::SES::ConfigurationSet').find(
+      ([, resource]) =>
+        properties(resource).Name === SES_PARTNER_CONFIGURATION_SET_NAME,
+    );
+    if (setResource === undefined) {
+      throw new Error('Missing the partner configuration set.');
+    }
+    const [setLogicalId, set] = setResource;
+    expect(set.DeletionPolicy).toBe('Retain');
+    expect(properties(set).SendingOptions).toEqual({ SendingEnabled: true });
+    // Suppression is never turned off (standard 17 rule 8).
+    expect(properties(set).SuppressionOptions).toBeUndefined();
+
+    const destination = resourceEntries(
+      'AWS::SES::ConfigurationSetEventDestination',
+    )
+      .map(([, resource]) => properties(resource))
+      .find(
+        (candidate) =>
+          JSON.stringify(candidate.ConfigurationSetName) ===
+          JSON.stringify({ Ref: setLogicalId }),
+      );
+    if (destination === undefined) {
+      throw new Error('Missing the partner configuration set destination.');
+    }
+    const eventDestination = asRecord(destination.EventDestination);
+    expect(eventDestination.Enabled).toBe(true);
+    expect(asStringArray(eventDestination.MatchingEventTypes).sort()).toEqual([
+      'BOUNCE',
+      'COMPLAINT',
+      'REJECT',
+    ]);
+    const topicRef = asRecord(eventDestination.SnsDestination).TopicARN;
+    expect(JSON.stringify(topicRef)).toContain('PartnerEmailEventsTopic');
+
+    const topic = resourceEntries('AWS::SNS::Topic').find(
+      ([, resource]) =>
+        properties(resource).TopicName === SES_PARTNER_EVENT_TOPIC_NAME,
+    );
+    if (topic === undefined) {
+      throw new Error('Missing the partner email events topic.');
+    }
+    const [topicLogicalId] = topic;
+    // Only SES, and only for this set, may publish to it.
+    const topicPolicy = resourceEntries('AWS::SNS::TopicPolicy').find(
+      ([, resource]) =>
+        JSON.stringify(properties(resource).Topics) ===
+        JSON.stringify([{ Ref: topicLogicalId }]),
+    );
+    if (topicPolicy === undefined) {
+      throw new Error('Missing the partner email events topic policy.');
+    }
+    const publish = asArray(
+      asRecord(properties(topicPolicy[1]).PolicyDocument).Statement,
+    )
+      .map(asRecord)
+      .find(
+        (statement) =>
+          statement.Sid === 'AllowSesPartnerConfigurationSetEvents',
+      );
+    expect(publish?.Principal).toEqual({ Service: 'ses.amazonaws.com' });
+    expect(JSON.stringify(publish?.Condition)).toContain(
+      `:configuration-set/${SES_PARTNER_CONFIGURATION_SET_NAME}`,
+    );
+
+    // The watcher: the alarm mailer mails each event to the operations team,
+    // and nothing texts it.
+    const subscriptions = resourceEntries('AWS::SNS::Subscription')
+      .map(([, resource]) => properties(resource))
+      .filter(
+        (subscription) =>
+          JSON.stringify(subscription.TopicArn) ===
+          JSON.stringify({ Ref: topicLogicalId }),
+      );
+    expect(subscriptions.map((subscription) => subscription.Protocol)).toEqual([
+      'lambda',
+    ]);
+    expect(JSON.stringify(subscriptions[0]?.Endpoint)).toContain('AlarmMailer');
+  });
+
   it('enables the SES configuration set and wires encrypted signed evidence', () => {
-    const configurationSetResource = onlyResource('AWS::SES::ConfigurationSet');
+    const configurationSetResource = resourceEntries(
+      'AWS::SES::ConfigurationSet',
+    ).find(
+      ([, resource]) =>
+        properties(resource).Name === SES_CONFIGURATION_SET_NAME,
+    )?.[1];
+    if (configurationSetResource === undefined) {
+      throw new Error('Missing the alert configuration set.');
+    }
     const configurationSet = properties(configurationSetResource);
     expect(configurationSet.Name).toBe(SES_CONFIGURATION_SET_NAME);
     expect(configurationSet.SendingOptions).toEqual({
@@ -3592,11 +3724,17 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(configurationSetResource.DeletionPolicy).toBe('Retain');
     expect(configurationSetResource.UpdateReplacePolicy).toBe('Retain');
 
-    const eventDestination = properties(
-      onlyResource('AWS::SES::ConfigurationSetEventDestination'),
-    );
+    const eventDestinationResource = resourceEntries(
+      'AWS::SES::ConfigurationSetEventDestination',
+    ).find(([logicalId]) =>
+      logicalId.startsWith('EmailConfigurationSetEventDestination'),
+    )?.[1];
+    if (eventDestinationResource === undefined) {
+      throw new Error('Missing the alert configuration set destination.');
+    }
+    const eventDestination = properties(eventDestinationResource);
     expect(eventDestination.ConfigurationSetName).toEqual({
-      Ref: expect.stringContaining('EmailConfigurationSet'),
+      Ref: expect.stringMatching(/^EmailConfigurationSet/),
     });
     expect(eventDestination.EventDestination).toEqual(
       expect.objectContaining({

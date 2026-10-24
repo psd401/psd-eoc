@@ -418,6 +418,28 @@ running application: one exact recipient, DRILL copy visible in the preview and
 message, and evidence read as queued → provider accepted → delivered or
 bounced.
 
+### Partner account mail
+
+Partner account mail — the invitation, the yearly expiry notice, and the
+administrators' quarterly review — is sent by the App Runner runtime and the
+daily partner-access sweep, not by the email worker. It names its own
+configuration set, `psd-eoc-production-partner`, never the alert set
+`psd-eoc-transactional`: the alert set's callback refuses mail without alert
+tags, and every refusal would land in `psd-eoc-email-callback-dlq`. Without a
+set of its own the mail would fall to the shared identity's default set, which
+this deployment does not own (psd-dev-standards 17 rule 7).
+
+The stack defines the set and sends both runtimes its name as
+`PSD_EOC_SES_CONFIGURATION_SET_NAME`; it is not a deployment parameter. Both
+`SendOnlyPartnerAccountEmail` grants name the identity and this set. The set's
+`owner-alert` destination publishes `BOUNCE`, `COMPLAINT`, and `REJECT` to the
+`psd-eoc-production-partner-email-events` topic, which the alarm mailer
+subscribes to, so each event reaches the `OperationsTeamAlarmEmail` mailbox as
+mail and never as a text. No code consumes these events and no suppression is
+recorded from them; SES account-level suppression still applies. A runtime
+whose environment lacks the set name reports partner access as not configured
+rather than sending.
+
 ## AWS End User Messaging SMS activation boundary
 
 The SMS work queue/DLQ, EventBridge-only receipt queue/DLQ, runtime bearer,

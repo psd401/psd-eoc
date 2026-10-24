@@ -16,9 +16,12 @@
  * confirmation step, no subscription state, and no unsubscribe link for a mail
  * scanner or a mis-click to find.
  *
- * It sends operational alarms to the operations team. It is not the staff
- * notification path and shares nothing with it — different sender, no
- * configuration set, and no access to a roster or a recipient.
+ * It sends operational alarms to the operations team. It also forwards, as
+ * raw SES event JSON through the non-alarm branch of `formatAlarmEmail`, the
+ * bounces, complaints, and rejections of partner account mail, so a person
+ * reads each one. It is not the staff notification path and shares nothing
+ * with it — different sender, no configuration set of its own, and no access
+ * to a roster or a recipient.
  */
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
 

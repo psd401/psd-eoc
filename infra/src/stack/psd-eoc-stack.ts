@@ -54,6 +54,10 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
+  SES_PARTNER_EVENT_DESTINATION_NAME,
+  SES_PARTNER_EVENT_TOPIC_NAME,
+  SES_PARTNER_EVENT_TYPES,
 } from '../config';
 import {
   AURORA_MAX_CAPACITY_ACU,
@@ -1777,6 +1781,88 @@ export class PsdEocStack extends Stack {
     );
     emailEventDestination.addResourceDependency(emailConfigurationSet);
 
+    // Partner account mail -- the invitation, the expiry notice, and the
+    // administrators' quarterly review -- names its own configuration set.
+    // Without one it fell to the shared identity's default set, which this
+    // stack does not own and which reaches no one (psd-dev-standards 17 rule
+    // 7). It cannot be the transactional set above: that set's callback
+    // refuses mail without alert tags, and every refusal would land in the
+    // email callback dead-letter queue.
+    //
+    // No code consumes these events. Bounces, complaints, and rejections go to
+    // a topic the alarm mailer subscribes to, so a person in the operations
+    // mailbox reads each one. That is the same last hop alarms use, and for
+    // the same reason: an SNS email subscription needs a confirmation click
+    // and carries an unsubscribe link. The topic is unencrypted for the same
+    // reason the alarm topics are (see `operationsAlarmTopic`); an event names
+    // a partner's address and the message's subject, and nothing else.
+    const partnerEmailConfigurationSetArn = Arn.format(
+      {
+        account,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        partition,
+        region,
+        resource: 'configuration-set',
+        resourceName: SES_PARTNER_CONFIGURATION_SET_NAME,
+        service: 'ses',
+      },
+      this,
+    );
+    const partnerEmailConfigurationSet = new ses.CfnConfigurationSet(
+      this,
+      'PartnerEmailConfigurationSet',
+      {
+        name: SES_PARTNER_CONFIGURATION_SET_NAME,
+        reputationOptions: {
+          reputationMetricsEnabled: true,
+        },
+        sendingOptions: {
+          sendingEnabled: true,
+        },
+      },
+    );
+    partnerEmailConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const partnerEmailEventsTopic = new sns.Topic(
+      this,
+      'PartnerEmailEventsTopic',
+      {
+        displayName: 'PSD EOC partner account mail bounces and complaints',
+        enforceSSL: true,
+        topicName: SES_PARTNER_EVENT_TOPIC_NAME,
+      },
+    );
+    partnerEmailEventsTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['sns:Publish'],
+        conditions: {
+          StringEquals: {
+            'AWS:SourceAccount': account,
+            'AWS:SourceArn': partnerEmailConfigurationSetArn,
+          },
+        },
+        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+        resources: [partnerEmailEventsTopic.topicArn],
+        sid: 'AllowSesPartnerConfigurationSetEvents',
+      }),
+    );
+    const partnerEmailEventDestination =
+      new ses.CfnConfigurationSetEventDestination(
+        this,
+        'PartnerEmailConfigurationSetEventDestination',
+        {
+          configurationSetName: partnerEmailConfigurationSet.ref,
+          eventDestination: {
+            enabled: true,
+            matchingEventTypes: [...SES_PARTNER_EVENT_TYPES],
+            name: SES_PARTNER_EVENT_DESTINATION_NAME,
+            snsDestination: { topicArn: partnerEmailEventsTopic.topicArn },
+          },
+        },
+      );
+    partnerEmailEventDestination.addResourceDependency(
+      partnerEmailConfigurationSet,
+    );
+
     const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
       'GoogleOauthSecret',
@@ -2952,7 +3038,7 @@ export class PsdEocStack extends Stack {
           conditions: {
             StringEquals: { 'ses:FromAddress': sesFromAddress },
           },
-          resources: [emailIdentityArn],
+          resources: [emailIdentityArn, partnerEmailConfigurationSetArn],
           sid: 'SendOnlyPartnerAccountEmail',
         }),
       ],
@@ -2997,6 +3083,9 @@ export class PsdEocStack extends Stack {
           PSD_EOC_DISPLAY_TIME_ZONE: deploymentIdentity.displayTimeZone,
           PSD_EOC_ORGANIZATION_NAME: deploymentIdentity.organizationName,
           PSD_EOC_PARTNER_USER_POOL_ID: partnerUserPoolId.valueAsString,
+          // A reference, not the literal name, so the task definition is
+          // ordered after the set and no send can name a set not yet created.
+          PSD_EOC_SES_CONFIGURATION_SET_NAME: partnerEmailConfigurationSet.ref,
           PSD_EOC_SES_FROM_ADDRESS: sesFromAddress,
           ...(sesFromDisplayName === null
             ? {}
@@ -3464,16 +3553,17 @@ export class PsdEocStack extends Stack {
           // Partner account mail — the invitation, the expiry notice, and the
           // administrators' quarterly review — is the one email the runtime
           // sends itself, in the same branded shell as alerts. Limited to the
-          // deployment's own sender address and identity, sent without the
-          // alert configuration set so its events never enter alert delivery
-          // evidence, and present only while partner access is configured.
-          // Alerts still reach people only through the email worker.
+          // deployment's own sender address and identity, sent through the
+          // partner configuration set -- never the alert set, so its events
+          // never enter alert delivery evidence -- and present only while
+          // partner access is configured. Alerts still reach people only
+          // through the email worker.
           new iam.PolicyStatement({
             actions: ['ses:SendEmail'],
             conditions: {
               StringEquals: { 'ses:FromAddress': sesFromAddress },
             },
-            resources: [emailIdentityArn],
+            resources: [emailIdentityArn, partnerEmailConfigurationSetArn],
             sid: 'SendOnlyPartnerAccountEmail',
           }),
         ],
@@ -3666,7 +3756,13 @@ export class PsdEocStack extends Stack {
                   value: partnerUserPoolClientSecretArn.valueAsString,
                 },
                 // The sender partner account mail uses: the same address and
-                // display name the email worker sends alerts from.
+                // display name the email worker sends alerts from, through the
+                // partner configuration set rather than the alert set. A
+                // reference, so the service is ordered after the set.
+                {
+                  name: 'PSD_EOC_SES_CONFIGURATION_SET_NAME',
+                  value: partnerEmailConfigurationSet.ref,
+                },
                 {
                   name: 'PSD_EOC_SES_FROM_ADDRESS',
                   value: sesFromAddress,
@@ -4001,6 +4097,7 @@ export class PsdEocStack extends Stack {
       operationsAlarmTopic,
       operationsKey,
       monitoringRunbookBaseUrl,
+      partnerEmailEventsTopic,
       pushWorkerCondition: shouldRunExpoPushWorker,
       pushWorkerLogGroup,
       sesIdentityDomain,
