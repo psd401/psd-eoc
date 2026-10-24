@@ -8,6 +8,7 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_IDENTITY_DOMAIN,
   SES_MAIL_FROM_DOMAIN,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
   SES_REQUIRED_EVENT_TYPES,
   SES_TEST_FROM_ADDRESS,
   TARGET_ACCOUNT_ID,
@@ -98,6 +99,8 @@ interface HarnessOptions {
   readonly account?: SesAccountSnapshot;
   readonly callerAccount?: string;
   readonly configurationSet?: SesConfigurationSetSnapshot;
+  /** Overrides `configurationSet` for the partner set alone. */
+  readonly partnerConfigurationSet?: SesConfigurationSetSnapshot;
   readonly confirmation?: string;
   readonly confirmations?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -152,6 +155,12 @@ function createHarness(options: HarnessOptions = {}): Harness {
     },
     async getConfigurationSet(name) {
       calls.getConfigurationSet.push(name);
+      if (
+        name === SES_PARTNER_CONFIGURATION_SET_NAME &&
+        options.partnerConfigurationSet !== undefined
+      ) {
+        return options.partnerConfigurationSet;
+      }
       return options.configurationSet ?? READY_CONFIGURATION_SET;
     },
     async getEmailIdentity(identity) {
@@ -481,6 +490,7 @@ describe('SES verification operation', () => {
     expect(harness.calls.getEmailIdentity).toEqual([SES_IDENTITY_DOMAIN]);
     expect(harness.calls.getConfigurationSet).toEqual([
       SES_CONFIGURATION_SET_NAME,
+      SES_PARTNER_CONFIGURATION_SET_NAME,
     ]);
     expect(harness.calls.sendTestEmail).toHaveLength(0);
     expect(harness.output.join(' ')).toContain('readiness check passed');
@@ -517,6 +527,7 @@ describe('SES verification operation', () => {
 
     expect(harness.calls.getConfigurationSet).toEqual([
       SES_CONFIGURATION_SET_NAME,
+      SES_PARTNER_CONFIGURATION_SET_NAME,
     ]);
   });
 
@@ -530,6 +541,38 @@ describe('SES verification operation', () => {
     expect(harness.errors.join(' ')).toContain(
       `configuration set ${SES_CONFIGURATION_SET_NAME} does not exist`,
     );
+  });
+
+  // Partner account mail names its own set (standard 17 rule 7), so the check
+  // reads it too and names it when it is not ready.
+  it('reports a partner set that is missing or unwatched', async () => {
+    const cases: Array<readonly [SesConfigurationSetSnapshot, string]> = [
+      [{ exists: false }, 'does not exist'],
+      [
+        {
+          ...READY_CONFIGURATION_SET,
+          eventDestinations: [
+            { enabled: true, matchingEventTypes: ['BOUNCE', 'COMPLAINT'] },
+          ],
+        },
+        'has no enabled event destination for REJECT',
+      ],
+    ];
+    for (const [partnerConfigurationSet, reason] of cases) {
+      const harness = createHarness({ partnerConfigurationSet });
+
+      expect(
+        await verificationMain(VERIFICATION_CHECK_ARGS, harness.runtime),
+      ).toBe(1);
+
+      expect(harness.errors.join(' ')).toContain(
+        `configuration set ${SES_PARTNER_CONFIGURATION_SET_NAME} ${reason}`,
+      );
+      expect(harness.errors.join(' ')).not.toContain(
+        `configuration set ${SES_CONFIGURATION_SET_NAME} `,
+      );
+      expect(harness.calls.sendTestEmail).toHaveLength(0);
+    }
   });
 
   it('rejects CI, non-TTY, and wrong-account test sends before SES mutation', async () => {
@@ -666,6 +709,7 @@ describe('SES verification operation', () => {
 
       expect(harness.calls.getConfigurationSet).toEqual([
         SES_CONFIGURATION_SET_NAME,
+        SES_PARTNER_CONFIGURATION_SET_NAME,
       ]);
       expect(harness.calls.sendTestEmail).toHaveLength(0);
     });
