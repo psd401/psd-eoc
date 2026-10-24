@@ -2,6 +2,7 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_IDENTITY_DOMAIN,
   SES_MAIL_FROM_DOMAIN,
+  SES_REQUIRED_EVENT_TYPES,
   SES_TEST_FROM_ADDRESS,
   TARGET_ACCOUNT_ID,
   TARGET_REGION,
@@ -17,6 +18,7 @@ import {
   terminalSafeText,
   type CliRuntime,
   type SesAccountSnapshot,
+  type SesConfigurationSetSnapshot,
   type SesEmailIdentitySnapshot,
   type SesOperationsApi,
 } from './ses-common';
@@ -132,6 +134,11 @@ export function parseVerificationOptions(
   };
 }
 
+// The shared identity belongs to the district, not to psd-eoc
+// (psd-dev-standards 17 rule 2), so this reads it and never asks it to carry a
+// psd-eoc value. Its default configuration set is the identity owner's; psd-eoc
+// passes its own set explicitly on every send, and configurationSetFailures
+// checks that set instead.
 function sourceIdentityFailures(identity: SesEmailIdentitySnapshot): string[] {
   const failures: string[] = [];
   if (identity.identityType !== 'DOMAIN') {
@@ -149,14 +156,52 @@ function sourceIdentityFailures(identity: SesEmailIdentitySnapshot): string[] {
   if (identity.dkimStatus !== 'SUCCESS') {
     failures.push('DKIM status is not SUCCESS');
   }
-  if (identity.mailFromDomain !== SES_MAIL_FROM_DOMAIN) {
-    failures.push('MAIL FROM domain does not match the expected domain');
-  }
-  if (identity.mailFromDomainStatus !== 'SUCCESS') {
+  // A missing MAIL FROM is the expected state until the identity owner sets
+  // it (standard 17 rollout step 4), so it is named as not set up rather than
+  // as a mismatch.
+  if (identity.mailFromDomain === undefined) {
+    failures.push(
+      `MAIL FROM ${SES_MAIL_FROM_DOMAIN} is not set up on the identity yet`,
+    );
+  } else if (identity.mailFromDomain !== SES_MAIL_FROM_DOMAIN) {
+    failures.push(`MAIL FROM domain is not ${SES_MAIL_FROM_DOMAIN}`);
+  } else if (identity.mailFromDomainStatus !== 'SUCCESS') {
     failures.push('MAIL FROM status is not SUCCESS');
   }
-  if (identity.configurationSetName !== SES_CONFIGURATION_SET_NAME) {
-    failures.push('default configuration set does not match');
+  return failures;
+}
+
+// The set every psd-eoc send names (the email worker and --send-test). With
+// no reliance on the identity default, a missing set fails those sends, and a
+// set without a bounce and complaint destination leaves them unwatched
+// (standard 17 rules 7 and 8).
+function configurationSetFailures(set: SesConfigurationSetSnapshot): string[] {
+  if (!set.exists) {
+    return [`configuration set ${SES_CONFIGURATION_SET_NAME} does not exist`];
+  }
+  const failures: string[] = [];
+  if (set.sendingEnabled !== true) {
+    failures.push(
+      `configuration set ${SES_CONFIGURATION_SET_NAME} sending is not enabled`,
+    );
+  }
+  const published = new Set(
+    set.eventDestinations
+      .filter((destination) => destination.enabled)
+      .flatMap((destination) => destination.matchingEventTypes),
+  );
+  const missing = SES_REQUIRED_EVENT_TYPES.filter(
+    (eventType) => !published.has(eventType),
+  );
+  if (missing.length > 0) {
+    failures.push(
+      `configuration set ${SES_CONFIGURATION_SET_NAME} has no enabled event destination for ${missing.join(', ')}`,
+    );
+  }
+  if (set.suppressedReasons?.length === 0) {
+    failures.push(
+      `configuration set ${SES_CONFIGURATION_SET_NAME} turns suppression off`,
+    );
   }
   return failures;
 }
@@ -164,13 +209,17 @@ function sourceIdentityFailures(identity: SesEmailIdentitySnapshot): string[] {
 function assertSourceReady(
   account: SesAccountSnapshot,
   identity: SesEmailIdentitySnapshot,
+  configurationSet: SesConfigurationSetSnapshot,
 ): void {
-  const failures = sourceIdentityFailures(identity);
+  const failures = [
+    ...sourceIdentityFailures(identity),
+    ...configurationSetFailures(configurationSet),
+  ];
   if (account.sendingEnabled !== true) {
     failures.unshift('account sending is not enabled');
   }
   if (failures.length > 0) {
-    throw new Error(`SES identity is not ready: ${failures.join('; ')}.`);
+    throw new Error(`SES is not ready: ${failures.join('; ')}.`);
   }
 }
 
@@ -192,7 +241,10 @@ async function readSourceReadiness(api: SesOperationsApi): Promise<{
 }> {
   const account = await api.getAccount();
   const identity = await api.getEmailIdentity(SES_IDENTITY_DOMAIN);
-  assertSourceReady(account, identity);
+  const configurationSet = await api.getConfigurationSet(
+    SES_CONFIGURATION_SET_NAME,
+  );
+  assertSourceReady(account, identity, configurationSet);
   return { account, identity };
 }
 
@@ -204,7 +256,7 @@ function printOfflinePreview(runtime: CliRuntime): void {
     `Target: account ${TARGET_ACCOUNT_ID}, region ${TARGET_REGION}, identity ${SES_IDENTITY_DOMAIN}.`,
   );
   runtime.stdout(
-    `Read-only identity/DKIM/MAIL FROM check: --check --confirm-account ${TARGET_ACCOUNT_ID} --confirm-region ${TARGET_REGION}.`,
+    `Read-only identity/DKIM/MAIL FROM/configuration-set check: --check --confirm-account ${TARGET_ACCOUNT_ID} --confirm-region ${TARGET_REGION}.`,
   );
   runtime.stdout(
     `A test send is a live provider write reserved for an authorized human: --send-test --confirm-account ${TARGET_ACCOUNT_ID} --confirm-region ${TARGET_REGION} --recipient <approved-verified-synthetic-address>.`,
@@ -231,7 +283,7 @@ export async function runVerification(
 
   if (options.mode === 'check') {
     runtime.stdout(
-      `SES identity readiness check passed for ${SES_IDENTITY_DOMAIN}; productionAccessEnabled=${String(account.productionAccessEnabled ?? 'unknown')}.`,
+      `SES readiness check passed for ${SES_IDENTITY_DOMAIN} and configuration set ${SES_CONFIGURATION_SET_NAME}; productionAccessEnabled=${String(account.productionAccessEnabled ?? 'unknown')}.`,
     );
     runtime.stdout('No email was sent.');
     return;

@@ -8,6 +8,7 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_IDENTITY_DOMAIN,
   SES_MAIL_FROM_DOMAIN,
+  SES_REQUIRED_EVENT_TYPES,
   SES_TEST_FROM_ADDRESS,
   TARGET_ACCOUNT_ID,
   TARGET_REGION,
@@ -18,6 +19,7 @@ import {
   type CliRuntime,
   type ProductionAccessRequest,
   type SesAccountSnapshot,
+  type SesConfigurationSetSnapshot,
   type SesEmailIdentitySnapshot,
   type SesOperationsApi,
   type TestEmailRequest,
@@ -54,12 +56,34 @@ const INITIAL_ACCOUNT: SesAccountSnapshot = {
 };
 
 const READY_SOURCE_IDENTITY: SesEmailIdentitySnapshot = {
-  configurationSetName: SES_CONFIGURATION_SET_NAME,
   dkimSigningEnabled: true,
   dkimStatus: 'SUCCESS',
   identityType: 'DOMAIN',
   mailFromDomain: SES_MAIL_FROM_DOMAIN,
   mailFromDomainStatus: 'SUCCESS',
+  verificationStatus: 'SUCCESS',
+  verifiedForSendingStatus: true,
+};
+
+// The set as the stack defines it: sending on, account suppression kept, and
+// one destination publishing every event type the callback consumes.
+const READY_CONFIGURATION_SET: SesConfigurationSetSnapshot = {
+  eventDestinations: [
+    {
+      enabled: true,
+      matchingEventTypes: ['SEND', 'DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT'],
+    },
+  ],
+  exists: true,
+  sendingEnabled: true,
+};
+
+// The shared identity as it stands before its owner sets MAIL FROM (standard
+// 17 rollout step 4): SES returns no MAIL FROM attributes at all.
+const MAIL_FROM_NOT_SET_UP_IDENTITY: SesEmailIdentitySnapshot = {
+  dkimSigningEnabled: true,
+  dkimStatus: 'SUCCESS',
+  identityType: 'DOMAIN',
   verificationStatus: 'SUCCESS',
   verifiedForSendingStatus: true,
 };
@@ -73,6 +97,7 @@ const READY_RECIPIENT_IDENTITY: SesEmailIdentitySnapshot = {
 interface HarnessOptions {
   readonly account?: SesAccountSnapshot;
   readonly callerAccount?: string;
+  readonly configurationSet?: SesConfigurationSetSnapshot;
   readonly confirmation?: string;
   readonly confirmations?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -89,6 +114,7 @@ interface HarnessCalls {
   createApi: number;
   getAccount: number;
   getCallerIdentity: number;
+  getConfigurationSet: string[];
   getEmailIdentity: string[];
   prompts: string[];
   putAccountDetails: ProductionAccessRequest[];
@@ -107,6 +133,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
     createApi: 0,
     getAccount: 0,
     getCallerIdentity: 0,
+    getConfigurationSet: [],
     getEmailIdentity: [],
     prompts: [],
     putAccountDetails: [],
@@ -122,6 +149,10 @@ function createHarness(options: HarnessOptions = {}): Harness {
     async getCallerIdentity() {
       calls.getCallerIdentity += 1;
       return { accountId: options.callerAccount ?? TARGET_ACCOUNT_ID };
+    },
+    async getConfigurationSet(name) {
+      calls.getConfigurationSet.push(name);
+      return options.configurationSet ?? READY_CONFIGURATION_SET;
     },
     async getEmailIdentity(identity) {
       calls.getEmailIdentity.push(identity);
@@ -448,9 +479,66 @@ describe('SES verification operation', () => {
     ).toBe(0);
 
     expect(harness.calls.getEmailIdentity).toEqual([SES_IDENTITY_DOMAIN]);
+    expect(harness.calls.getConfigurationSet).toEqual([
+      SES_CONFIGURATION_SET_NAME,
+    ]);
     expect(harness.calls.sendTestEmail).toHaveLength(0);
     expect(harness.output.join(' ')).toContain('readiness check passed');
     expect(harness.output.join(' ')).toContain('No email was sent');
+  });
+
+  // psd-dev-standards 17 rule 5: `mail.` is commonly a CNAME, which cannot
+  // also hold the MX and TXT records a MAIL FROM needs.
+  it('expects MAIL FROM at bounce.<identity domain>', () => {
+    expect(SES_MAIL_FROM_DOMAIN).toBe(`bounce.${SES_IDENTITY_DOMAIN}`);
+  });
+
+  // Until the identity owner sets MAIL FROM (standard 17 rollout step 4) the
+  // check names it as not set up, exits non-zero, and still reads nothing it
+  // should not.
+  it('reports a MAIL FROM that is not set up yet as not ready', async () => {
+    const harness = createHarness({
+      sourceIdentity: MAIL_FROM_NOT_SET_UP_IDENTITY,
+    });
+
+    expect(
+      await verificationMain(VERIFICATION_CHECK_ARGS, harness.runtime),
+    ).toBe(1);
+
+    expect(harness.errors.join(' ')).toContain(
+      `MAIL FROM ${SES_MAIL_FROM_DOMAIN} is not set up on the identity yet`,
+    );
+    expect(harness.output.join(' ')).not.toContain('readiness check passed');
+    expect(harness.calls.sendTestEmail).toHaveLength(0);
+  });
+
+  // The identity's default set belongs to its owner (standard 17 rule 2);
+  // psd-eoc names its own set on every send, so only that set is checked.
+  it('never reads or requires the shared identity default configuration set', async () => {
+    const harness = createHarness();
+
+    expect(
+      await verificationMain(VERIFICATION_CHECK_ARGS, harness.runtime),
+    ).toBe(0);
+
+    expect(Object.keys(READY_SOURCE_IDENTITY)).not.toContain(
+      'configurationSetName',
+    );
+    expect(harness.calls.getConfigurationSet).toEqual([
+      SES_CONFIGURATION_SET_NAME,
+    ]);
+  });
+
+  it('reports a missing own configuration set rather than failing on the lookup', async () => {
+    const harness = createHarness({ configurationSet: { exists: false } });
+
+    expect(
+      await verificationMain(VERIFICATION_CHECK_ARGS, harness.runtime),
+    ).toBe(1);
+
+    expect(harness.errors.join(' ')).toContain(
+      `configuration set ${SES_CONFIGURATION_SET_NAME} does not exist`,
+    );
   });
 
   it('rejects CI, non-TTY, and wrong-account test sends before SES mutation', async () => {
@@ -513,9 +601,8 @@ describe('SES verification operation', () => {
     ['verified-for-sending', { verifiedForSendingStatus: false }],
     ['DKIM signing', { dkimSigningEnabled: false }],
     ['DKIM status', { dkimStatus: 'PENDING' }],
-    ['MAIL FROM domain', { mailFromDomain: 'wrong.example.invalid' }],
+    ['MAIL FROM domain', { mailFromDomain: `mail.${SES_IDENTITY_DOMAIN}` }],
     ['MAIL FROM status', { mailFromDomainStatus: 'PENDING' }],
-    ['configuration set', { configurationSetName: 'wrong-config' }],
   ];
   for (const [label, change] of sourceBlockers) {
     it(`blocks sending when ${label} is not ready`, async () => {
@@ -530,6 +617,81 @@ describe('SES verification operation', () => {
       expect(harness.calls.sendTestEmail).toHaveLength(0);
     });
   }
+
+  it('blocks sending while MAIL FROM is not set up', async () => {
+    const harness = createHarness({
+      confirmations: [TEST_SEND_CONFIRMATION, TEST_RECIPIENT],
+      sourceIdentity: MAIL_FROM_NOT_SET_UP_IDENTITY,
+    });
+
+    expect(await verificationMain(TEST_SEND_ARGS, harness.runtime)).toBe(1);
+
+    expect(harness.calls.sendTestEmail).toHaveLength(0);
+  });
+
+  const configurationSetBlockers: Array<
+    readonly [string, SesConfigurationSetSnapshot]
+  > = [
+    ['the configuration set is missing', { exists: false }],
+    [
+      'configuration-set sending is off',
+      { ...READY_CONFIGURATION_SET, sendingEnabled: false },
+    ],
+    [
+      'the configuration set has no event destination',
+      { ...READY_CONFIGURATION_SET, eventDestinations: [] },
+    ],
+    [
+      'the event destination is disabled',
+      {
+        ...READY_CONFIGURATION_SET,
+        eventDestinations: [
+          { enabled: false, matchingEventTypes: [...SES_REQUIRED_EVENT_TYPES] },
+        ],
+      },
+    ],
+    [
+      'REJECT events are not published',
+      {
+        ...READY_CONFIGURATION_SET,
+        eventDestinations: [
+          { enabled: true, matchingEventTypes: ['BOUNCE', 'COMPLAINT'] },
+        ],
+      },
+    ],
+    [
+      'suppression is turned off',
+      { ...READY_CONFIGURATION_SET, suppressedReasons: [] },
+    ],
+  ];
+  for (const [label, configurationSet] of configurationSetBlockers) {
+    it(`blocks sending when ${label}`, async () => {
+      const harness = createHarness({
+        configurationSet,
+        confirmations: [TEST_SEND_CONFIRMATION, TEST_RECIPIENT],
+      });
+
+      expect(await verificationMain(TEST_SEND_ARGS, harness.runtime)).toBe(1);
+
+      expect(harness.calls.getConfigurationSet).toEqual([
+        SES_CONFIGURATION_SET_NAME,
+      ]);
+      expect(harness.calls.sendTestEmail).toHaveLength(0);
+    });
+  }
+
+  it('accepts a configuration set that keeps suppression for both reasons', async () => {
+    const harness = createHarness({
+      configurationSet: {
+        ...READY_CONFIGURATION_SET,
+        suppressedReasons: ['BOUNCE', 'COMPLAINT'],
+      },
+    });
+
+    expect(
+      await verificationMain(VERIFICATION_CHECK_ARGS, harness.runtime),
+    ).toBe(0);
+  });
 
   it('requires the exact recipient to be a separately verified email identity', async () => {
     const harness = createHarness({

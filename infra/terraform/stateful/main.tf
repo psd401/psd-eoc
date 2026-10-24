@@ -6,10 +6,150 @@ locals {
 }
 
 # The district's sending identity is shared with every other district sender,
-# so this root reads it rather than owning it. Planning fails here, before the
-# pool changes, if the identity is missing or not yet verified for sending.
+# so this root reads it rather than owning it (psd-dev-standards 17 rule 2).
+# Planning fails here, before the pool changes, if the identity is missing or
+# not yet verified for sending. It is read in ses_region, which may differ from
+# the pool's region: Cognito's region table lets a pool send through an
+# identity in another supported region, and the district sends production mail
+# from one account and region only (standard 17 decision 1).
 data "aws_sesv2_email_identity" "district" {
+  provider = aws.ses
+
   email_identity = var.ses_identity_domain
+}
+
+data "aws_partition" "current" {}
+
+locals {
+  cognito_configuration_set_name = "psd-eoc-${var.environment}-cognito"
+}
+
+# Cognito's mail gets its own configuration set (standard 17 rule 10, approved
+# 2026-10-23 as question 17.4). It is never the stack's psd-eoc-transactional
+# set: that set's events feed the alert callback, which refuses any event
+# without psd-eoc's correlation tags, so every Cognito email would land in the
+# callback dead-letter queue. Naming a set explicitly also keeps Cognito's mail
+# off whatever default the shared identity's owner sets.
+#
+# A configuration set is regional and must sit in the region of the identity
+# Cognito sends through, so it, its topic and its key use the ses provider.
+resource "aws_sesv2_configuration_set" "cognito" {
+  provider = aws.ses
+
+  configuration_set_name = local.cognito_configuration_set_name
+
+  reputation_options {
+    reputation_metrics_enabled = true
+  }
+
+  sending_options {
+    sending_enabled = true
+  }
+
+  # Suppression stays on, stated here rather than inherited (standard 17
+  # rule 8): an address that hard-bounced or complained is not sent to again.
+  suppression_options {
+    suppressed_reasons = ["BOUNCE", "COMPLAINT"]
+  }
+}
+
+# Bounce, complaint and reject events carry partner addresses, so the topic is
+# encrypted with a key SES may use. The AWS-managed SNS key cannot be used: its
+# policy cannot grant SES.
+resource "aws_kms_key" "cognito_email_events" {
+  provider = aws.ses
+
+  description             = "Encrypts partner Cognito email bounce, complaint and reject events."
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AccountAdministers"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:${data.aws_partition.current.partition}:iam::${var.aws_account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "SesPublishesCognitoSetEvents"
+        Effect    = "Allow"
+        Principal = { Service = "ses.amazonaws.com" }
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"]
+        Resource  = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = var.aws_account_id
+            "aws:SourceArn"     = aws_sesv2_configuration_set.cognito.arn
+          }
+        }
+      },
+    ]
+  })
+}
+
+# The topic's one subscriber is the deployment owner group, by email. No code
+# consumes it: a person reads each bounce or complaint (standard 17 rule 10).
+resource "aws_sns_topic" "cognito_email_events" {
+  provider = aws.ses
+
+  name              = "${local.cognito_configuration_set_name}-email-events"
+  kms_master_key_id = aws_kms_key.cognito_email_events.arn
+}
+
+resource "aws_sns_topic_policy" "cognito_email_events" {
+  provider = aws.ses
+
+  arn = aws_sns_topic.cognito_email_events.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "SesPublishesCognitoSetEvents"
+        Effect    = "Allow"
+        Principal = { Service = "ses.amazonaws.com" }
+        Action    = "sns:Publish"
+        Resource  = aws_sns_topic.cognito_email_events.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = var.aws_account_id
+            "aws:SourceArn"     = aws_sesv2_configuration_set.cognito.arn
+          }
+        }
+      },
+    ]
+  })
+}
+
+# Email subscriptions start pending: the owner group confirms from the message
+# SNS sends after the apply, and its group settings must accept mail from
+# outside the domain for that message to arrive.
+resource "aws_sns_topic_subscription" "cognito_email_events_owner" {
+  provider = aws.ses
+
+  topic_arn = aws_sns_topic.cognito_email_events.arn
+  protocol  = "email"
+  endpoint  = var.owner
+}
+
+resource "aws_sesv2_configuration_set_event_destination" "cognito" {
+  provider = aws.ses
+
+  configuration_set_name = aws_sesv2_configuration_set.cognito.configuration_set_name
+  event_destination_name = "owner-alert"
+
+  event_destination {
+    enabled              = true
+    matching_event_types = ["BOUNCE", "COMPLAINT", "REJECT"]
+
+    sns_destination {
+      topic_arn = aws_sns_topic.cognito_email_events.arn
+    }
+  }
+
+  depends_on = [aws_sns_topic_policy.cognito_email_events]
 }
 
 # Cognito sends DEVELOPER-configured mail through this role, which allows only
@@ -84,14 +224,20 @@ resource "aws_cognito_user_pool" "partner" {
   # configuration" (Cognito developer guide, user-pool-email.html), so with
   # COGNITO_DEFAULT the EMAIL_OTP factor above could never deliver a code.
   # Cognito sends through its email service-linked role below; the SES account
-  # must be out of the sandbox in this region before partners can be emailed.
+  # must be out of the sandbox in ses_region before partners can be emailed.
+  # source_arn is the identity's ARN in ses_region, which is what lets a pool
+  # in another supported region send through it.
   email_configuration {
     email_sending_account = "DEVELOPER"
     source_arn            = data.aws_sesv2_email_identity.district.arn
     from_email_address    = var.partner_email_from_address
+    configuration_set     = aws_sesv2_configuration_set.cognito.configuration_set_name
   }
 
-  depends_on = [aws_iam_service_linked_role.cognito_email]
+  depends_on = [
+    aws_iam_service_linked_role.cognito_email,
+    aws_sesv2_configuration_set_event_destination.cognito,
+  ]
 
   lifecycle {
     prevent_destroy = true

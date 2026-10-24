@@ -8,8 +8,9 @@ describes. The migration later imports the existing stateful resources
 resources, ECR, log groups) into this same root, so nothing here is redone.
 
 Today it holds one thing: the Cognito user pool for non-district first
-responders, its server app client, and the Secrets Manager record of that
-client's credential.
+responders, its server app client, the Secrets Manager record of that
+client's credential, and the SES configuration set, topic and key for the
+pool's email.
 
 ## Why a separate pool
 
@@ -114,16 +115,45 @@ Cognito's own mailbox. The root:
   and `psdEoc:sesFromAddress` as `Name <address>` (product owner,
   2026-10-23), so partners see one sender for invitations, codes and alerts.
 
-Before the first apply, the SES account in the pool's region must be out of the
+### Region
+
+The identity is read in `ses_region`, which may differ from `aws_region`.
+Cognito's
+[region table](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-email.html#user-pool-email-developer-region-mapping)
+lets a us-east-2 pool, for example, send through an identity in us-east-2,
+us-east-1, eu-west-1 or US West (Oregon), and `source_arn` is the
+identity's ARN in that region. The district sends production mail from one
+account and region only (psd-dev-standards 17 decision 1), which need not be
+the pool's region; the example pairs a us-east-2 pool with a us-east-1
+identity. The configuration set, topic and key below are regional and
+live in `ses_region` with the identity, through the `aws.ses` provider.
+
+Before the first apply, the SES account in `ses_region` must be out of the
 sandbox; in the sandbox Cognito "can't send messages to your users' email
 addresses" (same page). `infra/src/ops/ses-production-access.ts --check`
-reports it read-only; see
+reports it read-only for the stack's region; see
 [docs/runbooks/email-setup.md](../../../docs/runbooks/email-setup.md).
 
-No SES configuration set is attached. The stack's `psd-eoc-transactional` set
-publishes every event to the alert-delivery callback, which accepts only mail
-carrying its own correlation tags; Cognito's mail carries none, so each
-one-time-password email would be refused and land in the dead-letter queue.
+### Configuration set
+
+The pool names its own SES configuration set, `psd-eoc-<environment>-cognito`
+(psd-dev-standards 17 rule 10; product owner, 2026-10-23, question 17.4). It
+replaces the earlier decision to attach no set:
+
+- **Never `psd-eoc-transactional`.** That set publishes every event to the
+  alert-delivery callback, which refuses any event without its own correlation
+  tags. Cognito's mail carries none, so each one-time-password email would be
+  refused and land in `psd-eoc-email-callback-dlq`.
+- **Not the identity's default.** The shared identity's default set belongs to
+  its owner (standard 17 rule 2). Naming a set keeps Cognito's mail off it.
+- **Events reach a person.** An event destination publishes `BOUNCE`,
+  `COMPLAINT` and `REJECT` to a KMS-encrypted SNS topic whose one subscriber is
+  `owner`, by email. No code consumes the topic. The subscription starts
+  pending: after the apply, the owner group confirms it from the message SNS
+  sends, and the group must accept mail from outside the domain for that
+  message to arrive.
+- **Suppression stays on** for `BOUNCE` and `COMPLAINT`, stated on the set
+  rather than inherited (standard 17 rule 8).
 
 ## Changing the relying-party id
 

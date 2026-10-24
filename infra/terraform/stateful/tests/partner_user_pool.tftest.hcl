@@ -1,11 +1,15 @@
 // Credential-free plan of this root. Mocked providers mean nothing is created,
 // read, or authenticated, so this runs in `bun run check` and in CI.
+mock_provider "aws" {}
+
+// The SES region differs from the pool's on purpose, as the district's does:
+// a us-east-2 pool sending through a verified us-east-1 identity.
 mock_provider "aws" {
-  // The district identity as a real plan reads it: verified, in this account
-  // and region.
+  alias = "ses"
+
   mock_data "aws_sesv2_email_identity" {
     defaults = {
-      arn                         = "arn:aws:ses:us-east-2:123456789012:identity/example.invalid"
+      arn                         = "arn:aws:ses:us-east-1:123456789012:identity/example.invalid"
       verified_for_sending_status = true
     }
   }
@@ -14,6 +18,7 @@ mock_provider "aws" {
 variables {
   aws_account_id             = "123456789012"
   aws_region                 = "us-east-2"
+  ses_region                 = "us-east-1"
   environment                = "production"
   owner                      = "technology@example.invalid"
   source_repository_url      = "https://code.example.invalid/example/eoc"
@@ -106,10 +111,47 @@ run "partner_pool_plan" {
   assert {
     condition = (
       aws_cognito_user_pool.partner.email_configuration[0].email_sending_account == "DEVELOPER" &&
-      aws_cognito_user_pool.partner.email_configuration[0].source_arn == "arn:aws:ses:us-east-2:123456789012:identity/example.invalid" &&
+      aws_cognito_user_pool.partner.email_configuration[0].source_arn == "arn:aws:ses:us-east-1:123456789012:identity/example.invalid" &&
       aws_cognito_user_pool.partner.email_configuration[0].from_email_address == "EOC Alerts <eoc-alerts@example.invalid>"
     )
-    error_message = "Partner email must go through the district's verified SES identity."
+    error_message = "Partner email must go through the district's verified SES identity in ses_region."
+  }
+
+  // psd-dev-standards 17 rule 10: the pool's own set, never the stack's
+  // tagged psd-eoc-transactional set, whose callback refuses untagged mail.
+  assert {
+    condition = (
+      aws_cognito_user_pool.partner.email_configuration[0].configuration_set == "psd-eoc-production-cognito" &&
+      aws_sesv2_configuration_set.cognito.configuration_set_name == "psd-eoc-production-cognito"
+    )
+    error_message = "The partner pool must name its own psd-eoc-<env>-cognito configuration set."
+  }
+
+  assert {
+    condition     = aws_cognito_user_pool.partner.email_configuration[0].configuration_set != "psd-eoc-transactional"
+    error_message = "Cognito mail must never use the alert set; its callback refuses untagged events."
+  }
+
+  assert {
+    condition     = toset(aws_sesv2_configuration_set.cognito.suppression_options[0].suppressed_reasons) == toset(["BOUNCE", "COMPLAINT"])
+    error_message = "Suppression stays on for bounces and complaints (standard 17 rule 8)."
+  }
+
+  assert {
+    condition = (
+      aws_sesv2_configuration_set_event_destination.cognito.event_destination[0].enabled == true &&
+      aws_sesv2_configuration_set_event_destination.cognito.event_destination[0].matching_event_types == toset(["BOUNCE", "COMPLAINT", "REJECT"]) &&
+      length(aws_sesv2_configuration_set_event_destination.cognito.event_destination[0].sns_destination) == 1
+    )
+    error_message = "Bounce, complaint and reject events must reach the owner topic."
+  }
+
+  assert {
+    condition = (
+      aws_sns_topic_subscription.cognito_email_events_owner.protocol == "email" &&
+      aws_sns_topic_subscription.cognito_email_events_owner.endpoint == "technology@example.invalid"
+    )
+    error_message = "The owner group is the topic's one subscriber, by email."
   }
 
   assert {
@@ -126,7 +168,7 @@ run "unverified_ses_identity_is_refused" {
   override_data {
     target = data.aws_sesv2_email_identity.district
     values = {
-      arn                         = "arn:aws:ses:us-east-2:123456789012:identity/example.invalid"
+      arn                         = "arn:aws:ses:us-east-1:123456789012:identity/example.invalid"
       verified_for_sending_status = false
     }
   }
