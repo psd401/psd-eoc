@@ -136,9 +136,8 @@ export function parseVerificationOptions(
 
 // The shared identity belongs to the district, not to psd-eoc
 // (psd-dev-standards 17 rule 2), so this reads it and never asks it to carry a
-// psd-eoc value. Its default configuration set is the identity owner's; psd-eoc
-// passes its own set explicitly on every send, and configurationSetFailures
-// checks that set instead.
+// psd-eoc value. Its default configuration set is the identity owner's, so
+// configurationSetFailures checks psd-eoc's own alert set instead.
 function sourceIdentityFailures(identity: SesEmailIdentitySnapshot): string[] {
   const failures: string[] = [];
   if (identity.identityType !== 'DOMAIN') {
@@ -171,10 +170,12 @@ function sourceIdentityFailures(identity: SesEmailIdentitySnapshot): string[] {
   return failures;
 }
 
-// The set every psd-eoc send names (the email worker and --send-test). With
-// no reliance on the identity default, a missing set fails those sends, and a
-// set without a bounce and complaint destination leaves them unwatched
-// (standard 17 rules 7 and 8).
+// The set alert mail names explicitly (the email worker and --send-test). A
+// missing set fails those sends, and a set without a bounce and complaint
+// destination leaves them unwatched (standard 17 rules 7 and 8). This gate
+// covers alert mail only: the server's partner-account mail and the alarm
+// mailer still send without a set, so they use the identity owner's default
+// and nothing here checks them.
 function configurationSetFailures(set: SesConfigurationSetSnapshot): string[] {
   if (!set.exists) {
     return [`configuration set ${SES_CONFIGURATION_SET_NAME} does not exist`];

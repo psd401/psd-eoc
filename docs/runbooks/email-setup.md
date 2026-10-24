@@ -26,9 +26,12 @@ region, sender domain, secret references, and deployment inputs come from
    hosted zones, retained resources, current readiness row, and rollback point.
 2. Use read-only inventory first. Verify account sending state, identity,
    DKIM, MAIL FROM, the `psd-eoc-transactional` set and its event destination
-   (every psd-eoc send names it explicitly), worker permission, and event
-   evidence independently. `ses-verification.ts --check` reports a MAIL FROM
-   the identity owner has not set up yet as not ready.
+   (alert mail names it explicitly), worker permission, and event evidence
+   independently. `ses-verification.ts --check` reports a MAIL FROM the
+   identity owner has not set up yet as not ready. It covers alert mail only:
+   partner-account mail and the alarm mailer still send without a
+   configuration set, so they use the identity owner's default and the check
+   does not see them.
 3. Apply infrastructure only through direct `cdk deploy` as described in
    [CONFIGURATION.md](../CONFIGURATION.md). Do not create parallel identities,
    zones, configuration sets, or manual send permissions.
