@@ -772,6 +772,10 @@ async function main(): Promise<void> {
           // Synthetic partner identity provider and mailer: nothing leaves
           // the machine. A deployed stack cannot carry this pool id.
           PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+          // Partner email states where to sign in, so its message context
+          // needs the deployment origin. Set here rather than inherited from
+          // a developer's generated .env.local, which CI does not have.
+          GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
         },
         stdin: 'inherit',
         stdout: 'inherit',
