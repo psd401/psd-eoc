@@ -236,6 +236,7 @@ function lifecyclePreview() {
     eventTypeVersion: EVENT_TYPE_VERSION,
     rosterSnapshotId: IDS.roster,
     recipientCount: 3,
+    partnerRecipientCount: 0,
     channels: channelPlan(),
     sendReadiness: 'ready',
     blockingReasonCodes: [],

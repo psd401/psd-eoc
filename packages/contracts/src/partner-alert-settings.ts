@@ -223,3 +223,22 @@ export const SetPartnerAlertSettingsInputSchema = z
 export type SetPartnerAlertSettingsInput = z.infer<
   typeof SetPartnerAlertSettingsInputSchema
 >;
+
+/**
+ * Whether one live incident's response and threat alert partners under
+ * `settings`. Matching is on stable keys only: the response family must be
+ * one the settings name and the threat must not be excluded. A saved key that
+ * no longer exists in the catalog equals no current key, so it matches
+ * nothing; it can never widen who is alerted. Classification (drills, tests)
+ * and facility isolation are decided before this is asked.
+ */
+export function partnerAlertSettingsMatch(
+  settings: PartnerAlertSettings,
+  event: Readonly<{ responseFamilyKey: string; threatKey: string | null }>,
+): boolean {
+  return (
+    settings.responseFamilyKeys.includes(event.responseFamilyKey) &&
+    (event.threatKey === null ||
+      !settings.excludedThreatKeys.includes(event.threatKey))
+  );
+}
