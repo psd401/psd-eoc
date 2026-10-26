@@ -413,7 +413,11 @@ function scopeAllowsFacility(
   );
 }
 
-function assertInvocationAllowed(
+/**
+ * Refuses a principal class, source, or partner session the capability does
+ * not admit. Exported so tests can sweep every capability and transport.
+ */
+export function assertInvocationAllowed(
   capabilityId: RegisteredCapabilityId,
   invocation: TrustedCapabilityInvocation,
 ): void {
