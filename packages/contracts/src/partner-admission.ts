@@ -263,6 +263,21 @@ export const PartnerProviderPendingStepSchema = z
   .enum(['enable', 'disable'])
   .nullable();
 
+/**
+ * Whether a partner gets alert texts, as the Access page shows it.
+ * `not-signed-up` is no live consent: never given, or withdrawn in the app.
+ * `opted-out` is a live consent whose number replied STOP and has not
+ * replied START since. The provider keeps one opt-out list per number, so a
+ * STOP recorded for a staff endpoint with the same number counts too.
+ */
+export const PartnerTextAlertsSchema = z.enum([
+  'not-signed-up',
+  'signed-up',
+  'opted-out',
+]);
+
+export type PartnerTextAlerts = z.infer<typeof PartnerTextAlertsSchema>;
+
 export const PartnerAccessRecordSchema = z
   .object({
     admission: PartnerAdmissionSchema,
@@ -272,6 +287,7 @@ export const PartnerAccessRecordSchema = z
     invitationSentAt: TimestampSchema.nullable(),
     /** The partner's latest sign-in the app recorded; null if never. */
     lastSignInAt: TimestampSchema.nullable(),
+    textAlerts: PartnerTextAlertsSchema,
   })
   .strict()
   .readonly();

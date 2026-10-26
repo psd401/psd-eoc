@@ -8,6 +8,7 @@ import {
   type PartnerAccessRecord,
   type PartnerAccessStatus,
   type PartnerAdmission,
+  type PartnerTextAlerts,
 } from '@psd-eoc/contracts';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 
@@ -25,6 +26,7 @@ import {
 } from '../../db/schema';
 import { appendDevicePushTokenUnregistrations } from '../auth/installation-handoff';
 import { partnerAdmissionFromRow } from '../auth/partner-admission';
+import { loadSmsPhoneOptOuts } from '../notify/sms-policy';
 import type { PartnerMessageContext } from './messages';
 import { partnerInvitationMessage } from './messages';
 import type { PartnerProviders } from './providers';
@@ -32,7 +34,13 @@ import type { PartnerProviders } from './providers';
 /** The read and write surface partner administration needs. */
 export type PartnerDatabase = Pick<
   Database,
-  'select' | 'insert' | 'update' | 'execute'
+  'select' | 'selectDistinctOn' | 'insert' | 'update' | 'execute'
+>;
+
+/** What projecting admissions for the Access page reads. */
+export type PartnerAccessReadDatabase = Pick<
+  Database,
+  'select' | 'selectDistinctOn'
 >;
 
 /** A refusal an administrator can act on; never carries an address. */
@@ -119,17 +127,20 @@ function expectsEnabledAccount(
  * latest sign-in the app recorded for its address. A sign-in is a session the
  * server issued to that partner identity; Essentials keeps no history, so
  * these are the only sign-in times there are.
+ *
+ * Text alerts read the partner account's live consent the way partner
+ * delivery does (#597), and its number's newest STOP/START fact.
  */
 export async function projectPartnerAccess(
-  database: Pick<Database, 'select'>,
+  database: PartnerAccessReadDatabase,
   admissions: readonly PartnerAdmission[],
   now: Date,
 ): Promise<readonly PartnerAccessRecord[]> {
   if (admissions.length === 0) return [];
   const ids = admissions.map((admission) => admission.id);
   const emails = [...new Set(admissions.map((admission) => admission.email))];
-  const [syncRows, noticeRows, signInRows, sameAddressRows] = await Promise.all(
-    [
+  const [syncRows, noticeRows, signInRows, sameAddressRows, consentRows] =
+    await Promise.all([
       database
         .select({
           partnerAdmissionId: partnerProviderSyncs.partnerAdmissionId,
@@ -167,8 +178,37 @@ export async function projectPartnerAccess(
         )
         .groupBy(users.email),
       loadAdmissions(database, { emails }),
-    ],
+      database
+        .select({
+          email: users.email,
+          phoneNumber: staffSmsConsents.phoneNumber,
+        })
+        .from(staffSmsConsents)
+        .innerJoin(users, eq(users.id, staffSmsConsents.userId))
+        .where(
+          and(
+            inArray(users.email, emails),
+            isNull(users.googleSubject),
+            isNull(users.disabledAt),
+            isNull(staffSmsConsents.withdrawnAt),
+          ),
+        )
+        .orderBy(desc(staffSmsConsents.consentedAt), desc(staffSmsConsents.id)),
+    ]);
+  const livePhone = new Map<string, string>();
+  for (const row of consentRows) {
+    if (!livePhone.has(row.email)) livePhone.set(row.email, row.phoneNumber);
+  }
+  const optedOut = await loadSmsPhoneOptOuts(
+    database,
+    [...new Set(livePhone.values())],
+    { includePartnerEndpoints: true },
   );
+  const textAlerts = (email: string): PartnerTextAlerts => {
+    const phoneNumber = livePhone.get(email);
+    if (phoneNumber === undefined) return 'not-signed-up';
+    return optedOut.get(phoneNumber) === true ? 'opted-out' : 'signed-up';
+  };
   const lastSync = new Map<string, { action: string; completedAt: Date }>();
   for (const row of syncRows) {
     const prior = lastSync.get(row.partnerAdmissionId);
@@ -217,12 +257,13 @@ export async function projectPartnerAccess(
       providerPendingStep,
       invitationSentAt: invitationSentAt?.toISOString() ?? null,
       lastSignInAt: signedInAt?.toISOString() ?? null,
+      textAlerts: textAlerts(admission.email),
     });
   });
 }
 
 export async function listPartnerAccess(
-  database: Pick<Database, 'select'>,
+  database: PartnerAccessReadDatabase,
   input: Readonly<{ includeEnded: boolean }>,
   now: Date,
 ): Promise<readonly PartnerAccessRecord[]> {

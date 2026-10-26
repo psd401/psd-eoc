@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { expectAxeClean, statePath } from './support';
+import { expectAxeClean, issue597EvidencePath, statePath } from './support';
 
 /**
  * Issue #595: an administrator manages partners from the Access page. The
@@ -34,7 +34,25 @@ test.describe('partner-access', () => {
     await expect(row).toContainText('Invited — has not signed in');
     await expect(row).toContainText('new-responder@agency.example.invalid');
     await expect(row).toContainText('In sync');
+    await expect(row).toContainText('Not signed up');
     await expectAxeClean(page);
+  });
+
+  test('a partner who replied STOP shows as opted out of texts', async ({
+    page,
+  }) => {
+    await page.goto('/access');
+    const section = page.getByRole('region', { name: 'Partners' });
+    const row = section.getByRole('row', {
+      name: /Synthetic Joining Responder/u,
+    });
+    await expect(row).toContainText('Opted out — replied STOP', {
+      timeout: 30_000,
+    });
+    await expectAxeClean(page);
+    await section.screenshot({
+      path: issue597EvidencePath('partner-access-text-alerts.png'),
+    });
   });
 
   test('admin disables partner → partner session refused', async ({

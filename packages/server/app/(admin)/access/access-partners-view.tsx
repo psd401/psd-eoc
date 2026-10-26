@@ -1,6 +1,7 @@
 import type {
   PartnerAccessRecord,
   PartnerAccessStatus,
+  PartnerTextAlerts,
 } from '@psd-eoc/contracts';
 
 import {
@@ -16,6 +17,17 @@ const STATUS_LABELS: Readonly<Record<PartnerAccessStatus, string>> =
     disabled: 'Disabled',
     expired: 'Expired',
     superseded: 'Replaced',
+  });
+
+/**
+ * A STOP is the partner's own choice at their phone, so it reads as such:
+ * the district cannot text them until they reply START to that number.
+ */
+const TEXT_ALERT_LABELS: Readonly<Record<PartnerTextAlerts, string>> =
+  Object.freeze({
+    'not-signed-up': 'Not signed up',
+    'signed-up': 'Signed up',
+    'opted-out': 'Opted out — replied STOP',
   });
 
 function day(value: string | null): string {
@@ -219,12 +231,13 @@ export function PartnerAccessSection({
               <th scope="col">Last sign-in</th>
               <th scope="col">Invitation sent</th>
               <th scope="col">Sign-in account</th>
+              <th scope="col">Text alerts</th>
             </tr>
           </thead>
           <tbody>
             {partners.length === 0 ? (
               <tr>
-                <td colSpan={8}>No partner has been invited.</td>
+                <td colSpan={9}>No partner has been invited.</td>
               </tr>
             ) : (
               partners.map((record) => (
@@ -240,6 +253,7 @@ export function PartnerAccessSection({
                   <td>{day(record.lastSignInAt)}</td>
                   <td>{day(record.invitationSentAt)}</td>
                   <td>{providerLabel(record)}</td>
+                  <td>{TEXT_ALERT_LABELS[record.textAlerts]}</td>
                 </tr>
               ))
             )}

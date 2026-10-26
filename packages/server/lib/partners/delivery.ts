@@ -1,6 +1,8 @@
 import {
   EmailEndpointSchema,
   PushEndpointSchema,
+  SMS_OPT_OUT_REASON_CODE,
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
   SmsEndpointSchema,
   type DispatchBatch,
   type EmailEndpoint,
@@ -20,6 +22,7 @@ import {
   isNotNull,
   isNull,
   lte,
+  notInArray,
   or,
   sql,
 } from 'drizzle-orm';
@@ -177,7 +180,12 @@ async function loadPinnedPartners(
   );
 }
 
-/** Latest lifecycle fact per partner endpoint; absent means never recorded. */
+/**
+ * Latest lifecycle fact per partner endpoint; absent means never recorded.
+ * SMS STOP and START are left out: they follow the number, not the endpoint,
+ * and `loadSmsPhoneOptOuts` orders them by when the provider saw them, as
+ * staff resolution does.
+ */
 async function latestPartnerEndpointStatuses(
   database: DatabaseQuery,
   channel: NotificationChannel,
@@ -195,6 +203,10 @@ async function latestPartnerEndpointStatuses(
         eq(endpointStatusRecords.population, 'partner'),
         eq(endpointStatusRecords.channel, channel),
         inArray(endpointStatusRecords.partnerEndpointId, [...endpointIds]),
+        notInArray(endpointStatusRecords.reasonCode, [
+          SMS_OPT_OUT_REASON_CODE,
+          SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+        ]),
       ),
     )
     .orderBy(
@@ -518,11 +530,12 @@ export async function resolvePartnerPushEndpoints(
  * withdrawn since, a number opted out with the provider, an ended or expired
  * admission, or a disabled account is not sent to.
  *
- * A STOP from a partner-only number is not mirrored locally: opt-out records
- * are keyed to roster endpoints (`sms_opt_out_records`). The provider's
- * opt-out list is the authority and refuses the send
- * (`DESTINATION_PHONE_NUMBER_OPTED_OUT`, recorded as a failed attempt), so the
- * partner is not texted; withdrawing consent in the app stops resolution here.
+ * A partner's STOP is recorded locally against their partner endpoint, as a
+ * disabled `SMS_OPTED_OUT` lifecycle fact: when the provider refuses a send
+ * to the number, or when the scheduled reconciliation finds the number on the
+ * provider's opt-out list. Opt-outs are read by number across staff and
+ * partner facts, so the next batch leaves the partner out without a provider
+ * call, and a later provider-verified START brings them back.
  */
 export async function resolvePartnerSmsEndpoints(
   database: DatabaseQuery,
@@ -591,9 +604,11 @@ export async function resolvePartnerSmsEndpoints(
     'sms',
     [...rows.values()].map((row) => row.id),
   );
-  const optedOut = await loadSmsPhoneOptOuts(database, [
-    ...new Set(consentRows.map((consent) => consent.phoneNumber)),
-  ]);
+  const optedOut = await loadSmsPhoneOptOuts(
+    database,
+    [...new Set(consentRows.map((consent) => consent.phoneNumber))],
+    { includePartnerEndpoints: true },
+  );
   const admitted = new Map(
     partners.map((partner) => [partner.admissionId, partner.admitted]),
   );

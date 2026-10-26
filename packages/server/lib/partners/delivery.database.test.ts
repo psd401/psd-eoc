@@ -23,6 +23,12 @@ import {
   type SesV2SendEmailInput,
 } from '../../../../workers/email/ses-adapter';
 import {
+  SmsOptOutReconciler,
+  recordAwsManagedOptIn,
+  recordAwsManagedOptOutConflict,
+  type AwsEumDescribeOptedOutNumbersRequest,
+} from '../../../../workers/sms/opt-out';
+import {
   createDatabaseClient,
   type Database,
   type DatabaseQuery,
@@ -86,6 +92,10 @@ import {
 } from '../notify/dispatcher';
 import { createDrizzleEmailRuntimeStore } from '../notify/email-runtime-store';
 import { createDrizzleExpoPushRuntimeStore } from '../notify/expo-push-runtime-store';
+import {
+  createDrizzleSmsPolicyStore,
+  loadSmsPhoneOptOuts,
+} from '../notify/sms-policy';
 import { createDrizzleSmsRuntimeStore } from '../notify/sms-runtime-store';
 import { SYNTHETIC_PARTNER_ISSUER } from '../testing/partner-session';
 import {
@@ -94,6 +104,7 @@ import {
   requireSyntheticTestDatabaseUrl,
   type DisposableDatabase,
 } from '../testing/database';
+import { listPartnerAccess } from './access';
 
 /**
  * Fresh-database regression for partner delivery (#597): one live lockdown,
@@ -134,6 +145,34 @@ const WILDLIFE_THREAT = '00000000-0000-4000-8000-000000000700';
  */
 const SHARED_ADDRESS = 'shared-responder@agency.example.invalid';
 const ALPHA_PHONE = '+12025550142';
+const OPT_OUT_LIST = Object.freeze({
+  name: 'SyntheticPartnerList',
+  arn: 'arn:aws:sms-voice:us-west-2:000000000000:opt-out-list/SyntheticPartnerList',
+});
+
+/**
+ * The provider's opt-out list, as AWS End User Messaging answers it: the
+ * numbers on it, or none for a filtered read of a number that replied START.
+ */
+function optOutList(
+  numbers: readonly Readonly<{ phoneNumber: string; optedOutAt: number }>[],
+) {
+  return {
+    describeOptedOutNumbers: (request: AwsEumDescribeOptedOutNumbersRequest) =>
+      Promise.resolve({
+        OptOutListName: OPT_OUT_LIST.name,
+        OptOutListArn: OPT_OUT_LIST.arn,
+        OptedOutNumbers:
+          request.OptedOutNumbers === undefined
+            ? numbers.map((number) => ({
+                OptedOutNumber: number.phoneNumber,
+                OptedOutTimestamp: new Date(number.optedOutAt),
+                EndUserOptedOut: true,
+              }))
+            : [],
+      }),
+  };
+}
 
 let connection: PostgresDatabaseConnection | undefined;
 let ownedDatabase: DisposableDatabase | undefined;
@@ -935,6 +974,171 @@ describeWithDatabase('partner delivery from a live incident (#597)', () => {
         status: 'active',
       },
     ]);
+  });
+
+  test('a partner’s STOP is recorded locally, so the next batch leaves them out without a provider call', async () => {
+    const store = smsStore();
+    const policy = createDrizzleSmsPolicyStore(database() as Database);
+    const resolve = async () => {
+      const page = await store.resolveBatch({
+        operation: 'resolve-batch',
+        batch: batch('sms'),
+        enqueuedAt: new Date().toISOString(),
+        cursor: 0,
+      });
+      if (page.kind !== 'ready') throw new Error('The SMS batch expired.');
+      return page;
+    };
+    const textAlerts = async () =>
+      new Map(
+        (
+          await listPartnerAccess(
+            database() as Database,
+            { includeEnded: false },
+            new Date(),
+          )
+        ).map((record) => [record.admission.id, record.textAlerts]),
+      );
+    const startFrom = (occurredAt: number) =>
+      recordAwsManagedOptIn(
+        { rosterSnapshotId: fixture.snapshotId },
+        OPT_OUT_LIST,
+        {
+          requestId: randomUUID(),
+          keyword: 'START',
+          phoneNumber: ALPHA_PHONE,
+          occurredAt: new Date(occurredAt).toISOString(),
+          authorization: 'synthetic-inbound-keyword',
+        },
+        {
+          transport: optOutList([]),
+          resolver: policy,
+          recorder: policy,
+          authorizeInvocation: () => true,
+        },
+      );
+    const base = Date.now();
+
+    const first = await resolve();
+    expect(first.items).toHaveLength(1);
+    const [item] = first.items;
+    expect((await textAlerts()).get(fixture.alpha.admissionId)).toBe(
+      'signed-up',
+    );
+    expect((await textAlerts()).get(fixture.bravo.admissionId)).toBe(
+      'not-signed-up',
+    );
+
+    // The provider refuses a send to a number that replied STOP. The worker
+    // records the refusal against the partner endpoint it sent to, through
+    // the production application role; a replay returns the same record.
+    if (ownedDatabase === undefined) throw new Error('not migrated');
+    const roleConnection = createDatabaseClient({
+      driver: 'postgres',
+      url: ownedDatabase.url,
+      maxConnections: 1,
+    });
+    if (roleConnection.driver !== 'postgres') throw new Error('postgres');
+    try {
+      await roleConnection.db.execute(sql`set role psd_eoc_app`);
+      const rolePolicy = createDrizzleSmsPolicyStore(roleConnection.db);
+      const refusedAt = new Date(base - 4 * 60_000).toISOString();
+      const recorded = await recordAwsManagedOptOutConflict(
+        item!,
+        'synthetic-partner-opt-out-request',
+        refusedAt,
+        rolePolicy,
+      );
+      expect(recorded).toEqual(
+        expect.objectContaining({
+          recipientId: fixture.alpha.admissionId,
+          endpointId: item!.endpoint.id,
+          providerOccurredAt: refusedAt,
+        }),
+      );
+      expect(
+        await recordAwsManagedOptOutConflict(
+          item!,
+          'synthetic-partner-opt-out-request',
+          refusedAt,
+          rolePolicy,
+        ),
+      ).toEqual(recorded);
+    } finally {
+      await roleConnection.close();
+    }
+    const [fact] = await database()
+      .select({
+        partnerEndpointId: endpointStatusRecords.partnerEndpointId,
+        status: endpointStatusRecords.status,
+        reasonCode: endpointStatusRecords.reasonCode,
+      })
+      .from(endpointStatusRecords)
+      .where(
+        and(
+          eq(endpointStatusRecords.population, 'partner'),
+          eq(endpointStatusRecords.channel, 'sms'),
+        ),
+      );
+    expect(fact).toEqual({
+      partnerEndpointId: item!.endpoint.id,
+      status: 'disabled',
+      reasonCode: 'SMS_OPTED_OUT',
+    });
+
+    // The next batch page has no work item for Alpha, so nothing reaches the
+    // provider, and the send gate refuses the earlier item too. The partner's
+    // position stays, so no later partner shifts.
+    const stopped = await resolve();
+    expect(stopped.items).toEqual([]);
+    expect(stopped.nextCursor).toBeNull();
+    expect(await store.authorizeProviderSend(item!)).toEqual({
+      authorized: false,
+    });
+    expect((await textAlerts()).get(fixture.alpha.admissionId)).toBe(
+      'opted-out',
+    );
+    // A partner's STOP is not a staff fact: staff sends read roster facts
+    // only, so the same number on a staff roster is not suppressed here.
+    expect(
+      (await loadSmsPhoneOptOuts(database(), [ALPHA_PHONE])).has(ALPHA_PHONE),
+    ).toBe(false);
+
+    // START, verified with the provider, supersedes the STOP.
+    expect(await startFrom(base - 3 * 60_000)).toEqual(
+      expect.objectContaining({
+        recipientId: fixture.alpha.admissionId,
+        endpointId: item!.endpoint.id,
+        status: 'active',
+      }),
+    );
+    expect((await resolve()).items).toHaveLength(1);
+    expect((await textAlerts()).get(fixture.alpha.admissionId)).toBe(
+      'signed-up',
+    );
+
+    // A STOP the scheduled reconciliation finds on the provider's list is
+    // recorded the same way, before anything is sent.
+    const report = await new SmsOptOutReconciler({
+      transport: optOutList([
+        { phoneNumber: ALPHA_PHONE, optedOutAt: base - 2 * 60_000 },
+      ]),
+      resolver: policy,
+      recorder: policy,
+      optOutListName: OPT_OUT_LIST.name,
+      optOutListArn: OPT_OUT_LIST.arn,
+    }).reconcile({ rosterSnapshotId: fixture.snapshotId });
+    expect(report).toEqual(
+      expect.objectContaining({ recordedCount: 1, unresolvedCount: 0 }),
+    );
+    expect((await resolve()).items).toEqual([]);
+    expect((await textAlerts()).get(fixture.alpha.admissionId)).toBe(
+      'opted-out',
+    );
+
+    // Texting START again restores Alpha for the tests that follow.
+    await startFrom(base - 60_000);
+    expect((await resolve()).items).toHaveLength(1);
   });
 
   test('text reaches a partner at their own consented number until they withdraw', async () => {

@@ -155,6 +155,7 @@ function partner(
   status: PartnerAccessRecord['status'],
   ending: PartnerAccessRecord['admission']['ending'] = null,
   providerPendingStep: PartnerAccessRecord['providerPendingStep'] = null,
+  textAlerts: PartnerAccessRecord['textAlerts'] = 'not-signed-up',
 ): PartnerAccessRecord {
   return {
     admission: {
@@ -172,12 +173,13 @@ function partner(
     providerPendingStep,
     invitationSentAt: '2026-09-01T17:00:00.000Z',
     lastSignInAt: status === 'active' ? '2026-09-02T17:00:00.000Z' : null,
+    textAlerts,
   };
 }
 
 const PARTNERS: readonly PartnerAccessRecord[] = Object.freeze([
-  partner('1', 'invited', null, 'enable'),
-  partner('2', 'active'),
+  partner('1', 'invited', null, 'enable', 'signed-up'),
+  partner('2', 'active', null, null, 'opted-out'),
   partner('3', 'disabled', {
     reason: 'disabled',
     endedByUserId: IDS.user,
@@ -418,6 +420,16 @@ describe('AccessAdminView partners', () => {
     expect(html).toContain('Expired 2027-09-01');
     expect(html).toContain('data-partner-status="invited"');
     expect(html).toContain('Pending: sign-in account not yet confirmed');
+  });
+
+  test('shows whether each partner gets texts, and a STOP in words', () => {
+    const html = renderToStaticMarkup(
+      <AccessAdminView csrfToken={CSRF_TOKEN} view={authorizedView()} />,
+    );
+    expect(html).toContain('<th scope="col">Text alerts</th>');
+    expect(html).toContain('<td>Signed up</td>');
+    expect(html).toContain('<td>Opted out — replied STOP</td>');
+    expect(html).toContain('<td>Not signed up</td>');
   });
 
   test('offers resend, disable and correction only for current admissions, re-invite only for ended ones', () => {
