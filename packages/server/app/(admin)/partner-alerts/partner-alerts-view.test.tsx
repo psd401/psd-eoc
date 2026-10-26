@@ -123,7 +123,15 @@ describe('partner alerts admin view', () => {
   test('a saved response with no published version stays checked and can be removed', () => {
     const html = render(
       PartnerAlertSettingsStateSchema.parse({
-        current: null,
+        current: {
+          id: VERSION_ID,
+          version: 1,
+          responseFamilyKeys: ['lockdown', 'unpublished-family'],
+          excludedThreatKeys: [],
+          supersedesVersionId: null,
+          createdByUserId: ADMIN_ID,
+          createdAt: AT,
+        },
         effective: {
           responseFamilyKeys: ['lockdown', 'unpublished-family'],
           excludedThreatKeys: [],
@@ -135,6 +143,21 @@ describe('partner alerts admin view', () => {
       checkbox(html, 'responseFamilyKeys', 'unpublished-family'),
     ).toContain('checked');
     expect(html).toContain('unpublished-family (no published response)');
+  });
+
+  test('a default this district has no real version of is not offered, so the untouched page saves', () => {
+    const html = render(
+      PartnerAlertSettingsStateSchema.parse({
+        current: null,
+        effective: DEFAULT_PARTNER_ALERT_SETTINGS,
+        ...OPTIONS,
+        responseOptions: [{ familyKey: 'lockdown', name: 'Lockdown' }],
+      }),
+    );
+    expect(checkbox(html, 'responseFamilyKeys', 'lockdown')).toContain(
+      'checked',
+    );
+    expect(html).not.toContain('modified-lockdown');
   });
 
   test('a non-administrator sees the refusal and no settings', () => {

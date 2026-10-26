@@ -41,10 +41,11 @@ function SettingsForm({
   );
   // A saved response with no published real version stays listed, checked
   // and named by its key, so saving never silently drops it and unchecking
-  // it removes it.
+  // it removes it. A default this district has no real version of is never
+  // offered: it matches nothing, and a save would refuse it.
   const responseChoices = [
     ...state.responseOptions,
-    ...state.effective.responseFamilyKeys
+    ...(state.current?.responseFamilyKeys ?? [])
       .filter((key) => !offeredResponses.has(key))
       .map((key) => ({
         familyKey: key,

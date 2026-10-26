@@ -236,6 +236,19 @@ describeWithDatabase('partner alert settings', () => {
     ]);
   });
 
+  test('saving the untouched default page is accepted', async () => {
+    // The page submits the settings in effect unchanged; the first save
+    // must not refuse the defaults it showed.
+    const state = await read();
+    const saved = await save({
+      responseFamilyKeys: state.effective.responseFamilyKeys,
+      excludedThreatKeys: state.effective.excludedThreatKeys,
+      baseVersionId: state.current?.id ?? null,
+    });
+    expect(saved.version).toBe(1);
+    expect(saved.responseFamilyKeys).toEqual(['lockdown', 'modified-lockdown']);
+  });
+
   test('each save is a new version naming its administrator and the version it replaced', async () => {
     if (admin.actor.kind !== 'human') throw new Error('human only');
     const base = await currentVersionId();
