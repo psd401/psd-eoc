@@ -3,7 +3,7 @@ type: Domain Concept
 title: "Partner access: admissions, provider sync, and expiry sweep"
 description: "How non-district first responders are admitted, refused, renewed, disabled, and expired through append-only partner admissions, a separate partner identity provider, the Access page, and the daily partner-access sweep."
 tags: [partner-access, identity, admissions, expiry, cognito, ses]
-timestamp: 2026-10-23T20:32:53-07:00
+timestamp: 2026-10-26T08:24:41-07:00
 openwiki:
   roles: [domain, operations]
   change_kinds: [identity, lifecycle, persistence, scheduled-job]
@@ -113,7 +113,7 @@ The provider stub used in tests is `syntheticPartnerProviders`, selected only by
 
 Partner access is decided per request, never by a group. `decidePartnerAccess` (`packages/server/lib/auth/partner-admission.ts`) finds the address's unended admission and refuses with `NO_PARTNER_ADMISSION`, `PARTNER_ADMISSION_ENDED`, or `PARTNER_ADMISSION_EXPIRED`. `DrizzleSessionStore` in `packages/server/lib/auth/sessions.ts` chooses this path whenever `isPartnerIdentityIssuer` is true for the user's issuer, and `partnerAccessAsAccessDecision` restates the result as `roles: ['partner']`, no group sources, and `facilityScope: null`.
 
-A partner session records `authorization.kind = 'partner-admission'` with the admission id and `admissionExpiresAt` (`PartnerAdmissionSessionAuthorizationSchema` in `packages/contracts/src/identity.ts`). It carries no Google membership windows. `authorizeStoredSession` refuses a partner session at or after its expiry, and `sessionAuthorizationUsableUntil` gives the mobile client the same deadline, so a cached partner session stops being usable at expiry. A renewal keeps an open session working because the next read finds the new admission current.
+A partner session records `authorization.kind = 'partner-admission'` with the admission id and `admissionExpiresAt` (`PartnerAdmissionSessionAuthorizationSchema` in `packages/contracts/src/identity.ts`). It carries no Google membership windows. `authorizeStoredSession` refuses a partner session at or after its expiry, and `sessionAuthorizationUsableUntil` gives the mobile client the same deadline, so a cached partner session stops being usable at expiry. A renewal keeps an open session working because the next read finds the new admission current. The sign-in that creates the session, and its one-day cap, are described in [partner web sign-in](partner-sign-in.md#one-day-sessions); what the session may run is set by the partner allowlist in [capability engine](../architecture/capability-engine.md#partner-sessions-and-the-allowlist).
 
 ## Daily sweep
 
@@ -146,7 +146,7 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 
 ## Known gaps
 
-- **No partner sign-in route ships yet.** `packages/server/e2e/run.ts` says partner sign-in "is a later change", and the only partner session writer is the test helper `packages/server/lib/testing/partner-session.ts`. The stack grants `AdminInitiateAuth`, `AdminRespondToAuthChallenge`, and WebAuthn registration to the web task, but no repository code calls them. `docs/ARCHITECTURE.md` describes the intended sign-in, and [identity and access](identity-and-access.md) still says the partner configuration is unread.
+- **Partner sign-in is built but unverified against a real pool.** The emailed-code route at `/partner-sign-in` and its admission check are described in [partner web sign-in](partner-sign-in.md). The browser flows prove it only against the synthetic stand-in, and `lib/testing/partner-session.ts` remains a test helper that writes the same rows directly. The stack grants `AdminInitiateAuth` and `AdminRespondToAuthChallenge` to the web task, and `lib/auth/partner-otp.ts` now calls them. The readiness state is recorded in `docs/INTEGRATIONS.md` only.
 - **Live state is not recorded here.** Whether partner access is configured or verified on a deployment is a readiness claim owned by `docs/INTEGRATIONS.md`; see [configuration and readiness](../operations/configuration-and-readiness.md).
 
 ## Change navigation
@@ -156,6 +156,7 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 - **Partner mail change (sender, set, events):** the set name lives in `infra/src/config.ts`, the stack wiring in `infra/src/stack/psd-eoc-stack.ts`, and the runtime read in `resolvePartnerProviders`. Change them together and follow the recipe in [infrastructure](../operations/infrastructure.md#change-recipes).
 - **Provider calls and IAM must match.** `CognitoPartnerDirectory` calls `AdminCreateUser`, `AdminGetUser`, `AdminEnableUser`, `AdminUserGlobalSignOut`, and `AdminDisableUser`. The web task's policy in `infra/src/stack/psd-eoc-stack.ts` grants those five. The sweep task grants only `AdminDisableUser` and `AdminUserGlobalSignOut`, because it never enables an account. Changing a provider call means changing both grants and the stack test.
 - **Adding a partner capability** follows the same surface as any admin mutation: catalog entry in `capability-catalog.ts`, handler in `partner-capabilities.ts`, id in `ADMIN_MUTATION_IDS` (`packages/server/lib/capabilities/admin.ts`), the persisted enum in `db/schema/enums.ts`, and a migration extending `mutation_capability` (migration `0060` shows the pattern). See [capability engine](../architecture/capability-engine.md#change-recipes).
+- **Partner sign-in or session lifetime** is not in this page's code: change `lib/auth/partner-sign-in.ts` and `partner-session.ts` as described in [partner web sign-in](partner-sign-in.md#change-navigation). The admission rules here still decide access at every sign-in and read.
 - **Changing expiry or notice timing** touches three places that must agree: the generated column in migration `0059`, `partnerAdmissionExpiresAt`, and `PARTNER_EXPIRY_NOTICE_DAYS` in `sweep.ts`.
 
 ## Focused tests
@@ -173,7 +174,9 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 | Script exits quietly when unconfigured | `packages/server/scripts/operations/sweep-partner-access.test.ts` | `does nothing, and opens no database, when partner access is unconfigured` |
 | Access page controls match state | `packages/server/app/(admin)/access/access-admin-view.test.tsx` | `offers no partner controls when partner access is not configured`, `offers resend, disable and correction only for current admissions` |
 | Infrastructure grants and schedule | `infra/test/stack/psd-eoc-stack.test.ts` | `gives the partner-access sweep only disable, sign-out, and partner mail, gated on the condition`, `confines an unconfigured deployment to the gated grants, the service env, and the disabled sweep` |
+| A partner session reaching an administrator page gets the admin refusal, not a server error | `packages/server/app/(admin)/access/partner-capabilities.database.test.ts` | `a partner session gets the admin refusal its page renders, not a server error` |
 | Browser flow (synthetic IdP and mailer) | `packages/server/e2e/partner-access.flow.ts` | Playwright test names `admin invites partner`, `admin disables partner`, `expired partner is refused`, `admin renews partner` |
+| Browser flow: a signed-in partner joins and posts to a live drill, and sees no staff-only controls | `packages/server/e2e/partner-event-participation.flow.ts` | `partner joins a live drill and posts`, `partner has no start/end/admin controls` (conditional; needs the Playwright run) |
 
 ## Validation
 
