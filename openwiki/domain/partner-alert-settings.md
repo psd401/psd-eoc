@@ -92,11 +92,11 @@ Idempotent retries replay the stored version by its id (`resultReference`, `load
 - **Threat choices** include retired threats. A retired threat is listed only while it is excluded, so saving the page does not silently remove the exclusion.
 - The page (`partner-alerts/page.tsx`) is administrator-only. A non-administrator gets the refusal view, because `withAdminRefusal` turns the engine's 403 into a view (see [capability engine](../architecture/capability-engine.md#partner-sessions-and-the-allowlist)). The page posts to `/partner-alerts/api`, the status message is one allowlisted key (`settings-saved`), and the admin navigation entry is `Partner alerts` in `packages/server/app/nav/primary-nav-model.ts`.
 
-## Routing status: stored, not yet read by any alert path
+## Routing status: read when a live incident is planned
 
-`loadEffectivePartnerAlertSettings` is the intended reader for partner audience planning, as its doc comment says. In this revision, though, no production code calls it: the only callers are the page's state loader and the database tests. Partner recipients are not part of staff audiences either. Staff rosters are built from Google groups and skip partners (`packages/server/lib/roster/groups-sync.ts` notes that a partner has no Google subject and is never a roster contact), and the audience and dispatch path in [roster and audience](roster-and-audience.md) and [notification pipeline](notification-pipeline.md) has no partner step.
+`resolvePartnerAudience` in `packages/server/lib/partners/audience.ts` reads the effective settings when an activation preview is created, and pins the selected admissions beside the preview (`activation_preview_partners`). Partners are never part of staff rosters: staff rosters are built from Google groups and skip partners (`packages/server/lib/roster/groups-sync.ts`). Delivery to the pinned partners is described in [notification pipeline](notification-pipeline.md).
 
-So a saved setting changes what the page shows and what `loadEffectivePartnerAlertSettings` returns; it does not, by itself, send any alert to a partner. Any future partner alert path must read the effective settings through that loader and must keep drills and real events separate ([architecture overview](../architecture/overview.md)).
+A saved setting therefore changes who the next live incident's preview pins. It never changes an event already started: that event's all-clear and reactivation reach the set its activation pinned.
 
 ## Change navigation
 
@@ -104,7 +104,7 @@ So a saved setting changes what the page shows and what `loadEffectivePartnerAle
 - **Invariants to keep:** settings are keyed, never named; a save names the version it replaces and is refused if that is no longer current; no row is ever edited or removed; the partner allowlist never gains these IDs; partner alerts never gain a drill or channel setting.
 - **Adding a capability or a column** follows the recipe in [capability engine](../architecture/capability-engine.md#change-recipes). A new persisted enum entry needs a new migration, and the pattern to copy is `0062`. A change to a list bound must change the contract, the database check, and the migration together.
 - **Changing the defaults** changes `DEFAULT_PARTNER_ALERT_RESPONSE_FAMILY_KEYS`, which the contracts test pins. Existing saved versions are unaffected.
-- **Partner alert routing** (the future reader) is outside this page's source. Do not describe it as implemented until a caller of `loadEffectivePartnerAlertSettings` exists in the audience or dispatch code.
+- **Partner alert routing** is `packages/server/lib/partners/audience.ts` (who a live incident pins) and `packages/server/lib/partners/delivery.ts` (where each is reached at send time).
 
 ## Focused tests
 
@@ -144,5 +144,5 @@ Run the browser flow only when the Partner alerts page or its route changes. It 
 
 ## Related
 
-[Partner access](partner-access.md) (who is admitted), [partner web sign-in](partner-sign-in.md) (what a partner session may run), [event types and templates](event-types-and-templates.md) (the response families these keys name), [identity and access](identity-and-access.md) (administrator roles), [data model](data-model.md) (the table and its append-only rules), and the audience and dispatch pages this setting does not yet feed: [roster and audience](roster-and-audience.md) and [notification pipeline](notification-pipeline.md).
+[Partner access](partner-access.md) (who is admitted), [partner web sign-in](partner-sign-in.md) (what a partner session may run), [event types and templates](event-types-and-templates.md) (the response families these keys name), [identity and access](identity-and-access.md) (administrator roles), [data model](data-model.md) (the table and its append-only rules), and the audience and dispatch pages this setting feeds: [roster and audience](roster-and-audience.md) and [notification pipeline](notification-pipeline.md).
 
