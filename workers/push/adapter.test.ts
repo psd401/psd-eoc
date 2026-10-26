@@ -316,6 +316,17 @@ describe('ledgered Expo live adapter', () => {
     expect(app.transport.calls).toBe(0);
   });
 
+  test('sends a live incident partner alert like staff work (#597)', async () => {
+    const app = adapterRuntime();
+    const partner = workItem({ ...realBatch(), rosterPopulation: 'partner' });
+    expect(partner.attempt.rosterPopulation).toBe('partner');
+
+    await expect(app.adapter.send(request(partner))).resolves.toMatchObject({
+      state: 'provider-accepted',
+    });
+    expect(app.transport.calls).toBe(1);
+  });
+
   test('allows one concurrent provider call and makes the competing claim unknown', async () => {
     let release:
       ((outcomes: readonly ExpoProviderOutcome[]) => void) | undefined;

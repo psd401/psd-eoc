@@ -12,11 +12,16 @@ import {
   type DispatchBatch,
   type ExpoPushRuntimeRequest,
   type PersistedExpoReceiptTargetContract,
+  type PushEndpoint,
   type PushWorkerAttemptWorkItem,
 } from '@psd-eoc/contracts';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
-import { databaseExecuteRows, type Database } from '../../db/client';
+import {
+  databaseExecuteRows,
+  type Database,
+  type DatabaseQuery,
+} from '../../db/client';
 import {
   channelAttempts,
   dispatchBatches,
@@ -33,6 +38,12 @@ import {
   rosterSnapshotWithLivePushTokens,
 } from '../capabilities/devices';
 import { loadRosterSnapshot } from '../capabilities/start';
+import {
+  PartnerDeliveryError,
+  partnerPage,
+  readDatabaseClock,
+  resolvePartnerPushEndpoints,
+} from '../partners/delivery';
 
 const PUSH_PAGE_SIZE = 50;
 const EXPO_TTL_MILLISECONDS = 60 * 60 * 1_000;
@@ -280,10 +291,45 @@ async function persistedBatch(
   });
 }
 
+/** Partner push resolution (#597), read against the database clock. */
+async function partnerPushResolution(database: Database, batch: DispatchBatch) {
+  const query = database as unknown as DatabaseQuery;
+  try {
+    return await resolvePartnerPushEndpoints(
+      query,
+      batch,
+      await readDatabaseClock(query),
+    );
+  } catch (error) {
+    if (error instanceof PartnerDeliveryError) {
+      throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
+    }
+    throw error;
+  }
+}
+
+function partnerResolved(
+  batch: DispatchBatch,
+  items: Awaited<ReturnType<typeof partnerPushResolution>>['endpoints'],
+) {
+  return items.map((item) =>
+    Object.freeze({
+      rosterSnapshotId: batch.rosterSnapshotId,
+      rosterPopulation: batch.rosterPopulation,
+      recipientId: item.recipientId,
+      endpoint: item.endpoint,
+    }),
+  );
+}
+
 async function resolvedPushEndpoints(database: Database, batch: DispatchBatch) {
-  // A partner slice has no roster snapshot of its own to resolve through.
+  // A partner slice has no roster snapshot of its own: its partners are the
+  // set the activation pinned, reached on their own devices.
   if (!isRosteredDispatchBatch(batch)) {
-    throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
+    return partnerResolved(
+      batch,
+      (await partnerPushResolution(database, batch)).endpoints,
+    );
   }
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],
@@ -318,9 +364,24 @@ async function resolvedPushEndpointPage(
   batch: DispatchBatch,
   cursor: number,
 ) {
-  // A partner slice has no roster snapshot of its own to resolve through.
   if (!isRosteredDispatchBatch(batch)) {
-    throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
+    let page: ReturnType<typeof partnerPage<PushEndpoint>>;
+    try {
+      page = partnerPage(
+        await partnerPushResolution(database, batch),
+        cursor,
+        PUSH_PAGE_SIZE,
+      );
+    } catch (error) {
+      if (error instanceof PartnerDeliveryError) {
+        throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
+      }
+      throw error;
+    }
+    return Object.freeze({
+      endpoints: partnerResolved(batch, page.endpoints),
+      nextCursor: page.nextCursor,
+    });
   }
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],

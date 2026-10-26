@@ -12,6 +12,7 @@ import {
   type ChannelAttempt,
   type CurrentRosterSnapshot,
   type DispatchBatch,
+  type SmsEndpoint,
   type SmsRuntimeRequest,
   type SmsProviderSendAuthorization,
   type SmsWorkerAttemptWorkItem,
@@ -23,7 +24,11 @@ import {
   type CountryCode,
 } from 'libphonenumber-js';
 
-import { databaseExecuteRows, type Database } from '../../db/client';
+import {
+  databaseExecuteRows,
+  type Database,
+  type DatabaseQuery,
+} from '../../db/client';
 import {
   channelAttempts,
   channelConfigurations,
@@ -36,6 +41,10 @@ import {
   smsRetrySchedules,
 } from '../../db/schema';
 import { loadRosterSnapshot } from '../capabilities/start';
+import {
+  PartnerDeliveryError,
+  resolvePartnerSmsEndpoints,
+} from '../partners/delivery';
 import { resolveAudience } from '../roster/resolve';
 import { batchHasCurrentLifecycle } from './batch-lifecycle';
 import {
@@ -253,10 +262,47 @@ async function persistedBatch(
   });
 }
 
-async function resolvedSmsEndpoints(database: Database, batch: DispatchBatch) {
-  // A partner slice has no roster snapshot of its own to resolve through.
-  if (!isRosteredDispatchBatch(batch))
-    throw new SmsRuntimeStoreError('BATCH_CONFLICT');
+type SmsCandidateReference = Readonly<{
+  recipientId: string;
+  endpointId: string;
+}>;
+
+type SmsResolution = Readonly<{
+  /** Every endpoint the batch addresses, in a fixed paging order. */
+  candidates: readonly SmsCandidateReference[];
+  /** The candidates that may be sent to now. */
+  endpoints: readonly Readonly<{
+    recipientId: string;
+    endpoint: SmsEndpoint;
+  }>[];
+}>;
+
+/**
+ * A staff or synthetic batch resolves through its pinned roster snapshot. A
+ * partner slice (#597) has none: it reaches the partners its event's
+ * activation pinned, at each partner's own consented number, and plans no
+ * count of its own (numbers are found at send time), so it has no count to
+ * compare.
+ */
+async function resolvedSmsEndpoints(
+  database: Database,
+  batch: DispatchBatch,
+  now: number,
+): Promise<SmsResolution> {
+  if (!isRosteredDispatchBatch(batch)) {
+    try {
+      return await resolvePartnerSmsEndpoints(
+        database as unknown as DatabaseQuery,
+        batch,
+        new Date(now),
+      );
+    } catch (error) {
+      if (error instanceof PartnerDeliveryError) {
+        throw new SmsRuntimeStoreError('BATCH_CONFLICT');
+      }
+      throw error;
+    }
+  }
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],
     batch.rosterPopulation,
@@ -271,20 +317,16 @@ async function resolvedSmsEndpoints(database: Database, batch: DispatchBatch) {
     },
     createDrizzleSmsPolicyStore(database),
   );
-  return Object.freeze({ roster, endpoints });
+  return Object.freeze({
+    candidates: stableSmsCandidateReferences(batch, roster),
+    endpoints,
+  });
 }
 
-type SmsCandidateReference = Readonly<{
-  recipientId: string;
-  endpointId: string;
-}>;
-
-async function stableSmsCandidateReferences(
-  database: Database,
+function stableSmsCandidateReferences(
   batch: DispatchBatch,
-  roster: Awaited<ReturnType<typeof loadRosterSnapshot>>,
-): Promise<readonly SmsCandidateReference[]> {
-  if (roster === null) throw new SmsRuntimeStoreError('BATCH_CONFLICT');
+  roster: NonNullable<Awaited<ReturnType<typeof loadRosterSnapshot>>>,
+): readonly SmsCandidateReference[] {
   // The batch's endpoint count is its facility's audience, not the whole
   // district snapshot, so the candidates must come from the same audience.
   // Counting every number in the snapshot refused any batch whose audience
@@ -341,9 +383,7 @@ function attemptFor(
 
 function workItemFor(
   batch: DispatchBatch,
-  resolved: Awaited<
-    ReturnType<typeof resolvedSmsEndpoints>
-  >['endpoints'][number],
+  resolved: SmsResolution['endpoints'][number],
   attempt: ChannelAttempt,
 ): SmsWorkerAttemptWorkItem {
   return SmsWorkerAttemptWorkItemSchema.parse({
@@ -615,12 +655,8 @@ export function createDrizzleSmsRuntimeStore(
       if (batchIsExpired(batch)) {
         return Object.freeze({ kind: 'expired' as const });
       }
-      const resolution = await resolvedSmsEndpoints(database, batch);
-      const candidates = await stableSmsCandidateReferences(
-        database,
-        batch,
-        resolution.roster,
-      );
+      const resolution = await resolvedSmsEndpoints(database, batch, now());
+      const candidates = resolution.candidates;
       if (input.cursor > candidates.length) {
         throw new SmsRuntimeStoreError('BATCH_CONFLICT');
       }
@@ -688,7 +724,11 @@ export function createDrizzleSmsRuntimeStore(
       if (batchIsExpired(batch)) {
         return Object.freeze({ kind: 'expired' as const });
       }
-      const resolution = await resolvedSmsEndpoints(database, batch);
+      const resolution = await resolvedSmsEndpoints(
+        database,
+        batch,
+        currentTime,
+      );
       const endpoint = resolution.endpoints.find(
         (candidate) =>
           candidate.recipientId === source.recipientId &&
@@ -739,7 +779,7 @@ export function createDrizzleSmsRuntimeStore(
       if (configuration?.enabled !== true) {
         return deniedProviderSend;
       }
-      const resolution = await resolvedSmsEndpoints(database, batch);
+      const resolution = await resolvedSmsEndpoints(database, batch, now());
       if (
         !resolution.endpoints.some(
           (candidate) =>

@@ -897,9 +897,43 @@ async function loadDrizzleEndpointPolicy(
     );
   });
 
-  const phoneNumbers = endpointRows.flatMap(({ phoneNumber }) =>
-    phoneNumber === null ? [] : [phoneNumber],
+  const effectivePhoneOptOut = await loadSmsPhoneOptOuts(
+    database,
+    endpointRows.flatMap(({ phoneNumber }) =>
+      phoneNumber === null ? [] : [phoneNumber],
+    ),
   );
+
+  return Object.freeze(
+    endpointRows
+      .map((endpoint) => ({
+        recipientId: endpoint.recipientId,
+        endpointId: endpoint.endpointId,
+        status:
+          effectiveStatuses.get(candidateKey(endpoint)) ?? endpoint.status,
+        optedOut:
+          endpoint.phoneNumber !== null &&
+          (effectivePhoneOptOut.get(endpoint.phoneNumber) ?? false),
+      }))
+      .sort(
+        (left, right) =>
+          left.recipientId.localeCompare(right.recipientId) ||
+          left.endpointId.localeCompare(right.endpointId),
+      ),
+  );
+}
+
+/**
+ * Whether each number is opted out now, keyed by the number itself: the
+ * latest provider-verified opt-out or opt-in recorded against any retained
+ * endpoint with that number decides, so an opt-out follows the person across
+ * snapshots. A number with no such fact is absent from the map. Partner
+ * delivery (#597) reads the same facts for a partner's consented number.
+ */
+export async function loadSmsPhoneOptOuts(
+  database: SmsPolicyQueryDatabase,
+  phoneNumbers: readonly string[],
+): Promise<ReadonlyMap<string, boolean>> {
   const retainedLifecycleEndpoint = alias(
     rosterEndpoints,
     'retained_sms_lifecycle_endpoint',
@@ -988,24 +1022,7 @@ async function loadDrizzleEndpointPolicy(
       'Persisted SMS opt-out lifecycle evidence was inconsistent.',
     );
   });
-
-  return Object.freeze(
-    endpointRows
-      .map((endpoint) => ({
-        recipientId: endpoint.recipientId,
-        endpointId: endpoint.endpointId,
-        status:
-          effectiveStatuses.get(candidateKey(endpoint)) ?? endpoint.status,
-        optedOut:
-          endpoint.phoneNumber !== null &&
-          (effectivePhoneOptOut.get(endpoint.phoneNumber) ?? false),
-      }))
-      .sort(
-        (left, right) =>
-          left.recipientId.localeCompare(right.recipientId) ||
-          left.endpointId.localeCompare(right.endpointId),
-      ),
-  );
+  return effectivePhoneOptOut;
 }
 
 /**

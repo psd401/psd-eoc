@@ -175,6 +175,21 @@ describe('ledgered direct push adapter', () => {
     expect(persisted).not.toContain('[INCIDENT]');
   });
 
+  test('sends a live incident partner alert like staff work (#597)', async () => {
+    const app = runtime();
+    const staff = directWork();
+    const batch = { ...staff.batch, rosterPopulation: 'partner' as const };
+    const partner = Object.freeze({
+      batch,
+      attempt: attemptFor(batch),
+      endpoint: staff.endpoint,
+    });
+    await expect(app.adapter.send(request(partner))).resolves.toMatchObject({
+      state: 'provider-accepted',
+    });
+    expect(app.transport.calls).toBe(1);
+  });
+
   test('retains endpoint-invalidating provider truth for post-evidence worker handling', async () => {
     const app = runtime(
       FCM_DIRECT_PROVIDER,

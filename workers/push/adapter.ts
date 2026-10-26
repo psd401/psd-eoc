@@ -677,7 +677,8 @@ export class LedgeredExpoPushAdapter implements AttemptIdempotentProviderAdapter
     if (
       request.idempotencyKey !== workItem.attempt.id ||
       workItem.batch.integrationId !== this.integrationId ||
-      workItem.batch.rosterPopulation !== 'staff'
+      // Staff and a live incident's partners (#597); never synthetic.
+      workItem.batch.rosterPopulation === 'synthetic'
     ) {
       throw new LedgeredExpoPushAdapterError('EXPO_SEND_REQUEST_INVALID');
     }

@@ -119,6 +119,27 @@ describe('Expo native-fetch transport', () => {
     ).toBe(true);
   });
 
+  test('sends a live incident partner alert like staff work (#597)', async () => {
+    let calls = 0;
+    const transport = new ExpoPushHttpTransport({
+      accessToken: ACCESS_TOKEN,
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(ticketResponse(1, calls));
+      },
+      authorizeLiveTransport: () => true,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
+      clock: () => realBatch().createdAt,
+    });
+    const outcomes = await transport.sendAll([
+      workItem({ ...realBatch(), rosterPopulation: 'partner' }),
+    ]);
+    expect(calls).toBe(1);
+    expect(outcomes.map((outcome) => outcome.state)).toEqual([
+      'provider-accepted',
+    ]);
+  });
+
   test('expires stale items locally and preserves fresh siblings positionally', async () => {
     const freshBatch = realBatch();
     const staleBatch = {
