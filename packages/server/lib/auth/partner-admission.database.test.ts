@@ -16,6 +16,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  facilities,
   groupMembers,
   groupSources,
   partnerAdmissionEndings,
@@ -94,6 +95,11 @@ describeWithDatabase('partner admission access', () => {
     if (opened.driver !== 'postgres') throw new Error('PostgreSQL only.');
     connection = opened;
     await migrateDatabase(opened);
+    // A partner acts only at non-isolated facilities, so the district needs
+    // at least one for any partner session to be admitted.
+    await opened.db
+      .insert(facilities)
+      .values({ code: 'SYN-OPEN', name: 'Synthetic Open', isolated: false });
     const [admin] = await opened.db
       .insert(users)
       .values({

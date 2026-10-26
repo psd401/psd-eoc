@@ -166,6 +166,8 @@ export async function authorizePartnerSignIn(
           identitySubject: input.subject,
           email,
           displayName: admission.displayName,
+          // Never read for a partner: every session read places a partner
+          // at the non-isolated facilities (`partnerFacilityScope`).
           facilityScopeKind: 'district',
           createdAt: input.checkedAt,
           disabledAt: null,

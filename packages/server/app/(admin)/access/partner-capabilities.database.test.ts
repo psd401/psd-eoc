@@ -16,6 +16,7 @@ import {
 } from '../../../db/client';
 import {
   deviceEnrollments,
+  facilities,
   devicePushTokenRegistrations,
   devicePushTokenUnregistrations,
   partnerNotices,
@@ -256,6 +257,11 @@ describeWithDatabase('partner administration', () => {
     if (opened.driver !== 'postgres') throw new Error('PostgreSQL only.');
     connection = opened;
     await migrateDatabase(opened);
+    // A partner acts only at non-isolated facilities, so the district needs
+    // at least one for a partner session to be admitted at all.
+    await opened.db
+      .insert(facilities)
+      .values({ code: 'SYN-OPEN', name: 'Synthetic Open', isolated: false });
     admin = adminSession();
     await persistActor(admin);
   });

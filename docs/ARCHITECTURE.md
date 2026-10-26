@@ -195,6 +195,11 @@ access decisions each enforce.
   the engine's invocation check, and lifecycle confirmation issuance restate
   the refusal. Starting, ending, correcting, or reopening an event, Records
   and exports, configuration, audit, and agent keys are all outside it.
+- A partner acts at every facility that is not isolated, resolved by
+  `partnerFacilityScope` in `lib/auth/partner-admission.ts` on every session
+  read, never at the limit stored on the account row. An isolated facility's
+  events (the store reviewer's, for one) are therefore invisible to partners.
+  With no non-isolated facility, no partner is admitted.
 
 ## Data and delivery truth
 

@@ -16,8 +16,10 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  facilities,
   partnerAdmissionEndings,
   partnerAdmissions,
+  userFacilityScopes,
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
@@ -52,6 +54,8 @@ const YEAR_AND_A_DAY_MS = 366 * DAY_MS;
 let connection: PostgresDatabaseConnection | undefined;
 let disposable: DisposableDatabase | undefined;
 let adminId = '';
+let openFacilityIds: readonly string[] = [];
+let isolatedFacilityId = '';
 
 function database(): PostgresDatabaseConnection['db'] {
   if (connection === undefined) throw new Error('The database is not open.');
@@ -140,6 +144,21 @@ describeWithDatabase('partner web sign-in', () => {
       })
       .returning({ id: users.id });
     adminId = admin?.id ?? '';
+    // Two ordinary schools and one isolated facility (the store reviewer's
+    // kind), which a partner must never be able to act at.
+    const inserted = await opened.db
+      .insert(facilities)
+      .values([
+        { code: 'SYN-NORTH', name: 'Synthetic North', isolated: false },
+        { code: 'SYN-SOUTH', name: 'Synthetic South', isolated: false },
+        { code: 'SYN-RVW', name: 'Synthetic Review', isolated: true },
+      ])
+      .returning({ id: facilities.id, isolated: facilities.isolated });
+    openFacilityIds = inserted
+      .filter((row) => !row.isolated)
+      .map((row) => row.id)
+      .sort();
+    isolatedFacilityId = inserted.find((row) => row.isolated)?.id ?? '';
   });
 
   afterAll(async () => {
@@ -190,6 +209,39 @@ describeWithDatabase('partner web sign-in', () => {
     expect(authenticated.roles).toEqual(['partner']);
     // Its scope carries the marker the engine reads for the partner allowlist.
     expect(authenticated.scope.partner).toBe(true);
+    // A partner acts at every ordinary facility and never an isolated one,
+    // whatever district-wide limit the account row stores.
+    expect(row?.facilityScopeKind).toBe('district');
+    expect(authenticated.scope.facilityScope).toEqual({
+      kind: 'facilities',
+      facilityIds: openFacilityIds,
+    });
+    const scoped = authenticated.scope.facilityScope;
+    expect(
+      scoped.kind === 'facilities' &&
+        scoped.facilityIds.includes(isolatedFacilityId),
+    ).toBe(false);
+    expect(authenticated.scope.campusFacilityIds).toBeUndefined();
+
+    // An administrator's per-person limit still narrows a partner, and an
+    // isolated facility in that limit is dropped rather than honored.
+    const [north] = openFacilityIds;
+    if (north === undefined) throw new Error('No open facility.');
+    await database()
+      .update(users)
+      .set({ facilityScopeKind: 'facilities' })
+      .where(eq(users.id, completed.session.user.id));
+    await database()
+      .insert(userFacilityScopes)
+      .values([
+        { userId: completed.session.user.id, facilityId: north },
+        { userId: completed.session.user.id, facilityId: isolatedFacilityId },
+      ]);
+    const limited = await service.authenticate(completed.cookie.value, 'web');
+    expect(limited.scope.facilityScope).toEqual({
+      kind: 'facilities',
+      facilityIds: [north],
+    });
   });
 
   test('the same partner signs in again as the same person', async () => {

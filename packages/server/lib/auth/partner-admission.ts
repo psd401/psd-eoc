@@ -2,13 +2,18 @@ import {
   GOOGLE_IDENTITY_ISSUER,
   PartnerAdmissionSchema,
   partnerAdmissionStatus,
+  type FacilityScope,
   type PartnerAdmission,
   type PartnerAdmissionEndingReason,
 } from '@psd-eoc/contracts';
-import { desc, eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
-import { partnerAdmissionEndings, partnerAdmissions } from '../../db/schema';
+import {
+  facilities,
+  partnerAdmissionEndings,
+  partnerAdmissions,
+} from '../../db/schema';
 import type { AccessDecision } from './trusted-group-access';
 
 /** The minimal read surface shared by PostgreSQL and Aurora Data API. */
@@ -139,21 +144,62 @@ export async function decidePartnerAccess(
 }
 
 /**
+ * Where a partner acts: the limit stored on their account (district-wide
+ * unless an administrator narrowed it), less every isolated facility. An
+ * isolated facility (the store reviewer's, for one) keeps its events to its
+ * own building, so no outside responder sees or joins them. Read on every
+ * session read, so a facility created or isolated later is followed at once.
+ * Null when nothing is left, which admits no partner.
+ */
+export async function partnerFacilityScope(
+  database: PartnerAdmissionDatabase,
+  stored: FacilityScope,
+): Promise<FacilityScope | null> {
+  const rows = await database
+    .select({ id: facilities.id })
+    .from(facilities)
+    .where(eq(facilities.isolated, false))
+    .orderBy(asc(facilities.id));
+  const allowed =
+    stored.kind === 'district'
+      ? rows.map((row) => row.id)
+      : rows
+          .map((row) => row.id)
+          .filter((id) => stored.facilityIds.includes(id));
+  return allowed.length === 0
+    ? null
+    : Object.freeze({
+        kind: 'facilities' as const,
+        facilityIds: Object.freeze(allowed),
+      });
+}
+
+/**
  * Restates a partner decision in the shape session reads and rotations use
  * for a staff decision. A partner holds `partner` and nothing else, never
- * through a group, and acts where their stored limit says (`facilityScope`
- * null), since no group places them.
+ * through a group, and acts at `partnerFacilityScope`, never at the limit
+ * stored on the account row.
  */
 export function partnerAccessAsAccessDecision(
   decision: PartnerAccessDecision,
   checkedAt: Date,
+  facilityScope: FacilityScope | null,
 ):
   | Extract<AccessDecision, { granted: true }>
-  | Readonly<{ granted: false; refusal: PartnerAccessRefusal }> {
+  | Readonly<{
+      granted: false;
+      refusal: PartnerAccessRefusal | 'NO_PARTNER_FACILITIES';
+    }> {
   if (!decision.granted) {
     return Object.freeze({
       granted: false as const,
       refusal: decision.refusal,
+    });
+  }
+  if (facilityScope === null) {
+    return Object.freeze({
+      granted: false as const,
+      refusal: 'NO_PARTNER_FACILITIES' as const,
     });
   }
   return Object.freeze({
@@ -161,7 +207,7 @@ export function partnerAccessAsAccessDecision(
     roles: Object.freeze(['partner'] as const),
     groupSourceIds: Object.freeze([]),
     admittedAccountId: null,
-    facilityScope: null,
+    facilityScope,
     // The admission was read in this request; it is as fresh as the read.
     capturedAt: checkedAt,
   });
