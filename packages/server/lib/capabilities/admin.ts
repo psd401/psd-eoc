@@ -250,6 +250,7 @@ const ADMIN_MUTATION_IDS = new Set<RegisteredCapabilityId>([
   'invite-partner',
   'disable-partner',
   'reconcile-partner-access',
+  'set-partner-alert-settings',
   'create-event-type-draft',
   'update-event-type-draft',
   'publish-event-type-version',

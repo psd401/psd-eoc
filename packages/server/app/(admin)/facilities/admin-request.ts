@@ -232,7 +232,7 @@ function errorDetails(error: unknown): Readonly<{
 /** Accessible, cache-disabled error document for native form submissions. */
 export function adminFormErrorResponse(
   error: unknown,
-  returnPath: '/access' | '/facilities' | '/integrations',
+  returnPath: '/access' | '/facilities' | '/integrations' | '/partner-alerts',
 ): Response {
   const details = errorDetails(error);
   const heading = escapeHtml(details.heading);
@@ -251,7 +251,12 @@ export function adminFormErrorResponse(
 
 export function adminSuccessRedirect(
   request: Request,
-  path: '/access' | '/emergency' | '/facilities' | '/integrations',
+  path:
+    | '/access'
+    | '/emergency'
+    | '/facilities'
+    | '/integrations'
+    | '/partner-alerts',
   status: string,
   environment: ApplicationOriginEnvironment = process.env,
 ): Response {

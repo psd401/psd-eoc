@@ -1,0 +1,62 @@
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+
+import {
+  WEB_CSRF_COOKIE_NAME,
+  WEB_SESSION_COOKIE_NAME,
+} from '../../../lib/auth/sessions';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
+import { AdminCapabilityError } from '../../../lib/capabilities/admin';
+import { executeGetPartnerAlertSettingsCapability } from './capabilities';
+import {
+  partnerAlertsStatusMessage,
+  type PartnerAlertsSearchParameters,
+} from './page-state';
+import {
+  NON_ADMIN_PARTNER_ALERTS_VIEW,
+  PartnerAlertsAdminView,
+} from './partner-alerts-view';
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
+export default async function PartnerAlertsPage({
+  searchParams,
+}: Readonly<{
+  searchParams: Promise<PartnerAlertsSearchParameters>;
+}>) {
+  const cookieStore = await cookies();
+  const sessionToken = cookieStore.get(WEB_SESSION_COOKIE_NAME)?.value;
+  if (sessionToken === undefined) {
+    redirect('/login?reason=session-required');
+  }
+  let authenticated;
+  try {
+    authenticated = await authenticateWebSession(sessionToken);
+  } catch {
+    redirect('/login?reason=session-expired');
+  }
+  const csrfToken = cookieStore.get(WEB_CSRF_COOKIE_NAME)?.value;
+  if (csrfToken === undefined) {
+    redirect('/login?reason=session-required');
+  }
+  try {
+    const state = await executeGetPartnerAlertSettingsCapability({
+      authenticated,
+      query: {},
+    });
+    const parameters = await searchParams;
+    return (
+      <PartnerAlertsAdminView
+        csrfToken={csrfToken}
+        statusMessage={partnerAlertsStatusMessage(parameters.status)}
+        view={{ kind: 'authorized', state }}
+      />
+    );
+  } catch (error) {
+    if (error instanceof AdminCapabilityError && error.status === 403) {
+      return <PartnerAlertsAdminView view={NON_ADMIN_PARTNER_ALERTS_VIEW} />;
+    }
+    throw error;
+  }
+}
