@@ -103,6 +103,7 @@ const ENDPOINT_BINDING_CONSTRAINTS: ReadonlySet<string> = new Set([
   'channel_attempts_endpoint_binding',
   'channel_attempts_published_endpoint_fk',
   'channel_attempts_fanned_out_registration_fk',
+  'channel_attempts_partner_endpoint_fk',
   'channel_attempts_endpoint_identity',
 ]);
 
