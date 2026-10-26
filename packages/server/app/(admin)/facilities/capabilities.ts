@@ -29,7 +29,7 @@ import {
   type ManualRosterMembership,
   type Neighborhood,
   type NeighborhoodPage,
-  type RosterPopulation,
+  type RosteredPopulation,
 } from '@psd-eoc/contracts';
 import {
   and,
@@ -803,7 +803,7 @@ async function getGroupSource(
  * rather than restated, so adding a kind there reaches these queries.
  */
 const POPULATION_KINDS: Readonly<
-  Record<RosterPopulation, readonly GroupSourceKind[]>
+  Record<RosteredPopulation, readonly GroupSourceKind[]>
 > = {
   staff: groupSourceKindsForPopulation('staff'),
   synthetic: groupSourceKindsForPopulation('synthetic'),
@@ -812,14 +812,14 @@ const POPULATION_KINDS: Readonly<
 interface RosterConfigurationState {
   readonly id: string;
   readonly version: number;
-  readonly population: RosterPopulation;
+  readonly population: RosteredPopulation;
   readonly facilityIds: readonly string[];
   readonly sources: readonly GroupSource[];
 }
 
 async function latestRosterConfiguration(
   database: AdminQueryDatabase,
-  population: RosterPopulation,
+  population: RosteredPopulation,
   lock: boolean,
 ): Promise<RosterConfigurationState | null> {
   const lineages = await database
@@ -1071,14 +1071,14 @@ async function assertGroupIdentityAvailable(
   }
 }
 
-function sourcePopulation(source: GroupSource): RosterPopulation | null {
+function sourcePopulation(source: GroupSource): RosteredPopulation | null {
   if (source.purpose === 'access') return null;
   return rosterPopulationForGroupSourceKind(source.kind);
 }
 
 async function refreshRosterSourceConfiguration(
   database: AdminQueryDatabase,
-  population: RosterPopulation,
+  population: RosteredPopulation,
   options: Readonly<{
     additions?: readonly GroupSource[];
     requiredEffectiveSourceId?: string | null;

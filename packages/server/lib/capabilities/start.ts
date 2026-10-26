@@ -23,7 +23,7 @@ import {
   type GroupSourceKind,
   type RegisteredCapabilityId,
   type RosterGroupSourceRef,
-  type RosterPopulation,
+  type RosteredPopulation,
   type RosterSnapshot,
   type ThreatPage,
 } from '@psd-eoc/contracts';
@@ -364,7 +364,7 @@ function rosterGroupSourceRef(
 
 export async function loadRosterSnapshot(
   database: StartFlowQueryDatabase,
-  population: RosterPopulation,
+  population: RosteredPopulation,
   facilityId: string,
   exactSnapshotId?: string,
   hydrationCache?: RosterSnapshotHydrationCache,

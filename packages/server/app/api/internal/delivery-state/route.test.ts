@@ -83,6 +83,7 @@ function attemptRow(
     endpointId: attempt.endpointId,
     publishedEndpointId: attempt.endpointId,
     fannedOutRegistrationId: null,
+    partnerEndpointId: null,
     channel: attempt.channel,
     attemptNumber: attempt.attemptNumber,
     attemptedAt: new Date(attempt.attemptedAt),

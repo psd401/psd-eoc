@@ -109,6 +109,12 @@ import {
   parseCapabilityEnvelopeFor,
   parseCapabilityInput,
   resolveHumanActionRequirement,
+  NotificationTargetingSchema,
+  RosterPopulationSchema,
+  RosteredPopulationSchema,
+  eventPopulationForNotification,
+  isRosteredDispatchBatch,
+  isRosteredPopulation,
   type EventKind,
   type RosterPopulation,
   type TemplateMode,
@@ -3562,6 +3568,170 @@ describe('notification and outbox classification continuity', () => {
         ...syntheticDrill,
         rosterPopulation: 'staff',
       }).success,
+    ).toBe(false);
+  });
+
+  test('carries a partner slice only beside a live staff incident', () => {
+    const staffTarget = targeting('incident', 'real', 'staff');
+    const partnerTarget = targeting('incident', 'real', 'partner');
+
+    // An event is never targeted at partners; a notification record of a
+    // live incident may be.
+    expect(EventTargetingSchema.safeParse(partnerTarget).success).toBe(false);
+    expect(NotificationTargetingSchema.safeParse(partnerTarget).success).toBe(
+      true,
+    );
+    for (const target of [
+      staffTarget,
+      targeting('drill', 'drill', 'staff'),
+      targeting('drill', 'drill', 'synthetic'),
+      targeting('test', 'drill', 'synthetic'),
+    ]) {
+      expect(NotificationTargetingSchema.safeParse(target).success).toBe(true);
+    }
+    for (const target of [
+      targeting('drill', 'drill', 'partner'),
+      targeting('test', 'drill', 'partner'),
+    ]) {
+      expect(NotificationTargetingSchema.safeParse(target).success).toBe(false);
+    }
+    expect(eventPopulationForNotification('partner')).toBe('staff');
+    expect(eventPopulationForNotification('staff')).toBe('staff');
+    expect(eventPopulationForNotification('synthetic')).toBe('synthetic');
+
+    // The slice shares the staff intent's request and human authorization.
+    const partnerIntent = {
+      id: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('incident', 'real', 'partner'),
+      purpose: 'activation',
+      eventTypeVersion: realTypeRef,
+      rosterSnapshotId: ids.roster,
+      createdBy: humanActor,
+      source: 'web',
+      requestId: ids.request,
+      authorization: activationAuthorization(staffTarget),
+      channels: channelPlan(staffTarget),
+      createdAt: times.created,
+    } as const;
+    expect(NotificationIntentSchema.safeParse(partnerIntent).success).toBe(
+      true,
+    );
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...partnerIntent,
+        createdBy: agentActor,
+        source: 'mcp',
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...partnerIntent,
+        authorization: activationAuthorization(
+          targeting('test', 'drill', 'synthetic'),
+        ),
+      }).success,
+    ).toBe(false);
+    const drillTarget = targeting('drill', 'drill', 'staff');
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...partnerIntent,
+        ...notificationClassification('drill', 'drill', 'partner'),
+        eventTypeVersion: drillTypeRef,
+        channels: channelPlan(drillTarget),
+      }).success,
+    ).toBe(false);
+
+    // A partner all-clear carries the staff event's lifecycle targeting.
+    const partnerAllClear = {
+      ...partnerIntent,
+      purpose: 'all-clear',
+      authorization: lifecycleAuthorization('all-clear', staffTarget),
+      channels: channelPlan(staffTarget, 'all-clear'),
+    } as const;
+    expect(NotificationIntentSchema.safeParse(partnerAllClear).success).toBe(
+      true,
+    );
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...partnerAllClear,
+        authorization: lifecycleAuthorization(
+          'all-clear',
+          targeting('drill', 'drill', 'staff'),
+        ),
+      }).success,
+    ).toBe(false);
+
+    const partnerBatch = {
+      id: ids.batch,
+      intentId: ids.intent,
+      eventId: ids.event,
+      facilityId: ids.facility,
+      ...notificationClassification('incident', 'real', 'partner'),
+      purpose: 'activation',
+      eventTypeVersion: realTypeRef,
+      rosterSnapshotId: ids.roster,
+      requestId: ids.request,
+      authorization: activationAuthorization(staffTarget),
+      channel: 'email',
+      renderedMessage: renderedMessage('email', staffTarget),
+      integrationId: 'ses-email',
+      sequence: 2,
+      endpointCount: 1,
+      createdAt: times.created,
+    } as const;
+    const parsedBatch = DispatchBatchSchema.parse(partnerBatch);
+    // Roster-backed resolution refuses the slice; staff batches pass.
+    expect(isRosteredDispatchBatch(parsedBatch)).toBe(false);
+    expect(
+      isRosteredDispatchBatch(
+        DispatchBatchSchema.parse({
+          ...partnerBatch,
+          rosterPopulation: 'staff',
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      ChannelAttemptSchema.safeParse({
+        id: ids.attempt,
+        batchId: ids.batch,
+        intentId: ids.intent,
+        eventId: ids.event,
+        ...notificationClassification('incident', 'real', 'partner'),
+        purpose: 'activation',
+        eventTypeVersion: realTypeRef,
+        rosterSnapshotId: ids.roster,
+        recipientId: ids.recipient,
+        endpointId: ids.endpoint,
+        channel: 'email',
+        attemptNumber: 1,
+        attemptedAt: times.later,
+      }).success,
+    ).toBe(true);
+  });
+
+  test('keeps partners out of events, previews, and rosters', () => {
+    expect(RosterPopulationSchema.options).toEqual([
+      'staff',
+      'synthetic',
+      'partner',
+    ]);
+    expect(RosteredPopulationSchema.options).toEqual(['staff', 'synthetic']);
+    expect(isRosteredPopulation('partner')).toBe(false);
+    expect(isRosteredPopulation('staff')).toBe(true);
+    expect(isRosteredPopulation('synthetic')).toBe(true);
+    expect(
+      EventSchema.safeParse(activeEvent('incident', 'real', 'partner')).success,
+    ).toBe(false);
+    expect(
+      ActivationPreviewSchema.safeParse(
+        activationPreview(targeting('incident', 'real', 'partner')),
+      ).success,
+    ).toBe(false);
+    expect(
+      LifecycleConsequencePreviewSchema.safeParse(
+        lifecyclePreview('all-clear', targeting('incident', 'real', 'partner')),
+      ).success,
     ).toBe(false);
   });
 

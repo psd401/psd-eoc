@@ -8,7 +8,7 @@ import {
   RecipientSchema,
   registerCapabilityHandler,
   RosterGroupSourceRefSchema,
-  RosterPopulationSchema,
+  RosteredPopulationSchema,
   RosterSnapshotSchema,
   RosterSourceConfigurationRefSchema,
   RosterSourceConfigurationSchema,
@@ -27,7 +27,7 @@ import {
   type RegisteredCapabilityId,
   type RosterGroupFailure,
   type RosterGroupSourceRef,
-  type RosterPopulation,
+  type RosteredPopulation,
   type PushProviderCutover,
   type RosterSourceConfiguration,
   type RosterSourceConfigurationRef,
@@ -175,7 +175,7 @@ export interface RejectedRosterSyncPersistenceRequest {
 export interface RosterSyncBaseline {
   readonly snapshotId: string;
   readonly version: number;
-  readonly population: RosterPopulation;
+  readonly population: RosteredPopulation;
   readonly sourceConfiguration: RosterSourceConfigurationRef;
   readonly groupMemberCounts: readonly Readonly<{
     groupSourceId: string;
@@ -205,7 +205,7 @@ export interface RosterSyncStore {
     identityKeys: readonly string[],
   ): Promise<readonly RosterLocalContact[]>;
   loadLatestCompleteBaseline(
-    population: RosterPopulation,
+    population: RosteredPopulation,
   ): Promise<RosterSyncBaseline | null>;
   publishComplete(
     request: CompleteRosterSyncPersistenceRequest,
@@ -223,7 +223,7 @@ export interface RosterSyncStore {
 /** PII-free alert fact. It may safely feed structured logs or an alarm sink. */
 export interface RosterSyncAlert {
   readonly sourceConfiguration: RosterSourceConfigurationRef;
-  readonly population: RosterPopulation | null;
+  readonly population: RosteredPopulation | null;
   readonly syncResultId: string | null;
   readonly outcome: 'failed' | 'partial-rejected' | 'execution-failed';
   readonly errorCodes: readonly string[];
@@ -330,7 +330,7 @@ function errorCode(error: unknown, fallback: string): string {
 
 function validateMemberPopulation(
   member: RosterGroupMember,
-  population: RosterPopulation,
+  population: RosteredPopulation,
 ): void {
   const normalizedEmail = member.email.toLowerCase();
   if (population === 'staff') {
@@ -367,7 +367,7 @@ function validateMemberPopulation(
 async function readGroupMembers(
   store: RosterSyncStore,
   source: GroupSource,
-  population: RosterPopulation,
+  population: RosteredPopulation,
 ): Promise<readonly RosterGroupMember[]> {
   if (!source.active) {
     throw new RosterSyncError(
@@ -420,7 +420,7 @@ const RosterSyncBaselineSchema = z
   .object({
     snapshotId: UuidSchema,
     version: z.number().int().positive(),
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
     sourceConfiguration: RosterSourceConfigurationRefSchema,
     groupMemberCounts: z
       .array(
@@ -612,7 +612,7 @@ interface AccumulatedMember {
 function buildRecipients(
   groups: readonly FetchedGroup[],
   localContacts: readonly RosterLocalContact[],
-  population: RosterPopulation,
+  population: RosteredPopulation,
   capturedAt: string,
   uuid: () => string,
 ): readonly Recipient[] {
@@ -899,7 +899,7 @@ export async function syncRoster(
   }
 
   let persistedResult: RosterSyncResult | undefined;
-  let alertPopulation: RosterPopulation | null = null;
+  let alertPopulation: RosteredPopulation | null = null;
   try {
     const loaded = await dependencies.store.loadSourceConfiguration(
       input.sourceConfiguration,
@@ -1216,7 +1216,7 @@ export function createStructuredRosterSyncAlertSink(
 interface ConfigurationHeaderRow {
   readonly id: string;
   readonly version: number;
-  readonly population: RosterPopulation;
+  readonly population: RosteredPopulation;
   readonly createdAt: Date;
 }
 
@@ -1384,7 +1384,7 @@ async function loadPersistedSyncResult(
 
 function resultSourceRows(
   syncResultId: string,
-  population: RosterPopulation,
+  population: RosteredPopulation,
   references: readonly RosterGroupSourceRef[],
   setKind: GroupCompletionKind,
 ) {
@@ -1401,7 +1401,7 @@ function resultSourceRows(
 
 function snapshotSourceRows(
   rosterSnapshotId: string,
-  population: RosterPopulation,
+  population: RosteredPopulation,
   references: readonly RosterGroupSourceRef[],
   completionKind: GroupCompletionKind,
 ) {
@@ -2161,9 +2161,9 @@ export function createDrizzleRosterSyncStore(
     },
 
     async loadLatestCompleteBaseline(
-      rawPopulation: RosterPopulation,
+      rawPopulation: RosteredPopulation,
     ): Promise<RosterSyncBaseline | null> {
-      const population = RosterPopulationSchema.parse(rawPopulation);
+      const population = RosteredPopulationSchema.parse(rawPopulation);
       const [latestSnapshot] = await database
         .select({
           id: rosterSnapshots.id,

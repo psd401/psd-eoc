@@ -1,3 +1,4 @@
+import type { RosteredPopulation } from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
@@ -50,7 +51,9 @@ export const activationPreviews = pgTable(
     templateMode: templateModeEnum('template_mode').notNull(),
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
-    rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     // The threat is pinned by id and by the name shown when it was chosen.
     // Null only for a monthly delivery test, which has no threat scenario,
     // and for rows that predate the catalog.
@@ -143,7 +146,9 @@ export const preparedActivations = pgTable(
     templateMode: templateModeEnum('template_mode').notNull(),
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
-    rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     consequenceDigest: digest('consequence_digest').notNull(),
     preparedBy: jsonb('prepared_by').notNull(),
     preparedAt: occurredAt('prepared_at').defaultNow().notNull(),
@@ -207,7 +212,8 @@ export const events = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     status: eventStatusEnum('status').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id'),
-    rosterPopulation: rosterPopulationEnum('roster_population'),
+    rosterPopulation:
+      rosterPopulationEnum('roster_population').$type<RosteredPopulation>(),
     // Copied from the consumed preview at activation. Null for events that
     // predate the threat catalog; the history is never backfilled.
     threatId: uuid('threat_id').references(() => threats.id, {
@@ -370,7 +376,9 @@ export const lifecycleConsequencePreviews = pgTable(
     templateMode: templateModeEnum('template_mode').notNull(),
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
-    rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     recipientCount: integer('recipient_count').notNull(),
     channels: jsonb('channels').notNull(),
     sendReadiness: varchar('send_readiness', { length: 16 }).notNull(),
@@ -452,7 +460,9 @@ export const eventTransitions = pgTable(
     toStatus: eventStatusEnum('to_status').notNull(),
     kind: eventKindEnum('kind').notNull(),
     templateMode: templateModeEnum('template_mode').notNull(),
-    rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     actor: jsonb('actor').notNull(),
     source: invocationSourceEnum('source').notNull(),
     occurredAt: occurredAt('occurred_at').notNull(),
@@ -655,7 +665,9 @@ export const preparedActivationConsumptions = pgTable(
     templateMode: templateModeEnum('template_mode').notNull(),
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
-    rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     consequenceDigest: digest('consequence_digest').notNull(),
     authorization: jsonb('authorization').notNull(),
     requestId: uuid('request_id').notNull(),

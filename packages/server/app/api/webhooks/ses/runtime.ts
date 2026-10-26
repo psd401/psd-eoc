@@ -7,6 +7,7 @@ import {
   RecordDeliveryEvidenceInputSchema,
   RecordEndpointStatusInputSchema,
   UuidSchema,
+  isRosteredPopulation,
   invokeAuthorizedCapabilityHandler,
   registerCapabilityHandler,
   type Actor,
@@ -998,7 +999,9 @@ async function recordEndpointStatus(
   semanticIdempotencyKey: string,
 ): Promise<EndpointStatusRecord> {
   const input = RecordEndpointStatusInputSchema.parse(inputValue);
+  const rosterPopulation = attempt.rosterPopulation;
   if (
+    !isRosteredPopulation(rosterPopulation) ||
     attempt.channel !== 'email' ||
     input.rosterSnapshotId !== attempt.rosterSnapshotId ||
     input.recipientId !== attempt.recipientId ||
@@ -1019,7 +1022,7 @@ async function recordEndpointStatus(
           eq(rosterEndpoints.rosterSnapshotId, attempt.rosterSnapshotId),
           eq(rosterEndpoints.recipientId, attempt.recipientId),
           eq(rosterEndpoints.id, attempt.endpointId),
-          eq(rosterEndpoints.population, attempt.rosterPopulation),
+          eq(rosterEndpoints.population, rosterPopulation),
           eq(rosterEndpoints.channel, 'email'),
         ),
       )

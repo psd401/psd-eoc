@@ -1,3 +1,4 @@
+import type { RosteredPopulation } from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
@@ -36,7 +37,11 @@ import { eventTypeVersions } from './event-types';
 
 import { events } from './events';
 
-import { devicePushTokenRegistrations } from './identity';
+import {
+  devicePushTokenRegistrations,
+  partnerAdmissions,
+  staffSmsConsents,
+} from './identity';
 /** Immutable, transactionally recorded notification send intents. */
 export const notificationIntents = pgTable(
   'notification_intents',
@@ -49,6 +54,17 @@ export const notificationIntents = pgTable(
     eventTypeVersionId: uuid('event_type_version_id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     rosterPopulation: rosterPopulationEnum('roster_population').notNull(),
+    /**
+     * The population of the event this intent belongs to. A partner slice
+     * belongs to a staff event and is pinned to that event's staff snapshot;
+     * every other population is the event's own. Derived, never written.
+     */
+    eventRosterPopulation: rosterPopulationEnum('event_roster_population')
+      .$type<RosteredPopulation>()
+      .generatedAlwaysAs(
+        sql`case when roster_population in ('staff', 'synthetic') then roster_population else 'staff'::roster_population end`,
+      )
+      .notNull(),
     createdBy: jsonb('created_by').notNull(),
     source: invocationSourceEnum('source').notNull(),
     requestId: uuid('request_id').notNull(),
@@ -56,7 +72,12 @@ export const notificationIntents = pgTable(
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [
-    uniqueIndex('notification_intents_request_uq').on(table.requestId),
+    // One request records the staff (or synthetic) intent and, for a live
+    // incident, the partner slice beside it: one intent per population.
+    uniqueIndex('notification_intents_request_population_uq').on(
+      table.requestId,
+      table.rosterPopulation,
+    ),
     unique('notification_intents_identity_classification_uq').on(
       table.id,
       table.eventKind,
@@ -99,7 +120,7 @@ export const notificationIntents = pgTable(
         table.templateMode,
         table.eventTypeVersionId,
         table.rosterSnapshotId,
-        table.rosterPopulation,
+        table.eventRosterPopulation,
       ],
       foreignColumns: [
         events.id,
@@ -117,7 +138,7 @@ export const notificationIntents = pgTable(
       name: 'notification_intents_event_type_mode_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [table.rosterSnapshotId, table.rosterPopulation],
+      columns: [table.rosterSnapshotId, table.eventRosterPopulation],
       foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
       name: 'notification_intents_roster_population_fk',
     }).onDelete('restrict'),
@@ -125,9 +146,10 @@ export const notificationIntents = pgTable(
       'notification_intents_classification',
       sql`(
         ${table.eventKind} = 'incident' and ${table.templateMode} = 'real'
-        and ${table.rosterPopulation} = 'staff'
+        and ${table.rosterPopulation}::text in ('staff', 'partner')
       ) or (
         ${table.eventKind} = 'drill' and ${table.templateMode} = 'drill'
+        and ${table.rosterPopulation}::text in ('staff', 'synthetic')
       ) or (
         ${table.eventKind} = 'test' and ${table.templateMode} = 'drill'
         and ${table.rosterPopulation} = 'synthetic'
@@ -138,12 +160,12 @@ export const notificationIntents = pgTable(
       sql`(
         ${table.authorization} ->> 'requestId' is not distinct from ${table.requestId}::text
       ) and case
-        when ${table.purpose} = 'activation' and ${table.rosterPopulation} = 'staff' then
+        when ${table.purpose} = 'activation' and ${table.rosterPopulation}::text in ('staff', 'partner') then
           ${table.authorization} ->> 'kind' is not distinct from 'human-confirmed'
           and ${table.createdBy} ->> 'kind' is not distinct from 'human'
         when ${table.purpose} = 'activation' and ${table.rosterPopulation} = 'synthetic' then
           ${table.authorization} ->> 'kind' is not distinct from 'synthetic-training'
-        when ${table.purpose} <> 'activation' and ${table.rosterPopulation} = 'staff' then
+        when ${table.purpose} <> 'activation' and ${table.rosterPopulation}::text in ('staff', 'partner') then
           ${table.authorization} ->> 'kind' is not distinct from 'human-confirmed-lifecycle'
           and ${table.authorization} ->> 'purpose' is not distinct from ${table.purpose}::text
           and ${table.createdBy} ->> 'kind' is not distinct from 'human'
@@ -323,29 +345,9 @@ export const outbox = pgTable(
       table.authorization,
     ),
     foreignKey({
-      columns: [
-        table.eventId,
-        table.eventKind,
-        table.templateMode,
-        table.rosterPopulation,
-      ],
-      foreignColumns: [
-        events.id,
-        events.kind,
-        events.templateMode,
-        events.rosterPopulation,
-      ],
-      name: 'outbox_event_targeting_fk',
-    }).onDelete('restrict'),
-    foreignKey({
       columns: [table.eventTypeVersionId, table.templateMode],
       foreignColumns: [eventTypeVersions.id, eventTypeVersions.templateMode],
       name: 'outbox_event_type_mode_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.rosterSnapshotId, table.rosterPopulation],
-      foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
-      name: 'outbox_roster_population_fk',
     }).onDelete('restrict'),
     index('outbox_claim_idx').on(table.status, table.availableAt),
     check('outbox_message_version', sql`${table.messageVersion} in (1, 2)`),
@@ -354,9 +356,10 @@ export const outbox = pgTable(
       'outbox_classification',
       sql`(
         ${table.eventKind} = 'incident' and ${table.templateMode} = 'real'
-        and ${table.rosterPopulation} = 'staff'
+        and ${table.rosterPopulation}::text in ('staff', 'partner')
       ) or (
         ${table.eventKind} = 'drill' and ${table.templateMode} = 'drill'
+        and ${table.rosterPopulation}::text in ('staff', 'synthetic')
       ) or (
         ${table.eventKind} = 'test' and ${table.templateMode} = 'drill'
         and ${table.rosterPopulation} = 'synthetic'
@@ -579,29 +582,9 @@ export const dispatchBatches = pgTable(
       name: 'dispatch_batches_outbox_truth_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [
-        table.eventId,
-        table.eventKind,
-        table.templateMode,
-        table.rosterPopulation,
-      ],
-      foreignColumns: [
-        events.id,
-        events.kind,
-        events.templateMode,
-        events.rosterPopulation,
-      ],
-      name: 'dispatch_batches_event_targeting_fk',
-    }).onDelete('restrict'),
-    foreignKey({
       columns: [table.eventTypeVersionId, table.templateMode],
       foreignColumns: [eventTypeVersions.id, eventTypeVersions.templateMode],
       name: 'dispatch_batches_event_type_mode_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.rosterSnapshotId, table.rosterPopulation],
-      foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
-      name: 'dispatch_batches_roster_population_fk',
     }).onDelete('restrict'),
     check('dispatch_batches_sequence_positive', sql`${table.sequence} > 0`),
     check(
@@ -612,9 +595,10 @@ export const dispatchBatches = pgTable(
       'dispatch_batches_classification',
       sql`(
         ${table.eventKind} = 'incident' and ${table.templateMode} = 'real'
-        and ${table.rosterPopulation} = 'staff'
+        and ${table.rosterPopulation}::text in ('staff', 'partner')
       ) or (
         ${table.eventKind} = 'drill' and ${table.templateMode} = 'drill'
+        and ${table.rosterPopulation}::text in ('staff', 'synthetic')
       ) or (
         ${table.eventKind} = 'test' and ${table.templateMode} = 'drill'
         and ${table.rosterPopulation} = 'synthetic'
@@ -646,6 +630,77 @@ export const dispatchBatches = pgTable(
   ],
 );
 
+/**
+ * Where a partner slice reaches one admitted partner: the admission itself
+ * for email (its address), or one of the partner's own push registrations or
+ * SMS consents. A partner is admitted, never rostered, so this is the partner
+ * counterpart of a published roster endpoint. It copies no destination: the
+ * address, token, or number stays in its source row.
+ *
+ * Append-only. A trigger (migration 0063) refuses a registration or consent
+ * that does not belong to the admitted person.
+ */
+export const partnerEndpoints = pgTable(
+  'partner_endpoints',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    partnerAdmissionId: uuid('partner_admission_id').notNull(),
+    channel: notificationChannelEnum('channel').notNull(),
+    pushRegistrationId: uuid('push_registration_id'),
+    smsConsentId: uuid('sms_consent_id'),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.partnerAdmissionId],
+      foreignColumns: [partnerAdmissions.id],
+      name: 'partner_endpoints_admission_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.pushRegistrationId],
+      foreignColumns: [devicePushTokenRegistrations.id],
+      name: 'partner_endpoints_push_registration_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.smsConsentId],
+      foreignColumns: [staffSmsConsents.id],
+      name: 'partner_endpoints_sms_consent_fk',
+    }).onDelete('restrict'),
+    unique('partner_endpoints_binding_uq').on(
+      table.partnerAdmissionId,
+      table.id,
+      table.channel,
+    ),
+    uniqueIndex('partner_endpoints_email_uq')
+      .on(table.partnerAdmissionId)
+      .where(sql`${table.channel} = 'email'`),
+    uniqueIndex('partner_endpoints_push_registration_uq').on(
+      table.partnerAdmissionId,
+      table.pushRegistrationId,
+    ),
+    uniqueIndex('partner_endpoints_sms_consent_uq').on(
+      table.partnerAdmissionId,
+      table.smsConsentId,
+    ),
+    check(
+      'partner_endpoints_channel_source',
+      sql`(
+        ${table.channel} = 'email'
+        and ${table.pushRegistrationId} is null
+        and ${table.smsConsentId} is null
+      ) or (
+        ${table.channel} = 'push'
+        and ${table.pushRegistrationId} is not null
+        and ${table.smsConsentId} is null
+      ) or (
+        ${table.channel} = 'sms'
+        and ${table.smsConsentId} is not null
+        and ${table.pushRegistrationId} is null
+      )`,
+    ),
+  ],
+);
+
 /** Immutable endpoint attempts; provider results append separate evidence. */
 export const channelAttempts = pgTable(
   'channel_attempts',
@@ -667,15 +722,18 @@ export const channelAttempts = pgTable(
     recipientId: uuid('recipient_id').notNull(),
     endpointId: uuid('endpoint_id').notNull(),
     /**
-     * Exactly one of these names what `endpoint_id` is, and neither is ever
-     * written by the application: a trigger (migration 0057) derives both
-     * from `endpoint_id` on insert. A published endpoint is bound to its
-     * snapshot row; a staff push device enrolled after the snapshot was
-     * published -- which resolution fans a batch out to -- is bound to its
-     * own registration, owned by the snapshot recipient.
+     * Exactly one of these names what `endpoint_id` is, and none is ever
+     * written by the application: a trigger (migration 0057, superseded by
+     * 0063) derives them from `endpoint_id` on insert. A published endpoint
+     * is bound to its snapshot row; a staff push device enrolled after the
+     * snapshot was published -- which resolution fans a batch out to -- is
+     * bound to its own registration, owned by the snapshot recipient; a
+     * partner slice binds a partner endpoint owned by the admission
+     * `recipient_id` names.
      */
     publishedEndpointId: uuid('published_endpoint_id'),
     fannedOutRegistrationId: uuid('fanned_out_registration_id'),
+    partnerEndpointId: uuid('partner_endpoint_id'),
     channel: notificationChannelEnum('channel').notNull(),
     attemptNumber: integer('attempt_number').notNull(),
     attemptedAt: occurredAt('attempted_at').defaultNow().notNull(),
@@ -737,29 +795,9 @@ export const channelAttempts = pgTable(
       name: 'channel_attempts_dispatch_batch_truth_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [
-        table.eventId,
-        table.eventKind,
-        table.templateMode,
-        table.rosterPopulation,
-      ],
-      foreignColumns: [
-        events.id,
-        events.kind,
-        events.templateMode,
-        events.rosterPopulation,
-      ],
-      name: 'channel_attempts_event_targeting_fk',
-    }).onDelete('restrict'),
-    foreignKey({
       columns: [table.eventTypeVersionId, table.templateMode],
       foreignColumns: [eventTypeVersions.id, eventTypeVersions.templateMode],
       name: 'channel_attempts_event_type_mode_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.rosterSnapshotId, table.rosterPopulation],
-      foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
-      name: 'channel_attempts_roster_population_fk',
     }).onDelete('restrict'),
     foreignKey({
       columns: [
@@ -786,13 +824,24 @@ export const channelAttempts = pgTable(
     index('channel_attempts_fanned_out_registration_idx').on(
       table.fannedOutRegistrationId,
     ),
+    foreignKey({
+      columns: [table.recipientId, table.partnerEndpointId, table.channel],
+      foreignColumns: [
+        partnerEndpoints.partnerAdmissionId,
+        partnerEndpoints.id,
+        partnerEndpoints.channel,
+      ],
+      name: 'channel_attempts_partner_endpoint_fk',
+    }).onDelete('restrict'),
+    index('channel_attempts_partner_endpoint_idx').on(table.partnerEndpointId),
     check(
       'channel_attempts_endpoint_identity',
-      sql`num_nonnulls(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = 1
-        and coalesce(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = ${table.endpointId}
+      sql`num_nonnulls(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}, ${table.partnerEndpointId}) = 1
+        and coalesce(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}, ${table.partnerEndpointId}) = ${table.endpointId}
         and (${table.fannedOutRegistrationId} is null or (
           ${table.channel} = 'push' and ${table.rosterPopulation} = 'staff'
-        ))`,
+        ))
+        and (${table.partnerEndpointId} is not null) = (${table.rosterPopulation}::text = 'partner')`,
     ),
     index('channel_attempts_intent_idx').on(table.intentId),
     check('channel_attempts_attempt_positive', sql`${table.attemptNumber} > 0`),
@@ -800,9 +849,10 @@ export const channelAttempts = pgTable(
       'channel_attempts_classification',
       sql`(
         ${table.eventKind} = 'incident' and ${table.templateMode} = 'real'
-        and ${table.rosterPopulation} = 'staff'
+        and ${table.rosterPopulation}::text in ('staff', 'partner')
       ) or (
         ${table.eventKind} = 'drill' and ${table.templateMode} = 'drill'
+        and ${table.rosterPopulation}::text in ('staff', 'synthetic')
       ) or (
         ${table.eventKind} = 'test' and ${table.templateMode} = 'drill'
         and ${table.rosterPopulation} = 'synthetic'
@@ -1205,9 +1255,10 @@ export const endpointStatusRecords = pgTable(
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
     endpointId: uuid('endpoint_id').notNull(),
-    /** Derived by the migration-0057 trigger; see `channelAttempts`. */
+    /** Derived by the migration-0063 trigger; see `channelAttempts`. */
     publishedEndpointId: uuid('published_endpoint_id'),
     fannedOutRegistrationId: uuid('fanned_out_registration_id'),
+    partnerEndpointId: uuid('partner_endpoint_id'),
     population: rosterPopulationEnum('population').notNull(),
     channel: notificationChannelEnum('channel').notNull(),
     status: endpointStatusEnum('status').notNull(),
@@ -1243,13 +1294,26 @@ export const endpointStatusRecords = pgTable(
     index('endpoint_status_records_fanned_out_registration_idx').on(
       table.fannedOutRegistrationId,
     ),
+    foreignKey({
+      columns: [table.recipientId, table.partnerEndpointId, table.channel],
+      foreignColumns: [
+        partnerEndpoints.partnerAdmissionId,
+        partnerEndpoints.id,
+        partnerEndpoints.channel,
+      ],
+      name: 'endpoint_status_records_partner_endpoint_fk',
+    }).onDelete('restrict'),
+    index('endpoint_status_records_partner_endpoint_idx').on(
+      table.partnerEndpointId,
+    ),
     check(
       'endpoint_status_records_endpoint_identity',
-      sql`num_nonnulls(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = 1
-        and coalesce(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}) = ${table.endpointId}
+      sql`num_nonnulls(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}, ${table.partnerEndpointId}) = 1
+        and coalesce(${table.publishedEndpointId}, ${table.fannedOutRegistrationId}, ${table.partnerEndpointId}) = ${table.endpointId}
         and (${table.fannedOutRegistrationId} is null or (
           ${table.channel} = 'push' and ${table.population} = 'staff'
-        ))`,
+        ))
+        and (${table.partnerEndpointId} is not null) = (${table.population}::text = 'partner')`,
     ),
     check(
       'endpoint_status_records_lifecycle_status',
@@ -1342,7 +1406,9 @@ export const smsOptOutRecords = pgTable(
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
     endpointId: uuid('endpoint_id').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     channel: notificationChannelEnum('channel').notNull(),
     provider: varchar('provider', { length: 100 }).notNull(),
     providerReference: varchar('provider_reference', { length: 500 }).notNull(),

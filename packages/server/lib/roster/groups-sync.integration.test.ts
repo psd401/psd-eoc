@@ -6,7 +6,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import type { RosterPopulation } from '@psd-eoc/contracts';
+import type { RosteredPopulation } from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
@@ -1570,7 +1570,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
         }
         return baseStore.loadGroupMembers(groupSourceId);
       },
-      async loadLatestCompleteBaseline(population: RosterPopulation) {
+      async loadLatestCompleteBaseline(population: RosteredPopulation) {
         const baseline = await baseStore.loadLatestCompleteBaseline(population);
         baselineArrivals += 1;
         if (baselineArrivals === 2) {

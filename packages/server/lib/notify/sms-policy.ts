@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   DispatchBatchSchema,
+  isRosteredDispatchBatch,
   EndpointIdSchema,
   EndpointStatusRecordSchema,
   EndpointStatusSchema,
@@ -9,7 +10,7 @@ import {
   RecordEndpointStatusInputSchema,
   RecordSmsOptOutInputSchema,
   RenderedMessageSchema,
-  RosterPopulationSchema,
+  RosteredPopulationSchema,
   RosterSnapshotIdSchema,
   SMS_OPT_OUT_REASON_CODE as CONTRACT_SMS_OPT_OUT_REASON_CODE,
   SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
@@ -176,7 +177,7 @@ const SmsEndpointPolicyCandidateSchema = z
 const SmsEndpointPolicyQuerySchema = z
   .object({
     rosterSnapshotId: RosterSnapshotIdSchema,
-    rosterPopulation: RosterPopulationSchema,
+    rosterPopulation: RosteredPopulationSchema,
     endpointCount: z
       .number()
       .int()
@@ -337,6 +338,13 @@ export async function resolveSmsEndpoints(
   store: SmsEndpointPolicyStore,
 ): Promise<readonly ResolvedSmsEndpoint[]> {
   const batch = validateSmsDispatchBatch(input.batch);
+  // A partner slice has no roster recipients; it never resolves here.
+  if (!isRosteredDispatchBatch(batch)) {
+    throw new SmsPolicyError(
+      'SMS_ROSTER_MISMATCH',
+      'The SMS audience does not match the pinned roster snapshot.',
+    );
+  }
   let audience: ReturnType<typeof resolveAudience>;
   try {
     audience = resolveAudience(input.audience);

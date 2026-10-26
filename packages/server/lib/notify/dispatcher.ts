@@ -2,6 +2,8 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 
 import {
   DispatchBatchSchema,
+  eventPopulationForNotification,
+  isRosteredDispatchBatch,
   DispatchOutboxResultSchema,
   EndpointStatusSchema,
   FacilityIdSchema,
@@ -361,6 +363,10 @@ export async function resolveEmailEndpoints(
   store: EmailEndpointPolicyStore,
 ): Promise<readonly ResolvedEmailEndpoint[]> {
   const batch = parseEmailDispatchBatch(input.batch);
+  // A partner slice has no roster recipients; it never resolves here.
+  if (!isRosteredDispatchBatch(batch)) {
+    throw new EmailEndpointResolutionError('EMAIL_ROSTER_MISMATCH');
+  }
   let audience: ReturnType<typeof resolveAudience>;
   try {
     audience = resolveAudience(input.audience);
@@ -1931,7 +1937,10 @@ async function resolveOutboxMessage(
         eq(events.id, outboxRow.eventId),
         eq(events.kind, outboxRow.eventKind),
         eq(events.templateMode, outboxRow.templateMode),
-        eq(events.rosterPopulation, outboxRow.rosterPopulation),
+        eq(
+          events.rosterPopulation,
+          eventPopulationForNotification(outboxRow.rosterPopulation),
+        ),
       ),
     )
     .limit(1);

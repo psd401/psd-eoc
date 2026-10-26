@@ -12,8 +12,9 @@ import {
   EventClassificationSchema,
   EventIdSchema,
   EventKindSchema,
-  EventTargetingSchema,
   LifecycleActionAuthorizationSchema,
+  NotificationTargetingSchema,
+  eventPopulationForNotification,
   type EventKind,
 } from './event';
 import {
@@ -36,7 +37,9 @@ import {
   RecipientIdSchema,
   RosterPopulationSchema,
   RosterSnapshotIdSchema,
+  isRosteredPopulation,
   type RosterPopulation,
+  type RosteredPopulation,
 } from './roster';
 import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
 
@@ -240,7 +243,7 @@ function addNotificationTargetingIssues(
   context: z.RefinementCtx,
 ): void {
   if (
-    !EventTargetingSchema.safeParse({
+    !NotificationTargetingSchema.safeParse({
       kind: value.eventKind,
       templateMode: value.templateMode,
       rosterPopulation: value.rosterPopulation,
@@ -358,7 +361,8 @@ function addNotificationAuthorizationIssues(
   if (
     authorization.targeting.kind !== value.eventKind ||
     authorization.targeting.templateMode !== value.templateMode ||
-    authorization.targeting.rosterPopulation !== value.rosterPopulation
+    authorization.targeting.rosterPopulation !==
+      eventPopulationForNotification(value.rosterPopulation)
   ) {
     context.addIssue({
       code: 'custom',
@@ -403,12 +407,13 @@ export const NotificationIntentSchema = z
       });
     }
     if (
-      intent.rosterPopulation === 'staff' &&
+      intent.rosterPopulation !== 'synthetic' &&
       intent.createdBy.kind !== 'human'
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'Every staff-targeting notification intent requires a human.',
+        message:
+          'Every staff- or partner-targeting notification intent requires a human.',
         path: ['createdBy'],
       });
     }
@@ -493,6 +498,19 @@ export const DispatchBatchSchema = z
 
 /** Immutable channel dispatch batch inferred from its schema. */
 export type DispatchBatch = z.infer<typeof DispatchBatchSchema>;
+
+/**
+ * A dispatch batch resolved through a published roster snapshot: never a
+ * partner slice, whose recipients are admissions rather than roster rows.
+ */
+export type RosteredDispatchBatch = DispatchBatch &
+  Readonly<{ rosterPopulation: RosteredPopulation }>;
+
+/** True when a batch resolves through its pinned roster snapshot. */
+export const isRosteredDispatchBatch = (
+  batch: DispatchBatch,
+): batch is RosteredDispatchBatch =>
+  isRosteredPopulation(batch.rosterPopulation);
 
 /**
  * Owns one immutable attempt to hand a recipient endpoint to a provider.
