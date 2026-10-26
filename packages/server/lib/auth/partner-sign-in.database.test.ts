@@ -204,14 +204,15 @@ describeWithDatabase('partner web sign-in', () => {
     const email = `replay-${randomUUID()}@agency.example.invalid`;
     await admit(email);
     const verified = claims(email);
-    const requestId = randomUUID();
     const installationId = `web.${randomUUID()}`;
     const now = new Date();
+    // The route mints a fresh request id for every POST, so a double-submitted
+    // code arrives under two ids. The replay guard must not depend on it.
     const replay = () =>
       completePartnerSignIn(database(), {
         claims: verified,
         installationId,
-        requestId,
+        requestId: randomUUID(),
         now,
         staffDomain: STAFF_DOMAIN,
       });

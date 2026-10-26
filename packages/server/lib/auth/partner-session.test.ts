@@ -88,7 +88,6 @@ function completion(subject = 'cognito-sub-1') {
     },
     displayName: 'Synthetic Responder',
     installationId: 'web.installation-identifier',
-    requestId: randomUUID(),
   });
 }
 

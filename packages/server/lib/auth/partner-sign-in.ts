@@ -80,24 +80,21 @@ export interface PartnerSignInCompletion {
  * Normalizes verified partner claims into the exact evidence the capability
  * accepts. The response digest commits to this one completed exchange, so a
  * replayed sign-in is refused by the idempotency reservation rather than
- * issuing a second session.
+ * issuing a second session. The request id stays out of the digest: the route
+ * mints one per POST, so a double-submitted code would otherwise look new.
  */
 export function createPartnerSignInCompletion(
   input: Readonly<{
     claims: PartnerVerifiedClaims;
     displayName: string;
     installationId: string;
-    requestId: string;
   }>,
 ): PartnerSignInCompletion {
   const subjectDigest = sha256Hex(input.claims.subject);
   const responseDigest = sha256Hex(
-    [
-      'partner-otp-sign-in-v1',
-      input.requestId,
-      subjectDigest,
-      input.claims.claimsDigest,
-    ].join('\n'),
+    ['partner-otp-sign-in-v1', subjectDigest, input.claims.claimsDigest].join(
+      '\n',
+    ),
   );
   const trimmed = input.displayName.trim();
   const claims = {
@@ -206,7 +203,6 @@ export async function completePartnerSignIn(
     claims: input.claims,
     displayName: access.user.displayName,
     installationId: input.installationId,
-    requestId: input.requestId,
   });
   const envelope = parseCapabilityEnvelopeFor(
     'complete-oidc-sign-in',
