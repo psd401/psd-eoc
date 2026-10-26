@@ -13,6 +13,7 @@ openwiki:
     - packages/server/lib/capabilities/events.ts
     - packages/server/lib/capabilities/event-room.ts
     - packages/server/lib/capabilities/journal.ts
+    - packages/server/lib/partners/audience.ts
     - packages/contracts/src/event.ts
   symbols: [EVENT_STATUS_TRANSITIONS, transitionEventStatus, startEventRegistration, createActivationPreviewRegistration, buildActivationPreview, createEventCapabilityRuntime, OutboxDispatchHook, EVENT_CLASSIFICATION_PRESENTATIONS]
   test_paths:
@@ -62,7 +63,7 @@ sequenceDiagram
   S->>DB: roster snapshot, channel config, event-type version
   S-->>U: ActivationPreview (rendered copy per channel, recipients, blocking reasons, consequenceDigest)
   U->>EV: confirm (humanConfirmationId + Idempotency-Key) or join existing
-  EV->>DB: one transaction: event, transition seq 1, notification intent, outbox, audit
+  EV->>DB: one transaction: event, transition seq 1, notification intent, outbox, audit, and for a live incident that reached partners the partner slice's intent and outbox
   EV-->>U: event
   EV->>D: after commit, poll up to 10 outbox rows
   D->>D: queue to delivery SQS, errors swallowed and rows stay pending
@@ -70,12 +71,12 @@ sequenceDiagram
 
 Caption: preview is a persisted, digest-bound artifact; the committed transaction owns the notification intent and outbox row.
 
-- **Preview** (`start.ts` `createActivationPreviewRegistration`, `buildActivationPreview` in `start-preview.ts`): resolves the pinned immutable `RosterSnapshot`, audience, channel configuration and published event-type version, renders copy ([notification pipeline](notification-pipeline.md)), and can refuse with reason codes (`NO_RECIPIENTS`, `NO_<CHANNEL>_ENDPOINTS`) that `lib/events/blocking-reasons.ts` turns into administrator-facing sentences.
+- **Preview** (`start.ts` `createActivationPreviewRegistration`, `buildActivationPreview` in `start-preview.ts`): resolves the pinned immutable `RosterSnapshot`, audience, channel configuration and published event-type version, renders copy ([notification pipeline](notification-pipeline.md)), and can refuse with reason codes (`NO_RECIPIENTS`, `NO_<CHANNEL>_ENDPOINTS`) that `lib/events/blocking-reasons.ts` turns into administrator-facing sentences. For a live incident at a facility that is not isolated, it also pins the admitted partners the event would alert and counts them as `partnerRecipientCount` ([partner audience](partner-audience.md#planning-who-an-activation-would-alert)).
 - **Active-event decision**: `StartEventInput.activeEventDecision` carries `activeEventIdsSeen`, and `JoinOrStartDecision` forces an operator to choose join-existing vs. start-new, so two people cannot silently start duplicates. `canonicalStartInput` sorts the seen IDs for idempotency.
 - **Prepared activations** (`prepare-activation`, `drizzle-prepared-activation-store.ts`, `agents/prepared-activation.ts`): an agent may prepare an activation; a human must still review and confirm it; consumption is recorded (`PreparedActivationConsumption`).
 - **Post-commit dispatch**: `createOutboxDispatchHook` in `events.ts` polls up to `POST_COMMIT_OUTBOX_DISPATCH_LIMIT` (10) rows after any result containing a `notificationIntent`; any failure is swallowed so an operator who has been told the incident is active never sees it fail. A stranded row is picked up by the next activation or sweep ([pipeline](notification-pipeline.md)).
 - **Later transitions and queued sends**: an activation batch can still be queued when the event is cleared, closed or reactivated. The email store still sends the begin email in that case because the activation authorization still matches, while the SMS store requires the event to remain active. The per-purpose rules and the 2026-10-15 ShakeOut reason are in [send-time currency](notification-pipeline.md#send-time-currency).
-- **Lifecycle consequence previews** (`create-lifecycle-consequence-preview`, in `journal.ts`) give all-clear/close/reactivate/reopen the same preview → digest → confirm shape.
+- **Lifecycle consequence previews** (`create-lifecycle-consequence-preview`, in `journal.ts`) give all-clear/close/reactivate/reopen the same preview → digest → confirm shape. An all-clear or reactivation copies the activation preview's partner count rather than re-resolving partners, so it reaches the same partner set ([partner audience](partner-audience.md#confirmed-send-the-partner-slice)).
 - Routes: web `app/(app)/start/api/{preview,activate,join}`, mobile `app/api/mobile/start/{facilities,threats,preview,activate}`, REST `app/api/events*`.
 
 ## Event room and journal
@@ -88,3 +89,4 @@ Caption: preview is a persisted, digest-bound artifact; the committed transactio
 - Anything that can alter what a real recipient receives needs a real-vs-drill test (AGENTS.md: "Prove it in tests").
 - Focused tests: `events.test.ts` (transitions, post-commit dispatch seam via `createEventCapabilityRuntimeOverStore`, no DB), `event-room.database.test.ts`, `journal.database.test.ts` (need `TEST_DATABASE_URL`, see [verification](../testing/verification-and-testing.md)). Browser flows: `bun run test:e2e:issue-344` etc. (conditional: UI/flow changes).
 - Escalate: any change to what is human-only, to confirmation lifetime, or to how drill/real are rendered.
+d.

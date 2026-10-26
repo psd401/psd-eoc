@@ -94,7 +94,7 @@ Idempotent retries replay the stored version by its id (`resultReference`, `load
 
 ## Routing status: read when a live incident is planned
 
-`resolvePartnerAudience` in `packages/server/lib/partners/audience.ts` reads the effective settings when an activation preview is created, and pins the selected admissions beside the preview (`activation_preview_partners`). Partners are never part of staff rosters: staff rosters are built from Google groups and skip partners (`packages/server/lib/roster/groups-sync.ts`). Delivery to the pinned partners is described in [notification pipeline](notification-pipeline.md).
+`resolvePartnerAudience` in `packages/server/lib/partners/audience.ts` reads the effective settings when an activation preview is created, and pins the selected admissions beside the preview (`activation_preview_partners`). Partners are never part of staff rosters: staff rosters are built from Google groups and skip partners (`packages/server/lib/roster/groups-sync.ts`). Delivery to the pinned partners is described in [notification pipeline](notification-pipeline.md), and [partner audience](partner-audience.md) (who a live incident pins and how each channel reaches them).
 
 A saved setting therefore changes who the next live incident's preview pins. It never changes an event already started: that event's all-clear and reactivation reach the set its activation pinned.
 
@@ -144,5 +144,5 @@ Run the browser flow only when the Partner alerts page or its route changes. It 
 
 ## Related
 
-[Partner access](partner-access.md) (who is admitted), [partner web sign-in](partner-sign-in.md) (what a partner session may run), [event types and templates](event-types-and-templates.md) (the response families these keys name), [identity and access](identity-and-access.md) (administrator roles), [data model](data-model.md) (the table and its append-only rules), and the audience and dispatch pages this setting feeds: [roster and audience](roster-and-audience.md) and [notification pipeline](notification-pipeline.md).
+[Partner access](partner-access.md) (who is admitted), [partner web sign-in](partner-sign-in.md) (what a partner session may run), [event types and templates](event-types-and-templates.md) (the response families these keys name), [identity and access](identity-and-access.md) (administrator roles), [data model](data-model.md) (the table and its append-only rules), and the audience and dispatch pages this setting feeds: [roster and audience](roster-and-audience.md) and [notification pipeline](notification-pipeline.md), and [partner audience](partner-audience.md) (who a live incident pins and how each channel reaches them).
 
