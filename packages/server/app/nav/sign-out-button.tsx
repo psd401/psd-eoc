@@ -2,6 +2,21 @@
 
 import { useState } from 'react';
 
+/** The double-submit token, read from the cookie the server wrote for it. */
+function readCsrfToken(cookieName: string): string | null {
+  for (const segment of document.cookie.split(';')) {
+    const separator = segment.indexOf('=');
+    if (separator < 1) continue;
+    if (segment.slice(0, separator).trim() !== cookieName) continue;
+    try {
+      return decodeURIComponent(segment.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /**
  * Ends the current web session.
  *
@@ -9,10 +24,19 @@ import { useState } from 'react';
  * needs to issue the request and then leave the authenticated area. A full
  * navigation is used rather than a client-side route change so no authenticated
  * server component state survives the sign-out.
+ *
+ * The request carries the double-submit CSRF token every browser mutation
+ * carries. Without it the revoke endpoint refused the POST, which left the
+ * only sign-out control in the application failing for everyone — staff and
+ * partner alike — with "Sign out failed. Try again."
  */
 export function SignOutButton({
   sessionId,
-}: Readonly<{ sessionId: string }>): React.JSX.Element {
+  csrfCookieName,
+}: Readonly<{
+  sessionId: string;
+  csrfCookieName: string;
+}>): React.JSX.Element {
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -20,11 +44,20 @@ export function SignOutButton({
     setPending(true);
     setFailed(false);
     try {
+      const csrfToken = readCsrfToken(csrfCookieName);
+      if (csrfToken === null) {
+        setPending(false);
+        setFailed(true);
+        return;
+      }
       const response = await fetch('/api/auth/revoke', {
         method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
         headers: {
           'content-type': 'application/json',
           'idempotency-key': crypto.randomUUID(),
+          'x-psd-eoc-csrf': csrfToken,
         },
         body: JSON.stringify({ sessionId, reasonCode: 'USER_SIGNED_OUT' }),
       });

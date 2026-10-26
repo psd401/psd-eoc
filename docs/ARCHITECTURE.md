@@ -70,10 +70,24 @@ actor or facility scope yet, so
 `executeRepositoryAuditedOidcCompletion` accepts only the literal
 `complete-oidc-sign-in` registration. Its serializable repository commits
 replay protection, session issuance, and access-gate audit together. The
-source-boundary test permits only the browser callback and mobile exchange
-routes. Adding another lower-tier consumer requires moving it through the
-audited engine or deliberately updating this document and the exact allowlist
-test together.
+source-boundary test permits only the browser callback, the mobile exchange
+route, app-store review sign-in, and partner web sign-in. Adding another
+lower-tier consumer requires moving it through the audited engine or
+deliberately updating this document and the exact allowlist test together.
+
+Two issuers complete that one capability, and `lib/auth/identity-providers.ts`
+is the only place an issuer becomes a sign-in path: district Google for staff,
+and one Amazon Cognito user pool for partner (first-responder) accounts. The
+two paths cannot be confused for one another. A Google identity completes only
+through a code callback or the native exchange, a partner identity only
+through a verified email one-time password, and the pre-session envelope
+refuses either transport with the other's issuer. Staff authorization is
+current trusted-group membership; a partner's is an administrator's admission
+that has not ended or expired, re-read on every request. Staff sessions keep
+their long lifetime; a partner session lasts at most one day and never past
+its admission, which `lib/auth/partner-session.ts` caps rather than
+configures. Partner access is configuration: without the pool parameters the
+registry holds Google alone and the deployment has no partner sign-in.
 
 Reusable capability services live under `packages/server/lib`. Next `app`
 folders contain authentication, bounded request parsing, capability
@@ -169,6 +183,23 @@ access decisions each enforce.
   quarterly review. It writes partner records directly through `lib/partners`
   rather than running a capability. Inactivity is reviewed, never acted on:
   nothing disables a partner automatically except expiry.
+- A partner session may run only the written allowlist
+  `PARTNER_CAPABILITY_IDS` in `packages/contracts/src/partner-capabilities.ts`:
+  seeing live events and the facility, threat, and published event-type reads
+  that render them; opening an event room, joining, reading and posting to the
+  timeline, and attaching media; and the partner's own session, devices, push
+  registration, and text-message consent. A partner session's
+  server-resolved capability scope carries `partner: true`, and the capability
+  engine refuses every other capability for every transport with the same
+  generic refusal any principal gets. The event-type reads, which run outside
+  the engine's invocation check, and lifecycle confirmation issuance restate
+  the refusal. Starting, ending, correcting, or reopening an event, Records
+  and exports, configuration, audit, and agent keys are all outside it.
+- A partner acts at every facility that is not isolated, resolved by
+  `partnerFacilityScope` in `lib/auth/partner-admission.ts` on every session
+  read, never at the limit stored on the account row. An isolated facility's
+  events (the store reviewer's, for one) are therefore invisible to partners.
+  With no non-isolated facility, no partner is admitted.
 
 ## Data and delivery truth
 

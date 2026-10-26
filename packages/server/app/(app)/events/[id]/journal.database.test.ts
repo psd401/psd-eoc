@@ -2448,6 +2448,30 @@ describeWithDatabase('event journal database guarantees', () => {
         });
       }
 
+      // A partner session never gets a lifecycle confirmation row: both
+      // confirmable actions are outside the partner allowlist.
+      for (const action of ['all-clear', 'close'] as const) {
+        await expect(
+          journalRuntime.issueHumanConfirmation({
+            authenticated: Object.freeze({
+              ...authenticated,
+              scope: { ...authenticated.scope, partner: true as const },
+            }),
+            eventId,
+            action,
+            lifecyclePreviewId: action === 'all-clear' ? firstPreview.id : null,
+            confirmationPhrase: EVENT_CONFIRMATION_PHRASES[action],
+            requestId: randomUUID(),
+            now: new Date(),
+          }),
+          action,
+        ).rejects.toMatchObject({
+          code: 'FORBIDDEN',
+          reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+          status: 403,
+        });
+      }
+
       expect(EVENT_CONFIRMATION_PHRASES['all-clear']).toBe('ALL CLEAR');
       await expect(
         journalRuntime.issueHumanConfirmation({

@@ -92,6 +92,41 @@ export default function AuthLayout({
             font-size: 0.95rem;
           }
 
+          .field-label {
+            display: block;
+            font-weight: 700;
+            margin-top: 1rem;
+          }
+
+          .field-input {
+            display: block;
+            width: 100%;
+            min-height: 2.75rem;
+            margin: 0.375rem 0 0.25rem;
+            border: 1px solid #475569;
+            border-radius: 0.375rem;
+            background: #ffffff;
+            color: #17202a;
+            font: inherit;
+            padding: 0.5rem 0.75rem;
+          }
+
+          .field-input:focus-visible,
+          button:focus-visible {
+            outline: 0.25rem solid #92400e;
+            outline-offset: 0.2rem;
+          }
+
+          button.button-link {
+            cursor: pointer;
+          }
+
+          .form-message {
+            border-left: 0.25rem solid #92400e;
+            background: #fffbeb;
+            padding: 0.75rem 1rem;
+          }
+
           .skip-link {
             position: absolute;
             left: 0.75rem;

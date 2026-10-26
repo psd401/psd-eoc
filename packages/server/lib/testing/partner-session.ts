@@ -10,11 +10,11 @@ import {
   sessionTokenIssuances,
   users,
 } from '../../db/schema';
+import { SYNTHETIC_PARTNER_ISSUER } from '../auth/identity-providers';
 import { createOpaqueRefreshToken, hashRefreshToken } from '../auth/sessions';
 
 /** A synthetic partner identity provider; never a real pool. */
-export const SYNTHETIC_PARTNER_ISSUER =
-  'https://cognito-idp.example.invalid/synthetic-partner-pool';
+export { SYNTHETIC_PARTNER_ISSUER };
 
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1_000;
 

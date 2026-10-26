@@ -16,6 +16,7 @@ import {
   UuidSchema,
   defineCapability,
   getCapabilityInvocationPolicy,
+  isPartnerCapabilityId,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type Actor,
@@ -2251,7 +2252,11 @@ function assertEventTypeCapabilityAuthorized(
   const authenticated = context.authenticated;
   if (
     !principalKinds.has(authenticated.actor.kind) ||
-    !sources.has(authenticated.source)
+    !sources.has(authenticated.source) ||
+    // These reads run outside the engine's invocation check, so the partner
+    // allowlist is restated here.
+    (authenticated.scope.partner === true &&
+      !isPartnerCapabilityId(capabilityId))
   ) {
     throw new EventTypeCapabilityError(
       'FORBIDDEN',

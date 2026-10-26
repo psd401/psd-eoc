@@ -15,6 +15,7 @@ import {
   parseEmailBranding,
   type EmailBranding,
 } from '../../../../workers/email/email-message';
+import { SYNTHETIC_PARTNER_USER_POOL_ID } from '../auth/identity-providers';
 import { applicationOrigin, organizationName } from '../config/deployment';
 
 /**
@@ -69,9 +70,11 @@ const UNCONFIGURED = 'UNCONFIGURED';
  * The pool id that selects the synthetic providers. A deployed stack can
  * never carry it: the `PartnerUserPoolId` parameter accepts only
  * `UNCONFIGURED` or a region-prefixed pool id, so this is reachable only from
- * a test or local process that sets it on purpose.
+ * a test or local process that sets it on purpose. It is owned by the
+ * identity-provider registry, which resolves the same pool id to the
+ * synthetic issuer partner sign-in verifies against.
  */
-export const SYNTHETIC_PARTNER_USER_POOL_ID = 'SYNTHETIC';
+export { SYNTHETIC_PARTNER_USER_POOL_ID };
 
 function providerErrorName(error: unknown): string | null {
   return error !== null &&

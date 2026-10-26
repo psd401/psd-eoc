@@ -83,6 +83,7 @@ import {
   decidePartnerAccess,
   isPartnerIdentityIssuer,
   partnerAccessAsAccessDecision,
+  partnerFacilityScope,
 } from './partner-admission';
 import { decideAccess } from './trusted-group-access';
 
@@ -638,6 +639,7 @@ function authorizeStoredSession(
     scope: CapabilityScopeSchema.parse({
       facilityScope: effectiveScope,
       ...campusScopeFor(effectiveScope, context.campusFacilityIds),
+      ...(authorization.kind === 'partner-admission' ? { partner: true } : {}),
     }),
     membershipState,
     result,
@@ -1296,40 +1298,58 @@ export class DrizzleSessionStore implements SessionStore {
       roles: readonly Role[];
     }>
   > {
-    const decision = isPartnerIdentityIssuer(user.identityIssuer)
-      ? partnerAccessAsAccessDecision(
-          await decidePartnerAccess(database, {
-            email: user.email,
-            checkedAt: now,
-          }),
-          now,
-        )
-      : await decideAccess(database as Database, {
+    const partner = isPartnerIdentityIssuer(user.identityIssuer);
+    const partnerDecision = partner
+      ? await decidePartnerAccess(database, {
           email: user.email,
           checkedAt: now,
-        });
+        })
+      : null;
+    const staffDecision =
+      partnerDecision === null
+        ? await decideAccess(database as Database, {
+            email: user.email,
+            checkedAt: now,
+          })
+        : null;
+    const scopes = await database
+      .select({ facilityId: userFacilityScopes.facilityId })
+      .from(userFacilityScopes)
+      .where(eq(userFacilityScopes.userId, user.id));
+    const storedScope: FacilityScope =
+      scopes.length === 0
+        ? Object.freeze({ kind: 'district' as const })
+        : Object.freeze({
+            kind: 'facilities' as const,
+            facilityIds: Object.freeze(
+              scopes.map(({ facilityId }) => facilityId).sort(),
+            ),
+          });
+    const decision =
+      partnerDecision === null
+        ? staffDecision
+        : partnerAccessAsAccessDecision(
+            partnerDecision,
+            now,
+            await partnerFacilityScope(database, storedScope),
+          );
+    if (decision === null) {
+      throw new Error('No access decision was made for the session holder.');
+    }
     if (!decision.granted) {
       throw new SessionAccessError(
         'INVALID_MEMBERSHIP_EVIDENCE',
         'The session holder is no longer in a trusted access group or partner admission.',
       );
     }
-    const scopes = await database
-      .select({ facilityId: userFacilityScopes.facilityId })
-      .from(userFacilityScopes)
-      .where(eq(userFacilityScopes.userId, user.id));
     return Object.freeze({
       snapshotId: null,
       version: 0,
+      // A partner acts at their stored limit less isolated facilities.
       scope:
-        scopes.length === 0
-          ? Object.freeze({ kind: 'district' as const })
-          : Object.freeze({
-              kind: 'facilities' as const,
-              facilityIds: Object.freeze(
-                scopes.map(({ facilityId }) => facilityId).sort(),
-              ),
-            }),
+        partner && decision.facilityScope !== null
+          ? decision.facilityScope
+          : storedScope,
       // When the granting membership was actually read, not when it was
       // asked about. A capture instant of "now" is never stale and never in
       // the past, which makes every freshness check downstream vacuous.
@@ -1440,19 +1460,37 @@ export class DrizzleSessionStore implements SessionStore {
           checkedAt: now,
         })
       : null;
-    const decision =
+    const staffDecision =
       partnerDecision === null
         ? await decideAccess(database as Database, {
             email: userRow.email,
             checkedAt: now,
           })
-        : partnerAccessAsAccessDecision(partnerDecision, now);
-    const roles = decision.granted ? decision.roles : [];
-    const membershipAccessActive = decision.granted;
+        : null;
     const facilityRows = await database
       .select({ facilityId: userFacilityScopes.facilityId })
       .from(userFacilityScopes)
       .where(eq(userFacilityScopes.userId, userRow.id));
+    // A partner acts at their stored limit less every isolated facility.
+    const decision =
+      partnerDecision === null
+        ? staffDecision
+        : partnerAccessAsAccessDecision(
+            partnerDecision,
+            now,
+            await partnerFacilityScope(
+              database,
+              buildFacilityScope(
+                userRow.facilityScopeKind,
+                facilityRows.map((row) => row.facilityId),
+              ),
+            ),
+          );
+    if (decision === null) {
+      throw new Error('No access decision was made for the session holder.');
+    }
+    const roles = decision.granted ? decision.roles : [];
+    const membershipAccessActive = decision.granted;
     // Where the person acts is what their groups say now, on every request,
     // so a phone that stays signed in for weeks follows group changes too.
     // The stored limit decides only for an account a direct admission alone

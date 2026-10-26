@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { DrizzleQueryError } from 'drizzle-orm';
 
 import {
   HumanConfirmationRecordSchema,
@@ -783,6 +784,136 @@ describe('capability engine', () => {
     });
     expect(Object.isFrozen(invocation)).toBe(true);
     expect(Object.isFrozen(invocation.mutation)).toBe(true);
+  });
+
+  test('logs a failed statement without the values bound to it', async () => {
+    const store = new MemoryCapabilityStore();
+    const join = createJoinRegistration();
+    const failing = {
+      ...join.registration,
+      handler: () => {
+        // A connection failure carries no SQLSTATE, so only the message is
+        // left to log; Drizzle appends the bound values to it.
+        throw new DrizzleQueryError(
+          'select * from users where email = $1',
+          ['responder@agency.example.invalid'],
+          new Error('Connection terminated unexpectedly'),
+        );
+      },
+    };
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...values: unknown[]) => {
+      logged.push(values.map(String).join(' '));
+    };
+    try {
+      await captureEngineError(() =>
+        executeAuditedCapabilityTransaction(
+          failing,
+          { eventId: IDS.event },
+          humanMutationInvocation({
+            requestId: uuid(20_020),
+            idempotencyKey: 'pppp-fail-00000001',
+          }),
+          store,
+        ),
+      );
+    } finally {
+      console.error = original;
+    }
+    const failure = logged.find((line) => line.includes('capability-failed'));
+    expect(failure).toContain('select * from users where email = $1');
+    expect(failure).not.toContain('responder@agency.example.invalid');
+  });
+
+  test('a partner session runs only the partner allowlist', async () => {
+    const PARTNER_SCOPE = Object.freeze({ ...DISTRICT_SCOPE, partner: true });
+    const store = new MemoryCapabilityStore();
+    const join = createJoinRegistration();
+    const list = createListRegistration();
+    const close = createCloseRegistration();
+
+    // Joining and listing are on the allowlist.
+    await executeAuditedCapabilityTransaction(
+      join.registration,
+      { eventId: IDS.event },
+      humanMutationInvocation({
+        requestId: uuid(20_001),
+        idempotencyKey: 'pppp-join-000000001',
+        scope: PARTNER_SCOPE,
+      }),
+      store,
+    );
+    await executeAuditedCapabilityTransaction(
+      list.registration,
+      { facilityId: IDS.facility, cursor: null, limit: 20 },
+      humanQueryInvocation(uuid(20_002), PARTNER_SCOPE),
+      store,
+    );
+    expect(join.handlerCalls()).toBe(1);
+    expect(list.handlerCalls()).toBe(1);
+
+    // Ending an event is not, even with district scope and a confirmation.
+    const error = await captureEngineError(() =>
+      executeAuditedCapabilityTransaction(
+        close.registration,
+        { eventId: IDS.event },
+        humanMutationInvocation({
+          requestId: uuid(20_003),
+          idempotencyKey: 'pppp-close-00000001',
+          humanConfirmationId: uuid(20_004),
+          scope: PARTNER_SCOPE,
+        }),
+        store,
+      ),
+    );
+    expect(error).toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+      status: 403,
+    });
+    expect(close.handlerCalls()).toBe(0);
+    expect(store.auditEvents.at(-1)).toMatchObject({
+      action: 'close-event',
+      outcome: 'denied',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+    });
+
+    // The same capability under staff scope reaches confirmation checks.
+    const staffError = await captureEngineError(() =>
+      executeAuditedCapabilityTransaction(
+        close.registration,
+        { eventId: IDS.event },
+        humanMutationInvocation({
+          requestId: uuid(20_005),
+          idempotencyKey: 'ssss-close-00000001',
+          humanConfirmationId: uuid(20_006),
+        }),
+        store,
+      ),
+    );
+    expect(staffError).toMatchObject({ reasonCode: 'CONFIRMATION_INVALID' });
+  });
+
+  test('refuses a partner capability outside the allowlist during preflight', () => {
+    let thrown: unknown;
+    try {
+      preflightCapabilityInvocation(
+        'close-event',
+        { eventId: IDS.event },
+        humanMutationInvocation({
+          requestId: uuid(20_010),
+          idempotencyKey: 'pppp-close-00000002',
+          scope: { ...DISTRICT_SCOPE, partner: true },
+        }),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+    });
   });
 
   test('audits an exact mutation replay under its fresh request ID without a second handler call', async () => {

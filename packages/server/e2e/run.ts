@@ -563,6 +563,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-279',
     );
+    const committedIssue593EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-593',
+    );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedEvidenceDirectory
@@ -597,6 +602,11 @@ async function main(): Promise<void> {
         ? committedIssue32EvidenceDirectory
         : join(createdStateDirectory, 'evidence-32');
     await mkdir(issue32EvidenceDirectory, { recursive: true });
+    const issue593EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue593EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-593');
+    await mkdir(issue593EvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -712,6 +722,15 @@ async function main(): Promise<void> {
       admittedAt: new Date(now.getTime() - 360 * DAY_MILLISECONDS),
       statePath: join(createdStateDirectory, 'partner-renew.json'),
     });
+    // Issue #593. An admitted partner with no account and no session yet:
+    // the sign-in flow creates both, so nothing about it is pre-seeded.
+    await opened.db.insert(partnerAdmissions).values({
+      email: 'sign-me-in@agency.example.invalid',
+      displayName: 'Synthetic Signing Responder',
+      agency: 'Synthetic Fire District',
+      invitedByUserId: districtAdministrator.userId,
+      admittedAt: now,
+    });
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
     const issue344EventId = await createSyntheticDrill(
       opened,
@@ -778,6 +797,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ISSUE_279_EVIDENCE_DIR: issue279EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_593_EVIDENCE_DIR: issue593EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_PRIVACY_CONTACT_URL:
@@ -793,6 +813,13 @@ async function main(): Promise<void> {
           // Synthetic partner identity provider and mailer: nothing leaves
           // the machine. A deployed stack cannot carry this pool id.
           PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+          // The test-only allowance the synthetic pool requires before it
+          // will sign anyone in. The stack never sets it.
+          PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
+          // The deployment's transient-cookie secret. Partner sign-in's
+          // between-steps cookie is derived from it with its own label, the
+          // same secret the Google callback cookie uses.
+          GOOGLE_OIDC_COOKIE_SECRET: Buffer.alloc(32, 59).toString('base64url'),
           // Partner email states where to sign in, so its message context
           // needs the deployment origin. Set here rather than inherited from
           // a developer's generated .env.local, which CI does not have.

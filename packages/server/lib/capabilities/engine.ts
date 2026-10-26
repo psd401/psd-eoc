@@ -49,6 +49,7 @@ import {
   type SecurityAuditOutcome,
   type SessionRefreshTransport,
   type VerifiedCurrentRefreshCredential,
+  isPartnerCapabilityId,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../auth/sessions';
@@ -421,7 +422,13 @@ function assertInvocationAllowed(
   const sources: ReadonlySet<string> = new Set(policy.sources);
   if (
     !principalKinds.has(invocation.principalKind ?? invocation.actor.kind) ||
-    !sources.has(invocation.source)
+    !sources.has(invocation.source) ||
+    // A partner session may run only the written partner allowlist. The
+    // refusal is the same one any other principal gets, so it never says
+    // which role was refused.
+    (invocation.scope.partner === true &&
+      (invocation.actor.kind !== 'human' ||
+        !isPartnerCapabilityId(capabilityId)))
   ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',
@@ -631,7 +638,11 @@ function unexpectedFailureMessage(error: unknown): string {
     return `schema refused: ${paths.join(', ')}`;
   }
   if (!(error instanceof Error)) return 'no message';
-  const message = error.message.trim().replace(/\s+/gu, ' ');
+  // A Drizzle query error appends the statement's bound values after a
+  // "params:" line. The statement carries only placeholders; keep it alone.
+  const message = (error.message.split('\nparams:', 1)[0] ?? '')
+    .trim()
+    .replace(/\s+/gu, ' ');
   if (message.length === 0) return 'no message';
   return message.length > UNEXPECTED_FAILURE_MESSAGE_LIMIT
     ? `${message.slice(0, UNEXPECTED_FAILURE_MESSAGE_LIMIT)}\u2026`

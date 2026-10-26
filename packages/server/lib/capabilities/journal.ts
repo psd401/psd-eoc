@@ -2252,6 +2252,17 @@ async function issueEventHumanConfirmationWithDatabase(
   input: IssueEventHumanConfirmationInput,
 ): Promise<IssueEventHumanConfirmationResult> {
   assertInteractiveConfirmationIdentity(input.authenticated);
+  // Both confirmable actions (all-clear, close) are outside the partner
+  // allowlist, so a partner is refused before a confirmation row is written,
+  // with the engine's own generic refusal.
+  if (input.authenticated.scope.partner === true) {
+    throw new CapabilityEngineError(
+      'FORBIDDEN',
+      'CAPABILITY_INVOCATION_DENIED',
+      'This authenticated principal cannot invoke the capability.',
+      403,
+    );
+  }
   const eventId = UuidSchema.parse(input.eventId);
   UuidSchema.parse(input.requestId);
   if (!(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
