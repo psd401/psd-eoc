@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { IdempotencyPrincipalSchema, type StaffRole } from '@psd-eoc/contracts';
-import { eq, inArray } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 
 import {
   createDrizzleStartFlowCapabilityStore,
@@ -306,6 +306,7 @@ async function seedPartnerSmsStop(
     .select({ id: rosterSnapshots.id })
     .from(rosterSnapshots)
     .where(eq(rosterSnapshots.population, 'staff'))
+    .orderBy(desc(rosterSnapshots.capturedAt), desc(rosterSnapshots.id))
     .limit(1);
   const [consent] = await connection.db
     .insert(staffSmsConsents)

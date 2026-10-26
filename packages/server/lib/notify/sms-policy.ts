@@ -764,7 +764,9 @@ async function loadSmsLifecycleEndpoint(
  * snapshot has: the partner endpoint (#597) that texts it, if one exists.
  * Partners ride staff events only, so a synthetic snapshot never resolves
  * one. The provider list is per number and partner resolution reads facts by
- * number, so the newest such endpoint stands for all of them.
+ * number, so the newest such endpoint stands for all of them. A withdrawn
+ * consent or an ended admission still resolves: the STOP belongs to the
+ * number, and a later consent to it must not be texted.
  */
 async function resolvePartnerSmsDestination(
   database: SmsPolicyQueryDatabase,
@@ -1337,7 +1339,11 @@ export function createDrizzleSmsPolicyStore(
           // A partner's STOP (#597). `sms_opt_out_records` binds published
           // roster endpoints only, so the disabled lifecycle fact, which
           // carries the same provider evidence, is the whole record; its id
-          // and time identify it, and a replay returns the same fact.
+          // and time identify it, and a replay returns the same fact. Its
+          // identity is a staff fact's: snapshot, endpoint, and provider
+          // reference. Reconciling a newer staff snapshot records a number
+          // still on the provider's list again, as it does for staff; every
+          // copy agrees, and resolution reads the newest by number.
           const status = await appendSmsEndpointStatus(
             queryDatabase,
             optOutStatus,
