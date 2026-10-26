@@ -183,6 +183,18 @@ access decisions each enforce.
   quarterly review. It writes partner records directly through `lib/partners`
   rather than running a capability. Inactivity is reviewed, never acted on:
   nothing disables a partner automatically except expiry.
+- A partner session may run only the written allowlist
+  `PARTNER_CAPABILITY_IDS` in `packages/contracts/src/partner-capabilities.ts`:
+  seeing live events and the facility, threat, and published event-type reads
+  that render them; opening an event room, joining, reading and posting to the
+  timeline, and attaching media; and the partner's own session, devices, push
+  registration, and text-message consent. A partner session's
+  server-resolved capability scope carries `partner: true`, and the capability
+  engine refuses every other capability for every transport with the same
+  generic refusal any principal gets. The event-type reads, which run outside
+  the engine's invocation check, and lifecycle confirmation issuance restate
+  the refusal. Starting, ending, correcting, or reopening an event, Records
+  and exports, configuration, audit, and agent keys are all outside it.
 
 ## Data and delivery truth
 

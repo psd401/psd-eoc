@@ -308,6 +308,8 @@ describeWithDatabase('sign-in to session round trip', () => {
       facilityIds: [south],
     });
     expect(authenticated.scope.campusFacilityIds).toEqual([north]);
+    // A staff session never carries the partner allowlist marker.
+    expect(authenticated.scope.partner).toBeUndefined();
   });
 
   test('a signed-in school-group member is district-wide once a district group admits them', async () => {

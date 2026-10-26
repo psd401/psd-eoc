@@ -49,6 +49,7 @@ import {
   type SecurityAuditOutcome,
   type SessionRefreshTransport,
   type VerifiedCurrentRefreshCredential,
+  isPartnerCapabilityId,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../auth/sessions';
@@ -421,7 +422,13 @@ function assertInvocationAllowed(
   const sources: ReadonlySet<string> = new Set(policy.sources);
   if (
     !principalKinds.has(invocation.principalKind ?? invocation.actor.kind) ||
-    !sources.has(invocation.source)
+    !sources.has(invocation.source) ||
+    // A partner session may run only the written partner allowlist. The
+    // refusal is the same one any other principal gets, so it never says
+    // which role was refused.
+    (invocation.scope.partner === true &&
+      (invocation.actor.kind !== 'human' ||
+        !isPartnerCapabilityId(capabilityId)))
   ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',

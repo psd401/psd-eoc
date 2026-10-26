@@ -638,6 +638,7 @@ function authorizeStoredSession(
     scope: CapabilityScopeSchema.parse({
       facilityScope: effectiveScope,
       ...campusScopeFor(effectiveScope, context.campusFacilityIds),
+      ...(authorization.kind === 'partner-admission' ? { partner: true } : {}),
     }),
     membershipState,
     result,

@@ -57,6 +57,11 @@ test.describe('partner-sign-in', () => {
       timeout: 30_000,
     });
     await expect(page.getByText('partner', { exact: true })).toBeVisible();
+    // The events list renders for a partner: every read it makes is on the
+    // partner capability allowlist.
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Active events' }),
+    ).toBeVisible();
     await page.screenshot({
       path: issue593EvidencePath('partner-signed-in.png'),
       fullPage: true,
@@ -74,10 +79,19 @@ test.describe('partner-sign-in', () => {
 
     // Signing out is a POST that revokes server-side: the credential is dead
     // even though the browser is handed back its own cookie jar.
-    await page.getByRole('button', { name: 'Sign out' }).click();
-    await expect(
-      page.getByRole('heading', { level: 1, name: 'Sign in to PSD EOC' }),
-    ).toBeVisible({ timeout: 30_000 });
+    // Sign out is a client button: a click that lands before the dev server
+    // has hydrated it does nothing, so retry the click until it navigates.
+    const signInHeading = page.getByRole('heading', {
+      level: 1,
+      name: 'Sign in to PSD EOC',
+    });
+    await expect(async () => {
+      if (await signInHeading.isVisible()) {
+        return;
+      }
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await expect(signInHeading).toBeVisible({ timeout: 5_000 });
+    }).toPass({ timeout: 30_000 });
     const afterSignOut = (await page.context().cookies()).find((cookie) =>
       cookie.name.endsWith('psd-eoc-session'),
     );

@@ -651,6 +651,13 @@ export const CapabilityScopeSchema = z
      * event, and is absent for district scope and for agents.
      */
     campusFacilityIds: z.array(FacilityIdSchema).max(500).readonly().optional(),
+    /**
+     * Present only for a partner-agency session. The engine then admits only
+     * the written partner allowlist (`PARTNER_CAPABILITY_IDS`), whatever the
+     * facility scope says. Resolved with the rest of the scope from the
+     * session's own authorization, so no caller can forget to pass it.
+     */
+    partner: z.literal(true).optional(),
   })
   .strict()
   .readonly();

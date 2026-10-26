@@ -1296,6 +1296,38 @@ describe('capability-level administrator authorization', () => {
     expect(store.discardCalls).toBe(0);
   });
 
+  test('a partner session reads published event types and nothing else', async () => {
+    // The admin role is present only to prove the partner allowlist alone
+    // refuses: these reads run outside the engine's invocation check.
+    const partner = (roles: readonly Role[]): AuthenticatedSession =>
+      Object.freeze({
+        ...authenticatedSession(roles),
+        scope: {
+          facilityScope: { kind: 'district' as const },
+          partner: true as const,
+        },
+      });
+    const store = new CountingStore();
+    await expect(
+      executeListEventTypesCapability({
+        store,
+        authenticated: partner(['staff']),
+        query: { templateMode: null, enabled: true, cursor: null, limit: 20 },
+      }),
+    ).resolves.toMatchObject({ items: [] });
+    expect(store.listCalls).toBe(1);
+
+    await expect(
+      executeListEventTypeDraftsCapability({
+        store,
+        authenticated: partner(['admin']),
+        query: { cursor: null, limit: 200 },
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(store.listDraftCalls).toBe(0);
+  });
+
   test('lists drafts only for a district-scoped administrator', async () => {
     const adminStore = new CountingStore();
     const page = await executeListEventTypeDraftsCapability({

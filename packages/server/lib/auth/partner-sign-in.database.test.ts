@@ -188,6 +188,8 @@ describeWithDatabase('partner web sign-in', () => {
     );
     expect(authenticated.actor.userId).toBe(completed.session.user.id);
     expect(authenticated.roles).toEqual(['partner']);
+    // Its scope carries the marker the engine reads for the partner allowlist.
+    expect(authenticated.scope.partner).toBe(true);
   });
 
   test('the same partner signs in again as the same person', async () => {

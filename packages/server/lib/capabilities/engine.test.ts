@@ -785,6 +785,96 @@ describe('capability engine', () => {
     expect(Object.isFrozen(invocation.mutation)).toBe(true);
   });
 
+  test('a partner session runs only the partner allowlist', async () => {
+    const PARTNER_SCOPE = Object.freeze({ ...DISTRICT_SCOPE, partner: true });
+    const store = new MemoryCapabilityStore();
+    const join = createJoinRegistration();
+    const list = createListRegistration();
+    const close = createCloseRegistration();
+
+    // Joining and listing are on the allowlist.
+    await executeAuditedCapabilityTransaction(
+      join.registration,
+      { eventId: IDS.event },
+      humanMutationInvocation({
+        requestId: uuid(20_001),
+        idempotencyKey: 'pppp-join-000000001',
+        scope: PARTNER_SCOPE,
+      }),
+      store,
+    );
+    await executeAuditedCapabilityTransaction(
+      list.registration,
+      { facilityId: IDS.facility, cursor: null, limit: 20 },
+      humanQueryInvocation(uuid(20_002), PARTNER_SCOPE),
+      store,
+    );
+    expect(join.handlerCalls()).toBe(1);
+    expect(list.handlerCalls()).toBe(1);
+
+    // Ending an event is not, even with district scope and a confirmation.
+    const error = await captureEngineError(() =>
+      executeAuditedCapabilityTransaction(
+        close.registration,
+        { eventId: IDS.event },
+        humanMutationInvocation({
+          requestId: uuid(20_003),
+          idempotencyKey: 'pppp-close-00000001',
+          humanConfirmationId: uuid(20_004),
+          scope: PARTNER_SCOPE,
+        }),
+        store,
+      ),
+    );
+    expect(error).toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+      status: 403,
+    });
+    expect(close.handlerCalls()).toBe(0);
+    expect(store.auditEvents.at(-1)).toMatchObject({
+      action: 'close-event',
+      outcome: 'denied',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+    });
+
+    // The same capability under staff scope reaches confirmation checks.
+    const staffError = await captureEngineError(() =>
+      executeAuditedCapabilityTransaction(
+        close.registration,
+        { eventId: IDS.event },
+        humanMutationInvocation({
+          requestId: uuid(20_005),
+          idempotencyKey: 'ssss-close-00000001',
+          humanConfirmationId: uuid(20_006),
+        }),
+        store,
+      ),
+    );
+    expect(staffError).toMatchObject({ reasonCode: 'CONFIRMATION_INVALID' });
+  });
+
+  test('refuses a partner capability outside the allowlist during preflight', () => {
+    let thrown: unknown;
+    try {
+      preflightCapabilityInvocation(
+        'close-event',
+        { eventId: IDS.event },
+        humanMutationInvocation({
+          requestId: uuid(20_010),
+          idempotencyKey: 'pppp-close-00000002',
+          scope: { ...DISTRICT_SCOPE, partner: true },
+        }),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+    });
+  });
+
   test('audits an exact mutation replay under its fresh request ID without a second handler call', async () => {
     const store = new MemoryCapabilityStore();
     const join = createJoinRegistration();
