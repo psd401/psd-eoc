@@ -8,7 +8,6 @@ import {
   PartnerPoolConfigurationError,
   readPartnerPoolConfiguration,
   resolveTrustedIdentityProvider,
-  resolveTrustedPartnerProvider,
   SYNTHETIC_PARTNER_ISSUER,
 } from './identity-providers';
 
@@ -90,16 +89,16 @@ describe('trusted identity provider registry', () => {
     expect(isTrustedStaffIssuer(GOOGLE_IDENTITY_ISSUER, configured)).toBe(true);
     expect(isTrustedStaffIssuer(POOL_ISSUER, configured)).toBe(false);
     expect(
-      resolveTrustedPartnerProvider(GOOGLE_IDENTITY_ISSUER, configured),
-    ).toBeNull();
+      resolveTrustedIdentityProvider(GOOGLE_IDENTITY_ISSUER, configured)?.kind,
+    ).toBe('google');
   });
 
   test('only this deployment’s own pool resolves to the partner path', () => {
     expect(
-      resolveTrustedPartnerProvider(POOL_ISSUER, configured),
-    ).toMatchObject({ userPoolId: POOL });
+      resolveTrustedIdentityProvider(POOL_ISSUER, configured),
+    ).toMatchObject({ kind: 'partner', configuration: { userPoolId: POOL } });
     expect(
-      resolveTrustedPartnerProvider(
+      resolveTrustedIdentityProvider(
         'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Someone',
         configured,
       ),

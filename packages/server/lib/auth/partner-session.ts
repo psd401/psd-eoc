@@ -33,9 +33,9 @@ import {
   userFacilityScopes,
   users,
 } from '../../db/schema';
+import { lockPartnerAddress } from '../partners/access';
 import { supersedeOtherAccountsOnInstallation } from './installation-handoff';
 import { decidePartnerAccess } from './partner-admission';
-import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 import {
   describeSessionPersistenceFailure,
   digestWebSessionCredential,
@@ -512,10 +512,12 @@ export function createDrizzlePartnerSessionStore(
             await transaction.execute(
               sql`set transaction isolation level serializable`,
             );
-            // The same lock every writer of a person's authority takes, so a
-            // session cannot be issued while an administrator is ending the
-            // admission behind it.
-            await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+            // The lock every writer of this address's partner access takes
+            // (invite, renew, disable, the expiry sweep), so a session cannot
+            // be issued while the admission behind it is being ended. It is
+            // per address: partner sign-in never queues behind staff sign-in
+            // or the Groups sync on the administrator-availability lock.
+            await lockPartnerAddress(transaction, request.user.email);
 
             if (!/^[a-f0-9]{64}$/u.test(request.credentialDigest)) {
               throw new WebSessionIssuanceError(

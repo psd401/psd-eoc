@@ -271,4 +271,24 @@ describe('provider resolution', () => {
       })?.issuer,
     ).toBe('https://cognito-idp.example.invalid/synthetic-partner-pool');
   });
+
+  test('a configured pool resolves to one provider per process', () => {
+    // The route resolves the provider on every POST. One instance keeps the
+    // app-client credential read once per process instead of once a request.
+    const environment = {
+      PSD_EOC_PARTNER_USER_POOL_ID: 'us-west-2_Example1',
+      PSD_EOC_PARTNER_USER_POOL_CLIENT_ID: 'partner-app-client',
+      PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN:
+        'arn:aws:secretsmanager:us-west-2:111111111111:secret:/psd-eoc/partner-user-pool-client-AbCdEf',
+    };
+    const first = resolvePartnerOtpProvider(environment);
+    expect(first).not.toBeNull();
+    expect(resolvePartnerOtpProvider({ ...environment })).toBe(first);
+    expect(
+      resolvePartnerOtpProvider({
+        ...environment,
+        PSD_EOC_PARTNER_USER_POOL_CLIENT_ID: 'another-app-client',
+      }),
+    ).not.toBe(first);
+  });
 });

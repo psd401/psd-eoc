@@ -112,16 +112,17 @@ export function createPartnerOtpLimiter(): PartnerOtpLimiter {
         return budget.window.admitted.length >= budget.limit;
       });
       if (exhausted !== undefined) {
-        const decision = decideSlidingWindow(
-          exhausted.window,
-          input.kind,
-          exhausted.limit,
-          WINDOW_MS,
-          now,
-        );
         return Object.freeze({
           admitted: false as const,
-          retryAfterSeconds: decision.admitted ? 1 : decision.retryAfterSeconds,
+          // The window was found full at this same instant, so the wait is
+          // until its oldest counted call leaves it.
+          retryAfterSeconds: Math.max(
+            1,
+            Math.ceil(
+              (Math.min(...exhausted.window.admitted) + WINDOW_MS - now) /
+                1_000,
+            ),
+          ),
         });
       }
       for (const budget of windowsToCharge) {

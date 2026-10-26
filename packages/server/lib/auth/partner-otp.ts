@@ -180,6 +180,8 @@ export async function verifyPartnerIdToken(
 
 const partnerJwkSets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
+const cognitoPartnerOtpProviders = new Map<string, PartnerOtpProvider>();
+
 function partnerJwkSet(
   configuration: PartnerPoolConfiguration,
 ): ReturnType<typeof createRemoteJWKSet> {
@@ -436,7 +438,17 @@ export function resolvePartnerOtpProvider(
   if (configuration === null) {
     return null;
   }
-  return configuration.synthetic
-    ? syntheticPartnerOtpProvider(configuration)
-    : new CognitoPartnerOtpProvider(configuration);
+  if (configuration.synthetic) {
+    return syntheticPartnerOtpProvider(configuration);
+  }
+  // One provider per configuration, so its credential reader keeps the
+  // app-client secret for the life of the process.
+  const key = JSON.stringify(configuration);
+  const existing = cognitoPartnerOtpProviders.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const created = new CognitoPartnerOtpProvider(configuration);
+  cognitoPartnerOtpProviders.set(key, created);
+  return created;
 }

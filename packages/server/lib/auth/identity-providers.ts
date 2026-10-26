@@ -176,12 +176,3 @@ export function isTrustedStaffIssuer(
 ): boolean {
   return resolveTrustedIdentityProvider(issuer, environment)?.kind === 'google';
 }
-
-/** The configured partner provider for an issuer, or null for anything else. */
-export function resolveTrustedPartnerProvider(
-  issuer: string,
-  environment: Environment = process.env,
-): PartnerPoolConfiguration | null {
-  const provider = resolveTrustedIdentityProvider(issuer, environment);
-  return provider?.kind === 'partner' ? provider.configuration : null;
-}

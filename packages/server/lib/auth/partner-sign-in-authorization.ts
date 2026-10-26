@@ -42,7 +42,6 @@ export type PartnerSignInAuthorization =
       authorized: true;
       user: User;
       admission: PartnerAdmission;
-      created: boolean;
     }>
   | Readonly<{ authorized: false; refusal: PartnerSignInRefusal }>;
 
@@ -230,7 +229,6 @@ export async function authorizePartnerSignIn(
         disabledAt: null,
       }),
       admission,
-      created,
     });
   });
 }
