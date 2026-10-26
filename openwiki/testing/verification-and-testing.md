@@ -3,7 +3,7 @@ type: Testing Guide
 title: Verification gate, test layout, and narrow validation
 description: How PSD EOC verifies changes - the bun run check gate, sharded Bun test runner with per-shard synthetic PostgreSQL, test naming conventions (unit, database, integration, native, e2e), synthetic-district preload, documentation and workspace contracts, CI jobs, and the narrowest validation per area.
 tags: [testing, ci, bun, postgres, e2e, gate]
-timestamp: 2026-10-23T21:45:44-07:00
+timestamp: 2026-10-26T15:24:18-07:00
 openwiki:
   roles: [testing, delivery, workflow]
   change_kinds: [test, validation, ci]
@@ -100,6 +100,7 @@ Structural guard tests worth knowing: `capabilities/execution-boundary.test.ts` 
 | --- | --- | --- |
 | A single server lib module | `bun test <path>.test.ts` (add `--bail` while iterating) | it has a `.database.test.ts` sibling → start the synthetic DB |
 | Partner audience, partner notification slice, or partner population (`packages/server/lib/partners/audience.ts`, `start-preview.ts`, `events.ts` partner slice, `migration-0063`) | `bun test packages/server/lib/capabilities/events.test.ts packages/server/lib/notify/email-runtime-store.test.ts` | the pinned set or a partner schema or migration changes → `bun test packages/server/lib/partners/audience.database.test.ts` and `bun test packages/server/drizzle/migration-0063.integration.test.ts` (synthetic DB); see [partner audience](../domain/partner-audience.md#validation) |
+| Partner delivery at send time (`packages/server/lib/partners/delivery.ts`), partner SES routing (`workers/email/ses-events.ts`) | `bun test workers/email/ses-events.test.ts workers/email/ses-adapter.test.ts` | a store or resolver changes → `bun test packages/server/lib/partners/delivery.database.test.ts` (synthetic DB); a schema or grant change → also the `0065` role test in the same file |
 | Contracts schema | `bun test packages/contracts/src` then `bun run --cwd packages/server typecheck` | consumers in mobile/mcp/workers change → typecheck those workspaces (`bun run typecheck`) |
 | Worker | `bun test workers/<channel>` | durable store/route involved → matching server `*.integration.test.ts` (send-time currency: `packages/server/lib/notify/batch-lifecycle.integration.test.ts`, `email-runtime-store.integration.test.ts`) |
 | Mobile logic | `bun test packages/mobile/src/<area>`; native screens `bun run --cwd packages/mobile test:native -- --testPathPattern <name>` | behavior change → both `bun packages/mobile/e2e/run.ts ios` and `android` |

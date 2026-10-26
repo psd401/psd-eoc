@@ -3,32 +3,41 @@ type: Domain Concept
 title: "Partner audience: planning, pinning, and the partner notification slice"
 description: "How a live incident's activation preview resolves the admitted partners it would alert, pins that set, and writes a partner notification slice beside the staff send, and how each channel reaches that set at send time."
 tags: [partner-access, notifications, audience, activation, population]
-timestamp: 2026-10-26T13:30:00-07:00
+timestamp: 2026-10-26T15:24:18-07:00
 openwiki:
   roles: [domain, workflow, architecture]
-  change_kinds: [lifecycle, persistence, population]
+  change_kinds: [lifecycle, persistence, population, integration]
   source_paths:
     - packages/contracts/src/event.ts
     - packages/contracts/src/roster.ts
     - packages/contracts/src/notification.ts
     - packages/server/lib/partners/audience.ts
+    - packages/server/lib/partners/delivery.ts
     - packages/server/lib/capabilities/start.ts
     - packages/server/lib/capabilities/start-preview.ts
     - packages/server/lib/capabilities/events.ts
     - packages/server/lib/capabilities/journal.ts
+    - packages/server/lib/capabilities/devices.ts
     - packages/server/lib/notify/email-runtime-store.ts
-    -
+    - packages/server/lib/notify/expo-push-runtime-store.ts
+    - packages/server/lib/notify/sms-runtime-store.ts
+    - packages/server/app/api/webhooks/ses/runtime.ts
+    - workers/email/ses-events.ts
     - packages/server/db/schema/events.ts
     - packages/server/db/schema/delivery.ts
     - packages/server/drizzle/migrations/0063_partner_notification_population.sql
     - packages/server/drizzle/migrations/0064_partner_audience.sql
-  symbols: [RosterPopulationSchema, RosteredPopulationSchema, NotificationTargetingSchema, previewReachesPartners, PARTNER_AUDIENCE_MAX_RECIPIENTS, resolvePartnerAudience, recordActivationPreviewPartners, loadEventPartnerAudience, partnerSlice, persistLifecycleBundle, assertEmailBatch, activationPreviewPartners, partnerEndpoints]
+  symbols: [RosterPopulationSchema, RosteredPopulationSchema, NotificationTargetingSchema, previewReachesPartners, PARTNER_AUDIENCE_MAX_RECIPIENTS, resolvePartnerAudience, recordActivationPreviewPartners, loadEventPartnerAudience, partnerSlice, persistLifecycleBundle, assertEmailBatch, activationPreviewPartners, partnerEndpoints, resolvePartnerEmailEndpoints, resolvePartnerPushEndpoints, resolvePartnerSmsEndpoints, PartnerDeliveryError, loadDrizzlePartnerPushEndpointSendEligibility, SES_PARTNER_CONFIGURATION_SET_NAME, UNTRACKED_MAIL]
   test_paths:
     - packages/server/lib/partners/audience.database.test.ts
     - packages/server/lib/capabilities/events.test.ts
     - packages/server/lib/notify/email-runtime-store.test.ts
     - packages/server/drizzle/migration-0063.integration.test.ts
     - packages/server/lib/partners/delivery.database.test.ts
+    - workers/email/ses-events.test.ts
+    - workers/email/ses-adapter.test.ts
+    - workers/push/adapter.test.ts
+    - infra/test/stack/psd-eoc-stack.test.ts
     - packages/server/e2e/partner-audience.flow.ts
   invariants:
     - Partners are a notification population that is never rostered; no roster snapshot, recipient, or event holds one.
@@ -58,7 +67,8 @@ Partners are first responders admitted one by one outside the district ([partner
 
 `createActivationPreviewRecord` (`packages/server/lib/capabilities/start.ts`) calls `resolvePartnerAudience` (`packages/server/lib/partners/audience.ts`) with the preview's own clock. The function returns no partner unless every condition holds:
 
-```mermaid
+<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: a semicolon inside a label breaks rendering; rephrase the label. -->
+```text
 flowchart TD
   Q[Preview query] --> K{"Live incident (incident, real, staff)?"}
   K -- no --> NONE[No partners]
@@ -74,7 +84,7 @@ flowchart TD
 
 Caption: the function reads the response family from `event_types`, the threat key from `threats` (an unknown threat alerts nobody), and the effective settings through `loadEffectivePartnerAlertSettings`. Partners are never facility-scoped: an admission covers every non-isolated site.
 
-`buildActivationPreview` (`packages/server/lib/capabilities/start-preview.ts`) counts the pinned set as `partnerRecipientCount`, and refuses a duplicate admission, a count above `PARTNER_AUDIENCE_MAX_RECIPIENTS` (1,200), or any count for a preview that does not reach partners (`PARTNER_AUDIENCE_INVALID`). The count is part of the signed consequence digest like staff recipients. `recordActivationPreviewPartners` then writes one `activation_preview_partners` row per admission in the same transaction.
+`resolvePartnerAudience` never returns more than `PARTNER_AUDIENCE_MAX_RECIPIENTS` (1,200) ids: an overflow is logged as `partner-audience-truncated` and dropped, and the returned ids are sorted. A large partner list therefore never blocks the staff activation it rides on. `buildActivationPreview` (`packages/server/lib/capabilities/start-preview.ts`) counts the pinned set as `partnerRecipientCount`, and refuses a duplicate admission, a count above the bound (a defensive check), or any count for a preview that does not reach partners (`PARTNER_AUDIENCE_INVALID`). The count is part of the signed consequence digest like staff recipients. `recordActivationPreviewPartners` then writes one `activation_preview_partners` row per admission in the same transaction.
 
 ## Confirmed send: the partner slice
 
@@ -96,7 +106,9 @@ All-clear and reactivation do not re-resolve partners. `journal.ts` copies `part
 | Push | The partner's own live device registrations, one per device | 0 (more than planned is allowed, as for staff) | `resolvePartnerPushEndpoints` |
 | SMS | The partner's own active consent, newest per partner | 0 (exact-count equality applies to staff batches only) | `resolvePartnerSmsEndpoints` |
 
-Each endpoint is recorded once as a `partner_endpoints` row, and every attempt binds to it through `partner_endpoint_id`. Nobody is sent to whose admission ended or expired after activation, whose account is disabled, whose device was revoked, unregistered or re-enrolled, whose consent was withdrawn, or whose address is suppressed; they stay in the paging list so later pages do not shift. Push eligibility re-checks the admission and device ownership on the database clock. Partner bounce, complaint and reject events return through the signed SES callback and suppress partner mail only.
+Each endpoint is recorded once as a `partner_endpoints` row, and every attempt binds to it through `partner_endpoint_id`. Nobody is sent to whose admission ended or expired after activation, whose account is disabled, whose device was revoked, unregistered or re-enrolled, whose consent was withdrawn, or whose address is suppressed; they stay in the paging list so later pages do not shift. Push eligibility re-checks the admission and device ownership on the database clock: `/api/devices/internal/push-endpoint-eligibility` answers a partner endpoint through `loadDrizzlePartnerPushEndpointSendEligibility` (`packages/server/lib/capabilities/devices.ts`) instead of null, and a latest partner endpoint status (an invalidation) overrides it. A partner's invalidated push token is retired and cannot be re-registered as live.
+
+Partner alerts are sent under the partner SES set (`SES_PARTNER_CONFIGURATION_SET_NAME`), so their SES facts reach the signed callback. `workers/email/ses-events.ts` accepts a correlated event from either set and reports which one as `configurationSetName`. Account mail on the partner set (invitations, expiry notices, access reviews) carries no alert tags and raises `UNTRACKED_MAIL`, which the callback acknowledges with 204 and records nothing for. The callback also requires an event's set to match its attempt's population, so a partner bounce, complaint or reject records an endpoint status for the partner endpoint only, and a staff address is never suppressed by it. Partner suppression reads partner facts only. See [partner access](partner-access.md#partner-mail) for account mail and [notification pipeline](notification-pipeline.md) for the callback.
 
 ## Status and known gaps
 
@@ -110,7 +122,7 @@ Each endpoint is recorded once as a `partner_endpoints` row, and every attempt b
 - **Where to start:** the population and targeting schemas in `packages/contracts/src/roster.ts` and `event.ts`; then the planning query `resolvePartnerAudience`; then `partnerSlice` in `events.ts`.
 - **Invariants to keep:** a partner never enters a roster snapshot, a recipient list, or an event population; a partner intent is always a live-incident slice sharing its staff request; a preview's count and pinned rows match; the pinned set is never re-resolved for all-clear or reactivation; drills and tests never reach partners.
 - **Change the population or targeting shape:** contracts first, then the database check and generated columns in `db/schema/events.ts` and `delivery.ts`, with a new migration. Never edit `0063` or `0064`. The migration header states the rule that every comparison with `'partner'` is text, because a new enum value cannot be used in the same transaction.
-- **Change partner delivery:** edit `lib/partners/delivery.ts` and keep the send-time liveness checks. The database requires a partner push or SMS endpoint to belong to the admitted person. Escalate: this changes who receives a real alert, so it needs a real-versus-drill test and a human review.
+- **Change partner delivery:** edit `lib/partners/delivery.ts` and keep the send-time liveness checks. The database requires a partner push or SMS endpoint to belong to the admitted person. Partner SES routing is in `workers/email/ses-events.ts` (set match, `UNTRACKED_MAIL`) and `app/api/webhooks/ses/runtime.ts`; a change there must keep account mail out of the alert evidence path. Escalate: this changes who receives a real alert, so it needs a real-versus-drill test and a human review.
 - **Change who is alerted:** edit the settings path in [partner alert settings](partner-alert-settings.md) and `partnerAlertSettingsMatch`; keep `resolvePartnerAudience` the only planning reader.
 
 ## Focused tests
@@ -135,6 +147,28 @@ Quiet and narrow, no database:
 
 ```bash
 bun test packages/server/lib/capabilities/events.test.ts packages/server/lib/notify/email-runtime-store.test.ts
+```
+
+Send-time delivery and the SES callback, no database:
+
+```bash
+bun test workers/email/ses-events.test.ts workers/email/ses-adapter.test.ts
+```
+
+Database-backed checks need the synthetic database (`bun run test:db:start`, see [verification and testing](../testing/verification-and-testing.md)):
+
+```bash
+bun test packages/server/lib/partners/audience.database.test.ts
+bun test packages/server/lib/partners/delivery.database.test.ts
+bun test packages/server/drizzle/migration-0063.integration.test.ts
+```
+
+Schema or migration changes add `bun test packages/server/drizzle/migration-chain.test.ts` and `bun scripts/check-applied-migrations.ts origin/main HEAD` ([data model](data-model.md)). Run the browser flow only when the confirmation screen changes; it is conditional and needs Chromium through `packages/server/e2e/run.ts`.
+
+## Related
+
+[Partner access](partner-access.md) (who is admitted), [partner alert settings](partner-alert-settings.md) (which real events alert partners), [event lifecycle and activation](event-lifecycle-and-activation.md) (the preview, confirm, and lifecycle paths that carry the slice), [notification pipeline](notification-pipeline.md) (dispatch and the refusals), [roster and audience](roster-and-audience.md) (the staff population that partners are kept out of), and [data model](data-model.md) (the tables and append-only rules).
+ents.test.ts packages/server/lib/notify/email-runtime-store.test.ts
 ```
 
 Database-backed checks need the synthetic database (`bun run test:db:start`, see [verification and testing](../testing/verification-and-testing.md)):
