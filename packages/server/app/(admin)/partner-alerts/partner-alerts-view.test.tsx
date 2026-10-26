@@ -61,7 +61,7 @@ function form(entries: readonly (readonly [string, string])[]): AdminForm {
       ['csrfToken', 'synthetic-csrf-token'],
       ['idempotencyKey', 'synthetic-key'],
       ['intent', 'set-partner-alert-settings'],
-      ...entries,
+      ...entries.map(([name, value]): string[] => [name, value]),
     ]),
   );
 }
