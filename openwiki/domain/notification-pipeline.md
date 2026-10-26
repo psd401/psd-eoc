@@ -11,6 +11,7 @@ openwiki:
     - packages/server/lib/notify/render.ts
     - packages/server/lib/notify/reconcile.ts
     - packages/server/lib/notify/sms-policy.ts
+    - packages/server/lib/notify/email-runtime-store.ts
     - packages/server/app/api/internal/delivery-state/route.ts
     - infra/lambda/delivery-router/index.mjs
     - packages/server/db/schema/delivery.ts
@@ -60,7 +61,7 @@ Caption: authorization happens once in the engine; everything downstream is untr
 
 1. **Intent and outbox** are written in the activation transaction ([lifecycle](event-lifecycle-and-activation.md)). Tables: `notification_intents`, `notification_intent_channels`, `outbox`, `dispatch_batches` (`packages/server/db/schema/delivery.ts`). `OutboxStatus`: `pending → processing → published | failed`.
 2. **Rendering** (`lib/notify/render.ts`, `default-templates.ts`, `capabilities/notification-wording.ts`): event-type version templates per channel, `[INCIDENT]`/`[DRILL]` markers, SMS length limits (`SMS_GSM_MAX_SEPTETS`, `SMS_UCS2_MAX_CODE_UNITS`). Rendering happens at preview/authorization time; workers must send the exact rendered message and never re-render. Template management: [event types](event-types-and-templates.md).
-3. **Audience**: `lib/roster/resolve.ts` and `lib/notify/event-audience.ts`, `event-recipients.ts` resolve recipients from the pinned immutable roster snapshot ([roster](roster-and-audience.md)). Email additionally goes through `resolveEmailEndpoints` with an endpoint-policy lock (`MAX_EMAIL_ENDPOINTS` 12,000). Partner recipients have no step here: the administrator-chosen partner alert settings ([partner alert settings](partner-alert-settings.md)) are stored and shown on the admin page, but no code in this pipeline reads them yet.
+3. **Audience**: `lib/roster/resolve.ts` and `lib/notify/event-audience.ts`, `event-recipients.ts` resolve recipients from the pinned immutable roster snapshot ([roster](roster-and-audience.md)). Email additionally goes through `resolveEmailEndpoints` with an endpoint-policy lock (`MAX_EMAIL_ENDPOINTS` 12,000). A live incident also has a partner slice: its intent and outbox row carry `rosterPopulation: 'partner'` and never resolve through a roster. The admitted partners were pinned when the preview was planned, from the [partner alert settings](partner-alert-settings.md); see [partner audience](partner-audience.md). The channel runtimes refuse partner batches as terminal conflicts until partner delivery is enabled.
 4. **Dispatch** (`lib/notify/dispatcher.ts`, capability `dispatch-outbox`): `dispatchOutbox` claims rows under a lease (`DEFAULT_OUTBOX_LEASE_MILLISECONDS` 30 s), writes all channels' batches in one SQS `SendMessageBatch` signed with container-role credentials (`createAwsContainerRoleCredentialProvider`, `signSqsSendMessageBatchRequest`, config via `DELIVERY_QUEUE_URL`), and records sanitized failure codes (`OutboxDispatcherErrorCode`). Retryable failures back off 500 ms → 30 s and fail after `MAX_OUTBOX_DISPATCH_ATTEMPTS` (5); `QueueFailureOutcome` (`not-sent`/`partial`/`unknown`) decides safe retry. Triggered post-commit by activation (10 rows) and by sweeps; `docs/runbooks/alarm-outbox-stuck.md` covers stuck rows.
 5. **Router** (`infra/lambda/delivery-router/index.mjs`): one delivery queue → per-channel queues so one outcome covers the whole fan-out; body ≤ 256 KiB, forwarded verbatim, per-message `batchItemFailures`. Reads `<CHANNEL>_QUEUE_URL` per invocation so a missing variable retries into the DLQ.
 6. **Workers** process and write back: see [channel workers](../integrations/channel-workers.md). The writeback route `app/api/internal/delivery-state/route.ts` composes `ChannelAttempt` + `RecordDeliveryEvidenceInput` contracts and exposes no event mutation; sibling internal routes: `attempt-execution`, `email-runtime`, `aws-eum-sms-runtime`, `expo-push-runtime`, `devices/internal/push-*`.
@@ -102,6 +103,7 @@ Focused checks: `batch-lifecycle.integration.test.ts` (test "an email activation
 ## Invariants and gotchas
 
 - Queue bodies carry no destinations (no token, address, or phone) and repeat real/drill classification.
+- A partner batch never resolves through a roster snapshot, and every channel runtime refuses it until partner endpoints and delivery exist ([partner audience](partner-audience.md#delivery-is-refused-until-partner-delivery-exists)).
 - `invokeAuthorizedCapabilityHandler` is used here only at allowlisted boundaries ([capability engine](../architecture/capability-engine.md)).
 - Pausing a channel does not suppress already-queued work; workers recheck channel enablement immediately before provider I/O (`docs/learnings/security/2026-08-25-pause-does-not-suppress-queued-work.md`).
 - Metrics: the `metrics-collector` Lambda counts attempt states from a read-only transaction ([infrastructure](../operations/infrastructure.md)).
