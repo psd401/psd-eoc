@@ -10,16 +10,20 @@ openwiki:
     - packages/contracts/src/capability-catalog.ts
     - packages/contracts/src/capability.ts
     - packages/contracts/src/human-only.ts
+    - packages/contracts/src/partner-capabilities.ts
     - packages/server/lib/capabilities/engine.ts
+    - packages/server/lib/capabilities/admin.ts
     - packages/server/lib/http/human-route.ts
     - packages/server/lib/audit
-  symbols: [executeAuditedCapabilityTransaction, executeAuthorizedCapabilityQuery, invokeAuthorizedCapabilityHandler, executeRepositoryAuditedOidcCompletion, registerCapabilityHandler, HUMAN_ONLY_ACTION_IDS, resolveHumanCapabilityInvocation, ServerCapabilityRegistration]
+  symbols: [executeAuditedCapabilityTransaction, executeAuthorizedCapabilityQuery, invokeAuthorizedCapabilityHandler, executeRepositoryAuditedOidcCompletion, registerCapabilityHandler, HUMAN_ONLY_ACTION_IDS, resolveHumanCapabilityInvocation, ServerCapabilityRegistration, PARTNER_CAPABILITY_IDS, partnerAllowlistPermits, assertInvocationAllowed, withAdminRefusal]
   test_paths:
     - packages/server/lib/capabilities/engine.test.ts
     - packages/server/lib/capabilities/execution-boundary.test.ts
     - packages/contracts/src/human-only-agent-surface.test.ts
+    - packages/contracts/src/partner-capabilities.test.ts
+    - packages/server/app/nav/primary-nav-model.test.ts
     - packages/server/lib/audit/human-only.test.ts
-  validation_commands: [bun test packages/server/lib/capabilities/execution-boundary.test.ts packages/server/lib/capabilities/engine.test.ts]
+  validation_commands: [bun test packages/server/lib/capabilities/execution-boundary.test.ts packages/server/lib/capabilities/engine.test.ts packages/contracts/src/partner-capabilities.test.ts]
 ---
 
 # Capability catalog, engine, and human-only enforcement
@@ -73,6 +77,43 @@ Invariants (see `engine.ts` confirmation checks and tests `rejects missing, mism
 - Idempotency: same key + different canonical input is rejected; replay returns the stored result without re-running the handler, is audited under the fresh request ID, and **re-authorizes facility scope** before returning.
 - Agents reach protected actions only through aliases mapped in `packages/server/lib/agents/gateway.ts` (`protectedActionCapability`); those are refused and audited as `HUMAN_ONLY_REQUIRED` ([agent API](../integrations/agent-api-and-mcp.md)).
 - Authorization is deny-by-default and scoped by role and `FacilityScope` (`district` or `facilities`); client visibility is never a control.
+
+## Partner sessions and the allowlist
+
+A partner session is a human principal whose server-resolved scope carries `partner: true`; partner sign-in sets it ([partner web sign-in](../domain/partner-sign-in.md)). `assertInvocationAllowed` in `packages/server/lib/capabilities/engine.ts` refuses such an invocation unless the actor is human and the capability ID is in `PARTNER_CAPABILITY_IDS` (`packages/contracts/src/partner-capabilities.ts`). It runs in `preflightCapabilityInvocation` and in the audited paths, before the mutation envelope and the role and facility checks.
+
+```mermaid
+flowchart TD
+  A[Capability invocation] --> B{Principal kind and source allowed by the invocation policy?}
+  B -- no --> D[Refuse CAPABILITY_INVOCATION_DENIED 403]
+  B -- yes --> C{scope.partner is true?}
+  C -- no --> E[Later checks: envelope, role, facility scope, idempotency]
+  C -- yes --> F{Human actor and ID in PARTNER_CAPABILITY_IDS?}
+  F -- no --> D
+  F -- yes --> E
+```
+
+Caption: the partner allowlist only narrows. The check is skipped for any scope without `partner: true`, and a partner invocation that passes it still faces every ordinary check after it.
+
+- **The refusal is generic.** A partner gets the same `CAPABILITY_INVOCATION_DENIED` (403, "This authenticated principal cannot invoke the capability.") as any other refused principal, so it never names the role.
+- **Interfaces hide what the engine would refuse** with `partnerAllowlistPermits(scope, capabilityId)` (contracts, not an authorization). Consumers: `NavDestination.capabilityId` and `navigationDestinationsFor` in `packages/server/app/nav/primary-nav-model.ts`; the events list in `app/(app)/page.tsx`; the event room's summary export link in `app/(app)/events/[id]/page.tsx`; the Records and start gates in `app/(app)/records/_lib/session.ts` and `app/(app)/start/_lib/session.ts`, which redirect a partner to `/`; and `viewerManagesLifecycle` in `syncEventRoomRegistration` (`lib/capabilities/event-room.ts`).
+- **Admin pages stay renderable.** `withAdminRefusal` in `packages/server/lib/capabilities/admin.ts` turns the engine's denial into an `AdminCapabilityError` with status 403 inside `executeAdminQueryCapability` and `executeAdminMutationCapability`, so an admin page shows its non-administrator view instead of a server error.
+- **Partner facility scope** is resolved separately by `partnerFacilityScope` in `lib/auth/partner-admission.ts`: every non-isolated facility, never an isolated one. Event-room reads of an isolated facility's drill are refused for a partner (see the test table below).
+
+**Extend the allowlist** only by adding a registered capability ID to `PARTNER_CAPABILITY_IDS` and updating the exact-allowlist test in the same change, as `docs/ARCHITECTURE.md` requires. A new navigation destination must declare its `capabilityId` (the type requires it).
+
+Focused tests, by behavior:
+
+| Behavior | Test (find by name) |
+| --- | --- |
+| Every capability and human transport is refused off the allowlist for a partner, staff are unchanged | `packages/server/lib/capabilities/engine.test.ts`: `refuses every capability off the partner allowlist on every human transport` |
+| The allowlist is exactly what the interfaces show | `packages/contracts/src/partner-capabilities.test.ts`: `interfaces hide exactly what the allowlist refuses a partner` |
+| Partner navigation shows only allowlisted destinations | `packages/server/app/nav/primary-nav-model.test.ts`: `a partner sees only destinations whose capability the partner allowlist admits` |
+| Partner event room: no lifecycle control, no summary export | `packages/server/app/(app)/events/[id]/event-room.test.tsx`: `offers a partner no lifecycle control and no summary export`; `packages/server/lib/capabilities/event-room.database.test.ts`: `tells a partner the event is theirs to follow, not to end` |
+| Partner read of an isolated facility's drill is refused on web and mobile | `packages/server/lib/capabilities/event-room.database.test.ts` (needs `TEST_DATABASE_URL`): `a drill at an isolated facility is invisible to a partner` |
+| Admin page renders its refusal, not a 500 | `packages/server/app/(admin)/access/partner-capabilities.database.test.ts` (needs `TEST_DATABASE_URL`): `a partner session gets the admin refusal its page renders, not a server error` |
+
+Validation: `bun test packages/contracts/src/partner-capabilities.test.ts packages/server/app/nav/primary-nav-model.test.ts packages/server/lib/capabilities/engine.test.ts`. The browser flow `packages/server/e2e/partner-event-participation.flow.ts` exercises the partner surface in a browser and is conditional: run it only for changes to navigation, the events list, the event room, or the admin route guards.
 
 ## Audit
 
