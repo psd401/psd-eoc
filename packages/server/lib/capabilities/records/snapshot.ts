@@ -298,6 +298,14 @@ async function loadDeliveryAggregates(
           -- (migration 0057); counting its attempt against the plan reported
           -- more attempts than endpoints and refused the whole record.
           and attempt.fanned_out_registration_id is null
+          -- A partner slice plans one email per pinned partner and no push or
+          -- text count: those reach the partner's own devices and number,
+          -- found when the batch is sent (#597). Like a fanned-out device,
+          -- such an attempt is in addition to the plan, not counted against it.
+          and not (
+            attempt.partner_endpoint_id is not null
+            and attempt.channel <> 'email'
+          )
         order by
           attempt.batch_id,
           attempt.endpoint_id,
