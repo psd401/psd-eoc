@@ -199,9 +199,11 @@ function startFlowQueryDatabase(database: unknown): StartFlowQueryDatabase {
   return database as StartFlowQueryDatabase;
 }
 
-function partnerAudienceDatabase(database: StartFlowQueryDatabase): Database {
-  // The partner audience reads and appends through the same transaction.
-  return database as unknown as Database;
+function partnerAudienceDatabase(
+  database: StartFlowQueryDatabase,
+): Pick<Database, 'select' | 'insert'> {
+  // The partner audience only selects and inserts, through the same transaction.
+  return database as Pick<Database, 'select' | 'insert'>;
 }
 
 function eventTypeStoreDatabase(database: StartFlowQueryDatabase): Database {

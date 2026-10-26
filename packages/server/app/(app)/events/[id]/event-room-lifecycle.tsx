@@ -62,7 +62,7 @@ export function PreviewDetails({
             {preview.partnerRecipientCount}{' '}
             {preview.partnerRecipientCount === 1 ? 'partner' : 'partners'}
           </strong>{' '}
-          alerted when this event started, by email.
+          by email.
         </p>
       ) : null}
       {preview.channels.map((channel) => (
