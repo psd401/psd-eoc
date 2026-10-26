@@ -47,14 +47,38 @@ const hasUniqueGroupSourceIds = (
 ): boolean => hasUniqueStrings(sources.map((source) => source.id));
 
 /**
- * Owns the population boundary for immutable roster snapshots. Production
+ * Owns the population boundary for every notification record. Production
  * staff and synthetic training recipients are intentionally disjoint so test
  * paths can never silently resolve real endpoints.
+ *
+ * `partner` names admitted first responders outside the district. They are
+ * never rostered: no snapshot, recipient, or roster endpoint holds them, and
+ * no event targets them. A live incident carries a partner slice beside its
+ * staff recipients (see `NotificationTargetingSchema`).
  */
-export const RosterPopulationSchema = z.enum(['staff', 'synthetic']);
+export const RosterPopulationSchema = z.enum(['staff', 'synthetic', 'partner']);
 
-/** Roster population inferred from {@link RosterPopulationSchema}. */
+/** Notification population inferred from {@link RosterPopulationSchema}. */
 export type RosterPopulation = z.infer<typeof RosterPopulationSchema>;
+
+/**
+ * Owns the populations a published roster snapshot, and so an event, is
+ * drawn from. Partners are admitted one by one, never synced from a group.
+ */
+export const RosteredPopulationSchema = RosterPopulationSchema.exclude([
+  'partner',
+]);
+
+/** Rostered population inferred from {@link RosteredPopulationSchema}. */
+export type RosteredPopulation = z.infer<typeof RosteredPopulationSchema>;
+
+/**
+ * True when a notification population resolves through a published roster.
+ * A partner slice never does, so roster-backed resolution refuses it.
+ */
+export const isRosteredPopulation = (
+  population: RosterPopulation,
+): population is RosteredPopulation => population !== 'partner';
 
 /**
  * Owns which population a source kind belongs to. A manual source is a staff
@@ -68,12 +92,12 @@ export type RosterPopulation = z.infer<typeof RosterPopulationSchema>;
  */
 export const rosterPopulationForGroupSourceKind = (
   kind: GroupSourceKind,
-): RosterPopulation => (kind === 'synthetic' ? 'synthetic' : 'staff');
+): RosteredPopulation => (kind === 'synthetic' ? 'synthetic' : 'staff');
 
 /** True when a source of this kind belongs to {@link population}. */
 export const groupSourceKindMatchesPopulation = (
   kind: GroupSourceKind,
-  population: RosterPopulation,
+  population: RosteredPopulation,
 ): boolean => rosterPopulationForGroupSourceKind(kind) === population;
 
 /**
@@ -84,7 +108,7 @@ export const groupSourceKindMatchesPopulation = (
  * `google-group` and predates it.
  */
 export const groupSourceKindsForPopulation = (
-  population: RosterPopulation,
+  population: RosteredPopulation,
 ): readonly GroupSourceKind[] =>
   GroupSourceKindSchema.options.filter(
     (kind) => rosterPopulationForGroupSourceKind(kind) === population,
@@ -294,7 +318,7 @@ export type StaffRosterEmail = z.infer<typeof StaffRosterEmailSchema>;
 export const RecipientSchema = z
   .object({
     id: RecipientIdSchema,
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
     googleSubject: z.string().trim().min(1).max(255).nullable(),
     staffEmail: StaffRosterEmailSchema.optional(),
     displayName: z.string().trim().min(1).max(160),
@@ -398,7 +422,7 @@ export const RosterSourceConfigurationSchema = z
   .object({
     id: RosterSourceConfigurationIdSchema,
     version: VersionSchema,
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
     facilityIds: z.array(FacilityIdSchema).min(1).max(200).readonly(),
     groupSourceRefs: z
       .array(RosterGroupSourceRefSchema)
@@ -473,7 +497,7 @@ export const RosterSnapshotSchema = z
   .object({
     id: RosterSnapshotIdSchema,
     version: VersionSchema,
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
     complete: z.literal(true),
     sourceConfiguration: RosterSourceConfigurationRefSchema,
     facilityIds: z.array(FacilityIdSchema).min(1).max(200).readonly(),
@@ -755,7 +779,7 @@ export const RosterSyncResultSchema = z
   .object({
     id: UuidSchema,
     sourceConfiguration: RosterSourceConfigurationRefSchema,
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
     outcome: RosterSyncOutcomeSchema,
     startedAt: TimestampSchema,
     completedAt: TimestampSchema,
@@ -1046,7 +1070,7 @@ export type GetRosterSnapshotInput = z.infer<
  */
 export const RosterHealthQuerySchema = z
   .object({
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
     facilityId: FacilityIdSchema.nullable(),
     cursor: PaginationCursorSchema.nullable(),
     limit: z.number().int().positive().max(200),

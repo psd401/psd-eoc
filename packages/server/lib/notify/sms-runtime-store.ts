@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   ChannelAttemptSchema,
   DispatchBatchSchema,
+  isRosteredDispatchBatch,
   NotificationOutboxMessageSchema,
   SMS_PROVIDER_MINIMUM_TTL_SECONDS,
   SMS_TOTAL_LIFETIME_SECONDS,
@@ -253,6 +254,9 @@ async function persistedBatch(
 }
 
 async function resolvedSmsEndpoints(database: Database, batch: DispatchBatch) {
+  // A partner slice has no roster snapshot of its own to resolve through.
+  if (!isRosteredDispatchBatch(batch))
+    throw new SmsRuntimeStoreError('BATCH_CONFLICT');
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],
     batch.rosterPopulation,

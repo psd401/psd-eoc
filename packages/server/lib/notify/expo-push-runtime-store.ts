@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   DispatchBatchSchema,
+  isRosteredDispatchBatch,
   ExpoReceiptDurableDecisionSchema,
   ExpoSendLedgerCompletionSchema,
   NotificationOutboxMessageSchema,
@@ -280,6 +281,10 @@ async function persistedBatch(
 }
 
 async function resolvedPushEndpoints(database: Database, batch: DispatchBatch) {
+  // A partner slice has no roster snapshot of its own to resolve through.
+  if (!isRosteredDispatchBatch(batch)) {
+    throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
+  }
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],
     batch.rosterPopulation,
@@ -313,6 +318,10 @@ async function resolvedPushEndpointPage(
   batch: DispatchBatch,
   cursor: number,
 ) {
+  // A partner slice has no roster snapshot of its own to resolve through.
+  if (!isRosteredDispatchBatch(batch)) {
+    throw new ExpoPushRuntimeStoreError('BATCH_CONFLICT');
+  }
   const roster = await loadRosterSnapshot(
     database as unknown as Parameters<typeof loadRosterSnapshot>[0],
     batch.rosterPopulation,

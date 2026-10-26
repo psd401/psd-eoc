@@ -22,9 +22,10 @@ import {
 } from './event-type';
 import { ThreatIdSchema } from './threat';
 import {
-  RosterPopulationSchema,
+  RosteredPopulationSchema,
   RosterSnapshotIdSchema,
   type RosterPopulation,
+  type RosteredPopulation,
 } from './roster';
 import { HumanOnlyActionIdSchema } from './human-only';
 import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
@@ -217,6 +218,40 @@ export const EventTargetingSchema = z
 
 /** Valid event targeting triple inferred from its schema. */
 export type EventTargeting = z.infer<typeof EventTargetingSchema>;
+
+/**
+ * Owns the legal classification of one notification record: an intent, its
+ * outbox record, batches, and attempts. Every event targeting is one. A live
+ * incident additionally carries a partner slice beside its staff recipients;
+ * the slice belongs to the staff event, which is never itself targeted at
+ * partners. Drills and tests never reach partners.
+ */
+export const NotificationTargetingSchema = z
+  .union([
+    EventTargetingSchema,
+    z
+      .object({
+        kind: z.literal('incident'),
+        templateMode: z.literal('real'),
+        rosterPopulation: z.literal('partner'),
+      })
+      .strict()
+      .readonly(),
+  ])
+  .readonly();
+
+/** Valid notification targeting triple inferred from its schema. */
+export type NotificationTargeting = z.infer<typeof NotificationTargetingSchema>;
+
+/**
+ * The population of the event a notification record belongs to. A partner
+ * slice belongs to a staff event; every other population is the event's own.
+ */
+export function eventPopulationForNotification(
+  population: RosterPopulation,
+): RosteredPopulation {
+  return population === 'partner' ? 'staff' : population;
+}
 
 /**
  * Owns the stable identifier for an operational event. Corrections reference
@@ -432,7 +467,7 @@ export const EventSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     status: EventStatusSchema,
     rosterSnapshotId: RosterSnapshotIdSchema.nullable(),
-    rosterPopulation: RosterPopulationSchema.nullable(),
+    rosterPopulation: RosteredPopulationSchema.nullable(),
     threat: ActivationThreatSchema.nullable(),
     responseDetail: OperatorDetailSchema.nullable(),
     createdBy: ActorSchema,
@@ -691,7 +726,7 @@ const activationSelectionShape = {
   kind: EventKindSchema,
   templateMode: TemplateModeSchema,
   eventTypeVersion: EventTypeVersionRefSchema,
-  rosterPopulation: RosterPopulationSchema,
+  rosterPopulation: RosteredPopulationSchema,
 };
 
 function addActivationSelectionIssues(
@@ -769,7 +804,7 @@ export const ActivationPreviewSchema = z
     templateMode: TemplateModeSchema,
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
-    rosterPopulation: RosterPopulationSchema,
+    rosterPopulation: RosteredPopulationSchema,
     threat: ActivationThreatSchema.nullable(),
     responseDetail: OperatorDetailSchema.nullable(),
     recipientCount: z.number().int().nonnegative().max(1_200),
@@ -909,7 +944,7 @@ export const LifecycleConsequencePreviewSchema = z
     templateMode: TemplateModeSchema,
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
-    rosterPopulation: RosterPopulationSchema,
+    rosterPopulation: RosteredPopulationSchema,
     recipientCount: z.number().int().nonnegative().max(1_200),
     channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
     sendReadiness: z.enum(['ready', 'blocked']),

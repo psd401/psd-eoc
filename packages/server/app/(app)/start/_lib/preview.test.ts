@@ -9,7 +9,7 @@ import {
   type MessageTemplateCatalog,
   type NotificationPurpose,
   type RosterGroupSourceRef,
-  type RosterPopulation,
+  type RosteredPopulation,
   type RosterSnapshot,
   type TemplateMode,
 } from '@psd-eoc/contracts';
@@ -69,7 +69,7 @@ const FACILITY = Object.freeze({
   createdAt: CREATED_AT_ISO,
 }) satisfies Facility;
 
-function groupSource(population: RosterPopulation): RosterGroupSourceRef {
+function groupSource(population: RosteredPopulation): RosterGroupSourceRef {
   return Object.freeze({
     id: IDS.group,
     kind: population === 'staff' ? 'google-group' : 'synthetic',
@@ -78,7 +78,7 @@ function groupSource(population: RosterPopulation): RosterGroupSourceRef {
   });
 }
 
-function roster(population: RosterPopulation): RosterSnapshot {
+function roster(population: RosteredPopulation): RosterSnapshot {
   const source = groupSource(population);
   return Object.freeze({
     id: IDS.roster,
@@ -218,7 +218,7 @@ function channelConfigurations(): readonly ChannelConfiguration[] {
 
 function evidence(
   templateMode: TemplateMode,
-  population: RosterPopulation,
+  population: RosteredPopulation,
 ): ActivationPreviewEvidence {
   const kind =
     templateMode === 'real' ? ('incident' as const) : ('drill' as const);

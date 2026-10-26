@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 
 import {
   DispatchBatchSchema,
+  isRosteredDispatchBatch,
+  isRosteredPopulation,
   DeviceEnrollmentPageSchema,
   DeviceEnrollmentSchema,
   EndpointStatusSchema,
@@ -20,6 +22,7 @@ import {
   type CapabilityOutput,
   type DeviceEnrollmentPage,
   type DispatchBatch,
+  type RosteredDispatchBatch,
   type Endpoint,
   type EndpointStatus,
   type EndpointStatusRecord,
@@ -418,7 +421,7 @@ async function resolvePushEndpointContext(
   store: PushEndpointPolicyStore,
 ): Promise<
   Readonly<{
-    batch: DispatchBatch;
+    batch: RosteredDispatchBatch;
     candidates: readonly Readonly<{
       recipientId: string;
       endpoint: PushEndpoint;
@@ -427,6 +430,10 @@ async function resolvePushEndpointContext(
   }>
 > {
   const batch = parsePushBatch(input.batch);
+  // A partner slice has no roster recipients; it never resolves here.
+  if (!isRosteredDispatchBatch(batch)) {
+    throw new PushEndpointResolutionError('PUSH_ROSTER_MISMATCH');
+  }
   let audience: ReturnType<typeof resolveAudience>;
   try {
     audience = resolveAudience(input.audience);
@@ -492,7 +499,7 @@ async function resolvePushEndpointContext(
 }
 
 function eligiblePushEndpoints(
-  batch: DispatchBatch,
+  batch: RosteredDispatchBatch,
   candidates: readonly Readonly<{
     recipientId: string;
     endpoint: PushEndpoint;
@@ -1420,6 +1427,9 @@ async function loadDrizzlePushEndpointSendEligibility(
     process.env[PUSH_PROVIDER_CUTOVER_ENV],
   ),
 ): Promise<PushEndpointSendEligibilityEvidence | null> {
+  // A partner endpoint is never published in a roster snapshot, so this
+  // roster-backed path has no answer for it: ineligible, as before.
+  if (!isRosteredPopulation(input.rosterPopulation)) return null;
   const rows = await database
     .select({
       rosterSnapshotId: rosterEndpoints.rosterSnapshotId,

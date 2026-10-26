@@ -1,3 +1,4 @@
+import type { RosteredPopulation } from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
@@ -36,7 +37,9 @@ export const rosterSourceConfigurations = pgTable(
   {
     id: uuid('id').notNull(),
     version: integer('version').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [
@@ -49,6 +52,13 @@ export const rosterSourceConfigurations = pgTable(
     check(
       'roster_source_configurations_version_positive',
       sql`${table.version} > 0`,
+    ),
+    // Partners are admitted one by one, never synced from a group. Every
+    // roster table reaches this one through its population foreign keys, so
+    // refusing `partner` here keeps it out of the whole roster.
+    check(
+      'roster_source_configurations_rostered_population',
+      sql`${table.population}::text in ('staff', 'synthetic')`,
     ),
   ],
 );
@@ -88,7 +98,9 @@ export const rosterSourceConfigurationGroups = pgTable(
   {
     configurationId: uuid('configuration_id').notNull(),
     configurationVersion: integer('configuration_version').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     groupSourceId: uuid('group_source_id').notNull(),
     groupSourceKind: groupSourceKindEnum('group_source_kind').notNull(),
     groupPurpose: groupPurposeEnum('group_purpose').notNull(),
@@ -145,7 +157,9 @@ export const rosterSnapshots = pgTable(
   {
     id: uuid('id').defaultRandom().primaryKey(),
     version: integer('version').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     complete: boolean('complete').notNull(),
     sourceConfigurationId: uuid('source_configuration_id').notNull(),
     sourceConfigurationVersion: integer(
@@ -207,7 +221,9 @@ export const rosterSnapshotSources = pgTable(
   'roster_snapshot_sources',
   {
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     groupSourceId: uuid('group_source_id').notNull(),
     groupSourceKind: groupSourceKindEnum('group_source_kind').notNull(),
     groupPurpose: groupPurposeEnum('group_purpose').notNull(),
@@ -263,7 +279,9 @@ export const rosterSyncResults = pgTable(
     sourceConfigurationVersion: integer(
       'source_configuration_version',
     ).notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     outcome: rosterSyncOutcomeEnum('outcome').notNull(),
     startedAt: occurredAt('started_at').notNull(),
     completedAt: occurredAt('completed_at').notNull(),
@@ -325,7 +343,9 @@ export const rosterSyncResultSources = pgTable(
   'roster_sync_result_sources',
   {
     syncResultId: uuid('sync_result_id').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     groupSourceId: uuid('group_source_id').notNull(),
     groupSourceKind: groupSourceKindEnum('group_source_kind').notNull(),
     groupPurpose: groupPurposeEnum('group_purpose').notNull(),
@@ -404,7 +424,9 @@ export const rosterSyncGroupFailures = pgTable(
   {
     id: uuid('id').defaultRandom().primaryKey(),
     syncResultId: uuid('sync_result_id').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     groupSourceId: uuid('group_source_id').notNull(),
     groupSourceKind: groupSourceKindEnum('group_source_kind').notNull(),
     groupPurpose: groupPurposeEnum('group_purpose').notNull(),
@@ -453,7 +475,9 @@ export const rosterRecipients = pgTable(
     rosterSnapshotId: uuid('roster_snapshot_id')
       .notNull()
       .references(() => rosterSnapshots.id, { onDelete: 'restrict' }),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     googleSubject: varchar('google_subject', { length: 255 }),
     staffEmail: varchar('staff_email', { length: 320 }),
     displayName: varchar('display_name', { length: 160 }).notNull(),
@@ -504,7 +528,9 @@ export const rosterRecipientGroupSources = pgTable(
   {
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     groupSourceId: uuid('group_source_id').notNull(),
     groupSourceKind: groupSourceKindEnum('group_source_kind').notNull(),
     groupPurpose: groupPurposeEnum('group_purpose').notNull(),
@@ -554,7 +580,9 @@ export const rosterEndpoints = pgTable(
     id: uuid('id').notNull(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
-    population: rosterPopulationEnum('population').notNull(),
+    population: rosterPopulationEnum('population')
+      .$type<RosteredPopulation>()
+      .notNull(),
     channel: notificationChannelEnum('channel').notNull(),
     status: endpointStatusEnum('status').notNull(),
     capturedAt: occurredAt('captured_at').notNull(),

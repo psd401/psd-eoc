@@ -7,7 +7,7 @@ import {
   SmsLifecycleCapabilityContextSchema,
 } from './notification';
 import { ProviderSendOutcomeSchema } from './push-runtime';
-import { RosterPopulationSchema, SmsEndpointSchema } from './roster';
+import { RosteredPopulationSchema, SmsEndpointSchema } from './roster';
 import { TimestampSchema, UuidSchema } from './shared';
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -220,7 +220,7 @@ export const SmsOptOutReconciliationMessageSchema = z
 export const CurrentRosterSnapshotSchema = z
   .object({
     id: UuidSchema,
-    population: RosterPopulationSchema,
+    population: RosteredPopulationSchema,
   })
   .strict()
   .readonly();
