@@ -56,6 +56,15 @@ export function PreviewDetails({
       <p className="consequence-summary">
         <strong>{preview.recipientCount} staff</strong> by {channelSummary}.
       </p>
+      {preview.partnerRecipientCount > 0 ? (
+        <p className="consequence-summary">
+          <strong>
+            {preview.partnerRecipientCount}{' '}
+            {preview.partnerRecipientCount === 1 ? 'partner' : 'partners'}
+          </strong>{' '}
+          by email.
+        </p>
+      ) : null}
       {preview.channels.map((channel) => (
         <details className="channel-preview" key={channel.channel}>
           <summary>

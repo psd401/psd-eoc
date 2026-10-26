@@ -212,4 +212,21 @@ describe('which email batches this store will send', () => {
       assertEmailBatch({ ...batch, integrationId: 'expo-push' as const }),
     ).toThrow();
   });
+
+  test('refuses a partner slice as a conflict, not a transient failure', () => {
+    // Partner delivery lands later (#597). Until then a partner batch must
+    // stop at a 409, never retry into the dead-letter queue.
+    const partner = {
+      ...batch,
+      eventKind: 'incident' as const,
+      templateMode: 'real' as const,
+      rosterPopulation: 'partner' as const,
+    } as unknown as Parameters<typeof assertEmailBatch>[0];
+    expect(() => assertEmailBatch(partner)).toThrow(
+      expect.objectContaining({
+        code: 'BATCH_CONFLICT',
+        detail: 'partner-delivery-not-enabled',
+      }),
+    );
+  });
 });

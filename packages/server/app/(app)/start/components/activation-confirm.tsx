@@ -118,6 +118,21 @@ function audienceLabel(preview: ActivationPreview): string {
     : 'synthetic recipients';
 }
 
+function partnerLabel(count: number): string {
+  return count === 1 ? 'partner recipient' : 'partner recipients';
+}
+
+/**
+ * Admitted partners (first responders outside the district) a live incident
+ * also reaches (#597). Partners are planned by email; only a real incident at
+ * a site that is not isolated ever counts any.
+ */
+function partnerSentence(preview: ActivationPreview): string | null {
+  return preview.partnerRecipientCount > 0
+    ? ` and ${preview.partnerRecipientCount} ${partnerLabel(preview.partnerRecipientCount)} by email`
+    : null;
+}
+
 function classificationLabel(eventKind: EventKind, mode: TemplateMode): string {
   return getEventClassificationPresentation({
     kind: eventKind,
@@ -598,7 +613,7 @@ export function ActivationConfirm({
             : previewError !== null || preview === null
               ? 'PSD EOC could not check who will be notified.'
               : preview.sendReadiness === 'ready'
-                ? `Ready to start. ${preview.recipientCount} ${audienceLabel(preview)} will be notified by ${notifiedByLabel(preview)}.`
+                ? `Ready to start. ${preview.recipientCount} ${audienceLabel(preview)} will be notified by ${notifiedByLabel(preview)}${partnerSentence(preview) ?? ''}.`
                 : 'Notifications are not ready, so this event cannot be started yet.'}
         </p>
 
@@ -627,6 +642,17 @@ export function ActivationConfirm({
                 </strong>{' '}
                 at {selection.facilityName}, by {notifiedByLabel(preview)}.
               </p>
+              {preview.kind === 'incident' ? (
+                <p>
+                  <strong>
+                    {preview.partnerRecipientCount}{' '}
+                    {partnerLabel(preview.partnerRecipientCount)}
+                  </strong>{' '}
+                  {preview.partnerRecipientCount > 0
+                    ? '(admitted first responders outside the district), by email.'
+                    : '(no first responder outside the district is alerted for this event).'}
+                </p>
+              ) : null}
               <details className="message-preview">
                 <summary>See the exact message</summary>
                 <div className="channel-grid">
@@ -745,7 +771,11 @@ export function ActivationConfirm({
                         selection.templateMode === 'real'
                           ? 'REAL incident'
                           : 'DRILL'
-                      } and notify ${preview.recipientCount} ${audienceLabel(preview)}`}
+                      } and notify ${preview.recipientCount} ${audienceLabel(preview)}${
+                        preview.partnerRecipientCount > 0
+                          ? ` and ${preview.partnerRecipientCount} ${partnerLabel(preview.partnerRecipientCount)}`
+                          : ''
+                      }`}
                 </button>
               </section>
             )}

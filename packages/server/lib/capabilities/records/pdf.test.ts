@@ -246,6 +246,7 @@ function snapshot(
     delivery: [
       {
         purpose: 'activation',
+        rosterPopulation: 'staff',
         createdAt: '2026-08-11T16:00:01.000Z',
         explicitIntentState: 'recorded',
         channels: [deliveryChannel()],

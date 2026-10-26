@@ -14,7 +14,7 @@ import {
   type PersistedExpoReceiptTargetContract,
   type PushWorkerAttemptWorkItem,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { databaseExecuteRows, type Database } from '../../db/client';
 import {
@@ -458,7 +458,9 @@ export function createDrizzleExpoPushRuntimeStore(
         .from(outbox)
         .where(
           and(
-            eq(outbox.rosterPopulation, 'staff'),
+            // A live incident's partner slice (#597) is real people waiting
+            // on a real alert, exactly like its staff record.
+            inArray(outbox.rosterPopulation, ['staff', 'partner']),
             or(eq(outbox.eventKind, 'incident'), eq(outbox.eventKind, 'drill')),
             lte(outbox.createdAt, sql`clock_timestamp() - interval '1 minute'`),
             isNull(outbox.publishedAt),

@@ -163,6 +163,16 @@ export function assertEmailBatch(batch: DispatchBatch): void {
       'not-a-sendable-email-batch',
     );
   }
+  // A partner slice (#597) is planned before partner delivery exists. Refuse
+  // it as a terminal conflict: endpoint resolution would otherwise throw an
+  // error the route reads as transient, and the batch would retry into the
+  // dead-letter queue on every incident that reached a partner.
+  if (batch.rosterPopulation === 'partner') {
+    throw new EmailRuntimeStoreError(
+      'BATCH_CONFLICT',
+      'partner-delivery-not-enabled',
+    );
+  }
 }
 
 async function persistedBatch(

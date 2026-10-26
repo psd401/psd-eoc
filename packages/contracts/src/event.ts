@@ -796,6 +796,58 @@ const MultiChannelActivationPreviewPlanSchema = z
   .max(3)
   .readonly();
 
+/** Admitted partners one live incident can alert, bounded like a roster. */
+export const PARTNER_AUDIENCE_MAX_RECIPIENTS = 1_200;
+
+/**
+ * Whether a preview's classification can reach partners at all: only a live
+ * incident (incident, real, staff event). Drills, tests, and synthetic
+ * training never alert a partner, whatever the partner alert settings say.
+ */
+export function previewReachesPartners(
+  value: Readonly<{
+    kind: EventKind;
+    templateMode: TemplateMode;
+    rosterPopulation: RosteredPopulation;
+  }>,
+): boolean {
+  return (
+    value.kind === 'incident' &&
+    value.templateMode === 'real' &&
+    value.rosterPopulation === 'staff'
+  );
+}
+
+/**
+ * Admitted partners the preview will reach, beside its staff recipients. A
+ * count like any other: it is inside the digest a human signs. Absent reads
+ * as zero, so a preview recorded before partners existed reaches none.
+ */
+const PartnerRecipientCountSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(PARTNER_AUDIENCE_MAX_RECIPIENTS)
+  .default(0);
+
+function addPartnerAudienceIssues(
+  preview: Readonly<{
+    kind: EventKind;
+    templateMode: TemplateMode;
+    rosterPopulation: RosteredPopulation;
+    partnerRecipientCount: number;
+  }>,
+  context: z.RefinementCtx,
+): void {
+  if (preview.partnerRecipientCount > 0 && !previewReachesPartners(preview)) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Only a live incident reaches partners.',
+      path: ['partnerRecipientCount'],
+    });
+  }
+}
+
 export const ActivationPreviewSchema = z
   .object({
     id: ActivationPreviewIdSchema,
@@ -808,6 +860,7 @@ export const ActivationPreviewSchema = z
     threat: ActivationThreatSchema.nullable(),
     responseDetail: OperatorDetailSchema.nullable(),
     recipientCount: z.number().int().nonnegative().max(1_200),
+    partnerRecipientCount: PartnerRecipientCountSchema,
     channels: MultiChannelActivationPreviewPlanSchema,
     sendReadiness: z.enum(['ready', 'blocked']),
     blockingReasonCodes: z
@@ -835,6 +888,7 @@ export const ActivationPreviewSchema = z
   .strict()
   .superRefine((preview, context) => {
     addClassificationIssues(preview, context);
+    addPartnerAudienceIssues(preview, context);
     if (preview.eventTypeVersion.templateMode !== preview.templateMode) {
       context.addIssue({
         code: 'custom',
@@ -946,6 +1000,7 @@ export const LifecycleConsequencePreviewSchema = z
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosteredPopulationSchema,
     recipientCount: z.number().int().nonnegative().max(1_200),
+    partnerRecipientCount: PartnerRecipientCountSchema,
     channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
     sendReadiness: z.enum(['ready', 'blocked']),
     blockingReasonCodes: z
@@ -966,6 +1021,7 @@ export const LifecycleConsequencePreviewSchema = z
   .strict()
   .superRefine((preview, context) => {
     addClassificationIssues(preview, context);
+    addPartnerAudienceIssues(preview, context);
     if (preview.eventTypeVersion.templateMode !== preview.templateMode) {
       context.addIssue({
         code: 'custom',

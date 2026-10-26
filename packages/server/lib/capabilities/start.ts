@@ -77,6 +77,11 @@ import {
 import { DrizzleEventTypeStore, EventTypeCapabilityError } from './event-types';
 import { AudienceResolutionError } from '../roster/resolve';
 import {
+  PartnerAudienceBoundError,
+  recordActivationPreviewPartners,
+  resolvePartnerAudience,
+} from '../partners/audience';
+import {
   BoundedDatabaseQueryError,
   START_FLOW_DATABASE_PAGE_SIZE,
   collectBoundedDatabaseRows,
@@ -192,6 +197,13 @@ function startFlowQueryDatabase(database: unknown): StartFlowQueryDatabase {
   // Both configured Drizzle transports expose this schema-aware query API;
   // raw execute results are normalized at the consumers that read rows.
   return database as StartFlowQueryDatabase;
+}
+
+function partnerAudienceDatabase(
+  database: StartFlowQueryDatabase,
+): Pick<Database, 'select' | 'insert'> {
+  // The partner audience only selects and inserts, through the same transaction.
+  return database as Pick<Database, 'select' | 'insert'>;
 }
 
 function eventTypeStoreDatabase(database: StartFlowQueryDatabase): Database {
@@ -735,12 +747,16 @@ function mapPreviewConstructionError(error: unknown): never {
       case 'CHANNEL_CONFIGURATION_UNAVAILABLE':
       case 'INITIATOR_UNAVAILABLE':
         throw unavailable(error.message);
+      case 'PARTNER_AUDIENCE_INVALID':
       case 'PREVIEW_TIME_INVALID':
         throw conflict(error.message);
     }
   }
   if (error instanceof AudienceResolutionError) {
     throw unavailable(error.message);
+  }
+  if (error instanceof PartnerAudienceBoundError) {
+    throw conflict(error.message);
   }
   throw error;
 }
@@ -869,6 +885,21 @@ async function createActivationPreviewRecord(
     if (initiatorDisplayName === null) {
       throw unavailable('The initiating identity is unavailable.');
     }
+    // Planned here, with the same clock as the preview: who this live
+    // incident would alert beyond staff. The set is pinned with the preview
+    // and its count is signed with the rest of the consequence.
+    const partnerAdmissionIds = await resolvePartnerAudience(
+      partnerAudienceDatabase(database),
+      {
+        kind: input.kind,
+        templateMode: input.templateMode,
+        rosterPopulation: input.rosterPopulation,
+        facilityIsolated: facilityRow.isolated,
+        eventTypeVersionId: input.eventTypeVersion.id,
+        threatId: choice.threat?.id ?? null,
+        now,
+      },
+    );
     const preview = buildActivationPreview({
       id: randomUUID(),
       selection: input,
@@ -877,6 +908,7 @@ async function createActivationPreviewRecord(
       facility: facilityFromRow(facilityRow),
       eventTypeVersion,
       rosterSnapshot,
+      partnerAdmissionIds,
       channelConfigurations: channelConfigurationsValue,
       activeEventIds: activeEventRows.map((row) => row.id),
       initiator: actor,
@@ -896,6 +928,7 @@ async function createActivationPreviewRecord(
       threatDetail: preview.threat?.detail ?? null,
       responseDetail: preview.responseDetail,
       recipientCount: preview.recipientCount,
+      partnerRecipientCount: preview.partnerRecipientCount,
       channels: preview.channels,
       sendReadiness: preview.sendReadiness,
       blockingReasonCodes: preview.blockingReasonCodes,
@@ -904,6 +937,12 @@ async function createActivationPreviewRecord(
       createdAt: new Date(preview.createdAt),
       expiresAt: new Date(preview.expiresAt),
     });
+    await recordActivationPreviewPartners(
+      partnerAudienceDatabase(database),
+      preview,
+      partnerAdmissionIds,
+      new Date(preview.createdAt),
+    );
     return preview;
   } catch (error) {
     mapPreviewConstructionError(error);
@@ -964,6 +1003,7 @@ export async function loadActivationPreview(
     threat: activationThreatFromColumns(row),
     responseDetail: row.responseDetail ?? null,
     recipientCount: row.recipientCount,
+    partnerRecipientCount: row.partnerRecipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,

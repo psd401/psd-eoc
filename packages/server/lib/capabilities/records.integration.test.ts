@@ -794,6 +794,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     expect(snapshot.delivery).toEqual([
       {
         purpose: 'activation',
+        rosterPopulation: 'synthetic',
         createdAt: RUN.northVisibleEntryAt.toISOString(),
         explicitIntentState: null,
         channels: [

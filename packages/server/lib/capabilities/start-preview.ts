@@ -7,6 +7,8 @@ import {
   EventTypeVersionSchema,
   FacilitySchema,
   OperatorDetailSchema,
+  PARTNER_AUDIENCE_MAX_RECIPIENTS,
+  previewReachesPartners,
   type ActivationPreview,
   type ActivationSelection,
   type ActivationThreat,
@@ -53,6 +55,7 @@ export type ActivationPreviewBuildErrorCode =
   | 'EVENT_TYPE_UNAVAILABLE'
   | 'FACILITY_UNAVAILABLE'
   | 'INITIATOR_UNAVAILABLE'
+  | 'PARTNER_AUDIENCE_INVALID'
   | 'PREVIEW_TIME_INVALID'
   | 'THREAT_UNAVAILABLE';
 
@@ -68,6 +71,8 @@ export class ActivationPreviewBuildError extends Error {
         EVENT_TYPE_UNAVAILABLE: 'The selected event type is unavailable.',
         FACILITY_UNAVAILABLE: 'The selected facility is unavailable.',
         INITIATOR_UNAVAILABLE: 'The initiating identity is unavailable.',
+        PARTNER_AUDIENCE_INVALID:
+          'The partner audience does not match this event.',
         PREVIEW_TIME_INVALID: 'The activation preview time is invalid.',
         THREAT_UNAVAILABLE: 'The selected threat is unavailable.',
       }[code],
@@ -87,6 +92,11 @@ export interface ActivationPreviewEvidence {
   readonly facility: Facility;
   readonly eventTypeVersion: EventTypeVersion;
   readonly rosterSnapshot: RosterSnapshot;
+  /**
+   * Admitted partners resolved for this preview (#597); empty for anything
+   * but a live incident at a facility that is not isolated.
+   */
+  readonly partnerAdmissionIds: readonly string[];
   readonly channelConfigurations: readonly ChannelConfiguration[];
   readonly activeEventIds: readonly string[];
   readonly initiator: Actor;
@@ -170,6 +180,16 @@ export function buildActivationPreview(
       ACTIVATION_PREVIEW_MAX_AGE_SECONDS * 1_000
   ) {
     throw new ActivationPreviewBuildError('PREVIEW_TIME_INVALID');
+  }
+
+  const partnerRecipientCount = new Set(evidenceValue.partnerAdmissionIds).size;
+  if (
+    partnerRecipientCount !== evidenceValue.partnerAdmissionIds.length ||
+    partnerRecipientCount > PARTNER_AUDIENCE_MAX_RECIPIENTS ||
+    (partnerRecipientCount > 0 &&
+      (facility.isolated || !previewReachesPartners(selection)))
+  ) {
+    throw new ActivationPreviewBuildError('PARTNER_AUDIENCE_INVALID');
   }
 
   const resolvedAudience = resolveAudience({
@@ -270,6 +290,8 @@ export function buildActivationPreview(
     responseDetail,
 
     recipientCount,
+    // Partners are counted like staff and signed with everything else.
+    partnerRecipientCount,
     channels,
     sendReadiness:
       uniqueBlockingReasonCodes.length === 0

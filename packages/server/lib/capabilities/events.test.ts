@@ -438,6 +438,10 @@ class MemoryEventCapabilityTransaction implements EventCapabilityTransaction {
     if (outboxRecord !== null) {
       this.state.outboxRecords.push(outboxRecord);
     }
+    if (bundle.partnerNotification !== null) {
+      this.state.notificationIntents.push(bundle.partnerNotification.intent);
+      this.state.outboxRecords.push(bundle.partnerNotification.outbox);
+    }
     this.state.lifecycleBundles.push(bundle);
     this.state.lifecycleResults.set(lifecycleResultReference(result), result);
     if (this.state.failLifecycleAfterWrite) {
@@ -1950,6 +1954,179 @@ describe('event lifecycle capabilities', () => {
         ]);
       }
     }
+  });
+});
+
+describe('partner slice of a live incident (#597)', () => {
+  async function startRealIncident(
+    store: MemoryEventCapabilityStore,
+    partnerRecipientCount: number,
+  ) {
+    const preview = ActivationPreviewSchema.parse({
+      ...activationPreview({ target: REAL_TARGET }),
+      partnerRecipientCount,
+    });
+    seedActivation(store, preview);
+    const confirmationId = uuid(900 + partnerRecipientCount);
+    store.seedConfirmation(
+      issuedConfirmation({
+        id: confirmationId,
+        capabilityId: 'start-event',
+        actionIds: ['start-real-incident', 'send-real-notification'],
+        consequenceDigest: preview.consequenceDigest,
+        issuedAt: TIMES.previewCreated,
+        expiresAt: TIMES.activation,
+      }),
+    );
+    return executeEventCapability(
+      'start-event',
+      {
+        source: 'activation-preview',
+        activationPreviewId: preview.id,
+        activeEventDecision: { decision: 'start-new', activeEventIdsSeen: [] },
+      },
+      humanMutationInvocation({
+        requestId: uuid(910 + partnerRecipientCount),
+        idempotencyKey: `partner-slice-start-${partnerRecipientCount}`,
+        serverTime: TIMES.activation,
+        confirmationId,
+      }),
+      store,
+    );
+  }
+
+  test('records the partner slice as a second intent in the same human-confirmed request', async () => {
+    const store = new MemoryEventCapabilityStore();
+    const result = await startRealIncident(store, 3);
+    const bundle = store.lifecycleBundles[0];
+    const staff = result.notificationIntent;
+    const partner = bundle?.partnerNotification;
+    if (staff === null || partner === null || partner === undefined) {
+      throw new Error('The live incident omitted a notification slice.');
+    }
+
+    // The result a caller sees is unchanged: the staff intent alone.
+    expect(staff.rosterPopulation).toBe('staff');
+    expect(partner.intent).toMatchObject({
+      eventId: result.event.id,
+      eventKind: 'incident',
+      templateMode: 'real',
+      purpose: 'activation',
+      rosterSnapshotId: staff.rosterSnapshotId,
+      rosterPopulation: 'partner',
+      requestId: staff.requestId,
+      authorization: staff.authorization,
+      createdBy: staff.createdBy,
+    });
+    expect(partner.intent.id).not.toBe(staff.id);
+    // Same renderer, same marker: a partner reads exactly what staff read.
+    expect(
+      partner.intent.channels.map((channel) => channel.renderedMessage),
+    ).toEqual(staff.channels.map((channel) => channel.renderedMessage));
+    expect(
+      partner.intent.channels.map(({ channel, endpointCount }) => ({
+        channel,
+        endpointCount,
+      })),
+    ).toEqual([
+      { channel: 'push', endpointCount: 0 },
+      { channel: 'email', endpointCount: 3 },
+    ]);
+    expect(partner.outbox.message).toMatchObject({
+      intentId: partner.intent.id,
+      eventId: result.event.id,
+      facilityId: IDS.facility,
+      rosterPopulation: 'partner',
+      requestId: staff.requestId,
+      channels: partner.intent.channels,
+    });
+    expect(partner.outbox.id).not.toBe(bundle?.outboxRecord?.id);
+    expect(domainCounts(store)).toMatchObject({ intents: 2, outbox: 2 });
+  });
+
+  test('records no partner slice when the preview reaches no partner', async () => {
+    const store = new MemoryEventCapabilityStore();
+    await startRealIncident(store, 0);
+    expect(store.lifecycleBundles[0]?.partnerNotification).toBeNull();
+    expect(domainCounts(store)).toMatchObject({ intents: 1, outbox: 1 });
+  });
+
+  test('an all-clear reaches the same partners under the shared lifecycle authorization', async () => {
+    const store = new MemoryEventCapabilityStore();
+    const event = activeEvent({ target: REAL_TARGET });
+    store.seedEvent(event);
+    const consequenceDigest = '7'.repeat(64);
+    const preview = LifecycleConsequencePreviewSchema.parse({
+      ...lifecyclePreview(event, 'all-clear', {
+        id: uuid(920),
+        createdAt: TIMES.previewCreated,
+        consequenceDigest,
+      }),
+      partnerRecipientCount: 3,
+    });
+    seedLifecycle(store, preview);
+    const confirmationId = uuid(921);
+    store.seedConfirmation(
+      issuedConfirmation({
+        id: confirmationId,
+        capabilityId: 'all-clear-event',
+        actionIds: ['all-clear', 'send-real-notification'],
+        consequenceDigest,
+        issuedAt: TIMES.previewCreated,
+        expiresAt: TIMES.firstAllClear,
+      }),
+    );
+
+    const result = await executeEventCapability(
+      'all-clear-event',
+      { eventId: event.id, lifecyclePreviewId: preview.id },
+      humanMutationInvocation({
+        requestId: uuid(922),
+        idempotencyKey: 'partner-slice-all-clear-0001',
+        serverTime: TIMES.activation,
+        confirmationId,
+      }),
+      store,
+    );
+
+    const partner = store.lifecycleBundles[0]?.partnerNotification;
+    expect(partner?.intent).toMatchObject({
+      purpose: 'all-clear',
+      rosterPopulation: 'partner',
+      requestId: result.notificationIntent?.requestId,
+      authorization: result.notificationIntent?.authorization,
+    });
+    expect(
+      partner?.intent.channels.find((channel) => channel.channel === 'email')
+        ?.endpointCount,
+    ).toBe(3);
+  });
+
+  test('a drill preview cannot carry partners', () => {
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...activationPreview(),
+        partnerRecipientCount: 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('a correction record plans no partner slice of its own', async () => {
+    const store = new MemoryEventCapabilityStore();
+    const closed = activeEvent({ target: REAL_TARGET, status: 'closed' });
+    store.seedEvent(closed);
+    await executeEventCapability(
+      'reopen-as-correction',
+      { sourceEventId: closed.id, reason: 'Synthetic correction reason.' },
+      humanMutationInvocation({
+        requestId: uuid(930),
+        idempotencyKey: 'correction-key-0001',
+        serverTime: TIMES.activation,
+      }),
+      store,
+    );
+    expect(store.lifecycleBundles[0]?.partnerNotification).toBeNull();
+    expect(store.lifecycleBundles[0]?.outboxRecord).toBeNull();
   });
 });
 
