@@ -137,7 +137,8 @@ function canonicalSingletonLiveWork(
     if (
       (item.batch.integrationId !== 'expo-push' &&
         item.batch.integrationId !== 'mobile-push') ||
-      item.batch.rosterPopulation !== 'staff' ||
+      // Staff and a live incident's partners (#597); never synthetic.
+      item.batch.rosterPopulation === 'synthetic' ||
       item.batch.channel !== 'push' ||
       item.attempt.channel !== 'push' ||
       item.endpoint.channel !== 'push' ||

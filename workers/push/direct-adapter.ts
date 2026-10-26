@@ -480,7 +480,9 @@ export class LedgeredDirectPushAdapter implements AttemptIdempotentProviderAdapt
     if (
       request.idempotencyKey !== workItem.attempt.id ||
       workItem.batch.integrationId !== this.integrationId ||
-      workItem.batch.rosterPopulation !== 'staff' ||
+      // Live delivery reaches real people: staff and a live incident's
+      // partners (#597). The synthetic population has its own mock adapter.
+      workItem.batch.rosterPopulation === 'synthetic' ||
       !providerMatchesEndpoint(workItem, this.provider)
     ) {
       throw new ProviderDispatchError(

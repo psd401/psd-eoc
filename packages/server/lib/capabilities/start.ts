@@ -77,7 +77,6 @@ import {
 import { DrizzleEventTypeStore, EventTypeCapabilityError } from './event-types';
 import { AudienceResolutionError } from '../roster/resolve';
 import {
-  PartnerAudienceBoundError,
   recordActivationPreviewPartners,
   resolvePartnerAudience,
 } from '../partners/audience';
@@ -754,9 +753,6 @@ function mapPreviewConstructionError(error: unknown): never {
   }
   if (error instanceof AudienceResolutionError) {
     throw unavailable(error.message);
-  }
-  if (error instanceof PartnerAudienceBoundError) {
-    throw conflict(error.message);
   }
   throw error;
 }

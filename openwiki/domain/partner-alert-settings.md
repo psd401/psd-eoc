@@ -1,7 +1,7 @@
 ---
 type: Domain Concept
 title: "Partner alert settings: which real events alert partners"
-description: "The district administrator setting that chooses which response families alert partners and which threats never do, saved as append-only versions on the Partner alerts page, with its defaults, save and conflict rules, and how a live activation preview reads it to pin its partner audience."
+description: "The district administrator setting that chooses which response families alert partners and which threats never do, saved as append-only versions on the Partner alerts page, with its defaults, save and conflict rules, and current routing status."
 tags: [partner-access, alerts, settings, versioning, admin]
 timestamp: 2026-10-26T11:42:26-07:00
 openwiki:
@@ -10,7 +10,6 @@ openwiki:
   source_paths:
     - packages/contracts/src/partner-alert-settings.ts
     - packages/server/lib/partners/alert-settings.ts
-    - packages/server/lib/partners/audience.ts
     - packages/server/app/(admin)/partner-alerts/capabilities.ts
     - packages/server/app/(admin)/partner-alerts/api/route.ts
     - packages/server/app/(admin)/partner-alerts/page.tsx
@@ -22,7 +21,6 @@ openwiki:
     - packages/contracts/src/partner-alert-settings.test.ts
     - packages/server/app/(admin)/partner-alerts/capabilities.database.test.ts
     - packages/server/app/(admin)/partner-alerts/partner-alerts-view.test.tsx
-    - packages/server/lib/partners/audience.database.test.ts
     - packages/server/e2e/partner-alert-settings.flow.ts
   invariants:
     - The defaults are Lockdown and Modified Lockdown with no threat excluded until an administrator saves a version.
@@ -94,13 +92,11 @@ Idempotent retries replay the stored version by its id (`resultReference`, `load
 - **Threat choices** include retired threats. A retired threat is listed only while it is excluded, so saving the page does not silently remove the exclusion.
 - The page (`partner-alerts/page.tsx`) is administrator-only. A non-administrator gets the refusal view, because `withAdminRefusal` turns the engine's 403 into a view (see [capability engine](../architecture/capability-engine.md#partner-sessions-and-the-allowlist)). The page posts to `/partner-alerts/api`, the status message is one allowlisted key (`settings-saved`), and the admin navigation entry is `Partner alerts` in `packages/server/app/nav/primary-nav-model.ts`.
 
-## Routing status: read at planning, delivery not yet enabled
+## Routing status: read when a live incident is planned
 
-`resolvePartnerAudience` (`packages/server/lib/partners/audience.ts`) is the production reader. When a live incident's activation preview is planned, it calls `loadEffectivePartnerAlertSettings` and asks `partnerAlertSettingsMatch` (`packages/contracts/src/partner-alert-settings.ts`) whether the event's response family and threat are selected. A match pins the admitted partners into `activation_preview_partners`; a drill, test, or isolated facility never reaches that step. The settings are therefore in effect for every new live preview from the moment a version is saved.
+`resolvePartnerAudience` in `packages/server/lib/partners/audience.ts` reads the effective settings when an activation preview is created, and pins the selected admissions beside the preview (`activation_preview_partners`). Partners are never part of staff rosters: staff rosters are built from Google groups and skip partners (`packages/server/lib/roster/groups-sync.ts`). Delivery to the pinned partners is described in [notification pipeline](notification-pipeline.md), and [partner audience](partner-audience.md) (who a live incident pins and how each channel reaches them).
 
-A matched preview writes a partner notification slice when a human confirms it, but no partner receives a message yet: each channel runtime refuses partner batches. The whole path, including the refusals and the pinned set, is described in [partner audience](partner-audience.md). Staff audiences are unaffected: rosters are built from Google groups and never contain partners ([roster and audience](roster-and-audience.md)).
-
-Any change to how partner alerts are decided must keep reading the effective settings through `loadEffectivePartnerAlertSettings` and must keep drills and real events separate ([architecture overview](../architecture/overview.md)).
+A saved setting therefore changes who the next live incident's preview pins. It never changes an event already started: that event's all-clear and reactivation reach the set its activation pinned.
 
 ## Change navigation
 
@@ -108,7 +104,7 @@ Any change to how partner alerts are decided must keep reading the effective set
 - **Invariants to keep:** settings are keyed, never named; a save names the version it replaces and is refused if that is no longer current; no row is ever edited or removed; the partner allowlist never gains these IDs; partner alerts never gain a drill or channel setting.
 - **Adding a capability or a column** follows the recipe in [capability engine](../architecture/capability-engine.md#change-recipes). A new persisted enum entry needs a new migration, and the pattern to copy is `0062`. A change to a list bound must change the contract, the database check, and the migration together.
 - **Changing the defaults** changes `DEFAULT_PARTNER_ALERT_RESPONSE_FAMILY_KEYS`, which the contracts test pins. Existing saved versions are unaffected.
-- **Partner alert routing:** keep `resolvePartnerAudience` as the only reader that turns these settings into a partner set. Before describing partner delivery as live, confirm that the channel runtimes accept partner batches ([partner audience](partner-audience.md#delivery-is-refused-until-partner-delivery-exists)).
+- **Partner alert routing** is `packages/server/lib/partners/audience.ts` (who a live incident pins) and `packages/server/lib/partners/delivery.ts` (where each is reached at send time).
 
 ## Focused tests
 
@@ -129,7 +125,6 @@ Any change to how partner alerts are decided must keep reading the effective set
 | Page states, checked choices, retired and unpublished keys, refusal view, allowlisted status | `packages/server/app/(admin)/partner-alerts/partner-alerts-view.test.tsx` | `shows the saved version and keeps a retired threat that is still excluded`, `a saved response with no published version stays checked and can be removed`, `a non-administrator sees the refusal and no settings`, `status messages are allowlisted` |
 | Navigation entry for administrators only | `packages/server/app/nav/primary-nav-model.test.ts` | `matches authenticated, admin, and district-admin server authorization tiers` |
 | Browser flow: defaults, save, second version | `packages/server/e2e/partner-alert-settings.flow.ts` | `admin edits partner alert settings` |
-| A live preview pins partners under the saved settings; an excluded threat or retired-only response pins none | `packages/server/lib/partners/audience.database.test.ts` | `a live lockdown reaches every admitted, unexpired, unended partner`, `an excluded threat, or settings naming only a retired response, reach no partner` |
 
 ## Validation
 
@@ -149,5 +144,5 @@ Run the browser flow only when the Partner alerts page or its route changes. It 
 
 ## Related
 
-[Partner access](partner-access.md) (who is admitted), [partner web sign-in](partner-sign-in.md) (what a partner session may run), [event types and templates](event-types-and-templates.md) (the response families these keys name), [identity and access](identity-and-access.md) (administrator roles), [data model](data-model.md) (the table and its append-only rules), [partner audience](partner-audience.md) (the planning step that reads these settings and the slice it feeds), and [notification pipeline](notification-pipeline.md) (where partner batches are refused).
+[Partner access](partner-access.md) (who is admitted), [partner web sign-in](partner-sign-in.md) (what a partner session may run), [event types and templates](event-types-and-templates.md) (the response families these keys name), [identity and access](identity-and-access.md) (administrator roles), [data model](data-model.md) (the table and its append-only rules), and the audience and dispatch pages this setting feeds: [roster and audience](roster-and-audience.md) and [notification pipeline](notification-pipeline.md), and [partner audience](partner-audience.md) (who a live incident pins and how each channel reaches them).
 

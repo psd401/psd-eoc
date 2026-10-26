@@ -11,12 +11,13 @@ import {
   SesSendLedgerClaimSchema,
   type ChannelAttempt,
   type DispatchBatch,
+  type EmailEndpoint,
   type EmailRuntimeRequest,
   type EmailWorkerAttemptWorkItem,
 } from '@psd-eoc/contracts';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 
-import type { Database } from '../../db/client';
+import type { Database, DatabaseQuery } from '../../db/client';
 import {
   channelAttemptExecutions,
   channelAttempts,
@@ -33,6 +34,10 @@ import {
   resolveEmailEndpoints,
 } from './dispatcher';
 import { lockEmailEndpointPolicy } from './email-endpoint-policy-lock';
+import {
+  PartnerDeliveryError,
+  resolvePartnerEmailEndpoints,
+} from '../partners/delivery';
 
 export const EMAIL_WORKER_ENABLED_ENV = 'PSD_EOC_EMAIL_WORKER_ENABLED' as const;
 export const EMAIL_SEND_HORIZON_MILLISECONDS = 15 * 60_000;
@@ -163,16 +168,6 @@ export function assertEmailBatch(batch: DispatchBatch): void {
       'not-a-sendable-email-batch',
     );
   }
-  // A partner slice (#597) is planned before partner delivery exists. Refuse
-  // it as a terminal conflict: endpoint resolution would otherwise throw an
-  // error the route reads as transient, and the batch would retry into the
-  // dead-letter queue on every incident that reached a partner.
-  if (batch.rosterPopulation === 'partner') {
-    throw new EmailRuntimeStoreError(
-      'BATCH_CONFLICT',
-      'partner-delivery-not-enabled',
-    );
-  }
 }
 
 async function persistedBatch(
@@ -246,19 +241,67 @@ async function pinnedRoster(database: Database, batch: DispatchBatch) {
   return roster;
 }
 
+type EmailCandidateReference = Readonly<{
+  recipientId: string;
+  endpointId: string;
+}>;
+
+/**
+ * Who one email batch addresses, in a fixed paging order, and who of them may
+ * be sent to now.
+ *
+ * A staff or synthetic batch resolves through its pinned roster snapshot. A
+ * partner slice (#597) resolves through the partners its event's activation
+ * pinned, at the address each was admitted under; an admission that ended or
+ * expired since, or a suppressed partner address, is a candidate that is not
+ * sent to.
+ */
+async function emailResolution(
+  database: Database,
+  batch: DispatchBatch,
+): Promise<
+  Readonly<{
+    candidates: readonly EmailCandidateReference[];
+    endpoints: readonly Readonly<{
+      recipientId: string;
+      endpoint: EmailEndpoint;
+    }>[];
+  }>
+> {
+  if (batch.rosterPopulation === 'partner') {
+    try {
+      return await resolvePartnerEmailEndpoints(
+        database as unknown as DatabaseQuery,
+        batch,
+        await databaseNow(database),
+      );
+    } catch (error) {
+      // Terminal: a pinned audience and a batch's plan never change, so the
+      // route answers 409 and the worker retires the batch.
+      if (error instanceof PartnerDeliveryError) {
+        throw new EmailRuntimeStoreError('BATCH_CONFLICT', error.code);
+      }
+      throw error;
+    }
+  }
+  const roster = await pinnedRoster(database, batch);
+  return Object.freeze({
+    candidates: stableEmailCandidateReferences(roster),
+    endpoints: await resolveEmailEndpoints(
+      {
+        batch,
+        audience: { facilityId: batch.facilityId, rosterSnapshot: roster },
+      },
+      createDrizzleEmailEndpointPolicyStore(database),
+    ),
+  });
+}
+
 async function resolveCurrentEndpoints(
   database: Database,
   batch: DispatchBatch,
-  roster?: Awaited<ReturnType<typeof pinnedRoster>>,
 ) {
-  const snapshot = roster ?? (await pinnedRoster(database, batch));
-  return resolveEmailEndpoints(
-    {
-      batch,
-      audience: { facilityId: batch.facilityId, rosterSnapshot: snapshot },
-    },
-    createDrizzleEmailEndpointPolicyStore(database),
-  );
+  return (await emailResolution(database, batch)).endpoints;
 }
 
 /**
@@ -271,7 +314,7 @@ async function resolveCurrentEndpoints(
  */
 function stableEmailCandidateReferences(
   roster: Awaited<ReturnType<typeof pinnedRoster>>,
-): readonly Readonly<{ recipientId: string; endpointId: string }>[] {
+): readonly EmailCandidateReference[] {
   return Object.freeze(
     roster.recipients.flatMap((recipient) =>
       recipient.endpoints.flatMap((endpoint) =>
@@ -316,7 +359,7 @@ function attemptFor(
 
 function workItemFor(
   batch: DispatchBatch,
-  resolved: Awaited<ReturnType<typeof resolveCurrentEndpoints>>[number],
+  resolved: Readonly<{ recipientId: string; endpoint: EmailEndpoint }>,
   attemptNumber: number,
   attemptedAt: string,
 ): EmailWorkerAttemptWorkItem {
@@ -664,8 +707,7 @@ export function createDrizzleEmailRuntimeStore(
           'message-older-than-its-batch',
         );
       }
-      const roster = await pinnedRoster(database, batch);
-      const endpoints = await resolveCurrentEndpoints(database, batch, roster);
+      const { candidates, endpoints } = await emailResolution(database, batch);
       const now = await databaseNow(database);
       if (
         now.getTime() > Date.parse(batch.createdAt) + sendHorizonMilliseconds ||
@@ -682,7 +724,6 @@ export function createDrizzleEmailRuntimeStore(
       // this it reached nobody unless the audience happened to be exactly one
       // address: a second recipient made the whole send resolve to zero items
       // and report itself as suppressed, with no failed attempt to notice.
-      const candidates = stableEmailCandidateReferences(roster);
       if (input.cursor > candidates.length) {
         throw new EmailRuntimeStoreError('BATCH_CONFLICT', 'cursor-past-end');
       }

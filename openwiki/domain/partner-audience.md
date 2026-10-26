@@ -1,7 +1,7 @@
 ---
 type: Domain Concept
 title: "Partner audience: planning, pinning, and the partner notification slice"
-description: "How a live incident's activation preview resolves the admitted partners it would alert, pins that set, and writes a partner notification slice beside the staff send, with delivery still refused in this revision."
+description: "How a live incident's activation preview resolves the admitted partners it would alert, pins that set, and writes a partner notification slice beside the staff send, and how each channel reaches that set at send time."
 tags: [partner-access, notifications, audience, activation, population]
 timestamp: 2026-10-26T13:30:00-07:00
 openwiki:
@@ -17,6 +17,7 @@ openwiki:
     - packages/server/lib/capabilities/events.ts
     - packages/server/lib/capabilities/journal.ts
     - packages/server/lib/notify/email-runtime-store.ts
+    -
     - packages/server/db/schema/events.ts
     - packages/server/db/schema/delivery.ts
     - packages/server/drizzle/migrations/0063_partner_notification_population.sql
@@ -27,20 +28,21 @@ openwiki:
     - packages/server/lib/capabilities/events.test.ts
     - packages/server/lib/notify/email-runtime-store.test.ts
     - packages/server/drizzle/migration-0063.integration.test.ts
+    - packages/server/lib/partners/delivery.database.test.ts
     - packages/server/e2e/partner-audience.flow.ts
   invariants:
     - Partners are a notification population that is never rostered; no roster snapshot, recipient, or event holds one.
     - Only a live incident at a facility that is not isolated, with a response and threat the partner alert settings select, reaches partners; drills, tests, and synthetic training never do.
     - The partner set is resolved and pinned when the activation preview is planned; the confirmed send and every all-clear or reactivation reach exactly that pinned set.
     - A partner slice shares its staff send's request, authorization, and rendered messages, and is a separate intent and outbox record.
-    - Delivery of partner batches is refused as a terminal conflict until partner delivery is enabled.
+    - At send time each channel reaches only pinned partners whose admission, account, device or consent is still live; a partner bounce never suppresses a staff address.
   validation_commands:
     - bun test packages/server/lib/capabilities/events.test.ts packages/server/lib/notify/email-runtime-store.test.ts
 ---
 
 # Partner audience: planning, pinning, and the partner notification slice
 
-**Consult this page** when changing which admitted partners a live incident alerts, the partner notification slice written beside a staff send, the partner population in contracts or the database, or the point where partner delivery is refused.
+**Consult this page** when changing which admitted partners a live incident alerts, the partner notification slice written beside a staff send, the partner population in contracts or the database, or how partner batches are delivered at send time.
 
 Partners are first responders admitted one by one outside the district ([partner access](partner-access.md)). They are never rostered. This page covers how a live incident reaches them: which settings decide it ([partner alert settings](partner-alert-settings.md)), where the set is pinned ([event lifecycle](event-lifecycle-and-activation.md)), and how it becomes queued notification records ([notification pipeline](notification-pipeline.md)).
 
@@ -66,7 +68,7 @@ flowchart TD
   R -- no --> NONE
   R -- yes --> A["Admitted, unexpired, unended partners ordered by id"]
   A --> B{"More than 1200?"}
-  B -- yes --> CONFLICT["PartnerAudienceBoundError, refused as 409"]
+  B -- yes --> CAP["First 1200 pinned, overflow logged; staff activation proceeds"]
   B -- no --> PIN[Pinned with the preview]
 ```
 
@@ -82,36 +84,33 @@ When a human confirms the preview, `startEventRegistration` (`packages/server/li
 
 All-clear and reactivation do not re-resolve partners. `journal.ts` copies `partnerRecipientCount` from the activation preview into each lifecycle consequence preview, and `notifyingLifecycleResult` builds the same kind of slice from it. Closing and reopening create no slice (`partnerNotification: null`). A correction record plans no slice of its own.
 
-`loadEventPartnerAudience` (`packages/server/lib/partners/audience.ts`) reads the pinned admission ids for an event through its immutable activation authorization. Only the database tests call it in this revision; production all-clear code uses the copied count.
+`loadEventPartnerAudience` (`packages/server/lib/partners/audience.ts`) reads the pinned admission ids for an event through its immutable activation authorization. Partner delivery reads the pinned set at send time; all-clear previews use the copied count.
 
-## Delivery is refused until partner delivery exists
+## Delivery: reaching the pinned partners at send time
 
-The slice is written and queued, but no worker sends to a partner yet. Each runtime refuses a partner batch as a non-retryable conflict, so it cannot loop into the dead-letter queue:
+`packages/server/lib/partners/delivery.ts` resolves a partner batch; each runtime store routes a batch whose population is `partner` there instead of through a roster snapshot (`isRosteredDispatchBatch` decides the route).
 
-| Runtime | Refusal | Source |
-| --- | --- | --- |
-| Email | `BATCH_CONFLICT` with reason `partner-delivery-not-enabled` | `assertEmailBatch` in `packages/server/lib/notify/email-runtime-store.ts` |
-| Email endpoint resolution | `EMAIL_ROSTER_MISMATCH` (no roster to resolve through) | `resolveEmailEndpoints` in `packages/server/lib/notify/dispatcher.ts` |
-| Push | `BATCH_CONFLICT` before the roster snapshot is read | `resolvedPushEndpoints` and `resolvedPushEndpointPage` in `packages/server/lib/notify/expo-push-runtime-store.ts` |
-| SMS | `BATCH_CONFLICT` and `SMS_ROSTER_MISMATCH` | `resolvedSmsEndpoints` in `sms-runtime-store.ts`, `resolveSmsEndpoints` in `sms-policy.ts` |
+| Channel | Endpoint | Planned count | Source |
+| --- | --- | --- | --- |
+| Email | The address each pinned admission was admitted under, sent under the partner SES configuration set | One per pinned partner; must equal the plan | `resolvePartnerEmailEndpoints` |
+| Push | The partner's own live device registrations, one per device | 0 (more than planned is allowed, as for staff) | `resolvePartnerPushEndpoints` |
+| SMS | The partner's own active consent, newest per partner | 0 (exact-count equality applies to staff batches only) | `resolvePartnerSmsEndpoints` |
 
-`isRosteredDispatchBatch` (`packages/contracts/src/notification.ts`) is the guard: a batch resolves through its pinned snapshot only when its population is rostered. The Expo push store's pending read includes partner outbox rows, so a stranded partner slice is visible to the same sweep as a staff one. The SES webhook's endpoint-status path also refuses a non-rostered attempt.
-
-`partner_endpoints` (`packages/server/db/schema/delivery.ts`, migration `0063`) is the partner counterpart of a published roster endpoint: one row per admitted email address, or per push registration or SMS consent that belongs to the admitted person. `channel_attempts` and `endpoint_status_records` bind a partner attempt to one of these rows through a composite foreign key. No production code writes `partner_endpoints` yet, so the binding is exercised only by `migration-0063.integration.test.ts`.
+Each endpoint is recorded once as a `partner_endpoints` row, and every attempt binds to it through `partner_endpoint_id`. Nobody is sent to whose admission ended or expired after activation, whose account is disabled, whose device was revoked, unregistered or re-enrolled, whose consent was withdrawn, or whose address is suppressed; they stay in the paging list so later pages do not shift. Push eligibility re-checks the admission and device ownership on the database clock. Partner bounce, complaint and reject events return through the signed SES callback and suppress partner mail only.
 
 ## Status and known gaps
 
-- **Partner alert settings are read at planning.** `resolvePartnerAudience` reads `loadEffectivePartnerAlertSettings`, and the saved settings decide the pinned set. The settings alone never send anything; a partner receives a message only once delivery is enabled.
-- **Delivery is not enabled** (see the table above). An operator sees partner recipients on the confirmation screen and in the event's consequence summary; no partner receives a message.
-- **Endpoints are not produced.** `partner_endpoints` has no writer, and the email endpoint for a partner is not resolved anywhere.
-- **Summary PDF** labels a partner intent `(partners)` in its notification-intent heading (`packages/server/lib/capabilities/records/pdf.ts`, fed by `loadEventSummarySnapshot` in `records/snapshot.ts`); the export itself is described in [media, records and audit](media-records-and-audit.md).
+- **Settings are read at planning** and decide the pinned set; the confirmed send, all-clear and reactivation reach exactly that set.
+- **More than 1,200 admitted partners** pins the first 1,200 in admission order and logs the overflow; it never blocks the staff activation.
+- **Partner STOP is not recorded locally.** Opt-out records key on staff roster numbers; AWS refuses an opted-out number and the attempt records as failed.
+- **Summary PDF** labels a partner intent `(partners)` in its notification-intent heading (`packages/server/lib/capabilities/records/pdf.ts`); partner push and text attempts are left out of the plan comparison, like late-enrolled staff devices ([media, records and audit](media-records-and-audit.md)).
 
 ## Change navigation
 
 - **Where to start:** the population and targeting schemas in `packages/contracts/src/roster.ts` and `event.ts`; then the planning query `resolvePartnerAudience`; then `partnerSlice` in `events.ts`.
 - **Invariants to keep:** a partner never enters a roster snapshot, a recipient list, or an event population; a partner intent is always a live-incident slice sharing its staff request; a preview's count and pinned rows match; the pinned set is never re-resolved for all-clear or reactivation; drills and tests never reach partners.
 - **Change the population or targeting shape:** contracts first, then the database check and generated columns in `db/schema/events.ts` and `delivery.ts`, with a new migration. Never edit `0063` or `0064`. The migration header states the rule that every comparison with `'partner'` is text, because a new enum value cannot be used in the same transaction.
-- **Enable partner delivery:** remove the refusals in the table above only together with a writer for `partner_endpoints` and the endpoint resolution for partner batches. The database already requires a partner push or SMS endpoint to belong to the admitted person. Escalate: this changes who receives a real alert, so it needs a real-versus-drill test and a human review.
+- **Change partner delivery:** edit `lib/partners/delivery.ts` and keep the send-time liveness checks. The database requires a partner push or SMS endpoint to belong to the admitted person. Escalate: this changes who receives a real alert, so it needs a real-versus-drill test and a human review.
 - **Change who is alerted:** edit the settings path in [partner alert settings](partner-alert-settings.md) and `partnerAlertSettingsMatch`; keep `resolvePartnerAudience` the only planning reader.
 
 ## Focused tests
@@ -126,7 +125,7 @@ The slice is written and queued, but no worker sends to a partner yet. Each runt
 | Database refuses partners on a drill preview; pinned set append-only | same | `the database refuses partners on a drill preview and keeps the pinned set append-only` |
 | Application role can pin and read the set | same | `the production application role can pin and read a preview partner set` |
 | Slice as a second intent, same request and messages; no slice when none reached; all-clear; drill cannot carry partners; correction plans none | `packages/server/lib/capabilities/events.test.ts` (describe `partner slice of a live incident (#597)`) | `records the partner slice as a second intent in the same human-confirmed request`, `records no partner slice when the preview reaches no partner`, `an all-clear reaches the same partners under the shared lifecycle authorization`, `a drill preview cannot carry partners`, `a correction record plans no partner slice of its own` |
-| Partner batch refused as a conflict, not transient | `packages/server/lib/notify/email-runtime-store.test.ts` | `refuses a partner slice as a conflict, not a transient failure` |
+| Partner target to provider fact per channel; bounce suppresses partner mail only; liveness | `packages/server/lib/partners/delivery.database.test.ts` | `a live lockdown queues a partner slice for every channel`, `email reaches each admitted partner under the partner set, and a bounce suppresses partner mail only`, `text reaches a partner at their own consented number until they withdraw`, `push reaches a partner’s own live device, and eligibility follows the admission` |
 | Database: slice beside staff in one request; one intent per population; attempts and endpoint status bind only their own endpoint; partner never in roster or event; append-only | `packages/server/drizzle/migration-0063.integration.test.ts` | `a live incident records a partner slice beside its staff intent in one request`, `one request still holds only one intent per population`, `a partner attempt binds only a partner endpoint of its admission`, `partner never enters the roster or an event`, `partner endpoints are append-only` |
 | Browser: lockdown lists partner recipients; drill shows none | `packages/server/e2e/partner-audience.flow.ts` | `lockdown activation lists partner recipients` |
 

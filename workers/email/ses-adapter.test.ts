@@ -14,6 +14,7 @@ import { EMAIL_LOGO_CONTENT_ID } from './email-message';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_CORRELATION_TAG_NAMES,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
   SES_V2_PROVIDER,
   SesV2EmailAdapter,
   SesV2EmailAdapterError,
@@ -305,6 +306,22 @@ describe('SES v2 live adapter', () => {
       },
     ]);
     expect(app.ledger.completeCalls).toBe(1);
+  });
+
+  test('sends a live incident partner alert under the partner set (#597)', async () => {
+    const app = adapter();
+    const item = workItem();
+    const partner = {
+      ...item,
+      batch: { ...item.batch, rosterPopulation: 'partner' as const },
+      attempt: { ...item.attempt, rosterPopulation: 'partner' as const },
+    };
+
+    await app.adapter.send({ workItem: partner, idempotencyKey: IDS.attempt });
+
+    expect(app.client.inputs[0]?.ConfigurationSetName).toBe(
+      SES_PARTNER_CONFIGURATION_SET_NAME,
+    );
   });
 
   test('sends from the bare address when no display name is configured', async () => {

@@ -34,6 +34,7 @@ import {
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
+  type RosterPopulation,
   type RosterSnapshot,
 } from '@psd-eoc/contracts';
 import {
@@ -65,6 +66,9 @@ import {
   devicePushTokenRegistrations,
   devicePushTokenUnregistrations,
   endpointStatusRecords,
+  partnerAdmissionEndings,
+  partnerAdmissions,
+  partnerEndpoints,
   rosterEndpoints,
   rosterRecipients,
   sessionRevocations,
@@ -185,7 +189,7 @@ export interface ResolvePushEndpointsInput {
 
 export interface ResolvedPushEndpoint {
   readonly rosterSnapshotId: string;
-  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly rosterPopulation: RosterPopulation;
   readonly recipientId: string;
   readonly endpoint: PushEndpoint;
 }
@@ -197,7 +201,7 @@ export interface ResolvedPushEndpointPage {
 
 interface PushEndpointSendEligibilityEvidence {
   readonly rosterSnapshotId: string;
-  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly rosterPopulation: RosterPopulation;
   readonly recipientId: string;
   readonly endpointId: string;
   readonly platform: 'ios' | 'android';
@@ -239,7 +243,8 @@ function parsePushEndpointSendEligibilityEvidence(
     record === null ||
     typeof record.rosterSnapshotId !== 'string' ||
     (record.rosterPopulation !== 'staff' &&
-      record.rosterPopulation !== 'synthetic') ||
+      record.rosterPopulation !== 'synthetic' &&
+      record.rosterPopulation !== 'partner') ||
     typeof record.recipientId !== 'string' ||
     typeof record.endpointId !== 'string' ||
     (record.platform !== 'ios' && record.platform !== 'android') ||
@@ -713,7 +718,7 @@ function additionalPushEndpoints(
  * so the devices a batch fans out to and the devices the eligibility boundary
  * vouches for are chosen by one rule and cannot drift apart.
  */
-function fannedOutPushEndpoints(
+export function fannedOutPushEndpoints(
   publishedPushEndpointIds: readonly string[],
   registrations: readonly LivePushRegistration[],
   resolved: ReadonlyMap<string, LivePushRegistration>,
@@ -1420,6 +1425,139 @@ async function loadDrizzleFannedOutPushEndpointSendEligibility(
   });
 }
 
+/**
+ * Send-time evidence for a partner's push endpoint (#597).
+ *
+ * The endpoint is the partner's own registration, recorded in
+ * `partner_endpoints` when the batch was resolved. It is vouched for only
+ * while the admission is still live (not ended, not expired), the account is
+ * the admitted address under a non-Google issuer and is not disabled, the
+ * enrollment is not revoked, the registration is not unregistered (a device
+ * handed to another account unregisters it, #498), its build identity is
+ * complete, and the deployment's cutover still sends on its provider. Anything
+ * else answers `disabled`, which the caller reports as ineligible; a partner
+ * endpoint the recipient does not own answers null.
+ */
+async function loadDrizzlePartnerPushEndpointSendEligibility(
+  database: DeviceQueryDatabase,
+  input: PushEndpointSendEligibilityInput,
+  cutover: PushProviderCutover | null,
+): Promise<PushEndpointSendEligibilityEvidence | null> {
+  const [row] = await database
+    .select({
+      platform: devicePushTokenRegistrations.platform,
+      provider: devicePushTokenRegistrations.provider,
+      serviceEnvironment: devicePushTokenRegistrations.serviceEnvironment,
+      token: devicePushTokenRegistrations.token,
+      buildIdentityComplete: sql<boolean>`(
+        ${devicePushTokenRegistrations.applicationId} is not null
+        and ${devicePushTokenRegistrations.applicationVersion} is not null
+        and ${devicePushTokenRegistrations.nativeBuildVersion} is not null
+        and ${devicePushTokenRegistrations.expoProjectId} is not null
+        and ${devicePushTokenRegistrations.updateMode} = 'embedded-only'
+      )`,
+      registrationLive: sql<boolean>`(
+        ${devicePushTokenUnregistrations.id} is null
+        and ${deviceEnrollments.revokedAt} is null
+        and ${users.disabledAt} is null
+        and ${users.googleSubject} is null
+        and ${users.email} = ${partnerAdmissions.email}
+      )`,
+      admissionLive: sql<boolean>`(
+        ${partnerAdmissionEndings.id} is null
+        and ${partnerAdmissions.expiresAt} > clock_timestamp()
+      )`,
+    })
+    .from(partnerEndpoints)
+    .innerJoin(
+      partnerAdmissions,
+      eq(partnerAdmissions.id, partnerEndpoints.partnerAdmissionId),
+    )
+    .leftJoin(
+      partnerAdmissionEndings,
+      eq(partnerAdmissionEndings.partnerAdmissionId, partnerAdmissions.id),
+    )
+    .innerJoin(
+      devicePushTokenRegistrations,
+      eq(devicePushTokenRegistrations.id, partnerEndpoints.pushRegistrationId),
+    )
+    .innerJoin(
+      deviceEnrollments,
+      eq(deviceEnrollments.id, devicePushTokenRegistrations.deviceEnrollmentId),
+    )
+    .innerJoin(users, eq(users.id, deviceEnrollments.userId))
+    .leftJoin(
+      devicePushTokenUnregistrations,
+      and(
+        eq(
+          devicePushTokenUnregistrations.registrationId,
+          devicePushTokenRegistrations.id,
+        ),
+        eq(
+          devicePushTokenUnregistrations.deviceEnrollmentId,
+          devicePushTokenRegistrations.deviceEnrollmentId,
+        ),
+      ),
+    )
+    .where(
+      and(
+        eq(partnerEndpoints.id, input.endpointId),
+        eq(partnerEndpoints.partnerAdmissionId, input.recipientId),
+        eq(partnerEndpoints.channel, 'push'),
+      ),
+    )
+    .limit(1);
+  if (row === undefined) return null;
+  const platform = PushPlatformSchema.safeParse(row.platform);
+  if (
+    !platform.success ||
+    (row.provider !== 'expo' &&
+      row.provider !== 'apns' &&
+      row.provider !== 'fcm') ||
+    (row.serviceEnvironment !== 'development' &&
+      row.serviceEnvironment !== 'production')
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const live =
+    row.admissionLive === true &&
+    row.registrationLive === true &&
+    row.buildIdentityComplete === true &&
+    cutover !== null &&
+    selectedPushProvider(cutover, platform.data) === row.provider;
+  const [status] = await database
+    .select({ status: endpointStatusRecords.status })
+    .from(endpointStatusRecords)
+    .where(
+      and(
+        eq(endpointStatusRecords.population, 'partner'),
+        eq(endpointStatusRecords.channel, 'push'),
+        eq(endpointStatusRecords.partnerEndpointId, input.endpointId),
+      ),
+    )
+    .orderBy(
+      desc(endpointStatusRecords.recordedAt),
+      desc(endpointStatusRecords.sequence),
+    )
+    .limit(1);
+  const endpointStatus: EndpointStatus = live ? 'active' : 'disabled';
+  return Object.freeze({
+    rosterSnapshotId: input.rosterSnapshotId,
+    rosterPopulation: 'partner' as const,
+    recipientId: input.recipientId,
+    endpointId: input.endpointId,
+    platform: platform.data,
+    provider: row.provider,
+    serviceEnvironment: row.serviceEnvironment,
+    tokenDigest: createHash('sha256').update(row.token, 'utf8').digest('hex'),
+    endpointStatus,
+    effectiveStatus:
+      endpointStatus === 'active' && status !== undefined
+        ? EndpointStatusSchema.parse(status.status)
+        : endpointStatus,
+  });
+}
+
 async function loadDrizzlePushEndpointSendEligibility(
   database: DeviceQueryDatabase,
   input: PushEndpointSendEligibilityInput,
@@ -1427,9 +1565,15 @@ async function loadDrizzlePushEndpointSendEligibility(
     process.env[PUSH_PROVIDER_CUTOVER_ENV],
   ),
 ): Promise<PushEndpointSendEligibilityEvidence | null> {
-  // A partner endpoint is never published in a roster snapshot, so this
-  // roster-backed path has no answer for it: ineligible, as before.
-  if (!isRosteredPopulation(input.rosterPopulation)) return null;
+  // A partner endpoint is never published in a roster snapshot; it answers
+  // from the partner's own admission and registration instead.
+  if (!isRosteredPopulation(input.rosterPopulation)) {
+    return loadDrizzlePartnerPushEndpointSendEligibility(
+      database,
+      input,
+      cutover,
+    );
+  }
   const rows = await database
     .select({
       rosterSnapshotId: rosterEndpoints.rosterSnapshotId,
@@ -2015,7 +2159,7 @@ async function latestPushTokenFailureCutoff(
           eq(deliveryEvidence.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
           or(
             and(
-              eq(channelAttempts.rosterPopulation, 'staff'),
+              inArray(channelAttempts.rosterPopulation, ['staff', 'partner']),
               eq(deliveryEvidence.provider, 'expo-push'),
             ),
             and(
@@ -2070,6 +2214,12 @@ async function latestPushTokenFailureCutoff(
         eq(rosterEndpoints.channel, channelAttempts.channel),
       ),
     )
+    // A partner attempt (#597) reaches its registration through its partner
+    // endpoint.
+    .leftJoin(
+      partnerEndpoints,
+      eq(partnerEndpoints.id, channelAttempts.partnerEndpointId),
+    )
     .leftJoin(
       devicePushTokenRegistrations,
       or(
@@ -2081,6 +2231,10 @@ async function latestPushTokenFailureCutoff(
           devicePushTokenRegistrations.id,
           channelAttempts.fannedOutRegistrationId,
         ),
+        eq(
+          devicePushTokenRegistrations.id,
+          partnerEndpoints.pushRegistrationId,
+        ),
       ),
     )
     .where(
@@ -2089,7 +2243,10 @@ async function latestPushTokenFailureCutoff(
         or(
           eq(rosterEndpoints.token, token),
           and(
-            isNotNull(channelAttempts.fannedOutRegistrationId),
+            or(
+              isNotNull(channelAttempts.fannedOutRegistrationId),
+              isNotNull(channelAttempts.partnerEndpointId),
+            ),
             eq(devicePushTokenRegistrations.token, token),
           ),
         ),
@@ -2580,7 +2737,8 @@ async function requirePushEndpointInvalidationAttempt(
     registrationProvider === 'expo'
       ? or(
           and(
-            eq(channelAttempts.rosterPopulation, 'staff'),
+            // A partner (#597) is sent through the same live Expo integration.
+            inArray(channelAttempts.rosterPopulation, ['staff', 'partner']),
             eq(deliveryEvidence.provider, 'expo-push'),
           ),
           and(
@@ -2608,9 +2766,18 @@ async function requirePushEndpointInvalidationAttempt(
         eq(deliveryEvidence.attemptId, channelAttempts.id),
       ),
     )
+    // A partner attempt names its partner endpoint, which names the
+    // registration; every other attempt names the registration itself.
+    .leftJoin(
+      partnerEndpoints,
+      eq(partnerEndpoints.id, channelAttempts.partnerEndpointId),
+    )
     .leftJoin(
       devicePushTokenRegistrations,
-      eq(devicePushTokenRegistrations.id, channelAttempts.endpointId),
+      eq(
+        devicePushTokenRegistrations.id,
+        sql`coalesce(${partnerEndpoints.pushRegistrationId}, ${channelAttempts.endpointId})`,
+      ),
     )
     .where(
       and(
@@ -2719,6 +2886,50 @@ async function loadFannedOutPushEndpoint(
   });
 }
 
+/**
+ * The partner push endpoint a partner attempt was sent to (#597), shaped like
+ * a published one. The attempt names the partner endpoint, which names the
+ * partner's own registration; the database bound the two when the attempt
+ * was recorded (migration 0063).
+ */
+async function loadPartnerPushEndpoint(
+  database: DeviceQueryDatabase,
+  input: CapabilityInput<'record-endpoint-status'>,
+) {
+  const [row] = await database
+    .select({ registration: devicePushTokenRegistrations })
+    .from(channelAttempts)
+    .innerJoin(
+      partnerEndpoints,
+      eq(partnerEndpoints.id, channelAttempts.partnerEndpointId),
+    )
+    .innerJoin(
+      devicePushTokenRegistrations,
+      eq(devicePushTokenRegistrations.id, partnerEndpoints.pushRegistrationId),
+    )
+    .where(
+      and(
+        eq(channelAttempts.rosterSnapshotId, input.rosterSnapshotId),
+        eq(channelAttempts.recipientId, input.recipientId),
+        eq(channelAttempts.partnerEndpointId, input.endpointId),
+        eq(channelAttempts.channel, 'push'),
+      ),
+    )
+    .limit(1);
+  if (row === undefined) return undefined;
+  return Object.freeze({
+    id: input.endpointId,
+    rosterSnapshotId: input.rosterSnapshotId,
+    recipientId: input.recipientId,
+    population: 'partner' as const,
+    channel: 'push' as const,
+    platform: row.registration.platform,
+    provider: row.registration.provider,
+    serviceEnvironment: row.registration.serviceEnvironment,
+    token: row.registration.token,
+  });
+}
+
 async function recordEndpointStatusWithDatabase(
   database: DeviceQueryDatabase,
   input: CapabilityInput<'record-endpoint-status'>,
@@ -2736,7 +2947,9 @@ async function recordEndpointStatusWithDatabase(
     )
     .limit(1);
   const endpoint =
-    published ?? (await loadFannedOutPushEndpoint(database, input));
+    published ??
+    (await loadFannedOutPushEndpoint(database, input)) ??
+    (await loadPartnerPushEndpoint(database, input));
   if (endpoint === undefined) {
     throw deviceNotFound('The snapshotted endpoint was not found.');
   }

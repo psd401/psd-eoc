@@ -214,6 +214,18 @@ access decisions each enforce.
   after enrolling a device or consenting. The settings in effect are read
   through `loadEffectivePartnerAlertSettings` in
   `lib/partners/alert-settings.ts`.
+- A live incident's activation preview pins the admitted partners those
+  settings select (`lib/partners/audience.ts`), and the confirmed send writes a
+  partner intent beside the staff one. Its all-clear and reactivation reach
+  exactly that pinned set. Delivery resolves each partner when the batch is
+  sent (`lib/partners/delivery.ts`): the admitted address by email, the
+  partner's own live push registrations, and the partner's own live text
+  consent, each recorded once as a `partner_endpoints` row that attempts bind
+  to. An admission ended or expired since activation, an unregistered or
+  handed-on device, a withdrawn consent, or a suppressed address is not sent
+  to. Partner alert email goes out under the partner SES configuration set, so
+  a partner bounce or complaint is recorded against partner mail and never
+  suppresses a staff address.
 
 ## Data and delivery truth
 
