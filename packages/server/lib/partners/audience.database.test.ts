@@ -8,7 +8,10 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import type { ActivationPreview } from '@psd-eoc/contracts';
+import {
+  PARTNER_AUDIENCE_MAX_RECIPIENTS,
+  type ActivationPreview,
+} from '@psd-eoc/contracts';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
@@ -779,5 +782,37 @@ describeWithDatabase('partner audience at activation planning (#597)', () => {
     } finally {
       await roleConnection.close();
     }
+  });
+
+  test('more admitted partners than a preview may pin degrade the partner slice, never the staff activation', async () => {
+    const live = await resolvePartnerAudience(database(), query());
+    const extra = PARTNER_AUDIENCE_MAX_RECIPIENTS + 1 - live.length;
+    await database()
+      .insert(partnerAdmissions)
+      .values(
+        Array.from({ length: extra }, (_, index) => ({
+          email: `bulk-${index}@agency.example.invalid`,
+          displayName: 'Synthetic Responder',
+          agency: 'Synthetic Fire District',
+          invitedByUserId: OPERATOR.userId,
+          admittedAt: new Date(),
+        })),
+      );
+    const warnings: string[] = [];
+    const capped = await resolvePartnerAudience(database(), query(), (line) =>
+      warnings.push(line),
+    );
+    expect(capped).toHaveLength(PARTNER_AUDIENCE_MAX_RECIPIENTS);
+    expect([...capped].sort()).toEqual([...capped]);
+    expect(warnings.map((line) => JSON.parse(line) as unknown)).toEqual([
+      { event: 'partner-audience-truncated', pinned: 1_200 },
+    ]);
+    // The staff activation is still planned, with the bounded partner slice.
+    const preview = await createPreview({
+      templateMode: 'real',
+      eventTypeVersionId: versions.lockdownReal,
+    });
+    expect(preview.recipientCount).toBe(1);
+    expect(preview.partnerRecipientCount).toBe(PARTNER_AUDIENCE_MAX_RECIPIENTS);
   });
 });

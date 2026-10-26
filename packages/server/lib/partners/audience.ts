@@ -33,14 +33,6 @@ export interface PartnerAudienceQuery {
   readonly now: Date;
 }
 
-/** Thrown when the admitted partner list exceeds what one preview may pin. */
-export class PartnerAudienceBoundError extends Error {
-  public constructor() {
-    super('The partner audience exceeds its supported bound.');
-    this.name = 'PartnerAudienceBoundError';
-  }
-}
-
 /**
  * The partners one activation would alert, resolved when the preview is
  * planned (#597): every admitted, unexpired, unended partner, when the event
@@ -51,10 +43,16 @@ export class PartnerAudienceBoundError extends Error {
  *
  * Returns admission ids in a stable order. The caller pins them with the
  * preview, so what a human confirms is exactly this set.
+ *
+ * More admitted partners than one preview may pin never blocks the staff
+ * activation it rides on: the partner slice degrades to the first
+ * `PARTNER_AUDIENCE_MAX_RECIPIENTS` admissions, in admission order, and the
+ * shortfall is logged. The human still confirms the exact count pinned.
  */
 export async function resolvePartnerAudience(
   database: Pick<Database, 'select'>,
   query: PartnerAudienceQuery,
+  warn: (message: string) => void = console.warn,
 ): Promise<readonly string[]> {
   if (!previewReachesPartners(query) || query.facilityIsolated) return [];
   const [response] = await database
@@ -98,12 +96,20 @@ export async function resolvePartnerAudience(
         gt(partnerAdmissions.expiresAt, query.now),
       ),
     )
-    .orderBy(asc(partnerAdmissions.id))
+    .orderBy(asc(partnerAdmissions.admittedAt), asc(partnerAdmissions.id))
     .limit(PARTNER_AUDIENCE_MAX_RECIPIENTS + 1);
   if (rows.length > PARTNER_AUDIENCE_MAX_RECIPIENTS) {
-    throw new PartnerAudienceBoundError();
+    warn(
+      JSON.stringify({
+        event: 'partner-audience-truncated',
+        pinned: PARTNER_AUDIENCE_MAX_RECIPIENTS,
+      }),
+    );
   }
-  return rows.map((row) => row.id);
+  return rows
+    .slice(0, PARTNER_AUDIENCE_MAX_RECIPIENTS)
+    .map((row) => row.id)
+    .sort();
 }
 
 /** Pins a preview's resolved partners beside it, in the same transaction. */
