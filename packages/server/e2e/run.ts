@@ -23,7 +23,11 @@ import {
   mediaRecords,
   mediaUploadIntents,
   partnerAdmissions,
+  rosterSnapshotFacilities,
+  rosterSnapshotSources,
   rosterSnapshots,
+  rosterSourceConfigurationFacilities,
+  rosterSourceConfigurationGroups,
   rosterSourceConfigurations,
 } from '../db/schema';
 import { migrateDatabase } from '../drizzle/migrate';
@@ -415,25 +419,65 @@ async function seedIssue32ReadyMedia(
 async function seedSyntheticRecords(
   connection: PostgresDatabaseConnection,
   identity: IssuedIdentity,
+  northBuildingGroupId: string,
   now: Date,
 ): Promise<SyntheticRecordsFixture> {
   const staffRosterConfigurationId = randomUUID();
   const staffRosterSnapshotId = randomUUID();
-  await connection.db.insert(rosterSourceConfigurations).values({
-    id: staffRosterConfigurationId,
-    version: 1,
-    population: 'staff',
-    createdAt: new Date(now.getTime() - 4 * DAY_MILLISECONDS),
+  // Issue #597. The staff roster covers the North campus through its
+  // building group, with nobody in it: a real preview there builds (blocked,
+  // so it can never be confirmed) and shows the partners it would reach.
+  const northBuildingSource = {
+    population: 'staff' as const,
+    groupSourceId: northBuildingGroupId,
+    groupSourceKind: 'google-group' as const,
+    groupPurpose: 'building' as const,
+  };
+  await connection.db.transaction(async (transaction) => {
+    await transaction.insert(rosterSourceConfigurations).values({
+      id: staffRosterConfigurationId,
+      version: 1,
+      population: 'staff',
+      createdAt: new Date(now.getTime() - 4 * DAY_MILLISECONDS),
+    });
+    await transaction.insert(rosterSourceConfigurationFacilities).values({
+      configurationId: staffRosterConfigurationId,
+      configurationVersion: 1,
+      facilityId: SYNTHETIC_FACILITY_ID,
+    });
+    await transaction.insert(rosterSourceConfigurationGroups).values({
+      configurationId: staffRosterConfigurationId,
+      configurationVersion: 1,
+      ...northBuildingSource,
+    });
   });
-  await connection.db.insert(rosterSnapshots).values({
-    id: staffRosterSnapshotId,
-    version: 1,
-    population: 'staff',
-    complete: true,
-    sourceConfigurationId: staffRosterConfigurationId,
-    sourceConfigurationVersion: 1,
-    syncStartedAt: new Date(now.getTime() - 4 * DAY_MILLISECONDS),
-    capturedAt: new Date(now.getTime() - 3 * DAY_MILLISECONDS),
+  await connection.db.transaction(async (transaction) => {
+    await transaction.insert(rosterSnapshots).values({
+      id: staffRosterSnapshotId,
+      version: 1,
+      population: 'staff',
+      complete: true,
+      sourceConfigurationId: staffRosterConfigurationId,
+      sourceConfigurationVersion: 1,
+      syncStartedAt: new Date(now.getTime() - 4 * DAY_MILLISECONDS),
+      capturedAt: new Date(now.getTime() - 3 * DAY_MILLISECONDS),
+    });
+    await transaction.insert(rosterSnapshotFacilities).values({
+      rosterSnapshotId: staffRosterSnapshotId,
+      facilityId: SYNTHETIC_FACILITY_ID,
+    });
+    await transaction.insert(rosterSnapshotSources).values([
+      {
+        rosterSnapshotId: staffRosterSnapshotId,
+        ...northBuildingSource,
+        completionKind: 'expected',
+      },
+      {
+        rosterSnapshotId: staffRosterSnapshotId,
+        ...northBuildingSource,
+        completionKind: 'completed',
+      },
+    ]);
   });
 
   const fixture: SyntheticRecordsFixture = Object.freeze({
@@ -783,6 +827,7 @@ async function main(): Promise<void> {
     const records = await seedSyntheticRecords(
       opened,
       districtAdministrator,
+      facilityStaffGroupId,
       now,
     );
     await writeFile(
