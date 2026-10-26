@@ -9,6 +9,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   unique,
   uniqueIndex,
@@ -34,7 +35,7 @@ import { digest, occurredAt } from './shared';
 
 import { facilities, threats } from './configuration';
 
-import { humanConfirmationRecords } from './identity';
+import { humanConfirmationRecords, partnerAdmissions } from './identity';
 
 import { rosterSnapshots } from './roster';
 
@@ -64,6 +65,11 @@ export const activationPreviews = pgTable(
     threatDetail: varchar('threat_detail', { length: 200 }),
     responseDetail: varchar('response_detail', { length: 200 }),
     recipientCount: integer('recipient_count').notNull(),
+    // Admitted partners this preview reaches beside its staff recipients;
+    // who they are is activation_preview_partners. Zero unless live.
+    partnerRecipientCount: integer('partner_recipient_count')
+      .default(0)
+      .notNull(),
     channels: jsonb('channels').notNull(),
     sendReadiness: varchar('send_readiness', { length: 16 }).notNull(),
     blockingReasonCodes: jsonb('blocking_reason_codes').notNull(),
@@ -109,6 +115,20 @@ export const activationPreviews = pgTable(
       'activation_previews_count',
       sql`${table.recipientCount} between 0 and 1200`,
     ),
+    unique('activation_previews_partner_anchor_uq').on(
+      table.id,
+      table.kind,
+      table.templateMode,
+      table.rosterPopulation,
+    ),
+    check(
+      'activation_previews_partner_count',
+      sql`${table.partnerRecipientCount} between 0 and 1200
+        and (${table.partnerRecipientCount} = 0 or (
+          ${table.kind} = 'incident' and ${table.templateMode} = 'real'
+          and ${table.rosterPopulation} = 'staff'
+        ))`,
+    ),
     check(
       'activation_previews_readiness',
       sql`${table.sendReadiness} in ('ready', 'blocked')`,
@@ -131,6 +151,63 @@ export const activationPreviews = pgTable(
       'activation_previews_detail_nonempty',
       sql`(${table.threatDetail} is null or length(btrim(${table.threatDetail})) > 0)
         and (${table.responseDetail} is null or length(btrim(${table.responseDetail})) > 0)`,
+    ),
+  ],
+);
+
+/**
+ * The partners one live incident's activation preview resolved: admitted,
+ * unexpired partners the partner alert settings in effect let this response
+ * and threat reach (#597). Written with the preview and never changed. The
+ * event a human confirms from the preview reaches exactly this set, and its
+ * all-clear and reactivation reach the same set again, read through the
+ * event's activation authorization. A drill, test, or synthetic preview has
+ * no rows here; the composite foreign key and CHECK refuse them.
+ */
+export const activationPreviewPartners = pgTable(
+  'activation_preview_partners',
+  {
+    activationPreviewId: uuid('activation_preview_id').notNull(),
+    kind: eventKindEnum('kind').notNull(),
+    templateMode: templateModeEnum('template_mode').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .$type<RosteredPopulation>()
+      .notNull(),
+    partnerAdmissionId: uuid('partner_admission_id').notNull(),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.partnerAdmissionId],
+      foreignColumns: [partnerAdmissions.id],
+      name: 'activation_preview_partners_admission_fk',
+    }).onDelete('restrict'),
+    primaryKey({
+      name: 'activation_preview_partners_pk',
+      columns: [table.activationPreviewId, table.partnerAdmissionId],
+    }),
+    foreignKey({
+      columns: [
+        table.activationPreviewId,
+        table.kind,
+        table.templateMode,
+        table.rosterPopulation,
+      ],
+      foreignColumns: [
+        activationPreviews.id,
+        activationPreviews.kind,
+        activationPreviews.templateMode,
+        activationPreviews.rosterPopulation,
+      ],
+      name: 'activation_preview_partners_preview_fk',
+    }).onDelete('restrict'),
+    index('activation_preview_partners_admission_idx').on(
+      table.partnerAdmissionId,
+    ),
+    check(
+      'activation_preview_partners_live_incident',
+      sql`${table.kind} = 'incident' and ${table.templateMode} = 'real'
+        and ${table.rosterPopulation} = 'staff'`,
     ),
   ],
 );
@@ -380,6 +457,10 @@ export const lifecycleConsequencePreviews = pgTable(
       .$type<RosteredPopulation>()
       .notNull(),
     recipientCount: integer('recipient_count').notNull(),
+    // Copied from the event's activation preview: the same partners again.
+    partnerRecipientCount: integer('partner_recipient_count')
+      .default(0)
+      .notNull(),
     channels: jsonb('channels').notNull(),
     sendReadiness: varchar('send_readiness', { length: 16 }).notNull(),
     blockingReasonCodes: jsonb('blocking_reason_codes').notNull(),
@@ -436,6 +517,14 @@ export const lifecycleConsequencePreviews = pgTable(
     check(
       'lifecycle_consequence_previews_count',
       sql`${table.recipientCount} between 0 and 1200`,
+    ),
+    check(
+      'lifecycle_consequence_previews_partner_count',
+      sql`${table.partnerRecipientCount} between 0 and 1200
+        and (${table.partnerRecipientCount} = 0 or (
+          ${table.kind} = 'incident' and ${table.templateMode} = 'real'
+          and ${table.rosterPopulation} = 'staff'
+        ))`,
     ),
     check(
       'lifecycle_consequence_previews_expiry',
