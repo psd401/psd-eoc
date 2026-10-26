@@ -64,6 +64,27 @@ function boundedValue(value: string | undefined): string | null {
   return trimmed.length === 0 || trimmed === UNCONFIGURED ? null : trimmed;
 }
 
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set([
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
+]);
+
+/** True only for a local test database: loopback URL, no deployed host or CA. */
+function usesLoopbackDatabase(environment: Environment): boolean {
+  if (
+    boundedValue(environment.DATABASE_HOST) !== null ||
+    boundedValue(environment.DATABASE_SSL_ROOT_CERT) !== null
+  ) {
+    return false;
+  }
+  try {
+    return LOOPBACK_HOSTS.has(new URL(environment.DATABASE_URL ?? '').hostname);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The partner pool this deployment is configured for, or null when partner
  * access is off. A pool id without its app-client id is a half-configured
@@ -87,9 +108,13 @@ export function readPartnerPoolConfiguration(
   if (userPoolId === SYNTHETIC_PARTNER_USER_POOL_ID) {
     // The stand-in's codes are derived from the address, so it must never be
     // a deployed sign-in. The stack's parameter pattern refuses the pool id;
-    // this second, test-only variable (set by the browser-flow runner, never
-    // by the stack) means an environment edit alone cannot turn it on.
-    if (environment.PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN !== 'allowed') {
+    // beyond that it needs a test-only variable the stack never sets, and a
+    // loopback database. A deployed service reaches Aurora by host with a
+    // TLS root certificate, so it cannot meet that while serving real data.
+    if (
+      environment.PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN !== 'allowed' ||
+      !usesLoopbackDatabase(environment)
+    ) {
       throw new PartnerPoolConfigurationError(
         'The synthetic partner pool is for browser tests only.',
       );

@@ -240,6 +240,7 @@ describe('the synthetic partner provider', () => {
   const synthetic = readPartnerPoolConfiguration({
     PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
     PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
+    DATABASE_URL: 'postgresql://psd_eoc_test@127.0.0.1:55432/psd_eoc_test',
   });
   if (synthetic === null) throw new Error('No synthetic pool.');
   const provider = syntheticPartnerOtpProvider(synthetic);
@@ -296,6 +297,7 @@ describe('provider resolution', () => {
       resolvePartnerOtpProvider({
         PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
         PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
+        DATABASE_URL: 'postgresql://psd_eoc_test@127.0.0.1:55432/psd_eoc_test',
       })?.issuer,
     ).toBe('https://cognito-idp.example.invalid/synthetic-partner-pool');
   });

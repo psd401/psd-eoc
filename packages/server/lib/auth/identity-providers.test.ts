@@ -78,8 +78,36 @@ describe('trusted identity provider registry', () => {
       readPartnerPoolConfiguration({
         PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
         PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
+        DATABASE_URL: 'postgresql://psd_eoc_test@127.0.0.1:55432/psd_eoc_test',
       }),
     ).toMatchObject({ issuer: SYNTHETIC_PARTNER_ISSUER, synthetic: true });
+  });
+
+  test('the synthetic pool is refused next to a deployed database', () => {
+    // A deployed service reaches Aurora by host name with a TLS root
+    // certificate; setting both test variables there must still not turn on
+    // a sign-in whose codes anyone can derive.
+    const allowed = {
+      PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+      PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
+    };
+    for (const database of [
+      {},
+      { DATABASE_URL: 'postgresql://app@db.cluster.example.invalid:5432/eoc' },
+      {
+        DATABASE_URL: 'postgresql://psd_eoc_test@127.0.0.1:55432/psd_eoc_test',
+        DATABASE_HOST: 'db.cluster.example.invalid',
+      },
+      {
+        DATABASE_URL: 'postgresql://psd_eoc_test@localhost:55432/psd_eoc_test',
+        DATABASE_SSL_ROOT_CERT: '/etc/ssl/rds.pem',
+      },
+      { DATABASE_URL: 'not a url' },
+    ]) {
+      expect(() =>
+        readPartnerPoolConfiguration({ ...allowed, ...database }),
+      ).toThrow(PartnerPoolConfigurationError);
+    }
   });
 
   test('the synthetic pool is refused without the test-only allowance', () => {
