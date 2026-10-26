@@ -1139,6 +1139,20 @@ describeWithDatabase('partner delivery from a live incident (#597)', () => {
     // Texting START again restores Alpha for the tests that follow.
     await startFrom(base - 60_000);
     expect((await resolve()).items).toHaveLength(1);
+
+    // A refusal recorded late (a worker replay) whose provider time precedes
+    // that START does not undo it: facts are ordered by when the provider saw
+    // them, not when they were recorded.
+    await recordAwsManagedOptOutConflict(
+      item!,
+      'synthetic-partner-late-refusal',
+      new Date(base - 10 * 60_000).toISOString(),
+      policy,
+    );
+    expect((await resolve()).items).toHaveLength(1);
+    expect((await textAlerts()).get(fixture.alpha.admissionId)).toBe(
+      'signed-up',
+    );
   });
 
   test('text reaches a partner at their own consented number until they withdraw', async () => {
