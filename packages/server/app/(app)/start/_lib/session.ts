@@ -1,3 +1,4 @@
+import { partnerAllowlistPermits } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
@@ -20,8 +21,9 @@ export async function requirePageSession(
     );
   }
 
+  let authenticated: AuthenticatedSession;
   try {
-    return await authenticateWebSession(token);
+    authenticated = await authenticateWebSession(token);
   } catch (error) {
     if (error instanceof SessionAccessError) {
       redirect(
@@ -30,4 +32,13 @@ export async function requirePageSession(
     }
     throw error;
   }
+  // Every page but the events list is a step of starting an event, which the
+  // engine refuses a partner session; send it to the events list instead.
+  if (
+    returnTo !== '/' &&
+    !partnerAllowlistPermits(authenticated.scope, 'start-event')
+  ) {
+    redirect('/');
+  }
+  return authenticated;
 }

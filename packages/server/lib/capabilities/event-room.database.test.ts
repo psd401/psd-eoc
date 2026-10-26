@@ -991,4 +991,23 @@ describeWithDatabase('event-room atomic synchronization', () => {
     expect(campus.viewerManagesLifecycle).toBe(false);
     expect(campus.header).toEqual(expectedHeader());
   });
+
+  test('tells a partner the event is theirs to follow, not to end', async () => {
+    const eventId = await createActiveEvent();
+    const partner = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 100 },
+      {
+        ...invocation(),
+        scope: {
+          facilityScope: {
+            kind: 'facilities',
+            facilityIds: [fixtures().facilityId],
+          },
+          partner: true,
+        },
+      },
+    );
+    expect(partner.viewerManagesLifecycle).toBe(false);
+    expect(partner.header).toEqual(expectedHeader());
+  });
 });

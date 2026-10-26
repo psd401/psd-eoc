@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { EventIdSchema } from '@psd-eoc/contracts';
+import { EventIdSchema, partnerAllowlistPermits } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
 
@@ -105,7 +105,11 @@ export default async function EventRoomPage({
         displayTimeZone={displayTimeZone()}
         event={event}
         eventTypeLabel={eventTypeVersion.name}
-        exportSummaryPath={`/records/export/events/${encodeURIComponent(event.id)}`}
+        exportSummaryPath={
+          partnerAllowlistPermits(authenticated.scope, 'export-event-summary')
+            ? `/records/export/events/${encodeURIComponent(event.id)}`
+            : null
+        }
         facilityLabel={facility.name}
         initialCursor={initialSync.cursor}
         initialEntries={initialSync.entries}

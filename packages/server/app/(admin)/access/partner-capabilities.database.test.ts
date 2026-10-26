@@ -528,6 +528,34 @@ describeWithDatabase('partner administration', () => {
     await expectAdminRefusal(invite(address('forbidden'), null, staff), 403);
   });
 
+  test('a partner session gets the admin refusal its page renders, not a server error', async () => {
+    const email = address('partner-admin');
+    const admission = await invite(email);
+    await reconcile(admission.id, recordingProviders().providers);
+    const issued = await issueSyntheticPartnerSession(database(), {
+      email,
+      displayName: 'Synthetic Responder',
+      now: new Date(),
+    });
+    const partner = await new SessionService(
+      new DrizzleSessionStore(database()),
+    ).authenticate(issued.credential, 'web');
+    expect(partner.scope.partner).toBe(true);
+
+    // The engine refuses a partner before any admin check; the message is
+    // the engine's generic one, so it never names the refused role.
+    expect(
+      await expectAdminRefusal(
+        executeListPartnersCapability({
+          authenticated: partner,
+          store: createDrizzleAdminCapabilityStore(database(), partner),
+          query: { includeEnded: true },
+        }),
+        403,
+      ),
+    ).toBe('This authenticated principal cannot invoke the capability.');
+  });
+
   test('the application role can append and read provider syncs and notices', async () => {
     if (ownedDatabase === undefined) throw new Error('no database');
     const email = address('app-role');

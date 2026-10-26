@@ -1,4 +1,7 @@
-import { getEventClassificationPresentation } from '@psd-eoc/contracts';
+import {
+  getEventClassificationPresentation,
+  partnerAllowlistPermits,
+} from '@psd-eoc/contracts';
 import { WEB_CSRF_COOKIE_NAME } from '../../lib/auth/sessions';
 import type { Metadata } from 'next';
 import Link from 'next/link';
@@ -25,21 +28,38 @@ const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
 export default async function DashboardPage() {
   const authenticated = await requirePageSession('/');
   const data = await loadOperationalViewData(authenticated);
+  // A partner session joins and posts; the engine refuses it starting events
+  // and reading Records, so neither is offered.
+  const startsEvents = partnerAllowlistPermits(
+    authenticated.scope,
+    'start-event',
+  );
+  const readsRecords = partnerAllowlistPermits(
+    authenticated.scope,
+    'list-event-records',
+  );
 
   return (
     <main className="page-shell" id="main-content" tabIndex={-1}>
       <header className="page-heading">
         <div>
-          <p className="eyebrow">Staff emergency operations</p>
+          <p className="eyebrow">
+            {startsEvents
+              ? 'Staff emergency operations'
+              : 'Partner agency emergency operations'}
+          </p>
           <h1>Active events</h1>
           <p className="lede">
-            Join an event already underway, or choose a facility below to start
-            a separate incident or drill.
+            {startsEvents
+              ? 'Join an event already underway, or choose a facility below to start a separate incident or drill.'
+              : 'Join an event already underway to follow it and post updates. District staff start and end events.'}
           </p>
         </div>
-        <Link className="button button--secondary" href="/records">
-          View records
-        </Link>
+        {readsRecords ? (
+          <Link className="button button--secondary" href="/records">
+            View records
+          </Link>
+        ) : null}
       </header>
 
       <Call911Affordance />
@@ -109,52 +129,54 @@ export default async function DashboardPage() {
         )}
       </section>
 
-      <section aria-labelledby="start-event-heading">
-        <div className="section-heading">
-          <h2 id="start-event-heading">Start an event</h2>
-          <span className="step-hint">First choose site and mode</span>
-        </div>
-        <p>
-          Every action below is an explicit choice. Selecting a site does not
-          start an event or notify anyone.
-        </p>
-        <div className="dashboard-grid">
-          {data.facilities.map((facility) => (
-            <article className="facility-card" key={facility.id}>
-              <p className="facility-code">{facility.code}</p>
-              <h3>{facility.name}</h3>
-              <div className="action-grid">
-                <a
-                  aria-label={`Start REAL incident at ${facility.name}`}
-                  className="action-link action-link--real"
-                  href={startSelectionReturnPath({
-                    facilityId: facility.id,
-                    mode: 'real',
-                  })}
-                >
-                  <ClassificationIcon mode="real" />
-                  <span>
-                    Start <strong>REAL incident</strong>
-                  </span>
-                </a>
-                <a
-                  aria-label={`Run DRILL at ${facility.name}`}
-                  className="action-link action-link--drill"
-                  href={startSelectionReturnPath({
-                    facilityId: facility.id,
-                    mode: 'drill',
-                  })}
-                >
-                  <ClassificationIcon mode="drill" />
-                  <span>
-                    Run <strong>DRILL</strong>
-                  </span>
-                </a>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      {startsEvents ? (
+        <section aria-labelledby="start-event-heading">
+          <div className="section-heading">
+            <h2 id="start-event-heading">Start an event</h2>
+            <span className="step-hint">First choose site and mode</span>
+          </div>
+          <p>
+            Every action below is an explicit choice. Selecting a site does not
+            start an event or notify anyone.
+          </p>
+          <div className="dashboard-grid">
+            {data.facilities.map((facility) => (
+              <article className="facility-card" key={facility.id}>
+                <p className="facility-code">{facility.code}</p>
+                <h3>{facility.name}</h3>
+                <div className="action-grid">
+                  <a
+                    aria-label={`Start REAL incident at ${facility.name}`}
+                    className="action-link action-link--real"
+                    href={startSelectionReturnPath({
+                      facilityId: facility.id,
+                      mode: 'real',
+                    })}
+                  >
+                    <ClassificationIcon mode="real" />
+                    <span>
+                      Start <strong>REAL incident</strong>
+                    </span>
+                  </a>
+                  <a
+                    aria-label={`Run DRILL at ${facility.name}`}
+                    className="action-link action-link--drill"
+                    href={startSelectionReturnPath({
+                      facilityId: facility.id,
+                      mode: 'drill',
+                    })}
+                  >
+                    <ClassificationIcon mode="drill" />
+                    <span>
+                      Run <strong>DRILL</strong>
+                    </span>
+                  </a>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </main>
   );
 }

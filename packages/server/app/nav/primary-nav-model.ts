@@ -1,10 +1,20 @@
-import type { CapabilityScope, Role } from '@psd-eoc/contracts';
+import {
+  partnerAllowlistPermits,
+  type CapabilityScope,
+  type RegisteredCapabilityId,
+  type Role,
+} from '@psd-eoc/contracts';
 
 export interface NavDestination {
   readonly href: string;
   readonly label: string;
   readonly authorization: 'authenticated' | 'admin' | 'district-admin';
   readonly additionalActivePrefixes?: readonly string[];
+  /**
+   * The capability the destination's task runs. A partner session sees it
+   * only when the partner allowlist admits that capability.
+   */
+  readonly capabilityId: RegisteredCapabilityId;
 }
 
 /**
@@ -21,36 +31,81 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
     label: 'Events',
     authorization: 'authenticated',
     additionalActivePrefixes: Object.freeze(['/events']),
+    capabilityId: 'list-active-events',
   },
-  { href: '/start', label: 'Start event', authorization: 'authenticated' },
-  { href: '/records', label: 'Records', authorization: 'authenticated' },
+  {
+    href: '/start',
+    label: 'Start event',
+    authorization: 'authenticated',
+    capabilityId: 'start-event',
+  },
+  {
+    href: '/records',
+    label: 'Records',
+    authorization: 'authenticated',
+    capabilityId: 'list-event-records',
+  },
   {
     href: '/text-alerts',
     label: 'Text alerts',
     authorization: 'authenticated',
+    capabilityId: 'read-my-sms-consent',
   },
-  { href: '/admin', label: 'Readiness', authorization: 'district-admin' },
-  { href: '/facilities', label: 'Schools', authorization: 'district-admin' },
+  {
+    href: '/admin',
+    label: 'Readiness',
+    authorization: 'district-admin',
+    capabilityId: 'get-admin-readiness',
+  },
+  {
+    href: '/facilities',
+    label: 'Schools',
+    authorization: 'district-admin',
+    capabilityId: 'update-facility',
+  },
   {
     href: '/event-types',
     label: 'Responses',
     authorization: 'district-admin',
+    capabilityId: 'list-event-type-drafts',
   },
-  { href: '/access', label: 'Access', authorization: 'district-admin' },
-  { href: '/devices', label: 'Devices', authorization: 'admin' },
+  {
+    href: '/access',
+    label: 'Access',
+    authorization: 'district-admin',
+    capabilityId: 'list-admitted-accounts',
+  },
+  {
+    href: '/devices',
+    label: 'Devices',
+    authorization: 'admin',
+    capabilityId: 'list-device-sessions',
+  },
   {
     href: '/integrations',
     label: 'Notifications',
     authorization: 'district-admin',
+    capabilityId: 'get-integration-health',
   },
-  { href: '/audit', label: 'Audit', authorization: 'admin' },
-  { href: '/agents', label: 'Agents', authorization: 'district-admin' },
+  {
+    href: '/audit',
+    label: 'Audit',
+    authorization: 'admin',
+    capabilityId: 'query-security-audit',
+  },
+  {
+    href: '/agents',
+    label: 'Agents',
+    authorization: 'district-admin',
+    capabilityId: 'list-agent-api-keys',
+  },
 ]);
 
 export function navigationDestinationsFor(
   authorization: Readonly<{
     roles: readonly Role[];
     facilityScope: CapabilityScope['facilityScope'];
+    partner?: CapabilityScope['partner'];
   }>,
 ): readonly NavDestination[] {
   const administrator = authorization.roles.includes('admin');
@@ -58,9 +113,11 @@ export function navigationDestinationsFor(
     administrator && authorization.facilityScope.kind === 'district';
   return NAV_DESTINATIONS.filter(
     (destination) =>
-      destination.authorization === 'authenticated' ||
-      (destination.authorization === 'admin' && administrator) ||
-      (destination.authorization === 'district-admin' && districtAdministrator),
+      partnerAllowlistPermits(authorization, destination.capabilityId) &&
+      (destination.authorization === 'authenticated' ||
+        (destination.authorization === 'admin' && administrator) ||
+        (destination.authorization === 'district-admin' &&
+          districtAdministrator)),
   );
 }
 

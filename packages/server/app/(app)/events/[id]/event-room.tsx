@@ -133,8 +133,11 @@ export interface EventRoomProps {
   readonly eventTypeLabel: string;
   /** Same-origin event-room endpoint for timeline reads and explicit commands. */
   readonly apiUrl: string;
-  /** Same-origin, freshly authorized read-only event-summary export route. */
-  readonly exportSummaryPath: string;
+  /**
+   * Same-origin, freshly authorized read-only event-summary export route, or
+   * null when the viewer's session cannot export (a partner session).
+   */
+  readonly exportSummaryPath: string | null;
   /** Name of the readable double-submit CSRF cookie issued by the server. */
   readonly csrfCookieName: string;
   /** Server-authenticated session that owns the idempotency namespace. */
@@ -449,12 +452,14 @@ export function EventRoom({
                 file. Reason: {currentEvent.correctionReason}
               </p>
             )}
-            <a
-              className="button-link event-export-link"
-              href={exportSummaryPath}
-            >
-              Download PDF summary
-            </a>
+            {exportSummaryPath === null ? null : (
+              <a
+                className="button-link event-export-link"
+                href={exportSummaryPath}
+              >
+                Download PDF summary
+              </a>
+            )}
           </div>
           <div className="connection-panel">
             <p

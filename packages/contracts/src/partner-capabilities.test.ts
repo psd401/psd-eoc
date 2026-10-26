@@ -5,6 +5,7 @@ import {
   getCapabilityInvocationPolicy,
   isPartnerCapabilityId,
   PARTNER_CAPABILITY_IDS,
+  partnerAllowlistPermits,
   RegisteredCapabilityIdSchema,
 } from './index';
 
@@ -87,5 +88,15 @@ describe('partner capability allowlist', () => {
     expect(
       CapabilityScopeSchema.safeParse({ ...scope, partner: false }).success,
     ).toBe(false);
+  });
+
+  test('interfaces hide exactly what the allowlist refuses a partner', () => {
+    const partner = { partner: true } as const;
+    expect(partnerAllowlistPermits(partner, 'join-event')).toBe(true);
+    for (const id of NEVER_PARTNER) {
+      expect(partnerAllowlistPermits(partner, id)).toBe(false);
+      // Staff are never narrowed by the partner list.
+      expect(partnerAllowlistPermits({}, id)).toBe(true);
+    }
   });
 });

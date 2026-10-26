@@ -692,6 +692,30 @@ function mutationInvocation(
   });
 }
 
+/**
+ * Restates the engine's generic invocation refusal as the admin refusal admin
+ * pages and routes already turn into their non-administrator view. A partner
+ * session is refused by the engine before any admin check runs, and without
+ * this an admin page answers that refusal with a server error. The message
+ * stays the engine's own, so it still never says which role was refused.
+ */
+async function withAdminRefusal<Output>(
+  execution: Promise<Output>,
+): Promise<Output> {
+  try {
+    return await execution;
+  } catch (error) {
+    if (
+      error instanceof CapabilityEngineError &&
+      !(error instanceof AdminCapabilityError) &&
+      error.reasonCode === 'CAPABILITY_INVOCATION_DENIED'
+    ) {
+      throw new AdminCapabilityError('FORBIDDEN', error.message, 403);
+    }
+    throw error;
+  }
+}
+
 /** Executes a route-owned admin query through the canonical capability engine. */
 export function executeAdminQueryCapability<Id extends RegisteredCapabilityId>(
   registration: ServerCapabilityRegistration<Id, AdminCapabilityTransaction>,
@@ -700,11 +724,13 @@ export function executeAdminQueryCapability<Id extends RegisteredCapabilityId>(
   store: AdminCapabilityStore,
   metadata: AdminQueryMetadata = {},
 ): Promise<CapabilityOutput<Id>> {
-  return executeAuditedCapabilityTransaction(
-    withAuditRequestGuard(registration),
-    input,
-    queryInvocation(authenticated, metadata),
-    store,
+  return withAdminRefusal(
+    executeAuditedCapabilityTransaction(
+      withAuditRequestGuard(registration),
+      input,
+      queryInvocation(authenticated, metadata),
+      store,
+    ),
   );
 }
 
@@ -721,11 +747,13 @@ export function executeAdminMutationCapability<
   store: AdminCapabilityStore,
   metadata: AdminMutationMetadata,
 ): Promise<CapabilityOutput<Id>> {
-  return executeAuditedCapabilityTransaction(
-    withAuditRequestGuard(registration),
-    input,
-    mutationInvocation(authenticated, metadata),
-    store,
+  return withAdminRefusal(
+    executeAuditedCapabilityTransaction(
+      withAuditRequestGuard(registration),
+      input,
+      mutationInvocation(authenticated, metadata),
+      store,
+    ),
   );
 }
 

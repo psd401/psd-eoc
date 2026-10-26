@@ -5,6 +5,7 @@ import {
   EventSchema,
   JournalEntrySchema,
   PaginationCursorSchema,
+  partnerAllowlistPermits,
   projectJournalEntryForRead,
   type CapabilityInput,
   type CapabilityOutput,
@@ -448,14 +449,17 @@ export const syncEventRoomRegistration: ServerCapabilityRegistration<
     const descriptor = await cachedDescriptor(input, context);
     await context.transaction.beforeSync();
     const result = await context.transaction.syncEventRoom(input, descriptor);
-    const facilityScope = context.invocation.scope.facilityScope;
+    const scope = context.invocation.scope;
+    const facilityScope = scope.facilityScope;
     // A campus mate reaches this capability through `campusParticipation`;
-    // ending the event stays with the event's own school.
+    // ending the event stays with the event's own school. A partner's scope
+    // holds the facility, but the engine refuses a partner ending anything.
     return {
       ...result,
       viewerManagesLifecycle:
-        facilityScope.kind === 'district' ||
-        facilityScope.facilityIds.includes(descriptor.event.facilityId),
+        partnerAllowlistPermits(scope, 'all-clear-event') &&
+        (facilityScope.kind === 'district' ||
+          facilityScope.facilityIds.includes(descriptor.event.facilityId)),
     };
   },
 };

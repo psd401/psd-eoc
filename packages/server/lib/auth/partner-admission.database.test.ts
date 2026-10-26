@@ -146,6 +146,9 @@ describeWithDatabase('partner admission access', () => {
       partnerAdmissionId: admissionId,
       reason: 'disabled',
       endedByUserId: adminId,
+      // The host clock, like admittedAt: a database default can trail it by
+      // a few milliseconds and land the ending before the grant.
+      endedAt: new Date(),
     });
     expect(
       await decidePartnerAccess(database(), { email, checkedAt: new Date() }),
@@ -212,6 +215,9 @@ describeWithDatabase('partner admission access', () => {
       partnerAdmissionId: admissionId,
       reason: 'disabled',
       endedByUserId: adminId,
+      // The host clock, like admittedAt: a database default can trail it by
+      // a few milliseconds and land the ending before the grant.
+      endedAt: new Date(),
     });
     expect(
       await expectRefused(service.authenticate(issued.credential, 'web')),
@@ -260,6 +266,9 @@ describeWithDatabase('partner admission access', () => {
         partnerAdmissionId: firstId,
         reason: 'superseded',
         endedByUserId: adminId,
+        // The host clock, like admittedAt: a database default can trail it by
+        // a few milliseconds and land the ending before the grant.
+        endedAt: new Date(),
       });
     });
     const service = new SessionService(new DrizzleSessionStore(database()));
