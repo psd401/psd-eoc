@@ -502,6 +502,7 @@ export async function loadEventSummarySnapshot(
     .select({
       id: notificationIntents.id,
       purpose: notificationIntents.purpose,
+      rosterPopulation: notificationIntents.rosterPopulation,
       createdAt: notificationIntents.createdAt,
     })
     .from(notificationIntents)
@@ -623,6 +624,7 @@ export async function loadEventSummarySnapshot(
       }
       return Object.freeze({
         purpose: intent.purpose,
+        rosterPopulation: intent.rosterPopulation,
         createdAt: dateIso(intent.createdAt),
         explicitIntentState: explicitIntentState.get(intent.id) ?? null,
         channels: Object.freeze(

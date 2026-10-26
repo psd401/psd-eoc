@@ -15,6 +15,7 @@ import {
   type MediaContentType,
   type NotificationChannel,
   type NotificationPurpose,
+  type RosterPopulation,
 } from '@psd-eoc/contracts';
 import PDFDocument from 'pdfkit';
 
@@ -74,6 +75,8 @@ export interface EventSummaryDeliveryChannelSnapshot {
 
 export interface EventSummaryDeliveryIntentSnapshot {
   readonly purpose: NotificationPurpose;
+  /** Who the intent addressed: a live incident's partner slice is its own. */
+  readonly rosterPopulation: RosterPopulation;
   readonly createdAt: string;
   readonly explicitIntentState: 'accepted' | 'recorded' | null;
   readonly channels: readonly EventSummaryDeliveryChannelSnapshot[];
@@ -1032,9 +1035,14 @@ function writeDelivery(
       .font(FONT_NAME)
       .fontSize(11)
       .fillColor(COLORS.ink)
-      .text(`Notification intent ${intentIndex + 1} - ${intent.purpose}`, {
-        width: contentWidth(document),
-      })
+      .text(
+        `Notification intent ${intentIndex + 1} - ${intent.purpose}${
+          intent.rosterPopulation === 'partner' ? ' (partners)' : ''
+        }`,
+        {
+          width: contentWidth(document),
+        },
+      )
       .moveDown(0.25);
     writeBody(document, `Created: ${intent.createdAt}`, {
       color: COLORS.muted,

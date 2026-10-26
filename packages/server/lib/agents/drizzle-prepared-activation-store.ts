@@ -238,6 +238,7 @@ async function activationPreviewById(
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
     recipientCount: row.recipientCount,
+    partnerRecipientCount: row.partnerRecipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,

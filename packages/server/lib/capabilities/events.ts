@@ -11,6 +11,7 @@ import {
   EventTargetingSchema,
   EventTransitionSchema,
   eventPopulationForNotification,
+  previewReachesPartners,
   HumanConfirmationRecordSchema,
   JoinEventResultSchema,
   JournalEntrySchema,
@@ -132,9 +133,21 @@ export interface ResolvedLifecyclePreview {
   readonly preview: LifecycleConsequencePreview;
 }
 
+/** One notification intent and the outbox record that publishes it. */
+export interface PlannedNotification {
+  readonly intent: NotificationIntent;
+  readonly outbox: OutboxRecord;
+}
+
 export interface LifecyclePersistenceBundle {
   readonly result: EventLifecycleMutationResult;
   readonly outboxRecord: OutboxRecord | null;
+  /**
+   * The partner slice of a live incident's send (#597): a second intent in
+   * the same human-confirmed request, reaching the partners the activation
+   * preview pinned. Null when the preview reaches no partner.
+   */
+  readonly partnerNotification: PlannedNotification | null;
   /** Exact reviewed preview time; null only for non-notifying lifecycle work. */
   readonly sendPreviewCreatedAt: string | null;
 }
@@ -493,10 +506,7 @@ function buildNotification(
     wording: NotificationWording;
     context: CapabilityHandlerContext<EventCapabilityTransaction>;
   }>,
-): Readonly<{
-  intent: NotificationIntent;
-  outbox: OutboxRecord;
-}> {
+): PlannedNotification {
   if (
     input.authorization === null ||
     input.event.rosterSnapshotId === null ||
@@ -582,6 +592,52 @@ function buildNotification(
       publishedAt: null,
       failedAt: null,
       lastErrorCode: null,
+    }),
+  };
+}
+
+/**
+ * The partner slice of a staff notification (#597), or null when the preview
+ * reaches no partner. Same event, request, authorization, and rendered
+ * messages as the staff intent, so a partner reads exactly what staff read
+ * under the same marker; only the population and the planned counts differ.
+ * Partners are planned by email, one per admitted partner; push and text
+ * reach a partner only through endpoints resolved when the batch is sent.
+ */
+function partnerSlice(
+  staff: PlannedNotification,
+  preview: ActivationPreview | LifecycleConsequencePreview,
+  event: Event,
+): PlannedNotification | null {
+  if (preview.partnerRecipientCount === 0) return null;
+  if (!previewReachesPartners(preview) || event.kind !== 'incident') {
+    throw conflict('Only a live incident reaches partners.');
+  }
+  const channels = staff.intent.channels.map((channel) => ({
+    ...channel,
+    endpointCount:
+      channel.channel === 'email' ? preview.partnerRecipientCount : 0,
+  }));
+  const intent = NotificationIntentSchema.parse({
+    ...staff.intent,
+    id: randomUUID(),
+    rosterPopulation: 'partner',
+    channels,
+  });
+  const outboxId = randomUUID();
+  const message: NotificationOutboxMessage = {
+    ...staff.outbox.message,
+    outboxId,
+    intentId: intent.id,
+    rosterPopulation: intent.rosterPopulation,
+    channels: intent.channels,
+  };
+  return {
+    intent,
+    outbox: OutboxRecordSchema.parse({
+      ...staff.outbox,
+      id: outboxId,
+      message,
     }),
   };
 }
@@ -828,6 +884,7 @@ export const startEventRegistration: ServerCapabilityRegistration<
     await context.transaction.persistLifecycle({
       result,
       outboxRecord: notification.outbox,
+      partnerNotification: partnerSlice(notification, preview, event),
       sendPreviewCreatedAt: preview.createdAt,
     });
     return result;
@@ -1001,6 +1058,11 @@ async function notifyingLifecycleResult(
   await context.transaction.persistLifecycle({
     result,
     outboxRecord: notification.outbox,
+    partnerNotification: partnerSlice(
+      notification,
+      resolvedPreview.preview,
+      event,
+    ),
     sendPreviewCreatedAt: resolvedPreview.preview.createdAt,
   });
   return result;
@@ -1175,6 +1237,7 @@ export const closeEventRegistration: ServerCapabilityRegistration<
     await context.transaction.persistLifecycle({
       result,
       outboxRecord: null,
+      partnerNotification: null,
       sendPreviewCreatedAt: null,
     });
     return result;
@@ -1278,6 +1341,7 @@ export const reopenAsCorrectionRegistration: ServerCapabilityRegistration<
     await context.transaction.persistLifecycle({
       result,
       outboxRecord: null,
+      partnerNotification: null,
       sendPreviewCreatedAt: null,
     });
     return result;
@@ -1779,6 +1843,7 @@ async function activationPreviewById(
     threat: activationThreatFromColumns(row),
     responseDetail: row.responseDetail ?? null,
     recipientCount: row.recipientCount,
+    partnerRecipientCount: row.partnerRecipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,
@@ -1814,6 +1879,7 @@ async function lifecyclePreviewById(
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
     recipientCount: row.recipientCount,
+    partnerRecipientCount: row.partnerRecipientCount,
     channels: row.channels,
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,
@@ -2363,8 +2429,24 @@ async function persistLifecycleBundle(
       bundle.result.notificationIntent,
       bundle.outboxRecord,
     );
+    if (bundle.partnerNotification !== null) {
+      const partner = bundle.partnerNotification;
+      const staff = bundle.result.notificationIntent;
+      if (
+        partner.intent.rosterPopulation !== 'partner' ||
+        partner.intent.eventId !== staff.eventId ||
+        partner.intent.requestId !== staff.requestId ||
+        partner.intent.purpose !== staff.purpose
+      ) {
+        throw conflict(
+          'A partner notification must share its staff send request.',
+        );
+      }
+      await persistNotification(database, partner.intent, partner.outbox);
+    }
   } else if (
     bundle.outboxRecord !== null ||
+    bundle.partnerNotification !== null ||
     bundle.sendPreviewCreatedAt !== null
   ) {
     throw conflict(

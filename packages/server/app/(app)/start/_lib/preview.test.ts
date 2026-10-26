@@ -237,6 +237,7 @@ function evidence(
     facility: FACILITY,
     eventTypeVersion: eventTypeVersion(templateMode),
     rosterSnapshot: roster(population),
+    partnerAdmissionIds: [],
     channelConfigurations: channelConfigurations(),
     activeEventIds: [IDS.activeEventB, IDS.activeEventA],
     initiator: ACTOR,
@@ -468,5 +469,52 @@ describe('activation consequence preview', () => {
         'EVENT_TYPE_UNAVAILABLE',
       );
     }
+  });
+});
+
+describe('activation consequence preview partner audience (#597)', () => {
+  const PARTNERS = [
+    '00000000-0000-4000-8000-0000000005a1',
+    '00000000-0000-4000-8000-0000000005a2',
+  ] as const;
+
+  test('counts the resolved partners and signs the count with the consequence', () => {
+    const none = buildActivationPreview(evidence('real', 'staff'));
+    const two = buildActivationPreview({
+      ...evidence('real', 'staff'),
+      partnerAdmissionIds: PARTNERS,
+    });
+
+    expect(none.partnerRecipientCount).toBe(0);
+    expect(two.partnerRecipientCount).toBe(2);
+    // Staff counts and readiness are unchanged by partners.
+    expect(two.recipientCount).toBe(none.recipientCount);
+    expect(two.sendReadiness).toBe(none.sendReadiness);
+    expect(two.consequenceDigest).not.toBe(none.consequenceDigest);
+  });
+
+  test('refuses partners for a drill, a synthetic preview, or an isolated facility', () => {
+    for (const value of [
+      { ...evidence('drill', 'staff'), partnerAdmissionIds: PARTNERS },
+      { ...evidence('drill', 'synthetic'), partnerAdmissionIds: PARTNERS },
+      {
+        ...evidence('real', 'staff'),
+        facility: { ...FACILITY, isolated: true },
+        partnerAdmissionIds: PARTNERS,
+      },
+    ]) {
+      expect(() => buildActivationPreview(value)).toThrow(
+        new ActivationPreviewBuildError('PARTNER_AUDIENCE_INVALID'),
+      );
+    }
+  });
+
+  test('refuses a partner named twice', () => {
+    expect(() =>
+      buildActivationPreview({
+        ...evidence('real', 'staff'),
+        partnerAdmissionIds: [PARTNERS[0], PARTNERS[0]],
+      }),
+    ).toThrow(new ActivationPreviewBuildError('PARTNER_AUDIENCE_INVALID'));
   });
 });
