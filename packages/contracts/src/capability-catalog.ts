@@ -100,6 +100,12 @@ import {
   PartnerAdmissionSchema,
   ReconcilePartnerAccessInputSchema,
 } from './partner-admission';
+import {
+  GetPartnerAlertSettingsInputSchema,
+  PartnerAlertSettingsStateSchema,
+  PartnerAlertSettingsVersionSchema,
+  SetPartnerAlertSettingsInputSchema,
+} from './partner-alert-settings';
 import { ListThreatsInputSchema, ThreatPageSchema } from './threat';
 import {
   CreateGroupSourceInputSchema,
@@ -1695,6 +1701,24 @@ const CAPABILITY_CATALOG_BASE = Object.freeze({
     invocationPolicy: humanWebAdministrationInvocationPolicy,
     inputSchema: ListPartnersInputSchema,
     outputSchema: PartnerAccessListSchema,
+  }),
+  // Which real events alert partners. An administrator reads and saves them
+  // on the web; never offered to agents, and never to a partner.
+  'get-partner-alert-settings': canonicalCapability({
+    id: 'get-partner-alert-settings',
+    operation: 'query',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: GetPartnerAlertSettingsInputSchema,
+    outputSchema: PartnerAlertSettingsStateSchema,
+  }),
+  'set-partner-alert-settings': canonicalCapability({
+    id: 'set-partner-alert-settings',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    invocationPolicy: humanWebAdministrationInvocationPolicy,
+    inputSchema: SetPartnerAlertSettingsInputSchema,
+    outputSchema: PartnerAlertSettingsVersionSchema,
   }),
   'list-drill-records': canonicalCapability({
     id: 'list-drill-records',

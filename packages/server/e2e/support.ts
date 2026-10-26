@@ -82,6 +82,14 @@ export function issue594EvidencePath(name: string): string {
   return join(directory, name);
 }
 
+export function issue597EvidencePath(name: string): string {
+  const directory = process.env.PSD_EOC_E2E_ISSUE_597_EVIDENCE_DIR;
+  if (directory === undefined) {
+    throw new Error('Issue 597 browser evidence directory is unavailable.');
+  }
+  return join(directory, name);
+}
+
 export function issue32EvidencePath(name: string): string {
   const directory = process.env.PSD_EOC_E2E_ISSUE_32_EVIDENCE_DIR;
   if (directory === undefined) {

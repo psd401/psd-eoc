@@ -435,6 +435,13 @@
       "when": 1792795066259,
       "tag": "0061_partner_access_reviews",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1793032259357,
+      "tag": "0062_partner_alert_settings",
+      "breakpoints": true
     }
   ]
 }

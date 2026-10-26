@@ -335,6 +335,7 @@ const PERSISTED_MUTATION_CAPABILITY_ORDER = [
   'invite-partner',
   'disable-partner',
   'reconcile-partner-access',
+  'set-partner-alert-settings',
 ] as const;
 
 export const agentCapabilityGrantEnum = contractPgEnum(

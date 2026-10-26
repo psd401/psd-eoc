@@ -323,6 +323,66 @@ export const partnerAccessReviews = pgTable(
   ],
 );
 
+/**
+ * Which real events alert partners: the response families that do, and the
+ * threats that never do. Append-only versions, one per administrator save,
+ * each naming the version it replaced; the highest version is current, and
+ * with no row at all the contracts' defaults apply. Keys, never names, so a
+ * renamed response or threat changes nothing here. Key format and uniqueness
+ * are the contracts' to check; the database bounds the lists and refuses a
+ * null key.
+ */
+export const partnerAlertSettings = pgTable(
+  'partner_alert_settings',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    version: integer('version').notNull(),
+    responseFamilyKeys: varchar('response_family_keys', { length: 100 })
+      .array()
+      .notNull(),
+    excludedThreatKeys: varchar('excluded_threat_keys', { length: 100 })
+      .array()
+      .notNull(),
+    supersedesVersionId: uuid('supersedes_version_id'),
+    createdByUserId: uuid('created_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('partner_alert_settings_version_uq').on(table.version),
+    uniqueIndex('partner_alert_settings_supersedes_uq').on(
+      table.supersedesVersionId,
+    ),
+    foreignKey({
+      columns: [table.supersedesVersionId],
+      foreignColumns: [table.id],
+      name: 'partner_alert_settings_supersedes_fk',
+    }).onDelete('restrict'),
+    check('partner_alert_settings_version_positive', sql`${table.version} > 0`),
+    check(
+      'partner_alert_settings_first_replaces_nothing',
+      sql`(${table.version} = 1) = (${table.supersedesVersionId} is null)`,
+    ),
+    check(
+      'partner_alert_settings_not_self_superseding',
+      sql`${table.supersedesVersionId} is null or ${table.supersedesVersionId} <> ${table.id}`,
+    ),
+    check(
+      'partner_alert_settings_response_keys_bounded',
+      sql`coalesce(array_ndims(${table.responseFamilyKeys}), 1) = 1
+        and cardinality(${table.responseFamilyKeys}) <= 100
+        and array_position(${table.responseFamilyKeys}, null) is null`,
+    ),
+    check(
+      'partner_alert_settings_threat_keys_bounded',
+      sql`coalesce(array_ndims(${table.excludedThreatKeys}), 1) = 1
+        and cardinality(${table.excludedThreatKeys}) <= 200
+        and array_position(${table.excludedThreatKeys}, null) is null`,
+    ),
+  ],
+);
+
 /** Explicit facility rows for users whose scope is not district-wide. */
 export const userFacilityScopes = pgTable(
   'user_facility_scopes',

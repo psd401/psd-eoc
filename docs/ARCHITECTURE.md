@@ -200,6 +200,20 @@ access decisions each enforce.
   read, never at the limit stored on the account row. An isolated facility's
   events (the store reviewer's, for one) are therefore invisible to partners.
   With no non-isolated facility, no partner is admitted.
+- Which real events alert partners is a district administrator's setting on
+  the Partner alerts page (`get-partner-alert-settings` and
+  `set-partner-alert-settings`, web-only administration, never on the partner
+  allowlist): the response families that alert them (`event_types.family_key`)
+  and the threats that never do (`threats.key`). Each save is an append-only
+  version in `partner_alert_settings` naming its administrator and the version
+  it replaced; a save from a stale page is refused. Until the first save the
+  contracts' default applies: Lockdown and Modified Lockdown, no threat
+  excluded. Saving no response turns partner alerts off. Drills never alert
+  partners, so there is no drill setting, and channels are not a setting: a
+  partner is emailed at the admitted address and reached by push or text only
+  after enrolling a device or consenting. The settings in effect are read
+  through `loadEffectivePartnerAlertSettings` in
+  `lib/partners/alert-settings.ts`.
 
 ## Data and delivery truth
 

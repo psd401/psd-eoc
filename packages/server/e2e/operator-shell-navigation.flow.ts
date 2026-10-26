@@ -11,6 +11,7 @@ const DISTRICT_ADMIN_DESTINATIONS = [
   ['Schools', '/facilities', /^Facilities, neighborhoods,/u],
   ['Responses', '/event-types', 'Responses and message templates'],
   ['Access', '/access', 'Access groups and the roles they grant'],
+  ['Partner alerts', '/partner-alerts', 'Partner alerts'],
   ['Devices', '/devices', 'Device sessions'],
   ['Notifications', '/integrations', 'Integrations administration'],
   ['Audit', '/audit', 'Security audit log'],
@@ -23,7 +24,7 @@ test.describe('operator-shell-navigation', () => {
   }) => {
     await page.goto('/');
     const primary = page.getByRole('navigation', { name: 'Primary' });
-    await expect(primary.getByRole('link')).toHaveCount(13);
+    await expect(primary.getByRole('link')).toHaveCount(14);
     await expect(
       primary.getByRole('link', {
         name: 'Synthetic Example School District emergency operations',

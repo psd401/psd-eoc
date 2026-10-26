@@ -76,6 +76,12 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = Object.freeze([
     capabilityId: 'list-admitted-accounts',
   },
   {
+    href: '/partner-alerts',
+    label: 'Partner alerts',
+    authorization: 'district-admin',
+    capabilityId: 'get-partner-alert-settings',
+  },
+  {
     href: '/devices',
     label: 'Devices',
     authorization: 'admin',
