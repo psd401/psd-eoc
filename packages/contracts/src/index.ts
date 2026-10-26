@@ -20,6 +20,7 @@ export * from './media';
 export * from './mcp';
 export * from './notification';
 export * from './partner-admission';
+export * from './partner-alert-settings';
 export * from './partner-capabilities';
 export * from './push-runtime';
 export * from './readiness';

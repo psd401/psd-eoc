@@ -50,6 +50,8 @@ const NEVER_PARTNER = [
   'set-user-facility-scope',
   'invite-partner',
   'disable-partner',
+  'get-partner-alert-settings',
+  'set-partner-alert-settings',
   'list-event-records',
   'export-drill-records',
   'export-event-summary',
