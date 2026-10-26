@@ -6,7 +6,13 @@ import {
 } from './capability-derived-registry';
 import { FacilityIdSchema, FacilityScopeSchema } from './facility';
 import { HumanOnlyActionIdSchema, isHumanOnlyActionId } from './human-only';
-import { isAtOrAfter, TimestampSchema, UuidSchema } from './shared';
+import {
+  isAtOrAfter,
+  isPartnerIssuer,
+  PartnerIdentityIssuerSchema,
+  TimestampSchema,
+  UuidSchema,
+} from './shared';
 
 /**
  * Owns a capability's stable, kebab-case identifier across web, mobile, REST,
@@ -80,7 +86,10 @@ export type Actor = z.infer<typeof ActorSchema>;
 export const PreSessionOidcPrincipalSchema = z
   .object({
     kind: z.literal('verified-oidc-claims'),
-    issuer: z.literal('https://accounts.google.com'),
+    issuer: z.union([
+      z.literal('https://accounts.google.com'),
+      PartnerIdentityIssuerSchema,
+    ]),
     audience: z.string().trim().min(1).max(255),
     subject: z.string().trim().min(1).max(255),
     subjectDigest: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -100,6 +109,15 @@ export const PreSessionOidcPrincipalSchema = z
     displayName: z.string().trim().min(1).max(160),
   })
   .strict()
+  .superRefine((principal, context) => {
+    if (isPartnerIssuer(principal.issuer) && principal.hostedDomain !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A partner identity carries no hosted domain.',
+        path: ['hostedDomain'],
+      });
+    }
+  })
   .readonly();
 
 /** Minimized verified pre-session OIDC principal inferred from its schema. */
@@ -228,9 +246,35 @@ export type MobileOidcCodeExchangeTransport = z.infer<
   typeof MobileOidcCodeExchangeTransportSchema
 >;
 
+/**
+ * Trusted evidence for one completed partner email one-time-password
+ * sign-in. There is no authorization code, state, nonce, or PKCE verifier to
+ * record: the server asks the partner pool for a code, the partner returns
+ * it, and the pool answers with a signed identity token the server verifies.
+ * `otpVerified` is that exchange; `signatureVerified` is the token.
+ */
+export const PartnerOtpCompletionTransportSchema = z
+  .object({
+    kind: z.literal('partner-email-otp'),
+    method: z.literal('POST'),
+    otpVerified: z.literal(true),
+    signatureVerified: z.literal(true),
+  })
+  .strict()
+  .readonly();
+
+/** Trusted partner one-time-password transport inferred from its schema. */
+export type PartnerOtpCompletionTransport = z.infer<
+  typeof PartnerOtpCompletionTransportSchema
+>;
+
 /** Complete set of trusted transports that may establish an OIDC session. */
 export const OidcCompletionTransportSchema = z
-  .union([OidcCallbackTransportSchema, MobileOidcCodeExchangeTransportSchema])
+  .union([
+    OidcCallbackTransportSchema,
+    MobileOidcCodeExchangeTransportSchema,
+    PartnerOtpCompletionTransportSchema,
+  ])
   .readonly();
 
 /** Trusted OIDC completion transport inferred from its schema. */
@@ -1075,15 +1119,32 @@ export const AuthenticationCapabilityEnvelopeSchema = z
   })
   .strict()
   .superRefine((envelope, context) => {
-    const expectedTransport =
-      envelope.source === 'web'
-        ? 'oidc-code-callback'
-        : 'mobile-oidc-code-exchange';
-    if (envelope.transport.kind !== expectedTransport) {
+    const partner = isPartnerIssuer(envelope.principal.issuer);
+    // The issuer decides the transport, and the transport decides the issuer.
+    // This is the rule that keeps the two sign-in paths apart: a partner
+    // Cognito token presented as a Google code callback, or a Google token
+    // presented as a partner one-time password, is refused here before any
+    // handler, authorizer, or store sees it.
+    const allowedTransports = partner
+      ? (['partner-email-otp'] as const)
+      : envelope.source === 'web'
+        ? (['oidc-code-callback'] as const)
+        : (['mobile-oidc-code-exchange'] as const);
+    if (!allowedTransports.includes(envelope.transport.kind as never)) {
       context.addIssue({
         code: 'custom',
-        message: 'OIDC completion transport must match its invocation source.',
+        message:
+          'OIDC completion transport must match its issuer and invocation source.',
         path: ['transport'],
+      });
+    }
+    // Partner sign-in is a browser flow only; the native partner app is a
+    // later change (#598) and must widen this rule deliberately.
+    if (partner && envelope.source !== 'web') {
+      context.addIssue({
+        code: 'custom',
+        message: 'Partner sign-in completes on the web only.',
+        path: ['source'],
       });
     }
   })

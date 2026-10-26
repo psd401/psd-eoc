@@ -1,5 +1,9 @@
 import { validateReturnTo } from '../auth/return-to';
 import { organizationName } from '../../../lib/config/deployment';
+import { partnerSignInConfigured } from '../../../lib/auth/identity-providers';
+import { PARTNER_SIGN_IN_PATH } from '../partner-sign-in/status';
+
+export const dynamic = 'force-dynamic';
 
 export default async function LoginPage({
   searchParams,
@@ -30,6 +34,13 @@ export default async function LoginPage({
         <p className="supporting-text">
           Signing in does not start an incident or send a notification.
         </p>
+        {partnerSignInConfigured() ? (
+          <p className="supporting-text">
+            <a href={PARTNER_SIGN_IN_PATH}>Partner agency sign-in</a> — for
+            first responders with a {organization} partner account, who have no
+            district Google account.
+          </p>
+        ) : null}
       </section>
     </main>
   );

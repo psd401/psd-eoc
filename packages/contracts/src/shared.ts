@@ -126,3 +126,33 @@ export const AgentApiKeyLabelSchema = z
 
 /** Human-readable agent key label inferred from its schema. */
 export type AgentApiKeyLabel = z.infer<typeof AgentApiKeyLabelSchema>;
+
+/**
+ * The shape every partner (first-responder) identity issuer has: one Amazon
+ * Cognito user pool, named by its region and pool id.
+ *
+ * A partner's identity provider is never the district Google tenant, and the
+ * two can never be mistaken for one another: no string matches both this
+ * pattern and `https://accounts.google.com`. Every rule that keeps a Cognito
+ * token off the Google completion path, and a Google token off the partner
+ * path, is written against this one fact. It lives here so the capability
+ * envelope and the identity contracts can both use it.
+ */
+export const PARTNER_IDENTITY_ISSUER_PATTERN =
+  /^https:\/\/cognito-idp\.[a-z0-9-]{1,40}(?:\.[a-z0-9-]{1,40}){1,3}\/[A-Za-z0-9_-]{1,64}$/u;
+
+/** A partner identity issuer: exactly one Cognito user pool's issuer URL. */
+export const PartnerIdentityIssuerSchema = z
+  .string()
+  .max(255)
+  .refine((value) => PARTNER_IDENTITY_ISSUER_PATTERN.test(value), {
+    message: 'A partner identity issuer must be a Cognito user pool URL.',
+  });
+
+/** Partner identity issuer inferred from its schema. */
+export type PartnerIdentityIssuer = z.infer<typeof PartnerIdentityIssuerSchema>;
+
+/** True when an issuer names a partner Cognito user pool. */
+export function isPartnerIssuer(value: string): boolean {
+  return PARTNER_IDENTITY_ISSUER_PATTERN.test(value);
+}

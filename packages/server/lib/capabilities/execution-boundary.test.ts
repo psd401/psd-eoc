@@ -39,6 +39,9 @@ const REPOSITORY_AUDITED_OIDC_ALLOWLIST = Object.freeze([
   'packages/server/app/api/auth/mobile/oidc/exchange/route.ts',
   // App-store review sign-in: same capability, identity from a review code.
   'packages/server/lib/auth/app-review-sign-in.ts',
+  // Partner web sign-in: same capability, identity from the partner pool's
+  // verified email one-time password.
+  'packages/server/lib/auth/partner-sign-in.ts',
   'packages/server/lib/capabilities/engine.ts',
 ] as const);
 

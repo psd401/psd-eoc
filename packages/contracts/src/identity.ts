@@ -13,6 +13,8 @@ import {
   hasUniqueStrings,
   isAtOrAfter,
   isExclusiveRoleSet,
+  isPartnerIssuer,
+  PartnerIdentityIssuerSchema,
   RoleSchema,
   TimestampSchema,
   UuidSchema,
@@ -114,6 +116,15 @@ export type IdentityIssuer = z.infer<typeof IdentityIssuerSchema>;
 
 /** The issuer-scoped subject identifier an identity provider asserts. */
 export const IdentitySubjectSchema = z.string().trim().min(1).max(255);
+
+/**
+ * The issuer union every pre-session sign-in claim set carries: the district
+ * Google tenant for staff, or one partner Cognito pool for a first responder.
+ */
+export const SignInIdentityIssuerSchema = z.union([
+  z.literal(GOOGLE_IDENTITY_ISSUER),
+  PartnerIdentityIssuerSchema,
+]);
 
 export const UserSchema = z
   .object({
@@ -1020,7 +1031,7 @@ export const CompleteOidcSignInInputSchema = z
   .object({
     claims: z
       .object({
-        issuer: z.literal('https://accounts.google.com'),
+        issuer: SignInIdentityIssuerSchema,
         audience: z.string().trim().min(1).max(255),
         subject: z.string().trim().min(1).max(255),
         subjectDigest: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -1060,6 +1071,26 @@ export const CompleteOidcSignInInputSchema = z
         code: 'custom',
         message: `${input.device.platform} sign-in requires ${requiredUnlock}.`,
         path: ['device', 'unlockMethod'],
+      });
+    }
+    if (!isPartnerIssuer(input.claims.issuer)) {
+      return;
+    }
+    // A partner pool has no hosted domain to assert, and nothing reads one.
+    if (input.claims.hostedDomain !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A partner identity carries no hosted domain.',
+        path: ['claims', 'hostedDomain'],
+      });
+    }
+    // Partner sign-in is a browser flow only; the native partner app is a
+    // later change (#598) and must widen this rule deliberately.
+    if (input.device.platform !== 'web') {
+      context.addIssue({
+        code: 'custom',
+        message: 'Partner sign-in completes on the web only.',
+        path: ['device', 'platform'],
       });
     }
   })

@@ -220,6 +220,16 @@ can never complete. The `PartnerUserPoolRequiresLiveApplication` rule also
 refuses a supplied pool unless `ProvisionApplication=true`. The client secret itself is never a deployment value: the
 stack passes only its ARN, and the service reads the value at runtime.
 
+All three together are also what turns on partner web sign-in. With them the
+`/login` page offers "Partner agency sign-in", and a partner signs in with an
+email one-time password the server asks the pool for. Without them that
+option is absent and the partner sign-in form answers every submission with
+"temporarily unavailable", so removing the parameters returns the deploy to
+staff-only behavior with nothing else to undo. Partner sign-in also uses the
+deployment's existing transient-cookie secret for the cookie that carries one
+sign-in between its two steps, derived with its own label; there is no
+additional secret to supply.
+
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
 parameter and has a default. Push and SMS workers, direct-provider enablement,
 and their evidence inputs default to safe, dark, or unconfigured states when

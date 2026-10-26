@@ -25,6 +25,7 @@ import {
   applicationOrigin,
   iosBundleId as iosBundleId_,
 } from '../config/deployment';
+import { isTrustedStaffIssuer } from './identity-providers';
 
 const GOOGLE_ISSUER = 'https://accounts.google.com' as const;
 const GOOGLE_AUTHORIZATION_ENDPOINT =
@@ -1578,6 +1579,11 @@ async function verifyIdToken(
     boundedClaimString(protectedHeader.kid, 255) === null ||
     (protectedHeader.typ !== undefined && protectedHeader.typ !== 'JWT') ||
     payload.iss !== GOOGLE_ISSUER ||
+    // The registry decides which path an issuer may take. A token from the
+    // partner Cognito pool is refused here even if it were otherwise valid,
+    // so the Google completion path stays the staff path only.
+    typeof payload.iss !== 'string' ||
+    !isTrustedStaffIssuer(payload.iss) ||
     payload.aud !== configuration.clientId ||
     subject === null ||
     payload.email_verified !== true ||

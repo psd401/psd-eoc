@@ -1,7 +1,10 @@
 import { cookies } from 'next/headers';
 
 import { authenticateWebSession } from '../../lib/auth/request-session';
-import { WEB_SESSION_COOKIE_NAME } from '../../lib/auth/sessions';
+import {
+  WEB_CSRF_COOKIE_NAME,
+  WEB_SESSION_COOKIE_NAME,
+} from '../../lib/auth/sessions';
 import { organizationName } from '../../lib/config/deployment';
 import { navigationDestinationsFor } from './primary-nav-model';
 import { PrimaryNavLink } from './primary-nav-link';
@@ -58,7 +61,10 @@ export async function PrimaryNav(): Promise<React.JSX.Element | null> {
             {roles.length > 0 ? roles.join(' · ') : 'no roles'}
           </span>
         </span>
-        <SignOutButton sessionId={sessionId} />
+        <SignOutButton
+          sessionId={sessionId}
+          csrfCookieName={WEB_CSRF_COOKIE_NAME}
+        />
       </div>
     </nav>
   );

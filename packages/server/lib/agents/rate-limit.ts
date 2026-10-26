@@ -1,16 +1,20 @@
 import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
 
+import {
+  createSlidingWindow,
+  decideSlidingWindow,
+  isSlidingWindowEmpty,
+  pruneSlidingWindow,
+  slidingWindowClock,
+  type SlidingWindow,
+} from '../http/sliding-window';
+
 /**
  * Per-key request budgets for the agent REST surface.
  *
- * The limiter is in-memory and per process. App Runner runs between two and
- * four instances of the server (`infra/src/stack/psd-eoc-stack.ts`), each
- * with its own limiter, so one key's effective ceiling is up to four times
- * each constant and a key refused on one instance may still be admitted on
- * another. That is deliberate: the budget bounds what one key can make one
- * instance do (the 2026-10-15 outage was an out-of-memory kill after request
- * bursts); it is not a precise meter. Restarting an instance resets its
- * windows.
+ * The budgets ride on the shared sliding-log window in
+ * `lib/http/sliding-window.ts`, which documents why an in-process limiter is
+ * the right bound here.
  *
  * The per-minute budget is charged as soon as the key is authenticated,
  * before the protected-action check, so a key looping on a human-only alias
@@ -99,13 +103,6 @@ export class AgentGatewayRateLimitError extends Error {
   }
 }
 
-interface SlidingWindow {
-  /** Admission times (ms) still inside the window. */
-  admitted: number[];
-  /** Request kinds refused since the last admission. */
-  readonly refused: Set<string>;
-}
-
 interface KeyWindows {
   readonly minute: SlidingWindow;
   readonly hour: SlidingWindow;
@@ -115,25 +112,7 @@ const ADMITTED: AgentRequestLimitDecision = Object.freeze({
   kind: 'admitted',
 });
 
-function validClock(nowValue: Date): number {
-  const now = nowValue.getTime();
-  if (!Number.isFinite(now)) {
-    throw new TypeError('The agent request limiter requires a valid clock.');
-  }
-  return now;
-}
-
-function prune(window: SlidingWindow, cutoff: number): void {
-  window.admitted = window.admitted.filter((timestamp) => timestamp > cutoff);
-}
-
-/**
- * Sliding-log decision for one window: admitted while fewer than the limit
- * of requests fall inside the trailing window. A refused request is not
- * counted, so a client that keeps retrying recovers as soon as the oldest
- * admitted request ages out rather than being locked out for as long as it
- * hammers.
- */
+/** Restates one shared window decision in the agent limiter's vocabulary. */
 function decide(
   window: SlidingWindow,
   windowKind: AgentRequestLimitWindow,
@@ -142,24 +121,21 @@ function decide(
   windowMs: number,
   now: number,
 ): AgentRequestLimitDecision {
-  prune(window, now - windowMs);
-  if (window.admitted.length < limit) {
-    window.admitted.push(now);
-    window.refused.clear();
-    return ADMITTED;
-  }
-  const oldest = Math.min(...window.admitted);
-  const firstRefusal = !window.refused.has(requestKind);
-  window.refused.add(requestKind);
-  return Object.freeze({
-    kind: 'refused',
-    window: windowKind,
-    retryAfterSeconds: Math.max(
-      1,
-      Math.ceil((oldest + windowMs - now) / 1_000),
-    ),
-    firstRefusal,
-  });
+  const decision = decideSlidingWindow(
+    window,
+    requestKind,
+    limit,
+    windowMs,
+    now,
+  );
+  return decision.admitted
+    ? ADMITTED
+    : Object.freeze({
+        kind: 'refused' as const,
+        window: windowKind,
+        retryAfterSeconds: decision.retryAfterSeconds,
+        firstRefusal: decision.firstRefusal,
+      });
 }
 
 export function createAgentRequestLimiter(): AgentRequestLimiter {
@@ -170,11 +146,14 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
     if (now - sweptAt >= AGENT_RATE_LIMIT_HOUR_WINDOW_MS) {
       sweptAt = now;
       for (const [id, windows] of keys) {
-        prune(windows.minute, now - AGENT_RATE_LIMIT_MINUTE_WINDOW_MS);
-        prune(windows.hour, now - AGENT_RATE_LIMIT_HOUR_WINDOW_MS);
+        pruneSlidingWindow(
+          windows.minute,
+          now - AGENT_RATE_LIMIT_MINUTE_WINDOW_MS,
+        );
+        pruneSlidingWindow(windows.hour, now - AGENT_RATE_LIMIT_HOUR_WINDOW_MS);
         if (
-          windows.minute.admitted.length === 0 &&
-          windows.hour.admitted.length === 0
+          isSlidingWindowEmpty(windows.minute) &&
+          isSlidingWindowEmpty(windows.hour)
         ) {
           keys.delete(id);
         }
@@ -183,8 +162,8 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
     let windows = keys.get(apiKeyId);
     if (windows === undefined) {
       windows = {
-        minute: { admitted: [], refused: new Set() },
-        hour: { admitted: [], refused: new Set() },
+        minute: createSlidingWindow(),
+        hour: createSlidingWindow(),
       };
       keys.set(apiKeyId, windows);
     }
@@ -193,7 +172,7 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
 
   const limiter: AgentRequestLimiter = {
     admit(apiKeyId, nowValue, requestKind = 'request') {
-      const now = validClock(nowValue);
+      const now = slidingWindowClock(nowValue, 'The agent request limiter');
       return decide(
         windowsFor(apiKeyId, now).minute,
         'per-minute',
@@ -204,7 +183,7 @@ export function createAgentRequestLimiter(): AgentRequestLimiter {
       );
     },
     admitCostly(apiKeyId, capabilityId, nowValue) {
-      const now = validClock(nowValue);
+      const now = slidingWindowClock(nowValue, 'The agent request limiter');
       if (!costlyCapabilityIds.has(capabilityId)) return ADMITTED;
       return decide(
         windowsFor(apiKeyId, now).hour,

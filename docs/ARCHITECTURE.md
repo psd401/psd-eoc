@@ -70,10 +70,24 @@ actor or facility scope yet, so
 `executeRepositoryAuditedOidcCompletion` accepts only the literal
 `complete-oidc-sign-in` registration. Its serializable repository commits
 replay protection, session issuance, and access-gate audit together. The
-source-boundary test permits only the browser callback and mobile exchange
-routes. Adding another lower-tier consumer requires moving it through the
-audited engine or deliberately updating this document and the exact allowlist
-test together.
+source-boundary test permits only the browser callback, the mobile exchange
+route, app-store review sign-in, and partner web sign-in. Adding another
+lower-tier consumer requires moving it through the audited engine or
+deliberately updating this document and the exact allowlist test together.
+
+Two issuers complete that one capability, and `lib/auth/identity-providers.ts`
+is the only place an issuer becomes a sign-in path: district Google for staff,
+and one Amazon Cognito user pool for partner (first-responder) accounts. The
+two paths cannot be confused for one another. A Google identity completes only
+through a code callback or the native exchange, a partner identity only
+through a verified email one-time password, and the pre-session envelope
+refuses either transport with the other's issuer. Staff authorization is
+current trusted-group membership; a partner's is an administrator's admission
+that has not ended or expired, re-read on every request. Staff sessions keep
+their long lifetime; a partner session lasts at most one day and never past
+its admission, which `lib/auth/partner-session.ts` caps rather than
+configures. Partner access is configuration: without the pool parameters the
+registry holds Google alone and the deployment has no partner sign-in.
 
 Reusable capability services live under `packages/server/lib`. Next `app`
 folders contain authentication, bounded request parsing, capability

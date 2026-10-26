@@ -16,6 +16,7 @@ import { desc, sql } from 'drizzle-orm';
 import type { Database } from '../../db/client';
 import { securityAuditEntries } from '../../db/schema';
 import type { GoogleOidcCallbackErrorCode } from './oidc';
+import type { PartnerSignInRefusal } from './partner-sign-in-authorization';
 import type { WebSessionIssuanceErrorCode } from './session-cookie';
 
 const ACCESS_GATE_AUDIT_ACTION = 'complete-oidc-sign-in' as const;
@@ -177,6 +178,10 @@ export type AccessGateAuditEvent =
         | AccessGateDenialReason
         | GoogleOidcCallbackErrorCode
         | WebSessionIssuanceErrorCode
+        // A partner is refused by their admission, not by a group, so their
+        // refusals have their own vocabulary. The person is shown one
+        // generic message; the exact reason is recorded only here.
+        | PartnerSignInRefusal
         | typeof POST_GATE_SIGN_IN_FAILED_REASON;
       userId: string | null;
       source: 'web' | 'mobile';
