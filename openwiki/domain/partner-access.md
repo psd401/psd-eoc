@@ -3,7 +3,7 @@ type: Domain Concept
 title: "Partner access: admissions, provider sync, and expiry sweep"
 description: "How non-district first responders are admitted, refused, renewed, disabled, and expired through append-only partner admissions, a separate partner identity provider, the Access page, and the daily partner-access sweep."
 tags: [partner-access, identity, admissions, expiry, cognito, ses]
-timestamp: 2026-10-26T08:24:41-07:00
+timestamp: 2026-10-26T11:42:26-07:00
 openwiki:
   roles: [domain, operations]
   change_kinds: [identity, lifecycle, persistence, scheduled-job]
@@ -42,7 +42,7 @@ openwiki:
 
 **Consult this page** when changing how a non-district responder (for example a fire or police responder) gets, keeps, loses, or renews access, the Access page's Partners section, the partner identity provider calls, partner mail, or the daily sweep.
 
-Partner access is a second identity kind beside district staff. Staff sign in with Google and get roles from Google Groups ([identity and access](identity-and-access.md)). A partner signs in through a separate partner identity provider and is admitted only by an administrator's partner admission. The partner has no Google identity, no group, and no staff role. `docs/ARCHITECTURE.md` (section "Partner access") states the policy; this page records how the source implements it.
+Partner access is a second identity kind beside district staff. Staff sign in with Google and get roles from Google Groups ([identity and access](identity-and-access.md)). A partner signs in through a separate partner identity provider and is admitted only by an administrator's partner admission. The partner has no Google identity, no group, and no staff role. `docs/ARCHITECTURE.md` (section "Partner access") states the policy; this page records how the source implements it. Which real events alert an admitted partner is a separate administrator setting, stored as versions and covered in [partner alert settings](partner-alert-settings.md); admission decides who may hold an account, not which events reach them.
 
 ## Concepts
 
@@ -200,4 +200,6 @@ Escalate when a change crosses a boundary: stack or IAM changes add `bun test in
 - No partner data goes into staff tables, group sources, or staff roles, and no partner email goes through the alert configuration set.
 - Provider readiness and live verification belong in `docs/INTEGRATIONS.md`, not in this page.
 
-Related: [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#how-the-stack-gates-it) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+Related: [partner alert settings](partner-alert-settings.md) (which real events alert partners, configured by administrators), [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#how-the-stack-gates-it) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+ alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+(the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
