@@ -1,4 +1,9 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 
 import {
   AdminInitiateAuthCommand,
@@ -34,7 +39,8 @@ import {
 
 const MAX_ID_TOKEN_LENGTH = 24 * 1_024;
 const CLOCK_TOLERANCE_SECONDS = 60;
-const OTP_CODE_PATTERN = /^[0-9]{6,8}$/u;
+/** The shape of a pool email code; the sign-in form checks it too. */
+export const OTP_CODE_PATTERN = /^[0-9]{6,8}$/u;
 const SYNTHETIC_FLOW_PREFIX = 'synthetic-partner-otp:';
 
 export type PartnerOtpErrorCode =
@@ -178,6 +184,9 @@ export async function verifyPartnerIdToken(
   });
 }
 
+/** Marks a flow started for an address the pool said it does not hold. */
+const UNENROLLED_FLOW_PREFIX = 'unenrolled.';
+
 const partnerJwkSets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 const cognitoPartnerOtpProviders = new Map<string, PartnerOtpProvider>();
@@ -317,15 +326,24 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
       );
       session = response.Session;
       challenge = response.ChallengeName;
-    } catch {
+    } catch (error) {
+      // The pool's app client hides user existence
+      // (`prevent_user_existence_errors` in infra/terraform/stateful/main.tf),
+      // so an unenrolled address normally gets a challenge too. If the pool
+      // ever says so anyway, answer exactly as for an enrolled address: a
+      // flow whose code is always refused, never a different page.
+      if (error instanceof Error && error.name === 'UserNotFoundException') {
+        return Object.freeze({
+          flowSession: `${UNENROLLED_FLOW_PREFIX}${randomBytes(32).toString('base64url')}`,
+        });
+      }
       throw new PartnerOtpError(
         'PARTNER_PROVIDER_UNAVAILABLE',
         'The partner identity provider did not answer.',
       );
     }
-    // The pool answers an unenrolled address with a challenge too (its
-    // user-existence errors are off), so this branch is a provider or policy
-    // problem, not a statement about the address.
+    // An unenrolled address gets a challenge too (see above), so this branch
+    // is a provider or policy problem, not a statement about the address.
     if (challenge !== 'EMAIL_OTP' || session === undefined) {
       throw new PartnerOtpError(
         'PARTNER_PROVIDER_UNAVAILABLE',
@@ -338,7 +356,10 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
   public async verify(
     input: Readonly<{ email: string; flowSession: string; code: string }>,
   ): Promise<PartnerVerifiedClaims> {
-    if (!OTP_CODE_PATTERN.test(input.code)) {
+    if (
+      !OTP_CODE_PATTERN.test(input.code) ||
+      input.flowSession.startsWith(UNENROLLED_FLOW_PREFIX)
+    ) {
       refused();
     }
     const clientSecret = await this.readClientSecret();

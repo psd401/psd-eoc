@@ -77,8 +77,26 @@ describe('trusted identity provider registry', () => {
     expect(
       readPartnerPoolConfiguration({
         PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+        PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
       }),
     ).toMatchObject({ issuer: SYNTHETIC_PARTNER_ISSUER, synthetic: true });
+  });
+
+  test('the synthetic pool is refused without the test-only allowance', () => {
+    // Its codes are derived from the address, so a deployment that somehow
+    // carried the pool id alone must not get a sign-in anyone can complete.
+    for (const allowance of [undefined, '', 'true', 'ALLOWED']) {
+      const environment = {
+        PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+        ...(allowance === undefined
+          ? {}
+          : { PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: allowance }),
+      };
+      expect(() => readPartnerPoolConfiguration(environment)).toThrow(
+        PartnerPoolConfigurationError,
+      );
+      expect(partnerSignInConfigured(environment)).toBe(false);
+    }
   });
 
   test('Google is the staff path and a partner pool never is', () => {

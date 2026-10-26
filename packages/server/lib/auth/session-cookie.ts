@@ -598,6 +598,8 @@ function toIsoString(value: Date): string {
  * Only structural PostgreSQL fields are included. `detail`, `hint`, and `where`
  * are deliberately omitted: PostgreSQL embeds the offending row's column values
  * in those, which for this transaction means staff email and Google subject.
+ * For the same reason a Drizzle query error's bound parameters are cut from
+ * its message.
  * The result is safe to log and carries enough to identify the failing write.
  */
 export function describeSessionPersistenceFailure(error: unknown): string {
@@ -621,7 +623,11 @@ export function describeSessionPersistenceFailure(error: unknown): string {
     }
     const message = Reflect.get(current, 'message');
     if (typeof message === 'string' && message.length > 0) {
-      parts.push(`message=${message.slice(0, 300)}`);
+      // A Drizzle query error appends the statement's bound values after a
+      // "params:" line; those are email addresses and identity subjects.
+      // The statement itself carries only placeholders.
+      const statement = message.split('\nparams:', 1)[0] ?? '';
+      parts.push(`message=${statement.slice(0, 300)}`);
     }
     const cause: unknown = Reflect.get(current, 'cause');
     if (cause === undefined || cause === null) break;

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { DrizzleQueryError } from 'drizzle-orm';
 
 import {
   HumanConfirmationRecordSchema,
@@ -783,6 +784,46 @@ describe('capability engine', () => {
     });
     expect(Object.isFrozen(invocation)).toBe(true);
     expect(Object.isFrozen(invocation.mutation)).toBe(true);
+  });
+
+  test('logs a failed statement without the values bound to it', async () => {
+    const store = new MemoryCapabilityStore();
+    const join = createJoinRegistration();
+    const failing = {
+      ...join.registration,
+      handler: () => {
+        // A connection failure carries no SQLSTATE, so only the message is
+        // left to log; Drizzle appends the bound values to it.
+        throw new DrizzleQueryError(
+          'select * from users where email = $1',
+          ['responder@agency.example.invalid'],
+          new Error('Connection terminated unexpectedly'),
+        );
+      },
+    };
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...values: unknown[]) => {
+      logged.push(values.map(String).join(' '));
+    };
+    try {
+      await captureEngineError(() =>
+        executeAuditedCapabilityTransaction(
+          failing,
+          { eventId: IDS.event },
+          humanMutationInvocation({
+            requestId: uuid(20_020),
+            idempotencyKey: 'pppp-fail-00000001',
+          }),
+          store,
+        ),
+      );
+    } finally {
+      console.error = original;
+    }
+    const failure = logged.find((line) => line.includes('capability-failed'));
+    expect(failure).toContain('select * from users where email = $1');
+    expect(failure).not.toContain('responder@agency.example.invalid');
   });
 
   test('a partner session runs only the partner allowlist', async () => {

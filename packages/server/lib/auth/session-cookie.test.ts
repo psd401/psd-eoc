@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { DrizzleQueryError } from 'drizzle-orm';
 
 import {
   invokeAuthorizedCapabilityHandler,
@@ -309,6 +310,26 @@ describe('describeSessionPersistenceFailure', () => {
     expect(described).toContain('table_name=users');
     expect(described).not.toContain('staff.member@example.invalid');
     expect(described).not.toContain('Key (email)');
+  });
+
+  test('never emits the bound parameters a Drizzle query error carries', () => {
+    // Drizzle wraps a failed statement as "Failed query: <sql>\nparams: <values>",
+    // and the values here are a person's address and identity subject.
+    const failure = new DrizzleQueryError(
+      'select pg_advisory_xact_lock(hashtextextended($1, 0))',
+      ['partner-access:responder@agency.example.invalid', 'cognito-sub-1'],
+      Object.assign(new Error('could not serialize access'), {
+        code: '40001',
+      }),
+    );
+
+    const described = describeSessionPersistenceFailure(failure);
+
+    expect(described).toContain('pg_advisory_xact_lock');
+    expect(described).toContain('code=40001');
+    expect(described).not.toContain('responder@agency.example.invalid');
+    expect(described).not.toContain('cognito-sub-1');
+    expect(described).not.toContain('params:');
   });
 
   test('walks cause chains and tolerates values that are not errors', () => {

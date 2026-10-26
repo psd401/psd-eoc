@@ -813,6 +813,9 @@ async function main(): Promise<void> {
           // Synthetic partner identity provider and mailer: nothing leaves
           // the machine. A deployed stack cannot carry this pool id.
           PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+          // The test-only allowance the synthetic pool requires before it
+          // will sign anyone in. The stack never sets it.
+          PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
           // The deployment's transient-cookie secret. Partner sign-in's
           // between-steps cookie is derived from it with its own label, the
           // same secret the Google callback cookie uses.

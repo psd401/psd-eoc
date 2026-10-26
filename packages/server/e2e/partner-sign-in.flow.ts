@@ -37,7 +37,7 @@ test.describe('partner-sign-in', () => {
 
     await page.getByLabel('Your agency email address').fill(PARTNER_EMAIL);
     await page.getByRole('button', { name: 'Email me a sign-in code' }).click();
-    await expect(page.getByRole('alert')).toContainText(
+    await expect(page.locator('p.form-message[role="alert"]')).toContainText(
       'a sign-in code is on its way',
     );
     await expectAxeClean(page);
@@ -106,7 +106,7 @@ test.describe('partner-sign-in', () => {
     await page.getByRole('button', { name: 'Email me a sign-in code' }).click();
     // Step one says the same thing for every address, so it answers no
     // question about who has partner access.
-    await expect(page.getByRole('alert')).toContainText(
+    await expect(page.locator('p.form-message[role="alert"]')).toContainText(
       'a sign-in code is on its way',
     );
 
@@ -114,7 +114,7 @@ test.describe('partner-sign-in', () => {
       .getByLabel('Sign-in code from your email')
       .fill(syntheticPartnerOtpCode(UNKNOWN_EMAIL));
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.getByRole('alert')).toContainText(
+    await expect(page.locator('p.form-message[role="alert"]')).toContainText(
       'That sign-in could not be completed',
     );
     await expect(page.getByText(UNKNOWN_EMAIL)).toHaveCount(0);
@@ -131,7 +131,7 @@ test.describe('partner-sign-in', () => {
     await page.getByRole('button', { name: 'Email me a sign-in code' }).click();
     await page.getByLabel('Sign-in code from your email').fill('000000');
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.getByRole('alert')).toContainText(
+    await expect(page.locator('p.form-message[role="alert"]')).toContainText(
       'That sign-in could not be completed',
     );
     const session = (await page.context().cookies()).find((cookie) =>

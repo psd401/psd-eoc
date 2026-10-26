@@ -165,6 +165,32 @@ describe('the Cognito partner provider', () => {
     expect(parameters.SECRET_HASH).toMatch(/^[A-Za-z0-9+/]+={0,2}$/u);
   });
 
+  test('an unenrolled address gets a challenge too, and its code is refused', async () => {
+    // The pool's client hides user existence (prevent_user_existence_errors
+    // in infra/terraform/stateful/main.tf); if it ever said so anyway, the
+    // address must still get the same "code sent" step and the same refusal.
+    const notFound = Object.assign(new Error('User does not exist.'), {
+      name: 'UserNotFoundException',
+    });
+    const started = await provider([notFound]).start(EMAIL);
+    expect(started.flowSession.length).toBeGreaterThan(20);
+
+    const sent: unknown[] = [];
+    await expect(
+      provider([], sent).verify({
+        email: EMAIL,
+        flowSession: started.flowSession,
+        code: '123456',
+      }),
+    ).rejects.toMatchObject({ code: 'PARTNER_SIGN_IN_REFUSED' });
+    expect(sent).toHaveLength(0);
+
+    // Every other failure is still the provider being unavailable.
+    await expect(
+      provider([new Error('ThrottlingException')]).start(EMAIL),
+    ).rejects.toMatchObject({ code: 'PARTNER_PROVIDER_UNAVAILABLE' });
+  });
+
   test('reports a provider that offers no email code as unavailable', async () => {
     await expect(
       provider([{ ChallengeName: 'WEB_AUTHN', Session: 's' }]).start(EMAIL),
@@ -213,6 +239,7 @@ describe('the Cognito partner provider', () => {
 describe('the synthetic partner provider', () => {
   const synthetic = readPartnerPoolConfiguration({
     PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+    PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
   });
   if (synthetic === null) throw new Error('No synthetic pool.');
   const provider = syntheticPartnerOtpProvider(synthetic);
@@ -268,6 +295,7 @@ describe('provider resolution', () => {
     expect(
       resolvePartnerOtpProvider({
         PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
+        PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
       })?.issuer,
     ).toBe('https://cognito-idp.example.invalid/synthetic-partner-pool');
   });

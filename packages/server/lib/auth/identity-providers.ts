@@ -85,6 +85,15 @@ export function readPartnerPoolConfiguration(
     environment.PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN,
   );
   if (userPoolId === SYNTHETIC_PARTNER_USER_POOL_ID) {
+    // The stand-in's codes are derived from the address, so it must never be
+    // a deployed sign-in. The stack's parameter pattern refuses the pool id;
+    // this second, test-only variable (set by the browser-flow runner, never
+    // by the stack) means an environment edit alone cannot turn it on.
+    if (environment.PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN !== 'allowed') {
+      throw new PartnerPoolConfigurationError(
+        'The synthetic partner pool is for browser tests only.',
+      );
+    }
     return Object.freeze({
       userPoolId,
       clientId: clientId ?? SYNTHETIC_PARTNER_USER_POOL_ID,

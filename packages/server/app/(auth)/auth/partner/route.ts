@@ -19,6 +19,7 @@ import {
   readPartnerFlowCookie,
 } from '../../../../lib/auth/partner-flow-cookie';
 import {
+  OTP_CODE_PATTERN,
   PartnerOtpError,
   resolvePartnerOtpProvider,
 } from '../../../../lib/auth/partner-otp';
@@ -31,6 +32,7 @@ import {
   createDrizzleAccessGateAuditSink,
   POST_GATE_SIGN_IN_FAILED_REASON,
 } from '../../../../lib/auth/sign-in-audit';
+import { forwardedClientAddress } from '../../../../lib/http/client-address';
 import {
   PARTNER_SIGN_IN_PATH,
   type PartnerSignInStatus,
@@ -40,7 +42,6 @@ export const dynamic = 'force-dynamic';
 
 const MAX_FORM_BYTES = 4 * 1_024;
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@.]{1,63}(?:\.[^\s@.]{1,63}){1,8}$/u;
-const CODE_PATTERN = /^[0-9]{6,8}$/u;
 
 function noStore(response: NextResponse): NextResponse {
   response.headers.set('Cache-Control', 'no-store, max-age=0');
@@ -115,19 +116,6 @@ function singleValue(form: URLSearchParams, name: string): string | null {
   return values.length === 1 ? (values[0]?.trim() ?? null) : null;
 }
 
-/**
- * The caller, as this server can see them without trusting a proxy header
- * that anyone may set. App Runner terminates in front of the listener, so
- * `x-forwarded-for`'s first entry is the only address available; a caller who
- * omits or forges it still charges the shared bucket, which is never larger
- * than one address's.
- */
-function clientAddress(request: Request): string | null {
-  const forwarded = request.headers.get('x-forwarded-for');
-  const first = forwarded?.split(',', 1)[0]?.trim() ?? '';
-  return first.length > 0 && first.length <= 64 ? first : null;
-}
-
 function createConnection(): DatabaseConnection {
   const config = readDatabaseConfig();
   if (config.driver !== 'postgres') {
@@ -169,7 +157,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const now = new Date();
   const limiter = getPartnerOtpLimiter();
-  const client = clientAddress(request);
+  const client = forwardedClientAddress(request);
 
   if (step === 'send-code') {
     const email = singleValue(form, 'email')?.toLowerCase() ?? '';
@@ -218,7 +206,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return back(request, 'expired', { clearFlow: true });
   }
   const code = singleValue(form, 'code') ?? '';
-  if (!CODE_PATTERN.test(code)) {
+  if (!OTP_CODE_PATTERN.test(code)) {
     return back(request, 'refused', { step: 'code' });
   }
   if (

@@ -23,6 +23,7 @@ const names = [
   'PSD_EOC_PARTNER_USER_POOL_ID',
   'PSD_EOC_PARTNER_USER_POOL_CLIENT_ID',
   'PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN',
+  'PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN',
   'GOOGLE_OIDC_COOKIE_SECRET',
   'NODE_ENV',
 ] as const;
@@ -62,6 +63,7 @@ beforeEach(() => {
     original.set(name, process.env[name]);
   }
   Reflect.set(process.env, 'PSD_EOC_PARTNER_USER_POOL_ID', 'SYNTHETIC');
+  Reflect.set(process.env, 'PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN', 'allowed');
   Reflect.set(process.env, 'GOOGLE_OIDC_COOKIE_SECRET', COOKIE_SECRET);
   Reflect.deleteProperty(process.env, 'NODE_ENV');
 });

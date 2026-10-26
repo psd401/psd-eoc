@@ -638,7 +638,11 @@ function unexpectedFailureMessage(error: unknown): string {
     return `schema refused: ${paths.join(', ')}`;
   }
   if (!(error instanceof Error)) return 'no message';
-  const message = error.message.trim().replace(/\s+/gu, ' ');
+  // A Drizzle query error appends the statement's bound values after a
+  // "params:" line. The statement carries only placeholders; keep it alone.
+  const message = (error.message.split('\nparams:', 1)[0] ?? '')
+    .trim()
+    .replace(/\s+/gu, ' ');
   if (message.length === 0) return 'no message';
   return message.length > UNEXPECTED_FAILURE_MESSAGE_LIMIT
     ? `${message.slice(0, UNEXPECTED_FAILURE_MESSAGE_LIMIT)}\u2026`
