@@ -141,6 +141,7 @@ test.describe('partner-event-participation', () => {
       '/facilities',
       '/event-types',
       '/access',
+      '/partner-alerts',
       '/devices',
       '/integrations',
       '/audit',
@@ -149,7 +150,9 @@ test.describe('partner-event-participation', () => {
       const response = await page.goto(address);
       expect(response?.status(), address).toBeLessThan(500);
       await expect(
-        page.getByRole('link', { name: /^(Readiness|Access|Agents|Audit)$/u }),
+        page.getByRole('link', {
+          name: /^(Readiness|Access|Partner alerts|Agents|Audit)$/u,
+        }),
       ).toHaveCount(0);
     }
     await page.goto('/access');

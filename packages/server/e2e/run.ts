@@ -573,6 +573,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-594',
     );
+    const committedIssue597EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-597',
+    );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedEvidenceDirectory
@@ -617,6 +622,11 @@ async function main(): Promise<void> {
         ? committedIssue594EvidenceDirectory
         : join(createdStateDirectory, 'evidence-594');
     await mkdir(issue594EvidenceDirectory, { recursive: true });
+    const issue597EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue597EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-597');
+    await mkdir(issue597EvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -825,6 +835,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_593_EVIDENCE_DIR: issue593EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_594_EVIDENCE_DIR: issue594EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_597_EVIDENCE_DIR: issue597EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_PRIVACY_CONTACT_URL:
