@@ -40,6 +40,7 @@ import {
 } from '../../db/schema';
 import { seedDatabase } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
+import { partnerFacilityScope } from '../../lib/auth/partner-admission';
 import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   CapabilityEngineError,
@@ -52,6 +53,10 @@ import {
   readEventRoomCursorSequence,
   type EventRoomCapabilityRuntime,
 } from './event-room';
+import {
+  createDrizzleEventCapabilityStore,
+  executeEventCapability,
+} from './events';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -990,5 +995,83 @@ describeWithDatabase('event-room atomic synchronization', () => {
     expect(own.viewerManagesLifecycle).toBe(true);
     expect(campus.viewerManagesLifecycle).toBe(false);
     expect(campus.header).toEqual(expectedHeader());
+  });
+
+  test('tells a partner the event is theirs to follow, not to end', async () => {
+    const eventId = await createActiveEvent();
+    const partner = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 100 },
+      {
+        ...invocation(),
+        scope: {
+          facilityScope: {
+            kind: 'facilities',
+            facilityIds: [fixtures().facilityId],
+          },
+          partner: true,
+        },
+      },
+    );
+    expect(partner.viewerManagesLifecycle).toBe(false);
+    expect(partner.header).toEqual(expectedHeader());
+  });
+
+  test('a drill at an isolated facility is invisible to a partner', async () => {
+    const [review] = await setupDatabase()
+      .insert(facilities)
+      .values({
+        code: `RVW-${randomUUID().slice(0, 8).toUpperCase()}`,
+        name: 'Synthetic Review',
+        isolated: true,
+      })
+      .returning({ id: facilities.id });
+    if (review === undefined) throw new Error('No isolated facility.');
+    const reviewDrill = await createActiveEvent(review.id);
+    const schoolDrill = await createActiveEvent();
+
+    // The one place partner scope is resolved: every ordinary facility,
+    // never an isolated one, whatever district-wide limit is stored.
+    const facilityScope = await partnerFacilityScope(setupDatabase(), {
+      kind: 'district',
+    });
+    if (facilityScope === null || facilityScope.kind !== 'facilities') {
+      throw new Error('The partner has no ordinary facility.');
+    }
+    expect(facilityScope.facilityIds).toContain(fixtures().facilityId);
+    expect(facilityScope.facilityIds).not.toContain(review.id);
+    const partner = (source: 'web' | 'mobile') => ({
+      ...invocation(randomUUID(), source),
+      scope: { facilityScope, partner: true as const },
+    });
+
+    for (const source of ['web', 'mobile'] as const) {
+      const school = await eventRoomRuntime().execute(
+        { eventId: schoolDrill, cursor: null, limit: 100 },
+        partner(source),
+      );
+      expect(school.event?.id).toBe(schoolDrill);
+      await expect(
+        eventRoomRuntime().execute(
+          { eventId: reviewDrill, cursor: null, limit: 100 },
+          partner(source),
+        ),
+      ).rejects.toBeInstanceOf(CapabilityEngineError);
+      await expect(
+        executeEventCapability(
+          'list-active-events',
+          { facilityId: review.id, cursor: null, limit: 100 },
+          partner(source),
+          createDrizzleEventCapabilityStore(setupDatabase()),
+        ),
+      ).rejects.toBeInstanceOf(CapabilityEngineError);
+      await expect(
+        executeEventCapability(
+          'get-event',
+          { eventId: reviewDrill },
+          partner(source),
+          createDrizzleEventCapabilityStore(setupDatabase()),
+        ),
+      ).rejects.toBeInstanceOf(CapabilityEngineError);
+    }
   });
 });

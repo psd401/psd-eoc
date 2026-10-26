@@ -1,3 +1,4 @@
+import { partnerAllowlistPermits } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 
 import { authenticateWebSession } from '../../lib/auth/request-session';
@@ -37,14 +38,19 @@ export async function PrimaryNav(): Promise<React.JSX.Element | null> {
   const visible = navigationDestinationsFor({
     roles: authenticated.roles,
     facilityScope: authenticated.scope.facilityScope,
+    partner: authenticated.scope.partner,
   });
+  // The brand opens the start flow for staff; a partner cannot start events.
+  const brandHref = partnerAllowlistPermits(authenticated.scope, 'start-event')
+    ? '/start'
+    : '/';
   const email = authenticated.result.user.email;
   const roles = authenticated.roles;
   const sessionId = authenticated.actor.sessionId;
 
   return (
     <nav aria-label="Primary" className="primary-nav">
-      <a className="primary-nav__brand" href="/start">
+      <a className="primary-nav__brand" href={brandHref}>
         {organizationName()} emergency operations
       </a>
       <ul className="primary-nav__links">

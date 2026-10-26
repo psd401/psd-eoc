@@ -568,6 +568,11 @@ async function main(): Promise<void> {
       '.verification',
       'issue-593',
     );
+    const committedIssue594EvidenceDirectory = join(
+      REPOSITORY_ROOT,
+      '.verification',
+      'issue-594',
+    );
     const evidenceDirectory =
       process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
         ? committedEvidenceDirectory
@@ -607,6 +612,11 @@ async function main(): Promise<void> {
         ? committedIssue593EvidenceDirectory
         : join(createdStateDirectory, 'evidence-593');
     await mkdir(issue593EvidenceDirectory, { recursive: true });
+    const issue594EvidenceDirectory =
+      process.env.PSD_EOC_E2E_UPDATE_EVIDENCE === 'true'
+        ? committedIssue594EvidenceDirectory
+        : join(createdStateDirectory, 'evidence-594');
+    await mkdir(issue594EvidenceDirectory, { recursive: true });
     const opened = createDatabaseClient({
       driver: 'postgres',
       url: disposable.url,
@@ -722,6 +732,15 @@ async function main(): Promise<void> {
       admittedAt: new Date(now.getTime() - 360 * DAY_MILLISECONDS),
       statePath: join(createdStateDirectory, 'partner-renew.json'),
     });
+    // Issue #594. A signed-in partner no flow disables, expires, or renews,
+    // for the flows that join, post, and look for staff-only controls.
+    await issuePartner(opened, {
+      email: 'responder@agency.example.invalid',
+      displayName: 'Synthetic Joining Responder',
+      invitedByUserId: districtAdministrator.userId,
+      now,
+      statePath: join(createdStateDirectory, 'partner-responder.json'),
+    });
     // Issue #593. An admitted partner with no account and no session yet:
     // the sign-in flow creates both, so nothing about it is pre-seeded.
     await opened.db.insert(partnerAdmissions).values({
@@ -737,6 +756,12 @@ async function main(): Promise<void> {
       districtAdministrator,
     );
     const issue32EventId = await createSyntheticDrill(
+      opened,
+      districtAdministrator,
+    );
+    // Issue #594. A live drill only the partner flows touch, so no staff
+    // flow's join, post, or close changes what the partner sees.
+    const partnerEventId = await createSyntheticDrill(
       opened,
       districtAdministrator,
     );
@@ -757,6 +782,7 @@ async function main(): Promise<void> {
         issue344EventId,
         issue32EventId,
         issue32Media,
+        partnerEventId,
         districtAdministratorUserId: districtAdministrator.userId,
         records,
       }),
@@ -798,6 +824,7 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ISSUE_341_EVIDENCE_DIR: issue341EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_344_EVIDENCE_DIR: issue344EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_593_EVIDENCE_DIR: issue593EvidenceDirectory,
+          PSD_EOC_E2E_ISSUE_594_EVIDENCE_DIR: issue594EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_PRIVACY_CONTACT_URL:

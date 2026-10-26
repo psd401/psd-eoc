@@ -1,3 +1,4 @@
+import { partnerAllowlistPermits } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
@@ -41,12 +42,19 @@ export async function requireRecordsPageSession(
   if (token === undefined) {
     redirect(recordsSignInUrl(returnTo, 'session-required'));
   }
+  let authenticated: AuthenticatedSession;
   try {
-    return await authenticateWebSession(token);
+    authenticated = await authenticateWebSession(token);
   } catch (error) {
     if (error instanceof SessionAccessError) {
       redirect(recordsSignInUrl(returnTo, 'session-expired'));
     }
     throw error;
   }
+  // The engine refuses Records to a partner session; the events list is the
+  // partner's page.
+  if (!partnerAllowlistPermits(authenticated.scope, 'list-event-records')) {
+    redirect('/');
+  }
+  return authenticated;
 }

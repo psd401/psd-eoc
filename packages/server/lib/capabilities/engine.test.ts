@@ -3,6 +3,9 @@ import { DrizzleQueryError } from 'drizzle-orm';
 
 import {
   HumanConfirmationRecordSchema,
+  RegisteredCapabilityIdSchema,
+  getCapabilityInvocationPolicy,
+  isPartnerCapabilityId,
   type CapabilityOutput,
   type CapabilityScope,
   type HumanConfirmationRecord,
@@ -14,6 +17,7 @@ import { buildSecurityAuditEntry } from '../audit/entry';
 import { verifySecurityAuditEntries } from '../audit/verification';
 import {
   CapabilityEngineError,
+  assertInvocationAllowed,
   executeAuditedCapabilityTransaction,
   executeAuditedRefreshReplayDenial,
   executeAuditedSessionReplaySuccess,
@@ -914,6 +918,52 @@ describe('capability engine', () => {
       code: 'FORBIDDEN',
       reasonCode: 'CAPABILITY_INVOCATION_DENIED',
     });
+  });
+
+  test('refuses every capability off the partner allowlist on every human transport', () => {
+    const refusedForPartner = (
+      capabilityId: (typeof RegisteredCapabilityIdSchema.options)[number],
+      source: 'web' | 'mobile',
+      partner: boolean,
+    ) => {
+      try {
+        assertInvocationAllowed(
+          capabilityId,
+          humanQueryInvocation(
+            uuid(20_020),
+            partner ? { ...DISTRICT_SCOPE, partner: true } : DISTRICT_SCOPE,
+            source,
+          ),
+        );
+        return false;
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: 'FORBIDDEN',
+          reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+          status: 403,
+        });
+        return true;
+      }
+    };
+    let refusals = 0;
+    for (const capabilityId of RegisteredCapabilityIdSchema.options) {
+      const policy = getCapabilityInvocationPolicy(capabilityId);
+      for (const source of ['web', 'mobile'] as const) {
+        const staffMay =
+          (policy.principalKinds as readonly string[]).includes('human') &&
+          (policy.sources as readonly string[]).includes(source);
+        // The partner check only ever narrows what staff may run.
+        expect(refusedForPartner(capabilityId, source, false)).toBe(!staffMay);
+        expect(refusedForPartner(capabilityId, source, true)).toBe(
+          !staffMay || !isPartnerCapabilityId(capabilityId),
+        );
+        if (staffMay && !isPartnerCapabilityId(capabilityId)) refusals += 1;
+      }
+    }
+    // Agent transports carry agent principals, which a partner never holds:
+    // issuing an agent key is itself off the allowlist above.
+    expect(isPartnerCapabilityId('issue-agent-api-key')).toBe(false);
+    expect(refusals).toBeGreaterThan(50);
   });
 
   test('audits an exact mutation replay under its fresh request ID without a second handler call', async () => {

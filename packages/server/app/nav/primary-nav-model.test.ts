@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { isPartnerCapabilityId } from '@psd-eoc/contracts';
 
 import {
   NAV_DESTINATIONS,
@@ -55,6 +56,25 @@ describe('shared operator navigation model', () => {
       'Devices',
       'Audit',
     ]);
+  });
+
+  test('a partner sees only destinations whose capability the partner allowlist admits', () => {
+    const partner = navigationDestinationsFor({
+      roles: ['partner'],
+      facilityScope: {
+        kind: 'facilities',
+        facilityIds: ['10000000-0000-4000-8000-000000000001'],
+      },
+      partner: true,
+    });
+
+    expect(partner.map(({ label }) => label)).toEqual([
+      'Events',
+      'Text alerts',
+    ]);
+    for (const { capabilityId } of partner) {
+      expect(isPartnerCapabilityId(capabilityId)).toBe(true);
+    }
   });
 
   test('contains only unique, shipped destinations and no dead emergency route', () => {

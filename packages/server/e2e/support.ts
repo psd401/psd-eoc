@@ -17,6 +17,8 @@ export interface BrowserFixture {
     mediaId: string;
     uploadIntentId: string;
   }>;
+  /** A live drill reserved for the partner flows (issue #594). */
+  readonly partnerEventId: string;
   readonly districtAdministratorUserId: string;
   readonly records: Readonly<{
     northIncidentId: string;
@@ -68,6 +70,14 @@ export function issue593EvidencePath(name: string): string {
   const directory = process.env.PSD_EOC_E2E_ISSUE_593_EVIDENCE_DIR;
   if (directory === undefined) {
     throw new Error('Issue 593 browser evidence directory is unavailable.');
+  }
+  return join(directory, name);
+}
+
+export function issue594EvidencePath(name: string): string {
+  const directory = process.env.PSD_EOC_E2E_ISSUE_594_EVIDENCE_DIR;
+  if (directory === undefined) {
+    throw new Error('Issue 594 browser evidence directory is unavailable.');
   }
   return join(directory, name);
 }

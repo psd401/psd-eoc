@@ -29,9 +29,11 @@ test.describe('incident-record-history', () => {
     await expect(page.getByText('REAL INCIDENT', { exact: true })).toHaveCount(
       1,
     );
+    // The retained North drill plus the runner's four live North drills
+    // (shared, issue 344, issue 32, and the partner flows' drill).
     await expect(
       page.getByText('DRILL — TRAINING ONLY', { exact: true }),
-    ).toHaveCount(4);
+    ).toHaveCount(5);
     await expect(
       page.getByText('TEST — NOT A REAL INCIDENT', { exact: true }),
     ).toHaveCount(1);

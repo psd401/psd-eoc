@@ -269,6 +269,7 @@ function render(
   entries: readonly JournalEntry[] = ENTRIES,
   initialHasMore = false,
   viewerManagesLifecycle = true,
+  exportable = true,
 ) {
   return renderToStaticMarkup(
     <EventRoom
@@ -280,7 +281,11 @@ function render(
       eventTypeLabel={
         event.templateMode === 'real' ? 'Lockdown' : 'Lockdown Drill'
       }
-      exportSummaryPath={`/records/export/events/${encodeURIComponent(event.id)}`}
+      exportSummaryPath={
+        exportable
+          ? `/records/export/events/${encodeURIComponent(event.id)}`
+          : null
+      }
       facilityLabel="Synthetic North Campus"
       initialCursor="eyJ2IjoxfQ"
       initialEntries={entries.map((entry) =>
@@ -305,6 +310,15 @@ describe('event room server-rendered safety and history state', () => {
       'This event started at Synthetic North Campus. Staff there end it',
     );
     expect(campus).toContain('Post an update');
+  });
+
+  test('offers a partner no lifecycle control and no summary export', () => {
+    const partner = render(activeEvent('drill'), [], false, false, false);
+
+    expect(partner).not.toContain('>End event</button>');
+    expect(partner).not.toContain('Download PDF summary');
+    expect(partner).not.toContain('/records/export/events/');
+    expect(partner).toContain('Post an update');
   });
 
   test('builds web lifecycle requests without typed acknowledgement fields', () => {

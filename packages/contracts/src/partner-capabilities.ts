@@ -52,3 +52,18 @@ export function isPartnerCapabilityId(
 ): value is PartnerCapabilityId {
   return typeof value === 'string' && partnerCapabilityIdSet.has(value);
 }
+
+/**
+ * Returns true when a session with this scope may run the capability as far
+ * as the partner allowlist is concerned: every non-partner scope, and a
+ * partner scope only for allowlisted IDs.
+ *
+ * Interfaces use it to hide controls the engine would refuse. It never
+ * authorizes anything: role, facility, and source checks stay in the engine.
+ */
+export function partnerAllowlistPermits(
+  scope: Readonly<{ partner?: true | undefined }>,
+  capabilityId: RegisteredCapabilityId,
+): boolean {
+  return scope.partner !== true || isPartnerCapabilityId(capabilityId);
+}
