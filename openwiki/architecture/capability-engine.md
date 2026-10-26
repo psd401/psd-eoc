@@ -102,6 +102,8 @@ Caption: the partner allowlist only narrows. The check is skipped for any scope 
 
 **Extend the allowlist** only by adding a registered capability ID to `PARTNER_CAPABILITY_IDS` and updating the exact-allowlist test in the same change, as `docs/ARCHITECTURE.md` requires. A new navigation destination must declare its `capabilityId` (the type requires it).
 
+Web-only administration that concerns partners but is never partner-facing stays off the list by omission. The partner alert settings pair, `get-partner-alert-settings` and `set-partner-alert-settings`, uses the web-administration policy and is named in the partner test's `NEVER_PARTNER` list; see [partner alert settings](../domain/partner-alert-settings.md).
+
 Focused tests, by behavior:
 
 | Behavior | Test (find by name) |
@@ -121,7 +123,7 @@ The security audit is a hash-chained, append-only ledger (`packages/server/lib/a
 
 ## Change recipes
 
-**Add a capability.** (1) Schemas in the relevant contracts file; (2) `canonicalCapability(...)` entry in `capability-catalog.ts` with the narrowest `invocationPolicy`; (3) if agent-callable, add to `AGENT_KEY_GRANTABLE_CAPABILITY_IDS` (`agent-key-grants.ts`, must be a subset of the persisted grant enum) and the dispatcher switch in `packages/server/lib/agents/dispatcher.ts`; (4) DB enum migration if the ID joins persisted mutation/grant enums (new migration only; never edit applied ones); (5) server registration + handler, wired into the runtime factory; (6) route in `app/` or reuse the generic agent route; (7) expose to consumers (MCP `manifest.ts` `MCP_TOOL_IDS`, mobile `lib`, OpenAPI via `agents/openapi.ts`). Tests: `contracts.test.ts`, `capability-derived-views.test.ts`, `human-only-agent-surface.test.ts`, `agents/human-only.test.ts`, `agent-key-grants.test.ts`, `schema-enums.test.ts`. Escalate if the capability can start/notify/all-clear/close a real event: that is the product owner's decision.
+**Add a capability.** (1) Schemas in the relevant contracts file; (2) `canonicalCapability(...)` entry in `capability-catalog.ts` with the narrowest `invocationPolicy`; (3) if agent-callable, add to `AGENT_KEY_GRANTABLE_CAPABILITY_IDS` (`agent-key-grants.ts`, must be a subset of the persisted grant enum) and the dispatcher switch in `packages/server/lib/agents/dispatcher.ts`; (4) DB enum migration if the ID joins persisted mutation/grant enums (new migration only; never edit applied ones; `0062_partner_alert_settings.sql` is a recent example that adds one mutation value and its table together); (5) server registration + handler, wired into the runtime factory; (6) route in `app/` or reuse the generic agent route; (7) expose to consumers (MCP `manifest.ts` `MCP_TOOL_IDS`, mobile `lib`, OpenAPI via `agents/openapi.ts`). Tests: `contracts.test.ts`, `capability-derived-views.test.ts`, `human-only-agent-surface.test.ts`, `agents/human-only.test.ts`, `agent-key-grants.test.ts`, `schema-enums.test.ts`. Escalate if the capability can start/notify/all-clear/close a real event: that is the product owner's decision.
 
 **Consumer-boundary check.** Unit tests of a handler do not prove the shipped surface: confirm the ID resolves through the route (`packages/server/app/...`), the agent dispatcher if grantable, and `packages/mcp/src/manifest.ts` if exposed. Narrow: `bun test packages/server/lib/capabilities packages/contracts` plus `bun run --cwd packages/server typecheck`. Full `bun run check` is conditional on cross-package or migration changes.
 

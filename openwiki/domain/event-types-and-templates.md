@@ -35,7 +35,7 @@ openwiki:
 
 # Event types, message templates, drafts, and rendering
 
-An **event type** is what operators call a *response* (lockdown, evacuation, …). Each has immutable, versioned **template sets** per `(mode, purpose)` — real vs. drill, and `activation` / `all-clear` / `reactivation` — containing push, email and SMS copy. When [an event starts](event-lifecycle-and-activation.md), the preview binds an `eventTypeVersion`; the [notification pipeline](notification-pipeline.md) renders it per recipient batch. Real/drill separation lives here as in everything else ([architecture overview](../architecture/overview.md)).
+An **event type** is what operators call a *response* (lockdown, evacuation, …). Each has immutable, versioned **template sets** per `(mode, purpose)` — real vs. drill, and `activation` / `all-clear` / `reactivation` — containing push, email and SMS copy. When [an event starts](event-lifecycle-and-activation.md), the preview binds an `eventTypeVersion`; the [notification pipeline](notification-pipeline.md) renders it per recipient batch. Real/drill separation lives here as in everything else ([architecture overview](../architecture/overview.md)). Event types also carry a `family_key` (for example `lockdown`) that groups the real and drill identities of one response; administrators name response families, not individual types, when they choose which responses alert partners ([partner alert settings](partner-alert-settings.md)).
 
 **Consult this page when** changing template variables or rendering, SMS length handling, the draft/publish workflow, the Responses admin page, or default wording.
 
