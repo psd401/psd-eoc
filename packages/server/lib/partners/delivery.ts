@@ -517,6 +517,12 @@ export async function resolvePartnerPushEndpoints(
  * Candidates are the consents live when the batch was created; a consent
  * withdrawn since, a number opted out with the provider, an ended or expired
  * admission, or a disabled account is not sent to.
+ *
+ * A STOP from a partner-only number is not mirrored locally: opt-out records
+ * are keyed to roster endpoints (`sms_opt_out_records`). The provider's
+ * opt-out list is the authority and refuses the send
+ * (`DESTINATION_PHONE_NUMBER_OPTED_OUT`, recorded as a failed attempt), so the
+ * partner is not texted; withdrawing consent in the app stops resolution here.
  */
 export async function resolvePartnerSmsEndpoints(
   database: DatabaseQuery,
@@ -529,7 +535,7 @@ export async function resolvePartnerSmsEndpoints(
     return Object.freeze({ candidates: [], endpoints: [] });
   }
   const asOf = new Date(batch.createdAt);
-  const consentRows = await database
+  const consentHistory = await database
     .select({
       admissionId: partnerAdmissions.id,
       id: staffSmsConsents.id,
@@ -564,6 +570,14 @@ export async function resolvePartnerSmsEndpoints(
       desc(staffSmsConsents.consentedAt),
       desc(staffSmsConsents.id),
     );
+  // One number per partner, as for staff: if a superseded consent and its
+  // replacement ever overlap at the batch instant, only the newest is texted.
+  const seenAdmissions = new Set<string>();
+  const consentRows = consentHistory.filter((consent) => {
+    if (seenAdmissions.has(consent.admissionId)) return false;
+    seenAdmissions.add(consent.admissionId);
+    return true;
+  });
   const rows = await ensurePartnerEndpoints(
     database,
     'sms',
