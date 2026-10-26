@@ -182,8 +182,7 @@ export function buildActivationPreview(
     throw new ActivationPreviewBuildError('PREVIEW_TIME_INVALID');
   }
 
-  const partnerRecipientCount = new Set(evidenceValue.partnerAdmissionIds)
-    .size;
+  const partnerRecipientCount = new Set(evidenceValue.partnerAdmissionIds).size;
   if (
     partnerRecipientCount !== evidenceValue.partnerAdmissionIds.length ||
     partnerRecipientCount > PARTNER_AUDIENCE_MAX_RECIPIENTS ||
