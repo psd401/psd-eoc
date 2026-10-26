@@ -16,7 +16,7 @@ openwiki:
     - packages/server/db/schema/configuration.ts
     - packages/contracts/src/roster.ts
     - packages/contracts/src/group.ts
-  symbols: [syncRoster, createSyncRosterHandler, verifyRosterSyncJobToken, resolveAudience, publishScheduledRosterSnapshot, buildStaleRosterReport, RosterPopulationSchema]
+  symbols: [syncRoster, createSyncRosterHandler, verifyRosterSyncJobToken, resolveAudience, publishScheduledRosterSnapshot, buildStaleRosterReport, RosterPopulationSchema, RosteredPopulationSchema]
   test_paths:
     - packages/server/lib/roster/groups-sync.test.ts
     - packages/server/lib/roster/groups-sync.integration.test.ts
@@ -39,7 +39,7 @@ openwiki:
 
 - **Group sources** (`group_sources`, `group_members`; `GroupSourceSchema` in `contracts/src/group.ts`): kinds `google-group`, `manual`, `synthetic`; purposes `access`, `building` (tied to a facility), `others`. Admin pages: `app/(admin)/access`, `facilities`, `integrations`; capabilities `create-group-source`, `update-group-source`, `set-manual-roster-members`.
 - **Roster source configurations** (`roster_source_configurations` + facility/group links) are versioned; `rosterSourceConfigurationRevisionDigest` binds a sync to the exact revision.
-- **Snapshots** (`roster_snapshots`, `roster_recipients`, `roster_endpoints`, `roster_sync_results`, `roster_sync_group_failures`): immutable, population-tagged (`RosterPopulationSchema`: `staff` | `synthetic`). Endpoints are minimized (email/SMS/push) and public examples contain no contact or token data. `drizzle/roster-immutability.integration.test.ts` guards immutability at the database layer.
+- **Snapshots** (`roster_snapshots`, `roster_recipients`, `roster_endpoints`, `roster_sync_results`, `roster_sync_group_failures`): immutable, population-tagged (`RosteredPopulationSchema`: `staff` | `synthetic`). `RosterPopulationSchema` adds `partner` for the notification population of admitted first responders, which is never rostered: no snapshot, recipient, or roster endpoint holds one, and the database refuses it in `roster_source_configurations`. See [partner audience](partner-audience.md). Endpoints are minimized (email/SMS/push) and public examples contain no contact or token data. `drizzle/roster-immutability.integration.test.ts` guards immutability at the database layer.
 - **Facilities and neighborhoods** (`facilities`, `neighborhood_versions`, `neighborhood_facilities`): a neighborhood version groups schools on one campus; an event at one school reaches its campus-mates, but an isolated facility only reaches its own lists.
 
 ## Sync flow
@@ -63,7 +63,7 @@ Caption: scheduled and administrator-triggered sync share `syncRoster`; promotio
 
 ## Audience resolution
 
-`lib/roster/resolve.ts#resolveAudience` takes the pinned `RosterSnapshot` plus the activation selection (facility, neighborhood versions, group sources) and returns recipients/endpoints, failing closed with closed non-PII codes (`MISSING_TARGET_FACILITY`, `MISSING_NEIGHBORHOOD_VERSION`, `ENDPOINT_PROVENANCE_CONFLICT`, ...). The activation preview shows channel coverage and blocks with reason codes such as `NO_RECIPIENTS`, `NO_PUSH_ENDPOINTS` (rendered by `lib/events/blocking-reasons.ts`) — see [lifecycle](event-lifecycle-and-activation.md). The [notification pipeline](notification-pipeline.md) never reconstructs a recipient list; it reads endpoints from the snapshot named in the batch.
+`lib/roster/resolve.ts#resolveAudience` takes the pinned `RosterSnapshot` plus the activation selection (facility, neighborhood versions, group sources) and returns recipients/endpoints, failing closed with closed non-PII codes (`MISSING_TARGET_FACILITY`, `MISSING_NEIGHBORHOOD_VERSION`, `ENDPOINT_PROVENANCE_CONFLICT`, ...). The activation preview shows channel coverage and blocks with reason codes such as `NO_RECIPIENTS`, `NO_PUSH_ENDPOINTS` (rendered by `lib/events/blocking-reasons.ts`) — see [lifecycle](event-lifecycle-and-activation.md). The [notification pipeline](notification-pipeline.md) never reconstructs a recipient list; it reads endpoints from the snapshot named in the batch. Partner recipients do not pass through `resolveAudience`: a live incident's partners are pinned separately at preview time ([partner audience](partner-audience.md)).
 
 `get-stale-roster-report` (also an MCP tool) returns a PII-free `StaleRosterReport`: latest complete snapshot age, failed source groups, and recipients/endpoints lacking usable endpoints, scoped by facility (`lib/roster/stale-report.ts`); alarms and `docs/runbooks/alarm-roster-stale.md` cover operations.
 
