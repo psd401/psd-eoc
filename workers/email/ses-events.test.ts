@@ -9,8 +9,13 @@ import { IDS } from '../shared/test-fixtures';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_CORRELATION_TAG_NAMES,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
   SES_V2_PROVIDER,
 } from './ses-adapter';
+import {
+  SES_CONFIGURATION_SET_NAME as STACK_ALERT_SET,
+  SES_PARTNER_CONFIGURATION_SET_NAME as STACK_PARTNER_SET,
+} from '../../infra/src/config';
 import { SesEventError, parseSesEvent } from './ses-events';
 
 const SNS_MESSAGE_ID = '20000000-0000-4000-8000-000000000001';
@@ -74,6 +79,7 @@ describe('signed SES configuration-set event mapping', () => {
       eventKind: 'test',
       providerIoClaimToken: IDS.confirmation,
       mailMessageId: SES_MESSAGE_ID,
+      configurationSetName: SES_CONFIGURATION_SET_NAME,
       evidence: {
         subject: { kind: 'attempt', attemptId: IDS.attempt },
         state: 'provider-accepted',
@@ -320,4 +326,65 @@ describe('signed SES configuration-set event mapping', () => {
       }),
     ).toThrow(expect.objectContaining({ code: 'INVALID_MESSAGE' }));
   });
+});
+
+describe('partner configuration set events (#597)', () => {
+  function partnerSet(
+    tags: Readonly<Record<string, readonly string[]>> | null,
+  ): string {
+    const event = JSON.parse(
+      sesEvent('Bounce', {
+        bounceType: 'Permanent',
+        timestamp: EVENT_TIME,
+      }),
+    ) as { mail: { tags: Record<string, readonly string[]> } };
+    event.mail.tags = {
+      ...(tags ?? event.mail.tags),
+      'ses:configuration-set': [SES_PARTNER_CONFIGURATION_SET_NAME],
+    };
+    return JSON.stringify(event);
+  }
+
+  test('maps a correlated partner alert and names the set it came from', () => {
+    const result = parse(partnerSet(null));
+    expect(result.configurationSetName).toBe(
+      SES_PARTNER_CONFIGURATION_SET_NAME,
+    );
+    expect(result.endpointStatus).toEqual(
+      expect.objectContaining({ status: 'invalid', endpointId: IDS.endpoint }),
+    );
+  });
+
+  test('marks partner account mail, which carries no alert tags, as untracked', () => {
+    // An invitation bounce: SES adds its own tags, never psd-eoc's.
+    expect(() => parse(partnerSet({ 'ses:source-ip': ['192.0.2.1'] }))).toThrow(
+      expect.objectContaining({ code: 'UNTRACKED_MAIL' }),
+    );
+  });
+
+  test('refuses a partner-set event carrying only some alert tags', () => {
+    expect(() =>
+      parse(
+        partnerSet({ [SES_CORRELATION_TAG_NAMES.attemptId]: [IDS.attempt] }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_CORRELATION' }));
+  });
+
+  test('an untagged event from the alert set is still a correlation failure', () => {
+    const event = JSON.parse(sesEvent('Send', {})) as {
+      mail: { tags: Record<string, readonly string[]> };
+    };
+    event.mail.tags = { 'ses:configuration-set': [SES_CONFIGURATION_SET_NAME] };
+    expect(() => parse(JSON.stringify(event))).toThrow(
+      expect.objectContaining({ code: 'INVALID_CORRELATION' }),
+    );
+  });
+});
+
+test('names exactly the configuration sets the stack creates', () => {
+  // The worker sends under these names and the callback accepts only them;
+  // the stack creates the sets, so a rename on one side alone would refuse
+  // every alert or every partner alert.
+  expect(SES_CONFIGURATION_SET_NAME).toBe(STACK_ALERT_SET);
+  expect(SES_PARTNER_CONFIGURATION_SET_NAME).toBe(STACK_PARTNER_SET);
 });

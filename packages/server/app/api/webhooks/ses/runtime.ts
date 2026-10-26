@@ -33,6 +33,8 @@ import {
   channelAttempts,
   endpointStatusRecords,
   idempotencyRecords,
+  partnerAdmissions,
+  partnerEndpoints,
   rosterEndpoints,
   sesEmailProviderIo,
 } from '../../../../db/schema';
@@ -55,6 +57,8 @@ import {
 } from '../../../../../../workers/email/sns-signature';
 import {
   SES_CONFIGURATION_SET_NAME,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
+  SesEventError,
   parseSesEvent,
   type ParsedSesEvent,
 } from '../../../../../../workers/email/ses-events';
@@ -368,6 +372,11 @@ function assertEventMatchesAttempt(
     attempt.eventKind !== event.eventKind ||
     attempt.channel !== 'email' ||
     attempt.templateMode !== event.templateMode ||
+    // Partner alerts are sent under the partner set and everything else
+    // under the alert set (#597), so a fact from the other set is forged or
+    // misrouted and never touches this attempt.
+    (attempt.rosterPopulation === 'partner') !==
+      (event.configurationSetName === SES_PARTNER_CONFIGURATION_SET_NAME) ||
     (endpointStatus !== null &&
       (endpointStatus.rosterSnapshotId !== attempt.rosterSnapshotId ||
         endpointStatus.recipientId !== attempt.recipientId ||
@@ -624,7 +633,16 @@ export function createSesWebhookRouteHandler(
         expectedSendingAccountId: parseSnsTopicArn(expectedTopicArn).accountId,
         snsMessageId: envelope.MessageId,
       });
-    } catch {
+    } catch (error) {
+      // Partner account mail shares the partner set with partner alerts, so
+      // its signed events arrive here too. There is nothing to record for
+      // them; acknowledging keeps them out of the dead-letter queue.
+      if (error instanceof SesEventError && error.code === 'UNTRACKED_MAIL') {
+        return new Response(null, {
+          status: 204,
+          headers: responseHeaders(),
+        });
+      }
       return errorResponse(
         400,
         'INVALID_SES_EVENT',
@@ -1001,7 +1019,6 @@ async function recordEndpointStatus(
   const input = RecordEndpointStatusInputSchema.parse(inputValue);
   const rosterPopulation = attempt.rosterPopulation;
   if (
-    !isRosteredPopulation(rosterPopulation) ||
     attempt.channel !== 'email' ||
     input.rosterSnapshotId !== attempt.rosterSnapshotId ||
     input.recipientId !== attempt.recipientId ||
@@ -1014,19 +1031,37 @@ async function recordEndpointStatus(
   );
   return database.transaction(async (transaction) => {
     const query = webhookQueryDatabase(transaction);
-    const [endpoint] = await query
-      .select({ email: rosterEndpoints.email })
-      .from(rosterEndpoints)
-      .where(
-        and(
-          eq(rosterEndpoints.rosterSnapshotId, attempt.rosterSnapshotId),
-          eq(rosterEndpoints.recipientId, attempt.recipientId),
-          eq(rosterEndpoints.id, attempt.endpointId),
-          eq(rosterEndpoints.population, rosterPopulation),
-          eq(rosterEndpoints.channel, 'email'),
-        ),
-      )
-      .limit(1);
+    // A partner's address is its admission's (#597); the partner endpoint is
+    // the admission's email endpoint. Everything else is a roster endpoint.
+    const [endpoint] = isRosteredPopulation(rosterPopulation)
+      ? await query
+          .select({ email: rosterEndpoints.email })
+          .from(rosterEndpoints)
+          .where(
+            and(
+              eq(rosterEndpoints.rosterSnapshotId, attempt.rosterSnapshotId),
+              eq(rosterEndpoints.recipientId, attempt.recipientId),
+              eq(rosterEndpoints.id, attempt.endpointId),
+              eq(rosterEndpoints.population, rosterPopulation),
+              eq(rosterEndpoints.channel, 'email'),
+            ),
+          )
+          .limit(1)
+      : await query
+          .select({ email: partnerAdmissions.email })
+          .from(partnerEndpoints)
+          .innerJoin(
+            partnerAdmissions,
+            eq(partnerAdmissions.id, partnerEndpoints.partnerAdmissionId),
+          )
+          .where(
+            and(
+              eq(partnerEndpoints.id, attempt.endpointId),
+              eq(partnerEndpoints.partnerAdmissionId, attempt.recipientId),
+              eq(partnerEndpoints.channel, 'email'),
+            ),
+          )
+          .limit(1);
     if (endpoint?.email === null || endpoint?.email === undefined) {
       throw new SesWebhookPersistenceError();
     }

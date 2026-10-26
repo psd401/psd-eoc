@@ -22,11 +22,15 @@ import {
   type EmailBranding,
   type EmailMessageContent,
 } from './email-message';
-import { SES_CONFIGURATION_SET_NAME } from './ses-events';
+import {
+  SES_CONFIGURATION_SET_NAME,
+  SES_PARTNER_CONFIGURATION_SET_NAME,
+  type SesConfigurationSetName,
+} from './ses-events';
 
 export const SES_EMAIL_INTEGRATION_ID = 'ses-email' as const;
 export const SES_V2_PROVIDER = 'aws-ses-v2' as const;
-export { SES_CONFIGURATION_SET_NAME };
+export { SES_CONFIGURATION_SET_NAME, SES_PARTNER_CONFIGURATION_SET_NAME };
 
 export const SES_CORRELATION_TAG_NAMES = Object.freeze({
   attemptId: 'psd-eoc-attempt-id',
@@ -73,7 +77,7 @@ export interface SesV2SendEmailInput {
       Attachments: readonly SesV2InlineAttachment[];
     }>;
   }>;
-  readonly ConfigurationSetName: typeof SES_CONFIGURATION_SET_NAME;
+  readonly ConfigurationSetName: SesConfigurationSetName;
   readonly EmailTags: readonly Readonly<{
     Name: string;
     Value: string;
@@ -329,7 +333,12 @@ function buildSendInput(
         ),
       }),
     }),
-    ConfigurationSetName: SES_CONFIGURATION_SET_NAME,
+    // Partner alerts (#597) go out under the partner set, so their bounces
+    // and complaints are partner facts and never the alert set's.
+    ConfigurationSetName:
+      workItem.batch.rosterPopulation === 'partner'
+        ? SES_PARTNER_CONFIGURATION_SET_NAME
+        : SES_CONFIGURATION_SET_NAME,
     EmailTags: correlationTags(workItem),
   });
 }

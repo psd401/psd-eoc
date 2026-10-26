@@ -13,6 +13,16 @@ import {
 
 const SES_PROVIDER = 'aws-ses-v2';
 export const SES_CONFIGURATION_SET_NAME = 'psd-eoc-transactional' as const;
+/**
+ * Partner mail's own set (`infra/src/config.ts`): partner account mail and,
+ * since #597, the alerts a live incident sends partners. Its events reach this
+ * parser through the alert set's topic; only alert mail carries the
+ * correlation tags below.
+ */
+export const SES_PARTNER_CONFIGURATION_SET_NAME =
+  'psd-eoc-production-partner' as const;
+export type SesConfigurationSetName =
+  typeof SES_CONFIGURATION_SET_NAME | typeof SES_PARTNER_CONFIGURATION_SET_NAME;
 const MAX_SES_EVENT_BYTES = 256 * 1024;
 
 const TAGS = Object.freeze({
@@ -50,13 +60,24 @@ export interface ParsedSesEvent {
   readonly eventKind: EventKind;
   readonly providerIoClaimToken: string;
   readonly mailMessageId: string;
+  /** The set SES sent under: the alert set for staff, the partner set for partners. */
+  readonly configurationSetName: SesConfigurationSetName;
   readonly evidence: RecordDeliveryEvidenceInput | null;
   readonly endpointStatus: RecordEndpointStatusInput | null;
   readonly eventType: SesEventType;
 }
 
 export type SesEventErrorCode =
-  'INVALID_MESSAGE' | 'UNSUPPORTED_EVENT' | 'INVALID_CORRELATION';
+  | 'INVALID_MESSAGE'
+  | 'UNSUPPORTED_EVENT'
+  | 'INVALID_CORRELATION'
+  /**
+   * A signed event from the partner set for mail that is not an alert: an
+   * invitation, expiry notice, or access review (#618). Those carry no
+   * correlation tags and have nothing to record; a person already reads their
+   * bounces through the partner set's own destination.
+   */
+  | 'UNTRACKED_MAIL';
 
 export class SesEventError extends Error {
   public constructor(public readonly code: SesEventErrorCode) {
@@ -220,7 +241,16 @@ export function parseSesEvent(
     throw new SesEventError('INVALID_CORRELATION');
   }
 
-  const configurationSet = singleTag(mail.tags, TAGS.configurationSet);
+  const tags = mail.tags;
+  const configurationSet = singleTag(tags, TAGS.configurationSet);
+  if (
+    configurationSet === SES_PARTNER_CONFIGURATION_SET_NAME &&
+    Object.entries(TAGS).every(
+      ([key, name]) => key === 'configurationSet' || !Object.hasOwn(tags, name),
+    )
+  ) {
+    throw new SesEventError('UNTRACKED_MAIL');
+  }
   const attemptId = singleTag(mail.tags, TAGS.attemptId);
   const endpointId = singleTag(mail.tags, TAGS.endpointId);
   const rosterSnapshotId = singleTag(mail.tags, TAGS.rosterSnapshotId);
@@ -233,7 +263,8 @@ export function parseSesEvent(
     singleTag(mail.tags, TAGS.eventKind),
   );
   if (
-    configurationSet !== options.expectedConfigurationSetName ||
+    (configurationSet !== options.expectedConfigurationSetName &&
+      configurationSet !== SES_PARTNER_CONFIGURATION_SET_NAME) ||
     !UuidSchema.safeParse(attemptId).success ||
     !UuidSchema.safeParse(endpointId).success ||
     !UuidSchema.safeParse(rosterSnapshotId).success ||
@@ -351,6 +382,7 @@ export function parseSesEvent(
     eventKind: eventKindResult.data,
     providerIoClaimToken,
     mailMessageId,
+    configurationSetName: configurationSet as SesConfigurationSetName,
     evidence: mappedEvidence,
     endpointStatus: mappedEndpointStatus,
     eventType,

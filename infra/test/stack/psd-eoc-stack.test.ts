@@ -41,6 +41,7 @@ import {
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
   SES_PARTNER_CONFIGURATION_SET_NAME,
+  SES_PARTNER_EVENT_DESTINATION_NAME,
   SES_PARTNER_EVENT_TOPIC_NAME,
 } from '../../src/config';
 import { AURORA_MAX_CAPACITY_ACU } from '../../src/monitoring';
@@ -1040,9 +1041,11 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::SecretsManager::Secret', 15);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
-    // Two sets: alert mail, and partner account mail.
+    // Two sets: alert mail, and partner mail.
     template.resourceCountIs('AWS::SES::ConfigurationSet', 2);
-    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 2);
+    // Alert set to the signed evidence topic; partner set to the owner alert
+    // topic and, for partner alerts (#597), to the signed evidence topic.
+    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 3);
     // Five topics: SES event evidence, partner mail bounces and complaints,
     // the two paging routes, and the recovery route that carries every
     // alarm's OK transition.
@@ -3643,7 +3646,9 @@ describe('configured-unverified provider readiness boundary', () => {
       .find(
         (candidate) =>
           JSON.stringify(candidate.ConfigurationSetName) ===
-          JSON.stringify({ Ref: setLogicalId }),
+            JSON.stringify({ Ref: setLogicalId }) &&
+          asRecord(candidate.EventDestination).Name ===
+            SES_PARTNER_EVENT_DESTINATION_NAME,
       );
     if (destination === undefined) {
       throw new Error('Missing the partner configuration set destination.');
@@ -3701,6 +3706,63 @@ describe('configured-unverified provider readiness boundary', () => {
       'lambda',
     ]);
     expect(JSON.stringify(subscriptions[0]?.Endpoint)).toContain('AlarmMailer');
+  });
+
+  // #597: partner alerts go out under the partner set, so that set also
+  // publishes every delivery fact to the signed evidence topic the callback
+  // reads, and the email worker may send under it.
+  it('routes partner alert facts to the signed evidence topic and lets the worker send under the partner set', () => {
+    const setLogicalId = resourceEntries('AWS::SES::ConfigurationSet').find(
+      ([, resource]) =>
+        properties(resource).Name === SES_PARTNER_CONFIGURATION_SET_NAME,
+    )?.[0];
+    if (setLogicalId === undefined) {
+      throw new Error('Missing the partner configuration set.');
+    }
+    const evidenceDestination = resourceEntries(
+      'AWS::SES::ConfigurationSetEventDestination',
+    )
+      .map(([, resource]) => properties(resource))
+      .find(
+        (candidate) =>
+          JSON.stringify(candidate.ConfigurationSetName) ===
+            JSON.stringify({ Ref: setLogicalId }) &&
+          asRecord(candidate.EventDestination).Name ===
+            SES_EVENT_DESTINATION_NAME,
+      );
+    if (evidenceDestination === undefined) {
+      throw new Error('Missing the partner alert evidence destination.');
+    }
+    expect(evidenceDestination.EventDestination).toEqual(
+      expect.objectContaining({
+        Enabled: true,
+        MatchingEventTypes: [
+          'SEND',
+          'DELIVERY',
+          'BOUNCE',
+          'COMPLAINT',
+          'REJECT',
+        ],
+        SnsDestination: {
+          TopicARN: { Ref: expect.stringMatching(/^EmailEventsTopic/) },
+        },
+      }),
+    );
+
+    const sendStatements = resourceEntries('AWS::IAM::Policy')
+      .flatMap(([, resource]) =>
+        asArray(asRecord(properties(resource).PolicyDocument).Statement),
+      )
+      .map(asRecord)
+      .filter((statement) => statement.Sid === 'SendOnlyConfiguredSesEmail');
+    expect(sendStatements).toHaveLength(1);
+    const resources = JSON.stringify(sendStatements[0]?.Resource);
+    expect(resources).toContain(
+      `:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+    );
+    expect(resources).toContain(
+      `:configuration-set/${SES_PARTNER_CONFIGURATION_SET_NAME}`,
+    );
   });
 
   it('enables the SES configuration set and wires encrypted signed evidence', () => {
@@ -3908,7 +3970,10 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(sesPublish?.Condition).toEqual({
       StringEquals: {
         'AWS:SourceAccount': AWS_ACCOUNT,
-        'AWS:SourceArn': `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+        'AWS:SourceArn': [
+          `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+          `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_PARTNER_CONFIGURATION_SET_NAME}`,
+        ],
       },
     });
 
@@ -3935,7 +4000,10 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(sesKeyUse?.Condition).toEqual({
       StringEquals: {
         'AWS:SourceAccount': AWS_ACCOUNT,
-        'AWS:SourceArn': `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+        'AWS:SourceArn': [
+          `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+          `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_PARTNER_CONFIGURATION_SET_NAME}`,
+        ],
       },
     });
   });

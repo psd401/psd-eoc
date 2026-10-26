@@ -1632,13 +1632,32 @@ export class PsdEocStack extends Stack {
       },
       this,
     );
+    const partnerEmailConfigurationSetArn = Arn.format(
+      {
+        account,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        partition,
+        region,
+        resource: 'configuration-set',
+        resourceName: SES_PARTNER_CONFIGURATION_SET_NAME,
+        service: 'ses',
+      },
+      this,
+    );
+    // The email worker sends staff alerts under the alert set and a live
+    // incident's partner alerts under the partner set (#597), so a partner's
+    // bounce or complaint is recorded against partner mail only.
     emailWorkerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['ses:SendEmail', 'ses:SendRawEmail'],
         conditions: {
           StringEquals: { 'ses:FromAddress': sesFromAddress },
         },
-        resources: [emailIdentityArn, emailConfigurationSetArn],
+        resources: [
+          emailIdentityArn,
+          emailConfigurationSetArn,
+          partnerEmailConfigurationSetArn,
+        ],
         sid: 'SendOnlyConfiguredSesEmail',
       }),
     );
@@ -1654,7 +1673,10 @@ export class PsdEocStack extends Stack {
         conditions: {
           StringEquals: {
             'AWS:SourceAccount': account,
-            'AWS:SourceArn': emailConfigurationSetArn,
+            'AWS:SourceArn': [
+              emailConfigurationSetArn,
+              partnerEmailConfigurationSetArn,
+            ],
           },
         },
         principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
@@ -1728,7 +1750,10 @@ export class PsdEocStack extends Stack {
         conditions: {
           StringEquals: {
             'AWS:SourceAccount': account,
-            'AWS:SourceArn': emailConfigurationSetArn,
+            'AWS:SourceArn': [
+              emailConfigurationSetArn,
+              partnerEmailConfigurationSetArn,
+            ],
           },
         },
         principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
@@ -1789,25 +1814,14 @@ export class PsdEocStack extends Stack {
     // refuses mail without alert tags, and every refusal would land in the
     // email callback dead-letter queue.
     //
-    // No code consumes these events. Bounces, complaints, and rejections go to
-    // a topic the alarm mailer subscribes to, so a person in the operations
-    // mailbox reads each one. That is the same last hop alarms use, and for
-    // the same reason: an SNS email subscription needs a confirmation click
-    // and carries an unsubscribe link. The topic is unencrypted for the same
-    // reason the alarm topics are (see `operationsAlarmTopic`); an event names
-    // a partner's address and the message's subject, and nothing else.
-    const partnerEmailConfigurationSetArn = Arn.format(
-      {
-        account,
-        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-        partition,
-        region,
-        resource: 'configuration-set',
-        resourceName: SES_PARTNER_CONFIGURATION_SET_NAME,
-        service: 'ses',
-      },
-      this,
-    );
+    // Bounces, complaints, and rejections go to a topic the alarm mailer
+    // subscribes to, so a person in the operations mailbox reads each one.
+    // That is the same last hop alarms use, and for the same reason: an SNS
+    // email subscription needs a confirmation click and carries an
+    // unsubscribe link. The topic is unencrypted for the same reason the
+    // alarm topics are (see `operationsAlarmTopic`); an event names a
+    // partner's address and the message's subject, and nothing else. Partner
+    // alerts (#597) also use this set; see the second destination below.
     const partnerEmailConfigurationSet = new ses.CfnConfigurationSet(
       this,
       'PartnerEmailConfigurationSet',
@@ -1860,6 +1874,33 @@ export class PsdEocStack extends Stack {
         },
       );
     partnerEmailEventDestination.addResourceDependency(
+      partnerEmailConfigurationSet,
+    );
+    // Partner alerts (#597) also go out under this set. Their delivery facts
+    // must reach the app like every alert's, so the set publishes to the
+    // alert set's signed topic as well; the callback records the facts that
+    // carry alert tags and acknowledges the account mail that carries none.
+    const partnerAlertEventDestination =
+      new ses.CfnConfigurationSetEventDestination(
+        this,
+        'PartnerAlertEmailConfigurationSetEventDestination',
+        {
+          configurationSetName: partnerEmailConfigurationSet.ref,
+          eventDestination: {
+            enabled: true,
+            matchingEventTypes: [
+              'SEND',
+              'DELIVERY',
+              'BOUNCE',
+              'COMPLAINT',
+              'REJECT',
+            ],
+            name: SES_EVENT_DESTINATION_NAME,
+            snsDestination: { topicArn: emailEventsTopic.topicArn },
+          },
+        },
+      );
+    partnerAlertEventDestination.addResourceDependency(
       partnerEmailConfigurationSet,
     );
 
