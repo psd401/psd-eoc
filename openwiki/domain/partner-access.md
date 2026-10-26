@@ -3,7 +3,7 @@ type: Domain Concept
 title: "Partner access: admissions, provider sync, and expiry sweep"
 description: "How non-district first responders are admitted, refused, renewed, disabled, and expired through append-only partner admissions, a separate partner identity provider, the Access page, and the daily partner-access sweep."
 tags: [partner-access, identity, admissions, expiry, cognito, ses]
-timestamp: 2026-10-26T11:42:26-07:00
+timestamp: 2026-10-26T15:24:18-07:00
 openwiki:
   roles: [domain, operations]
   change_kinds: [identity, lifecycle, persistence, scheduled-job]
@@ -17,8 +17,9 @@ openwiki:
     - packages/server/app/(admin)/access/partner-capabilities.ts
     - packages/server/app/(admin)/access/api/route.ts
     - packages/server/scripts/operations/sweep-partner-access.ts
+    - workers/email/ses-events.ts
     - infra/src/config.ts
-  symbols: [PartnerAdmissionSchema, partnerAdmissionStatus, decidePartnerAccess, invitePartner, disablePartner, reconcilePartnerAccess, projectPartnerAccess, runPartnerAccessSweep, resolvePartnerProviders]
+  symbols: [PartnerAdmissionSchema, partnerAdmissionStatus, decidePartnerAccess, invitePartner, disablePartner, reconcilePartnerAccess, projectPartnerAccess, runPartnerAccessSweep, resolvePartnerProviders, UNTRACKED_MAIL]
   test_paths:
     - packages/contracts/src/partner-admission.test.ts
     - packages/server/lib/auth/partner-admission.database.test.ts
@@ -130,7 +131,9 @@ The script exits with status 1 when any provider change or notice is still pendi
 
 Partner mail is the one provider email the web runtime sends itself. `SesPartnerMailer` (`packages/server/lib/partners/providers.ts`) builds the body with `buildAccountEmailContent` from `workers/email/email-message.ts`, which uses the alert email's branded shell but no real/drill banner. It calls SES with `FromAddress` from `PSD_EOC_SES_FROM_ADDRESS`, `ConfigurationSetName` from `PSD_EOC_SES_CONFIGURATION_SET_NAME`, and the `partner-account` email tag. The mailer's constructor throws on a blank set name, and `resolvePartnerProviders` keeps partner access off when either variable is missing, so partner mail is never sent without its own set.
 
-The stack defines that set, `psd-eoc-production-partner` (`SES_PARTNER_CONFIGURATION_SET_NAME` in `infra/src/config.ts`), and gives both the web task and the sweep task a reference to it, which also orders each task after the set. The set is never the alert set, so partner mail never enters alert delivery evidence. Its bounce, complaint and reject events go to an SNS topic that the [alarm mailer](../operations/infrastructure.md#partner-account-mail-configuration-set) forwards to the operations mailbox as raw event JSON. No code consumes those events and no suppression is recorded from them; SES account-level suppression still applies. Replies go to the administrator access group addresses (`administratorGroupAddresses`). Alerts still reach people only through the [channel workers](../integrations/channel-workers.md).
+The stack defines that set, `psd-eoc-production-partner` (`SES_PARTNER_CONFIGURATION_SET_NAME` in `infra/src/config.ts`), and gives both the web task and the sweep task a reference to it, which also orders each task after the set. The set is never the alert set, so partner mail never enters alert delivery evidence. Its bounce, complaint and reject events go to an SNS topic that the [alarm mailer](../operations/infrastructure.md#partner-account-mail-configuration-set) forwards to the operations mailbox as raw event JSON. No code reads that owner-alert path, and no suppression is recorded from it; SES account-level suppression still applies.
+
+Since issue #597, partner alerts also send under this set, so the same set has a second destination that publishes SEND, DELIVERY, BOUNCE, COMPLAINT and REJECT to the signed evidence topic the SES callback reads. Account mail on that path carries no alert correlation tags, so the callback classifies it as `UNTRACKED_MAIL` (`workers/email/ses-events.ts`) and acknowledges it with 204 without recording anything. Only correlated alert mail becomes a delivery fact; see [partner audience](partner-audience.md#delivery-reaching-the-pinned-partners-at-send-time) and [notification pipeline](notification-pipeline.md). Replies go to the administrator access group addresses (`administratorGroupAddresses`). Alerts still reach people only through the [channel workers](../integrations/channel-workers.md).
 
 ```mermaid
 flowchart LR
@@ -138,9 +141,11 @@ flowchart LR
   Set -->|"owner-alert: BOUNCE, COMPLAINT, REJECT"| Topic["SNS PartnerEmailEventsTopic"]
   Topic -->|"Lambda subscription"| Mailer["alarm-mailer Lambda"]
   Mailer -->|"SES email with raw event JSON"| Ops["operations mailbox"]
+  Set -->|"alert evidence: SEND, DELIVERY, BOUNCE, COMPLAINT, REJECT"| Evidence["signed SES evidence topic"]
+  Evidence -->|"SES callback, UNTRACKED_MAIL acknowledged"| Callback["SES webhook callback"]
 ```
 
-Caption: partner mail's events reach a person through the same mailer that carries alarms, and no code reads them.
+Caption: the owner-alert path reaches a person through the mailer that carries alarms, and no code reads it. The evidence path is the one the SES callback reads; for account mail it records nothing.
 
 Cognito's own email, the one-time-password codes it sends to a partner's address, is a different path. The partner pool sends it through the district SES identity and names its own `psd-eoc-<environment>-cognito` configuration set, never the alert set. That set's bounce, complaint and reject events go by SNS email to the owner group and are read by a person, not by the alert callback. The Terraform side is in [infrastructure](../operations/infrastructure.md#configuration-set-for-cognito-mail).
 
@@ -202,4 +207,6 @@ Escalate when a change crosses a boundary: stack or IAM changes add `bun test in
 
 Related: [partner alert settings](partner-alert-settings.md) (which real events alert partners, configured by administrators), [partner audience](partner-audience.md) (how current admissions are pinned to a live incident and sent as a partner slice), [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#how-the-stack-gates-it) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
  alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+(the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+ert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
 (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
