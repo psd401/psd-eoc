@@ -39,6 +39,18 @@ function SettingsForm({
   const offeredResponses = new Set(
     state.responseOptions.map(({ familyKey }) => familyKey),
   );
+  // A saved response with no published real version stays listed, checked
+  // and named by its key, so saving never silently drops it and unchecking
+  // it removes it.
+  const responseChoices = [
+    ...state.responseOptions,
+    ...state.effective.responseFamilyKeys
+      .filter((key) => !offeredResponses.has(key))
+      .map((key) => ({
+        familyKey: key,
+        name: `${key} (no published response)`,
+      })),
+  ];
   // A threat that was retired after it was excluded stays listed, so saving
   // the page never silently drops the exclusion.
   const threats = state.threatOptions.filter(
@@ -53,26 +65,16 @@ function SettingsForm({
         type="hidden"
         value={state.current?.id ?? ''}
       />
-      {state.effective.responseFamilyKeys
-        .filter((key) => !offeredResponses.has(key))
-        .map((key) => (
-          <input
-            key={key}
-            name="responseFamilyKeys"
-            type="hidden"
-            value={key}
-          />
-        ))}
       <fieldset aria-describedby="partner-alert-responses-help">
         <legend>Responses that alert partners</legend>
         <p className="field-help" id="partner-alert-responses-help">
           A real event with one of these responses alerts partners. Drills never
           alert partners. Choose none to stop partner alerts entirely.
         </p>
-        {state.responseOptions.length === 0 ? (
+        {responseChoices.length === 0 ? (
           <p>No responses are published.</p>
         ) : (
-          state.responseOptions.map((option) => (
+          responseChoices.map((option) => (
             <label key={option.familyKey}>
               <input
                 defaultChecked={responses.has(option.familyKey)}
@@ -89,7 +91,8 @@ function SettingsForm({
         <legend>Threats that never alert partners</legend>
         <p className="field-help" id="partner-alert-threats-help">
           An event with an excluded threat does not alert partners, whatever its
-          response.
+          response. A retired threat is listed only while it is excluded;
+          unchecking it removes the exclusion for good.
         </p>
         {threats.length === 0 ? (
           <p>No threats are configured.</p>
@@ -153,10 +156,12 @@ export function PartnerAlertsAdminView({
       )}
       <p>
         Partners are responders from outside the district. These settings decide
-        which real events alert them; they are read when an event&apos;s
-        notifications are planned. Partners are emailed at their admitted
-        address and reached by push or text only after they sign in and enroll a
-        device or consent.
+        which real events will alert them.
+      </p>
+      <p className="notice">
+        <strong>Partner alert delivery is not turned on yet.</strong> Saving
+        here records your choice; no partner is alerted until delivery is
+        enabled in a later release.
       </p>
       <SettingsProvenance current={view.state.current} />
       <section aria-labelledby="partner-alert-settings-heading">

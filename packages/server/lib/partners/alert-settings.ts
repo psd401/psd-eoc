@@ -8,7 +8,7 @@ import {
   type PartnerAlertSettingsVersion,
   type SetPartnerAlertSettingsInput,
 } from '@psd-eoc/contracts';
-import { asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -158,11 +158,16 @@ export async function savePartnerAlertSettings(
         familyKey: eventTypes.familyKey,
       })
       .from(eventTypes)
-      .where(inArray(eventTypes.familyKey, responseFamilyKeys));
+      .where(
+        and(
+          eq(eventTypes.templateMode, 'real'),
+          inArray(eventTypes.familyKey, responseFamilyKeys),
+        ),
+      );
     if (known.length !== responseFamilyKeys.length) {
       throw new PartnerAccessError(
         'VALIDATION_ERROR',
-        'A chosen response does not exist.',
+        'A chosen response has no real version.',
       );
     }
   }

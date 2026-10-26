@@ -81,6 +81,8 @@ describe('partner alerts admin view', () => {
     );
     expect(html).toContain('name="baseVersionId" value=""');
     expect(html).toContain('Drills never alert partners.');
+    // Delivery lands in a later change; the page must not imply it is live.
+    expect(html).toContain('Partner alert delivery is not turned on yet.');
   });
 
   test('shows the saved version and keeps a retired threat that is still excluded', () => {
@@ -118,7 +120,7 @@ describe('partner alerts admin view', () => {
     expect(html).not.toContain('Synthetic gone');
   });
 
-  test('a saved response with no published version is kept on save', () => {
+  test('a saved response with no published version stays checked and can be removed', () => {
     const html = render(
       PartnerAlertSettingsStateSchema.parse({
         current: null,
@@ -129,9 +131,10 @@ describe('partner alerts admin view', () => {
         ...OPTIONS,
       }),
     );
-    expect(html).toContain(
-      'type="hidden" name="responseFamilyKeys" value="unpublished-family"',
-    );
+    expect(
+      checkbox(html, 'responseFamilyKeys', 'unpublished-family'),
+    ).toContain('checked');
+    expect(html).toContain('unpublished-family (no published response)');
   });
 
   test('a non-administrator sees the refusal and no settings', () => {
