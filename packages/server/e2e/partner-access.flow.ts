@@ -50,9 +50,15 @@ test.describe('partner-access', () => {
       timeout: 30_000,
     });
     await expectAxeClean(page);
-    await section.screenshot({
-      path: issue597EvidencePath('partner-access-text-alerts.png'),
-    });
+    // The section and its scrollable table are both regions named Partners;
+    // capture the whole section, located by its heading.
+    await page
+      .locator('section', {
+        has: page.getByRole('heading', { level: 2, name: 'Partners' }),
+      })
+      .screenshot({
+        path: issue597EvidencePath('partner-access-text-alerts.png'),
+      });
   });
 
   test('admin disables partner → partner session refused', async ({
