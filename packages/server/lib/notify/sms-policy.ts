@@ -699,8 +699,17 @@ async function lockSmsEndpointPolicy(
     recipientId: string;
     endpointId: string;
   }>,
+  population: SmsLifecycleEndpoint['population'],
 ): Promise<void> {
-  const endpointIdentity = `${input.rosterSnapshotId}:${input.recipientId}:${input.endpointId}`;
+  // A roster endpoint id is unique only within its snapshot, so a staff key
+  // names the snapshot. A partner endpoint has none of its own, and the same
+  // partner STOP can arrive under different ambient snapshots (a batch's,
+  // then the reconciler's after a republish); its key leaves the snapshot
+  // out so those writers serialize.
+  const endpointIdentity =
+    population === 'partner'
+      ? `partner:${input.recipientId}:${input.endpointId}`
+      : `${input.rosterSnapshotId}:${input.recipientId}:${input.endpointId}`;
   await database.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`sms-endpoint-policy:${endpointIdentity}`}, ${SMS_POLICY_LOCK_NAMESPACE}))`,
   );
@@ -808,13 +817,29 @@ async function appendSmsEndpointStatus(
   recordedAt: Date,
   uuid: () => string,
 ): Promise<EndpointStatusRecord> {
+  // A partner fact belongs to its admission and partner endpoint; the
+  // snapshot it names is only the batch or reconciliation that saw it. A
+  // partner replay is therefore found without the snapshot, so the same STOP
+  // seen again after a roster republish is the same fact, not a new row, and
+  // is reported under the snapshot the caller asked with.
+  const partner = endpoint.population === 'partner';
+  const snapshotScope = partner
+    ? undefined
+    : eq(endpointStatusRecords.rosterSnapshotId, input.rosterSnapshotId);
+  const asRequested = (record: EndpointStatusRecord): EndpointStatusRecord =>
+    partner
+      ? EndpointStatusRecordSchema.parse({
+          ...record,
+          rosterSnapshotId: input.rosterSnapshotId,
+        })
+      : record;
   if (input.provider !== undefined && input.providerReference !== undefined) {
     const exactRows = await database
       .select()
       .from(endpointStatusRecords)
       .where(
         and(
-          eq(endpointStatusRecords.rosterSnapshotId, input.rosterSnapshotId),
+          snapshotScope,
           eq(endpointStatusRecords.recipientId, input.recipientId),
           eq(endpointStatusRecords.endpointId, input.endpointId),
           eq(endpointStatusRecords.channel, 'sms'),
@@ -842,7 +867,7 @@ async function appendSmsEndpointStatus(
           'The endpoint lifecycle replay did not match retained evidence.',
         );
       }
-      return record;
+      return asRequested(record);
     }
   }
   const [existing] = await database
@@ -850,7 +875,7 @@ async function appendSmsEndpointStatus(
     .from(endpointStatusRecords)
     .where(
       and(
-        eq(endpointStatusRecords.rosterSnapshotId, input.rosterSnapshotId),
+        snapshotScope,
         eq(endpointStatusRecords.recipientId, input.recipientId),
         eq(endpointStatusRecords.endpointId, input.endpointId),
         eq(endpointStatusRecords.channel, 'sms'),
@@ -874,7 +899,7 @@ async function appendSmsEndpointStatus(
       : dateIso(existing.providerOccurredAt)) ===
       (input.providerOccurredAt ?? null)
   ) {
-    return endpointStatusFromRow(existing);
+    return asRequested(endpointStatusFromRow(existing));
   }
   const record = EndpointStatusRecordSchema.parse({
     id: UuidSchema.parse(uuid()),
@@ -1286,7 +1311,6 @@ export function createDrizzleSmsPolicyStore(
       const input = inputResult.data;
       return database.transaction(async (transaction) => {
         const queryDatabase = smsPolicyQueryDatabase(transaction);
-        await lockSmsEndpointPolicy(queryDatabase, input);
         const endpoint = await loadSmsLifecycleEndpoint(queryDatabase, input);
         if (endpoint === null) {
           throw new SmsPolicyError(
@@ -1294,6 +1318,7 @@ export function createDrizzleSmsPolicyStore(
             'The endpoint-status append did not identify a retained SMS endpoint.',
           );
         }
+        await lockSmsEndpointPolicy(queryDatabase, input, endpoint.population);
         return appendSmsEndpointStatus(
           queryDatabase,
           input,
@@ -1317,7 +1342,6 @@ export function createDrizzleSmsPolicyStore(
       const input = inputResult.data;
       return database.transaction(async (transaction) => {
         const queryDatabase = smsPolicyQueryDatabase(transaction);
-        await lockSmsEndpointPolicy(queryDatabase, input);
         const endpoint = await loadSmsLifecycleEndpoint(queryDatabase, input);
         if (endpoint === null) {
           throw new SmsPolicyError(
@@ -1325,6 +1349,7 @@ export function createDrizzleSmsPolicyStore(
             'The SMS opt-out did not identify a retained SMS endpoint.',
           );
         }
+        await lockSmsEndpointPolicy(queryDatabase, input, endpoint.population);
         const optOutStatus = RecordEndpointStatusInputSchema.parse({
           rosterSnapshotId: input.rosterSnapshotId,
           recipientId: input.recipientId,
@@ -1339,11 +1364,10 @@ export function createDrizzleSmsPolicyStore(
           // A partner's STOP (#597). `sms_opt_out_records` binds published
           // roster endpoints only, so the disabled lifecycle fact, which
           // carries the same provider evidence, is the whole record; its id
-          // and time identify it, and a replay returns the same fact. Its
-          // identity is a staff fact's: snapshot, endpoint, and provider
-          // reference. Reconciling a newer staff snapshot records a number
-          // still on the provider's list again, as it does for staff; every
-          // copy agrees, and resolution reads the newest by number.
+          // and time identify it. A replay, including the same STOP seen
+          // again under a newer staff snapshot, returns the same fact
+          // (see appendSmsEndpointStatus), reported under the caller's
+          // snapshot.
           const status = await appendSmsEndpointStatus(
             queryDatabase,
             optOutStatus,

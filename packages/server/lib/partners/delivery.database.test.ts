@@ -1064,10 +1064,26 @@ describeWithDatabase('partner delivery from a live incident (#597)', () => {
           rolePolicy,
         ),
       ).toEqual(recorded);
+      // The same STOP seen under another snapshot (the reconciler's after a
+      // roster republish) is the same fact, reported under that snapshot,
+      // and adds no row.
+      const republishedId = randomUUID();
+      expect(
+        await recordAwsManagedOptOutConflict(
+          {
+            ...item!,
+            batch: { ...item!.batch, rosterSnapshotId: republishedId },
+            attempt: { ...item!.attempt, rosterSnapshotId: republishedId },
+          },
+          'synthetic-partner-opt-out-request',
+          refusedAt,
+          rolePolicy,
+        ),
+      ).toEqual({ ...recorded, rosterSnapshotId: republishedId });
     } finally {
       await roleConnection.close();
     }
-    const [fact] = await database()
+    const facts = await database()
       .select({
         partnerEndpointId: endpointStatusRecords.partnerEndpointId,
         status: endpointStatusRecords.status,
@@ -1080,6 +1096,8 @@ describeWithDatabase('partner delivery from a live incident (#597)', () => {
           eq(endpointStatusRecords.channel, 'sms'),
         ),
       );
+    expect(facts).toHaveLength(1);
+    const [fact] = facts;
     expect(fact).toEqual({
       partnerEndpointId: item!.endpoint.id,
       status: 'disabled',
