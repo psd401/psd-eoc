@@ -1311,6 +1311,26 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     ).resolves.toEqual({ authorized: false });
   });
 
+  test('refuses an opt-out that names no retained endpoint as a conflict, not a transient failure', async () => {
+    // A policy refusal never changes on retry. Untyped it reached the worker
+    // as a 503 and cycled the queue until it dead-lettered.
+    currentTime = Date.parse(CREATED_AT) + 1_000;
+    const input = optOutInput(
+      {
+        attempt: {
+          rosterSnapshotId: randomUUID(),
+          recipientId: randomUUID(),
+          endpointId: randomUUID(),
+        },
+      } as SmsWorkerAttemptWorkItem,
+      'unretained-endpoint',
+    );
+    await expectStoreError(
+      () => runtimeStore().executeLifecycle(input),
+      'BATCH_CONFLICT',
+    );
+  });
+
   test('keeps the immutable 50-row cursor stable when current eligibility changes between pages', async () => {
     currentTime = Date.parse(CREATED_AT) + 1_000;
     const store = runtimeStore();

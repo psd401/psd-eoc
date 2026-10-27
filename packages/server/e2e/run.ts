@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { IdempotencyPrincipalSchema, type StaffRole } from '@psd-eoc/contracts';
-import { inArray } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 
 import {
   createDrizzleStartFlowCapabilityStore,
@@ -23,12 +23,14 @@ import {
   mediaRecords,
   mediaUploadIntents,
   partnerAdmissions,
+  partnerEndpoints,
   rosterSnapshotFacilities,
   rosterSnapshotSources,
   rosterSnapshots,
   rosterSourceConfigurationFacilities,
   rosterSourceConfigurationGroups,
   rosterSourceConfigurations,
+  staffSmsConsents,
 } from '../db/schema';
 import { migrateDatabase } from '../drizzle/migrate';
 import { createCsrfToken } from '../lib/auth/middleware';
@@ -46,6 +48,7 @@ import {
   executeEventCapability,
 } from '../lib/capabilities/events';
 import type { TrustedCapabilityInvocation } from '../lib/capabilities/engine';
+import { createDrizzleSmsPolicyStore } from '../lib/notify/sms-policy';
 import { createDisposableDatabase } from '../lib/testing/database';
 import { issueSyntheticPartnerSession } from '../lib/testing/partner-session';
 
@@ -264,14 +267,18 @@ async function issuePartner(
     admittedAt?: Date;
     statePath: string;
   }>,
-): Promise<void> {
-  await connection.db.insert(partnerAdmissions).values({
-    email: input.email,
-    displayName: input.displayName,
-    agency: 'Synthetic Fire District',
-    invitedByUserId: input.invitedByUserId,
-    admittedAt: input.admittedAt ?? input.now,
-  });
+): Promise<Readonly<{ admissionId: string; userId: string }>> {
+  const [admission] = await connection.db
+    .insert(partnerAdmissions)
+    .values({
+      email: input.email,
+      displayName: input.displayName,
+      agency: 'Synthetic Fire District',
+      invitedByUserId: input.invitedByUserId,
+      admittedAt: input.admittedAt ?? input.now,
+    })
+    .returning({ id: partnerAdmissions.id });
+  if (admission === undefined) throw new Error('No partner admission.');
   const issued = await issueSyntheticPartnerSession(connection.db, {
     email: input.email,
     displayName: input.displayName,
@@ -282,6 +289,54 @@ async function issuePartner(
     issued.credential,
     new Date(input.now.getTime() + DAY_MILLISECONDS).toISOString(),
   );
+  return Object.freeze({ admissionId: admission.id, userId: issued.userId });
+}
+
+/**
+ * Follow-up to #597. A partner who signed up for texts and then replied STOP:
+ * the provider's refusal is recorded against their partner endpoint the way
+ * the SMS worker records it, so the Access page shows the STOP.
+ */
+async function seedPartnerSmsStop(
+  connection: PostgresDatabaseConnection,
+  partner: Readonly<{ admissionId: string; userId: string }>,
+  now: Date,
+): Promise<void> {
+  const [snapshot] = await connection.db
+    .select({ id: rosterSnapshots.id })
+    .from(rosterSnapshots)
+    .where(eq(rosterSnapshots.population, 'staff'))
+    .orderBy(desc(rosterSnapshots.capturedAt), desc(rosterSnapshots.id))
+    .limit(1);
+  const [consent] = await connection.db
+    .insert(staffSmsConsents)
+    .values({
+      userId: partner.userId,
+      phoneNumber: '+12025550177',
+      disclosureVersion: '2026-09-04',
+      source: 'web',
+      consentedAt: new Date(now.getTime() - 60_000),
+    })
+    .returning({ id: staffSmsConsents.id });
+  const [endpoint] = await connection.db
+    .insert(partnerEndpoints)
+    .values({
+      partnerAdmissionId: partner.admissionId,
+      channel: 'sms',
+      smsConsentId: consent?.id,
+    })
+    .returning({ id: partnerEndpoints.id });
+  if (snapshot === undefined || endpoint === undefined) {
+    throw new Error('The partner STOP could not be seeded.');
+  }
+  await createDrizzleSmsPolicyStore(connection.db).recordSmsOptOut({
+    rosterSnapshotId: snapshot.id,
+    recipientId: partner.admissionId,
+    endpointId: endpoint.id,
+    provider: 'aws-eum-sms',
+    providerReference: 'synthetic-partner-stop',
+    providerOccurredAt: now.toISOString(),
+  });
 }
 
 function invocation(
@@ -788,7 +843,7 @@ async function main(): Promise<void> {
     });
     // Issue #594. A signed-in partner no flow disables, expires, or renews,
     // for the flows that join, post, and look for staff-only controls.
-    await issuePartner(opened, {
+    const responder = await issuePartner(opened, {
       email: 'responder@agency.example.invalid',
       displayName: 'Synthetic Joining Responder',
       invitedByUserId: districtAdministrator.userId,
@@ -830,6 +885,7 @@ async function main(): Promise<void> {
       facilityStaffGroupId,
       now,
     );
+    await seedPartnerSmsStop(opened, responder, now);
     await writeFile(
       join(createdStateDirectory, 'fixture.json'),
       JSON.stringify({

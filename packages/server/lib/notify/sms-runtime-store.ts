@@ -51,6 +51,7 @@ import {
   createDrizzleSmsPolicyStore,
   executeRecordSmsOptOutCapability,
   resolveSmsEndpoints,
+  SmsPolicyError,
 } from './sms-policy';
 
 const SMS_PAGE_SIZE = 50;
@@ -796,11 +797,23 @@ export function createDrizzleSmsRuntimeStore(
     },
 
     async executeLifecycle(input) {
-      return executeRecordSmsOptOutCapability(
-        input.input,
-        input.context,
-        policy,
-      );
+      try {
+        return await executeRecordSmsOptOutCapability(
+          input.input,
+          input.context,
+          policy,
+        );
+      } catch (error) {
+        // A policy refusal (no retained endpoint, evidence that disagrees
+        // with a replay, invalid input) answers the same on every retry.
+        // Left untyped it reached the route as a 503, which the worker
+        // retries until the queue dead-letters it; as a conflict the worker
+        // retires it to the dead-letter queue at once.
+        if (error instanceof SmsPolicyError) {
+          throw new SmsRuntimeStoreError('BATCH_CONFLICT');
+        }
+        throw error;
+      }
     },
 
     resolveSmsDestination(input) {

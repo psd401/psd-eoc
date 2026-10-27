@@ -1501,7 +1501,12 @@ export const RecordSmsOptOutInputSchema = z
 /** SMS opt-out input inferred from its schema. */
 export type RecordSmsOptOutInput = z.infer<typeof RecordSmsOptOutInputSchema>;
 
-/** Owns one retained SMS opt-out fact without copying a phone number. */
+/**
+ * Owns one retained SMS opt-out fact without copying a phone number. For a
+ * staff or synthetic endpoint, `id` is the `sms_opt_out_records` row; for a
+ * partner endpoint (#597), which that table cannot bind, it is the disabled
+ * `endpoint_status_records` fact that is the whole record.
+ */
 export const SmsOptOutRecordSchema = z
   .object({
     id: UuidSchema,
