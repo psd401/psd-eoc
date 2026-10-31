@@ -96,6 +96,13 @@ export function userCanManageEventJournal(
 ): boolean {
   return (
     roles.length > 0 &&
+    // A partner never corrects or redacts an entry. The server leaves
+    // `correct-journal-entry` and `redact-journal-entry` off the partner
+    // capability allowlist, so it refuses them anyway; without this, a
+    // partner's facility-scoped admission would satisfy the rest of this
+    // test and any screen that wired it up would offer an action that can
+    // only be refused (issue #598).
+    !roles.includes('partner') &&
     (scope.kind === 'district' || scope.facilityIds.includes(facilityId))
   );
 }

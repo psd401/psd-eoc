@@ -21,6 +21,7 @@ import {
 } from './auth-controller';
 import { MobileAuthError, OfflineMutationDeniedError } from './auth-errors';
 import {
+  partnerSessionFixture,
   sessionFixture,
   TEST_NEXT_TOKEN,
   TEST_NOW,
@@ -702,6 +703,87 @@ describe('mobile auth controller', () => {
     expect(auth.getSnapshot().phase).toBe('signed-out');
     expect(auth.getSnapshot().session).toBeNull();
     expect(storage.vault).toBeNull();
+  });
+
+  // Issue #598. A partner's admission runs for a year while the session it
+  // issues lasts a day. `sessionAuthorizationUsableUntil` reports the
+  // admission, so a controller that scheduled on that alone would leave a
+  // partner holding a dead session for a year. The deadline is the earlier of
+  // the two, and the day is what returns the partner to sign-in.
+  test('a partner session ends at its own one-day expiry, not at the admission', async () => {
+    const partner = partnerSessionFixture();
+    const sessionExpiry = Date.parse(partner.session.expiresAt);
+    const admissionExpiry = Date.parse(
+      sessionAuthorizationUsableUntil(partner.session.authorization),
+    );
+    expect(sessionExpiry).toBeLessThan(admissionExpiry);
+
+    const storage = new FakeStorage({
+      refreshToken: TEST_TOKEN,
+      pendingRefreshIdempotencyKey: null,
+      session: partner,
+    });
+    const timer = new FakeTimer();
+    let currentTime = TEST_NOW;
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => {
+          throw new MobileAuthError('offline', 'unreachable');
+        },
+        revoke: async () => {},
+      },
+      undefined,
+      { now: () => currentTime, timer },
+    );
+    await auth.bootstrap();
+    await auth.foreground();
+    expect(auth.getSnapshot().phase).toBe('offline-cached');
+    expect(timer.latestDelay()).toBe(sessionExpiry - TEST_NOW.getTime());
+
+    currentTime = new Date(sessionExpiry);
+    timer.fireLatest();
+    await flush();
+    await flush();
+
+    // Cleanly: signed out, nothing cached, nothing left in secure storage for
+    // the next launch to try to restore.
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+    expect(auth.getSnapshot().session).toBeNull();
+    expect(storage.vault).toBeNull();
+  });
+
+  test('a restored partner session is usable until that same day boundary', async () => {
+    const partner = partnerSessionFixture();
+    const storage = new FakeStorage({
+      refreshToken: TEST_TOKEN,
+      pendingRefreshIdempotencyKey: null,
+      session: partner,
+    });
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => ({
+          refreshToken: TEST_NEXT_TOKEN,
+          tokenType: 'Bearer' as const,
+          session: partner,
+        }),
+        revoke: async () => {},
+      },
+      undefined,
+      { now: () => TEST_NOW },
+    );
+    await auth.bootstrap();
+    await auth.foreground();
+
+    expect(auth.getSnapshot().phase).toBe('online');
+    expect(auth.getSnapshot().session?.user.roles).toEqual(['partner']);
+    // The partner arm of the authorization union survives the round trip
+    // through secure storage and the refresh, so nothing in the controller
+    // quietly assumes the staff arm.
+    expect(auth.getSnapshot().session?.session.authorization.kind).toBe(
+      'partner-admission',
+    );
   });
 
   test('mutation guard rechecks local time and hides an expired online shell immediately', async () => {

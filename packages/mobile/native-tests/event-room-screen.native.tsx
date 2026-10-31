@@ -30,6 +30,7 @@ import {
   eventStatusAcceptsTimelinePosts,
   invalidateLocationCaptureForPostingState,
   retainJournalMutationIdentity,
+  userCanManageEventJournal,
 } from '../src/features/event-room/event-room-screen';
 import {
   NativePhotoDraftStorage,
@@ -1866,5 +1867,49 @@ describe('mobile event-room lifecycle confirmations', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('who may correct or redact a timeline entry', () => {
+  const facilityId = '00000000-0000-4000-8000-0000000000f1';
+  const facilityScope = {
+    kind: 'facilities' as const,
+    facilityIds: [facilityId],
+  };
+
+  test('a staff member in scope may', () => {
+    expect(
+      userCanManageEventJournal(['staff'], facilityScope, facilityId),
+    ).toBe(true);
+    expect(
+      userCanManageEventJournal(['staff'], { kind: 'district' }, facilityId),
+    ).toBe(true);
+  });
+
+  test('a staff member outside scope may not', () => {
+    expect(
+      userCanManageEventJournal(
+        ['staff'],
+        { kind: 'facilities', facilityIds: [] },
+        facilityId,
+      ),
+    ).toBe(false);
+    expect(userCanManageEventJournal([], facilityScope, facilityId)).toBe(
+      false,
+    );
+  });
+
+  // Issue #598. A partner's admission reaches every non-isolated facility, so
+  // the facility test alone would admit them. The server leaves
+  // `correct-journal-entry` and `redact-journal-entry` off the partner
+  // capability allowlist and refuses both, so offering either would only ever
+  // produce a refusal.
+  test('a partner never may, in scope or not', () => {
+    expect(
+      userCanManageEventJournal(['partner'], facilityScope, facilityId),
+    ).toBe(false);
+    expect(
+      userCanManageEventJournal(['partner'], { kind: 'district' }, facilityId),
+    ).toBe(false);
   });
 });

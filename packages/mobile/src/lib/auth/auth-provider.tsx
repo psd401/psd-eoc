@@ -41,6 +41,7 @@ import {
 } from './issue-32-synthetic-authenticator';
 import { createLocalAuthenticator } from './local-authenticator';
 import { MobileOidcClient } from './oidc-client';
+import { isPartnerSession } from './partner-session';
 import { OidcRedirectNotCapturedError } from './oidc-client';
 import { createSecurePendingOidcFlowStore } from './secure-pending-oidc-flow';
 import { createSecureSessionStore } from './secure-session-store';
@@ -63,6 +64,26 @@ export interface MobileAuthContextValue {
   readonly beginGoogleSignIn: () => Promise<void>;
   /** Signs in the app-store review account with the code it was given. */
   readonly beginAppReviewSignIn: (email: string, code: string) => Promise<void>;
+  /**
+   * Partner sign-in, first step: ask the partner pool to email a code to one
+   * address. True means a code was requested, which the server answers the
+   * same way for every address; it is never a statement that the address
+   * holds partner access.
+   */
+  readonly requestPartnerCode: (email: string) => Promise<boolean>;
+  /** Partner sign-in, second step: answer the outstanding flow with its code. */
+  readonly completePartnerSignIn: (code: string) => Promise<void>;
+  /** True while one partner code request is outstanding and still usable. */
+  readonly partnerCodeRequested: boolean;
+  /**
+   * True when the signed-in person holds a partner admission rather than
+   * district staff access. Partners read, join and post; they never start or
+   * end an event, and the server refuses those capabilities whatever the
+   * screen offers, so this only keeps the app from offering them.
+   */
+  readonly isPartnerSession: boolean;
+  /** Abandons the outstanding partner flow and returns to the address step. */
+  readonly resetPartnerSignIn: () => void;
   /** Resumes an attempt whose redirect arrived outside `promptAsync`. */
   readonly completeGoogleSignIn: (
     authorizationCode: string,
@@ -89,7 +110,7 @@ export interface MobileAuthContextValue {
 interface AuthRuntime {
   readonly controller: MobileAuthController;
   readonly oidc: MobileOidcClient | null;
-  readonly reviewApi: AuthApiClient | null;
+  readonly signInApi: AuthApiClient | null;
   readonly storage: AuthStorage;
 }
 
@@ -116,7 +137,7 @@ function createRuntime(): AuthRuntime {
       }),
       storage: fixture.storage,
       oidc: null,
-      reviewApi: null,
+      signInApi: null,
     });
   }
 
@@ -163,7 +184,7 @@ function createRuntime(): AuthRuntime {
   return Object.freeze({
     controller,
     storage,
-    reviewApi: api,
+    signInApi: api,
     oidc: new MobileOidcClient(
       api,
       expoOidcBrowser,
@@ -182,10 +203,67 @@ function shellAvailable(state: AuthState): boolean {
   );
 }
 
-function publicSignInError(error: unknown): string {
+/**
+ * What one sign-in surface says when something it did not anticipate goes
+ * wrong, and when this build has no live authentication runtime at all. Each
+ * surface names itself, so a partner is never told that Google sign-in
+ * failed and a staff member is never told about partner agencies.
+ */
+interface SignInSurface {
+  readonly fallbackMessage: string;
+  readonly unavailableMessage: string;
+}
+
+const GOOGLE_SURFACE: SignInSurface = Object.freeze({
+  fallbackMessage:
+    'PSD EOC could not complete Google sign-in. Try again or contact district technology support.',
+  unavailableMessage:
+    'Synthetic accessibility testing does not use Google sign-in. Restart the development build to restore its in-memory enrollment.',
+});
+
+const APP_REVIEW_SURFACE: SignInSurface = Object.freeze({
+  fallbackMessage:
+    'PSD EOC could not complete review sign-in. Try again or contact district technology support.',
+  unavailableMessage: 'App review sign-in is not available in this build.',
+});
+
+const PARTNER_SURFACE: SignInSurface = Object.freeze({
+  fallbackMessage:
+    'PSD EOC could not complete partner agency sign-in. Try again or contact district technology support.',
+  unavailableMessage: 'Partner agency sign-in is not available in this build.',
+});
+
+function publicSignInError(surface: SignInSurface, error: unknown): string {
   return error instanceof MobileAuthError
     ? error.message
-    : 'PSD EOC could not complete Google sign-in. Try again or contact district technology support.';
+    : surface.fallbackMessage;
+}
+
+/** The live authentication runtime, present together or not at all. */
+interface LiveAuthRuntime {
+  readonly oidc: MobileOidcClient;
+  readonly signInApi: AuthApiClient;
+  readonly platform: NativeDevicePlatform;
+}
+
+function resolveLiveRuntime(
+  runtime: AuthRuntime,
+  surface: SignInSurface,
+): LiveAuthRuntime {
+  if (runtime.oidc === null || runtime.signInApi === null) {
+    throw new MobileAuthError('configuration', surface.unavailableMessage);
+  }
+  if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
+    throw new MobileAuthError(
+      'configuration',
+      'PSD EOC sign-in requires an iOS or Android build.',
+    );
+  }
+  return Object.freeze({
+    oidc: runtime.oidc,
+    signInApi: runtime.signInApi,
+    platform: Platform.OS,
+  });
 }
 
 export function AuthProvider({ children }: PropsWithChildren) {
@@ -202,6 +280,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [signInRedirectUncaptured, setSignInRedirectUncaptured] =
     useState(false);
   const signingInRef = useRef(false);
+  // The sealed partner flow stays in memory for the few minutes it is usable.
+  // It is opaque, it is not a credential, and it is deliberately not written
+  // to storage: an abandoned attempt should die with the process rather than
+  // wait on disk for a code that has already expired.
+  const partnerFlowRef = useRef<string | null>(null);
+  const [partnerCodeRequested, setPartnerCodeRequested] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -228,10 +312,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const runSignIn = useCallback(
     async (
-      attempt: (
-        oidc: MobileOidcClient,
-        platform: NativeDevicePlatform,
-      ) => Promise<MobileSessionResponse>,
+      surface: SignInSurface,
+      attempt: (live: LiveAuthRuntime) => Promise<MobileSessionResponse>,
     ) => {
       if (signingInRef.current) {
         return;
@@ -241,27 +323,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setSignInError(null);
       setSignInRedirectUncaptured(false);
       try {
-        if (runtime.oidc === null) {
-          throw new MobileAuthError(
-            'configuration',
-            'Synthetic accessibility testing does not use Google sign-in. Restart the development build to restore its in-memory enrollment.',
-          );
-        }
-        if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
-          throw new MobileAuthError(
-            'configuration',
-            'Mobile Google sign-in requires an iOS or Android development build.',
-          );
-        }
-        // Platform is narrowed by the guard above, so the attempt never has
-        // to assert it.
-        const payload = await attempt(runtime.oidc, Platform.OS);
+        const payload = await attempt(resolveLiveRuntime(runtime, surface));
         const enrolled = await runtime.controller.enroll(payload);
         if (!enrolled) {
           setSignInError(runtime.controller.getSnapshot().message);
         }
       } catch (error) {
-        setSignInError(publicSignInError(error));
+        setSignInError(publicSignInError(surface, error));
         setSignInRedirectUncaptured(
           error instanceof OidcRedirectNotCapturedError,
         );
@@ -275,40 +343,94 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const beginGoogleSignIn = useCallback(
     () =>
-      runSignIn(async (oidc, platform) => {
+      runSignIn(GOOGLE_SURFACE, async (live) => {
         const installationId =
           await runtime.storage.getOrCreateInstallationId();
-        return oidc.signIn(platform, installationId);
+        return live.oidc.signIn(live.platform, installationId);
       }),
     [runSignIn, runtime],
   );
 
   const completeGoogleSignIn = useCallback(
     (authorizationCode: string, state: string) =>
-      runSignIn((oidc) => oidc.completeSignIn(authorizationCode, state)),
+      runSignIn(GOOGLE_SURFACE, (live) =>
+        live.oidc.completeSignIn(authorizationCode, state),
+      ),
     [runSignIn],
   );
 
   const beginAppReviewSignIn = useCallback(
     (email: string, code: string) =>
-      runSignIn(async (_oidc, platform) => {
-        if (runtime.reviewApi === null) {
-          throw new MobileAuthError(
-            'configuration',
-            'App review sign-in is not available in this build.',
-          );
-        }
+      runSignIn(APP_REVIEW_SURFACE, async (live) => {
         const installationId =
           await runtime.storage.getOrCreateInstallationId();
-        return runtime.reviewApi.appReviewSignIn({
+        return live.signInApi.appReviewSignIn({
           email: email.trim().toLowerCase(),
           code: code.trim(),
-          platform,
+          platform: live.platform,
           installationId,
         });
       }),
     [runSignIn, runtime],
   );
+
+  const requestPartnerCode = useCallback(
+    async (email: string): Promise<boolean> => {
+      if (signingInRef.current) {
+        return false;
+      }
+      signingInRef.current = true;
+      setIsSigningIn(true);
+      setSignInError(null);
+      setSignInRedirectUncaptured(false);
+      try {
+        const live = resolveLiveRuntime(runtime, PARTNER_SURFACE);
+        const installationId =
+          await runtime.storage.getOrCreateInstallationId();
+        const started = await live.signInApi.partnerSignInStart({
+          email: email.trim().toLowerCase(),
+          platform: live.platform,
+          installationId,
+        });
+        partnerFlowRef.current = started.flowToken;
+        setPartnerCodeRequested(true);
+        return true;
+      } catch (error) {
+        partnerFlowRef.current = null;
+        setPartnerCodeRequested(false);
+        setSignInError(publicSignInError(PARTNER_SURFACE, error));
+        return false;
+      } finally {
+        signingInRef.current = false;
+        setIsSigningIn(false);
+      }
+    },
+    [runtime],
+  );
+
+  const completePartnerSignIn = useCallback(
+    (code: string) =>
+      runSignIn(PARTNER_SURFACE, (live) => {
+        const flowToken = partnerFlowRef.current;
+        if (flowToken === null) {
+          throw new MobileAuthError(
+            'rejected',
+            'This sign-in request expired. Request a new code.',
+          );
+        }
+        return live.signInApi.partnerSignInVerify({
+          flowToken,
+          code: code.trim(),
+        });
+      }),
+    [runSignIn],
+  );
+
+  const resetPartnerSignIn = useCallback(() => {
+    partnerFlowRef.current = null;
+    setPartnerCodeRequested(false);
+    setSignInError(null);
+  }, []);
 
   const subscribeState = useCallback(
     (listener: () => void) => runtime.controller.subscribe(listener),
@@ -339,13 +461,21 @@ export function AuthProvider({ children }: PropsWithChildren) {
       beginGoogleSignIn,
       beginAppReviewSignIn,
       completeGoogleSignIn,
+      requestPartnerCode,
+      completePartnerSignIn,
+      partnerCodeRequested,
+      resetPartnerSignIn,
+      isPartnerSession: isPartnerSession(state.session),
       unlock: () => runtime.controller.foreground(),
       retryConnection: () => runtime.controller.retryConnection(),
       subscribeState,
       isOnlineSession,
       requestAuthenticated: runtime.controller.requestAuthenticated,
       signOut: async () => {
-        setSignInError(null);
+        // A sign-out leaves no half-finished partner attempt behind, so the
+        // sign-in screen comes back on its first step rather than asking for
+        // a code nobody requested.
+        resetPartnerSignIn();
         setSignInRedirectUncaptured(false);
         await runtime.controller.signOut();
       },
@@ -355,8 +485,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
       beginAppReviewSignIn,
       beginGoogleSignIn,
       completeGoogleSignIn,
+      completePartnerSignIn,
       isOnlineSession,
       isSigningIn,
+      partnerCodeRequested,
+      requestPartnerCode,
+      resetPartnerSignIn,
       runtime,
       signInError,
       signInRedirectUncaptured,

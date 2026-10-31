@@ -8,6 +8,7 @@ import {
   PreSessionOidcPrincipalSchema,
   type AuthenticationCapabilityEnvelope,
   type CompleteOidcSignInInput,
+  type NativeDevicePlatform,
   type PreSessionOidcPrincipal,
   type SessionEstablishmentResult,
 } from '@psd-eoc/contracts';
@@ -68,6 +69,17 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+/**
+ * Which surface one partner sign-in is completing on. The browser enrolls
+ * the `web` platform and carries the session cookie; the native app enrolls
+ * its own platform and carries the opaque bearer.
+ */
+export type PartnerSignInSurface =
+  | Readonly<{ kind: 'web' }>
+  | Readonly<{ kind: 'native'; platform: NativeDevicePlatform }>;
+
+const WEB_SURFACE: PartnerSignInSurface = Object.freeze({ kind: 'web' });
+
 /** Verified adapter output ready for the canonical sign-in capability. */
 export interface PartnerSignInCompletion {
   readonly capabilityInput: CompleteOidcSignInInput;
@@ -88,14 +100,35 @@ export function createPartnerSignInCompletion(
     claims: PartnerVerifiedClaims;
     displayName: string;
     installationId: string;
+    surface?: PartnerSignInSurface;
   }>,
 ): PartnerSignInCompletion {
+  const surface = input.surface ?? WEB_SURFACE;
   const subjectDigest = sha256Hex(input.claims.subject);
-  const responseDigest = sha256Hex(
-    ['partner-otp-sign-in-v1', subjectDigest, input.claims.claimsDigest].join(
-      '\n',
-    ),
-  );
+  // The browser's digest is unchanged. A native sign-in commits to its own
+  // device as well, because the same partner may hold a browser session and
+  // a phone session at once, and because the synthetic pool's claims digest
+  // is derived from the address rather than from a fresh token: without the
+  // device in the digest, a second device's sign-in would look like a replay
+  // of the first.
+  const responseDigest =
+    surface.kind === 'web'
+      ? sha256Hex(
+          [
+            'partner-otp-sign-in-v1',
+            subjectDigest,
+            input.claims.claimsDigest,
+          ].join('\n'),
+        )
+      : sha256Hex(
+          [
+            'partner-otp-sign-in-native-v1',
+            surface.platform,
+            input.installationId,
+            subjectDigest,
+            input.claims.claimsDigest,
+          ].join('\n'),
+        );
   const trimmed = input.displayName.trim();
   const claims = {
     issuer: input.claims.issuer,
@@ -113,11 +146,18 @@ export function createPartnerSignInCompletion(
   return Object.freeze({
     capabilityInput: CompleteOidcSignInInputSchema.parse({
       claims,
-      device: {
-        platform: 'web',
-        unlockMethod: 'secure-session-cookie',
-        installationId: input.installationId,
-      },
+      device:
+        surface.kind === 'web'
+          ? {
+              platform: 'web',
+              unlockMethod: 'secure-session-cookie',
+              installationId: input.installationId,
+            }
+          : {
+              platform: surface.platform,
+              unlockMethod: 'biometric',
+              installationId: input.installationId,
+            },
     }),
     principal: PreSessionOidcPrincipalSchema.parse({
       kind: 'verified-oidc-claims',
@@ -133,12 +173,13 @@ export function createPartnerSignInCompletion(
 export function createCompletePartnerSignInEnvelope(
   completion: PartnerSignInCompletion,
   context: Readonly<{ requestId: string; serverTime: string }>,
+  surface: PartnerSignInSurface = WEB_SURFACE,
 ): AuthenticationCapabilityEnvelope {
   return AuthenticationCapabilityEnvelopeSchema.parse({
     capabilityId: 'complete-oidc-sign-in',
     operation: 'mutation',
     principal: completion.principal,
-    source: 'web',
+    source: surface.kind === 'web' ? 'web' : 'mobile',
     requestId: context.requestId,
     serverTime: context.serverTime,
     input: completion.capabilityInput,
@@ -169,6 +210,17 @@ export interface CompletedPartnerSignIn {
   readonly cookie: WebSessionCookie;
 }
 
+/** What a native partner sign-in hands back: the session and its bearer. */
+export interface CompletedNativePartnerSignIn {
+  readonly session: SessionEstablishmentResult;
+  readonly bearer: string;
+}
+
+export interface CompleteNativePartnerSignInInput extends CompletePartnerSignInInput {
+  /** The native platform this sign-in enrolls. */
+  readonly platform: NativeDevicePlatform;
+}
+
 /**
  * Admits one verified partner and issues their browser session.
  *
@@ -180,6 +232,51 @@ export async function completePartnerSignIn(
   database: Database,
   input: CompletePartnerSignInInput,
 ): Promise<CompletedPartnerSignIn> {
+  const { session, cookie } = await issuePartnerSession(
+    database,
+    input,
+    WEB_SURFACE,
+  );
+  if (cookie === undefined) {
+    throw new Error('The canonical sign-in capability issued no cookie.');
+  }
+  return Object.freeze({ session, cookie });
+}
+
+/**
+ * Admits one verified partner on a phone and issues their native session.
+ *
+ * Only the credential's transport differs from the browser path: the same
+ * admission decides, the same capability issues the session, and the same
+ * one-day ceiling applies. The partner is handed an opaque bearer instead of
+ * a cookie, exactly as staff are on the same device.
+ */
+export async function completeNativePartnerSignIn(
+  database: Database,
+  input: CompleteNativePartnerSignInInput,
+): Promise<CompletedNativePartnerSignIn> {
+  const { session, bearer } = await issuePartnerSession(
+    database,
+    input,
+    Object.freeze({ kind: 'native', platform: input.platform }),
+  );
+  if (bearer === undefined) {
+    throw new Error('The canonical sign-in capability issued no bearer.');
+  }
+  return Object.freeze({ session, bearer });
+}
+
+interface IssuedPartnerSession {
+  readonly session: SessionEstablishmentResult;
+  readonly cookie: WebSessionCookie | undefined;
+  readonly bearer: string | undefined;
+}
+
+async function issuePartnerSession(
+  database: Database,
+  input: CompletePartnerSignInInput,
+  surface: PartnerSignInSurface,
+): Promise<IssuedPartnerSession> {
   const access = await authorizePartnerSignIn(
     database,
     {
@@ -203,34 +300,56 @@ export async function completePartnerSignIn(
     claims: input.claims,
     displayName: access.user.displayName,
     installationId: input.installationId,
+    surface,
   });
   const envelope = parseCapabilityEnvelopeFor(
     'complete-oidc-sign-in',
-    createCompletePartnerSignInEnvelope(completion, {
-      requestId: input.requestId,
-      serverTime,
-    }),
+    createCompletePartnerSignInEnvelope(
+      completion,
+      { requestId: input.requestId, serverTime },
+      surface,
+    ),
   );
 
   const policy = input.policy ?? DEFAULT_PARTNER_SESSION_POLICY;
   let cookie: WebSessionCookie | undefined;
-  const context: PartnerSignInContext = Object.freeze({
-    authorization: Object.freeze({
-      user: access.user,
-      admission: access.admission,
-      capturedAt: input.now,
-    }),
-    cookieSink: Object.freeze({
-      set(value: WebSessionCookie): void {
-        if (cookie !== undefined) {
-          throw new Error('A sign-in may issue only one session cookie.');
-        }
-        cookie = value;
-      },
-    }),
-    envelope,
-    responseDigest: completion.responseDigest,
+  let bearer: string | undefined;
+  const authorization = Object.freeze({
+    user: access.user,
+    admission: access.admission,
+    capturedAt: input.now,
   });
+  // Exactly one sink, chosen by the surface. The session issuer refuses a
+  // context that carries both or the wrong one for its device.
+  const context: PartnerSignInContext = Object.freeze(
+    surface.kind === 'web'
+      ? {
+          authorization,
+          cookieSink: Object.freeze({
+            set(value: WebSessionCookie): void {
+              if (cookie !== undefined) {
+                throw new Error('A sign-in may issue only one session cookie.');
+              }
+              cookie = value;
+            },
+          }),
+          envelope,
+          responseDigest: completion.responseDigest,
+        }
+      : {
+          authorization,
+          bearerSink: Object.freeze({
+            set(value: string): void {
+              if (bearer !== undefined) {
+                throw new Error('A sign-in may issue only one bearer.');
+              }
+              bearer = value;
+            },
+          }),
+          envelope,
+          responseDigest: completion.responseDigest,
+        },
+  );
   const session = await executeRepositoryAuditedOidcCompletion(
     createPartnerSignInHandler({
       store: input.store ?? createDrizzlePartnerSessionStore(database),
@@ -248,8 +367,5 @@ export async function completePartnerSignIn(
       }),
     },
   );
-  if (cookie === undefined) {
-    throw new Error('The canonical sign-in capability issued no cookie.');
-  }
-  return Object.freeze({ session, cookie });
+  return Object.freeze({ session, cookie, bearer });
 }

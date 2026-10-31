@@ -121,4 +121,80 @@ describe('the partner sign-in flow cookie', () => {
     expect(readPartnerFlowCookie(null)).toBeNull();
     expect(readPartnerFlowCookie('other=x')).toBeNull();
   });
+
+  // Issue #598. The native app seals the same flow under its own label.
+  describe('the native partner flow', () => {
+    const nativeFlow: PartnerSignInFlow = Object.freeze({
+      email: 'responder@agency.example.invalid',
+      flowSession: 'provider-session-handle',
+      installationId: 'native-installation-identifier',
+      platform: 'ios',
+      expiresAt: now.getTime() + 5 * 60 * 1_000,
+    });
+
+    test('a sealed native flow opens again unchanged', () => {
+      const sealed = sealPartnerSignInFlow(nativeFlow, environment, 'native');
+      expect(sealed.startsWith('n1.')).toBe(true);
+      expect(sealed).not.toContain(nativeFlow.email);
+      expect(sealed).not.toContain(nativeFlow.flowSession);
+      expect(openPartnerSignInFlow(sealed, now, environment, 'native')).toEqual(
+        nativeFlow,
+      );
+    });
+
+    test('neither surface can finish the other’s sign-in', () => {
+      const browserSeal = sealPartnerSignInFlow(flow, environment);
+      const nativeSeal = sealPartnerSignInFlow(
+        nativeFlow,
+        environment,
+        'native',
+      );
+      expect(browserSeal.startsWith('p1.')).toBe(true);
+      expect(
+        openPartnerSignInFlow(browserSeal, now, environment, 'native'),
+      ).toBeNull();
+      expect(openPartnerSignInFlow(nativeSeal, now, environment)).toBeNull();
+    });
+
+    test('a relabelled seal still does not open', () => {
+      // Even with the label swapped, the label is the associated data the
+      // seal authenticates, so the cipher refuses it.
+      const browserSeal = sealPartnerSignInFlow(flow, environment);
+      const relabelled = ['n1', ...browserSeal.split('.').slice(1)].join('.');
+      expect(
+        openPartnerSignInFlow(relabelled, now, environment, 'native'),
+      ).toBeNull();
+    });
+
+    test('a native flow names the platform it enrolls', () => {
+      // A browser flow carries no platform, and a native one must.
+      expect(
+        openPartnerSignInFlow(
+          sealPartnerSignInFlow(flow, environment, 'native'),
+          now,
+          environment,
+          'native',
+        ),
+      ).toBeNull();
+      expect(
+        openPartnerSignInFlow(
+          sealPartnerSignInFlow(nativeFlow, environment),
+          now,
+          environment,
+        ),
+      ).toBeNull();
+    });
+
+    test('an expired native flow does not open', () => {
+      const sealed = sealPartnerSignInFlow(nativeFlow, environment, 'native');
+      expect(
+        openPartnerSignInFlow(
+          sealed,
+          new Date(nativeFlow.expiresAt),
+          environment,
+          'native',
+        ),
+      ).toBeNull();
+    });
+  });
 });

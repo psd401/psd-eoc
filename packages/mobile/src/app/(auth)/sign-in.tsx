@@ -17,11 +17,30 @@ import { privacyPolicyUrl } from '../../lib/auth/auth-api-client';
 const UNEXPECTED_SIGN_IN_ERROR =
   'PSD EOC could not start secure sign-in. Try again or contact district technology support.';
 
+/** Stable identifiers for the partner agency flow's Maestro journey. */
+export const PARTNER_SIGN_IN_TEST_IDS = Object.freeze({
+  toggle: 'partner-sign-in-toggle',
+  email: 'partner-sign-in-email',
+  requestCode: 'partner-sign-in-request-code',
+  code: 'partner-sign-in-code',
+  verify: 'partner-sign-in-verify',
+  startOver: 'partner-sign-in-start-over',
+});
+
+/** The emailed partner code, as the field keeps it: digits only. */
+export function partnerCodeDigits(value: string): string {
+  return value.replace(/\D/gu, '').slice(0, 8);
+}
+
 export default function SignInScreen() {
   const {
     beginAppReviewSignIn,
     beginGoogleSignIn,
+    completePartnerSignIn,
     isSigningIn,
+    partnerCodeRequested,
+    requestPartnerCode,
+    resetPartnerSignIn,
     signInError,
     signOut,
     state,
@@ -33,6 +52,13 @@ export default function SignInScreen() {
   const [reviewEmail, setReviewEmail] = useState('');
   const [reviewCode, setReviewCode] = useState('');
   const [reviewAttempted, setReviewAttempted] = useState(false);
+  // Partner agencies are not in district single sign-on. They hold an
+  // admission in the partner pool and prove one address with an emailed code,
+  // so their flow is two steps and never leaves the app.
+  const [partnerOpen, setPartnerOpen] = useState(false);
+  const [partnerEmail, setPartnerEmail] = useState('');
+  const [partnerCode, setPartnerCode] = useState('');
+  const [partnerAttempted, setPartnerAttempted] = useState(false);
   const [isRetryingStorage, setIsRetryingStorage] = useState(false);
   // A failed attempt has to be visible where the press happened. The notice
   // above the card can already be on screen before anyone taps, so a sign-in
@@ -46,12 +72,16 @@ export default function SignInScreen() {
   // else. Showing it in both places says the same thing twice and buries it.
   const attemptFailure = attempted && !busy && visibleError !== null;
   const reviewFailure = reviewAttempted && !busy && visibleError !== null;
+  const partnerFailure = partnerAttempted && !busy && visibleError !== null;
   const reviewReady =
     reviewEmail.trim().length > 0 && reviewCode.trim().length > 0;
+  const partnerEmailReady = partnerEmail.trim().length > 0;
+  const partnerCodeReady = partnerCode.length >= 6;
 
   async function handleReviewSignIn(): Promise<void> {
     setLocalError(null);
     setAttempted(false);
+    setPartnerAttempted(false);
     setReviewAttempted(true);
     try {
       await beginAppReviewSignIn(reviewEmail, reviewCode);
@@ -63,12 +93,45 @@ export default function SignInScreen() {
   async function handleSignIn(): Promise<void> {
     setLocalError(null);
     setReviewAttempted(false);
+    setPartnerAttempted(false);
     setAttempted(true);
     try {
       await beginGoogleSignIn();
     } catch {
       setLocalError(UNEXPECTED_SIGN_IN_ERROR);
     }
+  }
+
+  async function handlePartnerCodeRequest(): Promise<void> {
+    setLocalError(null);
+    setAttempted(false);
+    setReviewAttempted(false);
+    setPartnerAttempted(true);
+    setPartnerCode('');
+    try {
+      await requestPartnerCode(partnerEmail);
+    } catch {
+      setLocalError(UNEXPECTED_SIGN_IN_ERROR);
+    }
+  }
+
+  async function handlePartnerSignIn(): Promise<void> {
+    setLocalError(null);
+    setAttempted(false);
+    setReviewAttempted(false);
+    setPartnerAttempted(true);
+    try {
+      await completePartnerSignIn(partnerCode);
+    } catch {
+      setLocalError(UNEXPECTED_SIGN_IN_ERROR);
+    }
+  }
+
+  function handlePartnerStartOver(): void {
+    setLocalError(null);
+    setPartnerAttempted(false);
+    setPartnerCode('');
+    resetPartnerSignIn();
   }
 
   async function handleStorageRetry(): Promise<void> {
@@ -120,7 +183,10 @@ export default function SignInScreen() {
           </Text>
         </View>
 
-        {visibleError !== null && !attemptFailure && !reviewFailure ? (
+        {visibleError !== null &&
+        !attemptFailure &&
+        !reviewFailure &&
+        !partnerFailure ? (
           <View
             accessibilityLiveRegion="assertive"
             accessibilityRole="alert"
@@ -226,6 +292,175 @@ export default function SignInScreen() {
             Android biometric, or the device passcode when you return. PSD EOC
             never creates a separate app PIN.
           </Text>
+        </View>
+
+        <View style={styles.reviewSection}>
+          <Pressable
+            accessibilityHint="Shows the sign-in for invited partner agency responders"
+            accessibilityLabel="Partner agency sign-in"
+            accessibilityRole="button"
+            accessibilityState={{ expanded: partnerOpen }}
+            onPress={() => {
+              setPartnerOpen((open) => !open);
+            }}
+            style={({ pressed }) => [
+              styles.privacyLink,
+              pressed && styles.buttonPressed,
+            ]}
+            testID={PARTNER_SIGN_IN_TEST_IDS.toggle}
+          >
+            <Text style={styles.privacyLinkText}>Partner agency sign-in</Text>
+          </Pressable>
+
+          {partnerOpen ? (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Partner agency</Text>
+              <Text style={styles.cardBody}>
+                {partnerCodeRequested
+                  ? 'If that address holds a current partner admission, a code is on its way to it. Enter the code to finish signing in.'
+                  : 'For invited first responders. Enter the email address your agency was invited with and PSD EOC emails you a one-time code. District staff sign in with Google above.'}
+              </Text>
+
+              {partnerCodeRequested ? (
+                <>
+                  <TextInput
+                    accessibilityLabel="One-time code from your email"
+                    autoCapitalize="none"
+                    autoComplete="one-time-code"
+                    autoCorrect={false}
+                    autoFocus
+                    editable={!busy}
+                    inputMode="numeric"
+                    keyboardType="number-pad"
+                    maxLength={8}
+                    onChangeText={(value) => {
+                      setPartnerCode(partnerCodeDigits(value));
+                    }}
+                    onSubmitEditing={() => {
+                      if (partnerCodeReady && !busy) {
+                        void handlePartnerSignIn();
+                      }
+                    }}
+                    placeholder="One-time code"
+                    placeholderTextColor="#829AB1"
+                    style={styles.reviewInput}
+                    testID={PARTNER_SIGN_IN_TEST_IDS.code}
+                    textContentType="oneTimeCode"
+                    value={partnerCode}
+                  />
+                  <Pressable
+                    accessibilityHint="Finishes partner agency sign-in with the code from your email"
+                    accessibilityLabel="Sign in with this code"
+                    accessibilityRole="button"
+                    accessibilityState={{
+                      busy,
+                      disabled: busy || !partnerCodeReady,
+                    }}
+                    disabled={busy || !partnerCodeReady}
+                    onPress={() => {
+                      void handlePartnerSignIn();
+                    }}
+                    style={({ pressed }) => [
+                      styles.primaryButton,
+                      pressed && !busy && styles.buttonPressed,
+                      (busy || !partnerCodeReady) && styles.buttonDisabled,
+                    ]}
+                    testID={PARTNER_SIGN_IN_TEST_IDS.verify}
+                  >
+                    {isSigningIn && partnerAttempted ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : null}
+                    <Text style={styles.primaryButtonText}>
+                      {isSigningIn && partnerAttempted
+                        ? 'Signing in'
+                        : 'Sign in with this code'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityHint="Discards this code request and asks for the email address again"
+                    accessibilityLabel="Use a different address"
+                    accessibilityRole="button"
+                    disabled={busy}
+                    onPress={handlePartnerStartOver}
+                    style={({ pressed }) => [
+                      styles.privacyLink,
+                      pressed && styles.buttonPressed,
+                    ]}
+                    testID={PARTNER_SIGN_IN_TEST_IDS.startOver}
+                  >
+                    <Text style={styles.privacyLinkText}>
+                      Use a different address
+                    </Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <TextInput
+                    accessibilityLabel="Partner agency email"
+                    autoCapitalize="none"
+                    autoComplete="email"
+                    autoCorrect={false}
+                    editable={!busy}
+                    inputMode="email"
+                    keyboardType="email-address"
+                    onChangeText={setPartnerEmail}
+                    onSubmitEditing={() => {
+                      if (partnerEmailReady && !busy) {
+                        void handlePartnerCodeRequest();
+                      }
+                    }}
+                    placeholder="Partner agency email"
+                    placeholderTextColor="#829AB1"
+                    style={styles.reviewInput}
+                    testID={PARTNER_SIGN_IN_TEST_IDS.email}
+                    textContentType="emailAddress"
+                    value={partnerEmail}
+                  />
+                  <Pressable
+                    accessibilityHint="Emails a one-time code to this address if it holds a partner admission"
+                    accessibilityLabel="Email me a code"
+                    accessibilityRole="button"
+                    accessibilityState={{
+                      busy,
+                      disabled: busy || !partnerEmailReady,
+                    }}
+                    disabled={busy || !partnerEmailReady}
+                    onPress={() => {
+                      void handlePartnerCodeRequest();
+                    }}
+                    style={({ pressed }) => [
+                      styles.primaryButton,
+                      pressed && !busy && styles.buttonPressed,
+                      (busy || !partnerEmailReady) && styles.buttonDisabled,
+                    ]}
+                    testID={PARTNER_SIGN_IN_TEST_IDS.requestCode}
+                  >
+                    {isSigningIn && partnerAttempted ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : null}
+                    <Text style={styles.primaryButtonText}>
+                      {isSigningIn && partnerAttempted
+                        ? 'Sending a code'
+                        : 'Email me a code'}
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+
+              {partnerFailure ? (
+                <View
+                  accessibilityLiveRegion="assertive"
+                  accessibilityRole="alert"
+                  style={styles.attemptFailure}
+                >
+                  <Text style={styles.attemptFailureTitle}>
+                    Partner sign-in did not complete
+                  </Text>
+                  <Text style={styles.attemptFailureBody}>{visibleError}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.reviewSection}>
