@@ -23,6 +23,7 @@
  * Usage: bun packages/mobile/e2e/partner-run.ts <ios|android>
  */
 
+import { randomBytes } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -231,7 +232,9 @@ const server = Bun.spawn(
       PSD_EOC_PARTNER_USER_POOL_ID: 'SYNTHETIC',
       PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN: 'allowed',
       // The transient-cookie secret the partner flow seal is derived from.
-      GOOGLE_OIDC_COOKIE_SECRET: Buffer.alloc(32, 61).toString('base64url'),
+      // Fresh per run: this server lives for one journey, and a constant here
+      // would be a checked-in value shaped like a secret.
+      GOOGLE_OIDC_COOKIE_SECRET: randomBytes(32).toString('base64url'),
       GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
       GOOGLE_OIDC_APPLICATION_ORIGIN: apiBaseUrl,
     },

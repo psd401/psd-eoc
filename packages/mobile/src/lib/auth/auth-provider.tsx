@@ -321,11 +321,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
     };
   }, [runtime]);
 
-  const runSignIn = useCallback(
-    async (
+  /**
+   * Runs one sign-in attempt. Only one may be in flight at a time, and
+   * whatever it does to the screen — the busy flag and the one visible
+   * message — belongs to this wrapper, not to the surfaces, so every surface
+   * behaves the same whether it enrolls a session or only asks for a code.
+   */
+  const runAttempt = useCallback(
+    async <Result,>(
       surface: SignInSurface,
-      attempt: (live: LiveAuthRuntime) => Promise<MobileSessionResponse>,
-    ) => {
+      attempt: (live: LiveAuthRuntime) => Promise<Result>,
+      onSuccess: (result: Result) => void | Promise<void>,
+      onFailure: () => void = () => {},
+    ): Promise<void> => {
       if (signingInRef.current) {
         return;
       }
@@ -334,12 +342,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setSignInError(null);
       setSignInRedirectUncaptured(false);
       try {
-        const payload = await attempt(resolveLiveRuntime(runtime, surface));
-        const enrolled = await runtime.controller.enroll(payload);
-        if (!enrolled) {
-          setSignInError(runtime.controller.getSnapshot().message);
-        }
+        await onSuccess(await attempt(resolveLiveRuntime(runtime, surface)));
       } catch (error) {
+        onFailure();
         setSignInError(publicSignInError(surface, error));
         setSignInRedirectUncaptured(
           error instanceof OidcRedirectNotCapturedError,
@@ -350,6 +355,20 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
     },
     [runtime],
+  );
+
+  const runSignIn = useCallback(
+    (
+      surface: SignInSurface,
+      attempt: (live: LiveAuthRuntime) => Promise<MobileSessionResponse>,
+    ) =>
+      runAttempt(surface, attempt, async (payload) => {
+        const enrolled = await runtime.controller.enroll(payload);
+        if (!enrolled) {
+          setSignInError(runtime.controller.getSnapshot().message);
+        }
+      }),
+    [runAttempt, runtime],
   );
 
   const beginGoogleSignIn = useCallback(
@@ -387,41 +406,36 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const requestPartnerCode = useCallback(
     async (email: string): Promise<boolean> => {
-      if (signingInRef.current) {
-        return false;
-      }
-      signingInRef.current = true;
-      setIsSigningIn(true);
-      setSignInError(null);
-      setSignInRedirectUncaptured(false);
-      try {
-        const live = resolveLiveRuntime(runtime, PARTNER_SURFACE);
-        const installationId =
-          await runtime.storage.getOrCreateInstallationId();
-        const started = await live.signInApi.partnerSignInStart({
-          email: email.trim().toLowerCase(),
-          platform: live.platform,
-          installationId,
-        });
-        partnerFlowRef.current = started.flowToken;
-        setPartnerCodeRequested(true);
-        return true;
-      } catch (error) {
-        partnerFlowRef.current = null;
-        setPartnerCodeRequested(false);
-        setSignInError(publicSignInError(PARTNER_SURFACE, error));
-        return false;
-      } finally {
-        signingInRef.current = false;
-        setIsSigningIn(false);
-      }
+      let requested = false;
+      await runAttempt(
+        PARTNER_SURFACE,
+        async (live) => {
+          const installationId =
+            await runtime.storage.getOrCreateInstallationId();
+          return live.signInApi.partnerSignInStart({
+            email: email.trim().toLowerCase(),
+            platform: live.platform,
+            installationId,
+          });
+        },
+        (started) => {
+          partnerFlowRef.current = started.flowToken;
+          setPartnerCodeRequested(true);
+          requested = true;
+        },
+        () => {
+          partnerFlowRef.current = null;
+          setPartnerCodeRequested(false);
+        },
+      );
+      return requested;
     },
-    [runtime],
+    [runAttempt, runtime],
   );
 
   const completePartnerSignIn = useCallback(
     (code: string) =>
-      runSignIn(PARTNER_SURFACE, (live) => {
+      runSignIn(PARTNER_SURFACE, async (live) => {
         const flowToken = partnerFlowRef.current;
         if (flowToken === null) {
           throw new MobileAuthError(
@@ -429,10 +443,17 @@ export function AuthProvider({ children }: PropsWithChildren) {
             'This sign-in request expired. Request a new code.',
           );
         }
-        return live.signInApi.partnerSignInVerify({
+        const payload = await live.signInApi.partnerSignInVerify({
           flowToken,
           code: code.trim(),
         });
+        // The server has spent this flow. Whatever happens to the session
+        // from here, the screen must come back on its first step rather than
+        // ask again for a code that can no longer be answered. A refused code
+        // throws above instead, leaving the flow to be retyped.
+        partnerFlowRef.current = null;
+        setPartnerCodeRequested(false);
+        return payload;
       }),
     [runSignIn],
   );

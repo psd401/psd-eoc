@@ -846,7 +846,12 @@ export function createDrizzlePartnerSessionStore(
                 occurredAt: request.createdAt.toISOString(),
                 userId: result.user.id,
                 sessionId: result.session.id,
-                source: 'web',
+                // The surface that actually signed in, derived the way the
+                // staff store derives it. A partner was a browser-only
+                // principal until #598; writing a constant here now would
+                // record every native sign-in as a browser one, in a ledger
+                // that is append-only and can only be corrected forward.
+                source: request.device.platform === 'web' ? 'web' : 'mobile',
               },
               previousAuditEntry ?? null,
             );

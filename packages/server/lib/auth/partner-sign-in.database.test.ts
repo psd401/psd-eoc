@@ -19,6 +19,7 @@ import {
   facilities,
   partnerAdmissionEndings,
   partnerAdmissions,
+  securityAuditEntries,
   userFacilityScopes,
   users,
 } from '../../db/schema';
@@ -30,7 +31,11 @@ import {
 } from '../testing/database';
 import { DrizzleSessionStore, SessionService } from './sessions';
 import { DEFAULT_SESSION_POLICY } from './sessions';
-import { completePartnerSignIn, PartnerSignInError } from './partner-sign-in';
+import {
+  completeNativePartnerSignIn,
+  completePartnerSignIn,
+  PartnerSignInError,
+} from './partner-sign-in';
 import type { PartnerVerifiedClaims } from './partner-otp';
 
 /**
@@ -104,6 +109,39 @@ function signIn(
     now,
     staffDomain: STAFF_DOMAIN,
   });
+}
+
+function signInFromApp(
+  verified: PartnerVerifiedClaims,
+  platform: 'ios' | 'android',
+  now = new Date(),
+): ReturnType<typeof completeNativePartnerSignIn> {
+  return completeNativePartnerSignIn(database(), {
+    claims: verified,
+    installationId: `native.${randomUUID()}`,
+    platform,
+    requestId: randomUUID(),
+    now,
+    staffDomain: STAFF_DOMAIN,
+  });
+}
+
+/** The one success entry the access-gate ledger holds for one sign-in. */
+async function successAudit(
+  sessionId: string,
+): Promise<Readonly<{ source: string; outcome: string }>> {
+  const [row] = await database()
+    .select({
+      source: securityAuditEntries.source,
+      outcome: securityAuditEntries.outcome,
+    })
+    .from(securityAuditEntries)
+    // A successful sign-in targets the session it issued.
+    .where(eq(securityAuditEntries.targetId, sessionId));
+  if (row === undefined) {
+    throw new Error('The sign-in wrote no access-gate audit entry.');
+  }
+  return row;
 }
 
 async function expectRefusal(
@@ -242,6 +280,35 @@ describeWithDatabase('partner web sign-in', () => {
       kind: 'facilities',
       facilityIds: [north],
     });
+  });
+
+  // Issue #598. A partner was a browser-only principal until the native app
+  // could sign one in. The ledger is append-only, so a sign-in recorded
+  // against the wrong surface can only be corrected forward: an investigator
+  // reconstructing how an account authenticated would be sent to the browser
+  // when the real surface was a phone.
+  test('the ledger records the surface a partner actually signed in from', async () => {
+    const email = `surface-${randomUUID()}@agency.example.invalid`;
+    await admit(email);
+    const browser = await signIn(claims(email));
+    expect(await successAudit(browser.session.session.id)).toEqual({
+      outcome: 'success',
+      source: 'web',
+    });
+
+    for (const platform of ['ios', 'android'] as const) {
+      const native = `native-${platform}-${randomUUID()}@agency.example.invalid`;
+      await admit(native);
+      const app = await signInFromApp(claims(native), platform);
+      expect(await successAudit(app.session.session.id)).toEqual({
+        outcome: 'success',
+        source: 'mobile',
+      });
+      // The same session the app is handed, carried on a bearer rather than
+      // a cookie.
+      expect(app.bearer.length).toBeGreaterThan(0);
+      expect(app.session.deviceEnrollment.platform).toBe(platform);
+    }
   });
 
   test('the same partner signs in again as the same person', async () => {

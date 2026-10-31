@@ -183,11 +183,13 @@ export function openPartnerSignInFlow(
   const { email, flowSession, installationId, platform, expiresAt } = record;
   // A native flow names the platform it enrolls and a browser flow never
   // does, so a seal cannot be carried from one surface's shape to the
-  // other's even if its label were somehow accepted.
+  // other's even if its label were somehow accepted. Narrowing here rather
+  // than testing it separately is what lets the result be built without an
+  // assertion the compiler cannot check.
+  const nativePlatform =
+    platform === 'ios' || platform === 'android' ? platform : null;
   const platformValid =
-    surface === 'native'
-      ? platform === 'ios' || platform === 'android'
-      : platform === undefined;
+    surface === 'native' ? nativePlatform !== null : platform === undefined;
   if (
     typeof email !== 'string' ||
     email.length === 0 ||
@@ -207,12 +209,12 @@ export function openPartnerSignInFlow(
     return null;
   }
   return Object.freeze(
-    surface === 'native'
+    nativePlatform !== null && surface === 'native'
       ? {
           email,
           flowSession,
           installationId,
-          platform: platform as 'ios' | 'android',
+          platform: nativePlatform,
           expiresAt,
         }
       : { email, flowSession, installationId, expiresAt },
