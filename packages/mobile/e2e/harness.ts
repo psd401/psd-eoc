@@ -62,8 +62,9 @@ export function requireSyntheticMobileE2E(
  * thing under test is two server endpoints and the screen that calls them.
  * Its safety rules are therefore the opposite shape of the issue-32 journey's:
  *
- * - the in-process synthetic auth and start fixtures must be ABSENT, or the
- *   app would never reach the server and the run would prove nothing;
+ * - the in-process start and push fixtures must be ABSENT, or the app would
+ *   never reach the server and the run would prove nothing, and the unlock
+ *   stand-in names this journey rather than the notification one;
  * - the server it talks to must be an http loopback origin, so a run can
  *   never be pointed at a deployment; and
  * - the local authenticator is still the exact-flag synthetic one and push
@@ -75,7 +76,7 @@ export function requireSyntheticNativePartnerE2E(
 ): void {
   if (
     environment.PSD_EOC_E2E_SYNTHETIC_ONLY !== 'true' ||
-    environment.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE !== 'issue-32' ||
+    environment.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE !== 'issue-598' ||
     environment.EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED !== 'false' ||
     environment.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE !== undefined ||
     environment.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE !== undefined

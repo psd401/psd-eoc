@@ -7,32 +7,37 @@ import type { LocalAuthenticator } from './auth-controller';
  * It exists because Xcode 26 removed the simulator biometric command a
  * headless run used, so a simulator falls through to the device passcode
  * sheet that no automated run can answer. It must never be reachable from a
- * build anyone installs, so it is only enabled for one of the two end-to-end
- * journeys, each identified by the exact set of flags that journey sets:
+ * build anyone installs, so each of the two end-to-end journeys names itself
+ * in the fixture flag, and neither journey's value satisfies the other's arm:
  *
- * - the issue-32 notification journey, whose in-process fixtures stand in for
- *   the server entirely; and
- * - the issue-598 native partner journey, which has no in-process fixture
- *   because it drives the real client against a server on this machine's
- *   loopback — an origin a store build can never have, because the app only
- *   accepts http loopback in a development build.
+ * - `issue-32`, the notification journey, whose in-process fixtures stand in
+ *   for the server entirely and which must therefore have both of them; and
+ * - `issue-598`, the native partner journey, which must have neither, because
+ *   it drives the real client against a server on this machine's loopback —
+ *   an origin a store build can never have, since the app only accepts http
+ *   loopback in a development build.
  *
- * Every arm also requires a development build.
+ * A build left over from one journey therefore cannot stand in during the
+ * other, and every arm also requires a development build.
  */
 export function isSyntheticSimulatorAuthenticatorEnabled(): boolean {
   if (typeof __DEV__ === 'undefined' || !__DEV__) return false;
-  if (process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE !== 'issue-32') {
-    return false;
+  switch (process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE) {
+    case 'issue-32':
+      return (
+        isIssue21SyntheticFixtureEnabled() &&
+        process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE === 'issue-32'
+      );
+    case 'issue-598':
+      return (
+        !isIssue21SyntheticFixtureEnabled() &&
+        process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE === undefined &&
+        process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE === undefined &&
+        isLoopbackApiOrigin(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL)
+      );
+    default:
+      return false;
   }
-  if (isIssue21SyntheticFixtureEnabled()) {
-    return (
-      process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE === 'issue-32'
-    );
-  }
-  return (
-    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE === undefined &&
-    isLoopbackApiOrigin(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL)
-  );
 }
 
 function isLoopbackApiOrigin(value: string | undefined): boolean {

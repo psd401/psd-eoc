@@ -79,7 +79,7 @@ const childEnvironment: Record<string, string | undefined> = {
   CI: 'true',
   EXPO_PUBLIC_PSD_EOC_API_BASE_URL: apiBaseUrl,
   EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
-  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',
+  EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-598',
   MAESTRO_CLI_NO_ANALYTICS: '1',
   MAESTRO_DRIVER_STARTUP_TIMEOUT: '120000',
   NODE_OPTIONS: '--dns-result-order=ipv4first',

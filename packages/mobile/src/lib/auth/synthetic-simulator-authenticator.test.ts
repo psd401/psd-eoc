@@ -59,7 +59,7 @@ describe('the synthetic simulator authenticator', () => {
   test('stands in for the native partner journey, and only on loopback', () => {
     delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
     delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE;
-    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-32';
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-598';
 
     process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL = 'http://127.0.0.1:34567';
     expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(true);
@@ -79,7 +79,7 @@ describe('the synthetic simulator authenticator', () => {
 
   test('never stands in for a release build', () => {
     process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL = 'http://127.0.0.1:34567';
-    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-32';
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-598';
     delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
     delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE;
     expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(true);
@@ -90,14 +90,36 @@ describe('the synthetic simulator authenticator', () => {
 
   test('half of one journey never qualifies for the other', () => {
     process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL = 'http://127.0.0.1:34567';
-    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-32';
     // The notification journey's app fixture without its push fixture.
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-32';
     process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE = 'issue-21';
     delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE;
     expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(false);
     // The partner journey's loopback origin with a push fixture it never sets.
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-598';
     delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
     process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE = 'issue-32';
+    expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(false);
+  });
+
+  // Neither journey's flag value opens the other's arm, so a build left over
+  // from one cannot stand in during the other.
+  test('each journey names itself, and neither value opens the other arm', () => {
+    process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL = 'http://127.0.0.1:34567';
+    // The native partner journey's world, labelled as the notification one.
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-32';
+    delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
+    delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE;
+    expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(false);
+    // The notification journey's world, labelled as the partner one.
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-598';
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE = 'issue-21';
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE = 'issue-32';
+    expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(false);
+    // An unknown label opens neither.
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE = 'issue-999';
+    delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
+    delete process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE;
     expect(isSyntheticSimulatorAuthenticatorEnabled()).toBe(false);
   });
 });

@@ -54,7 +54,7 @@ describe('issue-32 mobile E2E harness', () => {
   test('the native partner journey refuses an app fixture or a remote server', () => {
     const safe = {
       PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
-      EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',
+      EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-598',
       EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
       EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'http://127.0.0.1:34567',
     };

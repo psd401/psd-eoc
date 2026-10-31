@@ -87,7 +87,10 @@ registration disabled.
 
 The in-process app fixtures must be absent, and `partner-run.ts` refuses to
 start if either is set, because an in-process fixture would stop the app ever
-reaching the endpoints under test.
+reaching the endpoints under test. This journey also labels the unlock
+stand-in `issue-598` rather than `issue-32`: each journey names itself, and
+neither label opens the other's arm, so a build left over from one cannot
+stand in during the other.
 
 ```bash
 bun run test:db:start
