@@ -6,6 +6,9 @@ import {
   CompleteOidcSignInInputSchema,
   GOOGLE_IDENTITY_ISSUER,
   isPartnerIssuer,
+  MobilePartnerSignInFlowTokenSchema,
+  MobilePartnerSignInStartRequestSchema,
+  MobilePartnerSignInVerifyRequestSchema,
   PreSessionOidcPrincipalSchema,
 } from './index';
 
@@ -99,7 +102,7 @@ describe('partner sign-in contracts', () => {
     ).toMatchObject({ transport: { kind: 'partner-email-otp' } });
   });
 
-  test('a partner identity carries no hosted domain and no native device', () => {
+  test('a partner identity carries no hosted domain', () => {
     expect(() =>
       CompleteOidcSignInInputSchema.parse(
         input({ hostedDomain: 'agency.example.invalid' }),
@@ -111,11 +114,6 @@ describe('partner sign-in contracts', () => {
         ...claims({ hostedDomain: 'agency.example.invalid' }),
         audienceVerified: true,
       }),
-    ).toThrow();
-    expect(() =>
-      CompleteOidcSignInInputSchema.parse(
-        input({}, { platform: 'ios', unlockMethod: 'biometric' }),
-      ),
     ).toThrow();
   });
 
@@ -156,11 +154,99 @@ describe('partner sign-in contracts', () => {
     ).toThrow();
   });
 
-  test('a partner never signs in from a native application', () => {
+  // Issue #598. The native app is the second partner surface. It carries the
+  // same one-time-password transport, and the device platform is what binds
+  // the issued credential to its transport: a browser gets the cookie, a
+  // phone gets the bearer, and neither can claim the other's.
+  test('a partner signs in from the native application', () => {
+    expect(
+      CompleteOidcSignInInputSchema.parse(
+        input({}, { platform: 'ios', unlockMethod: 'biometric' }),
+      ),
+    ).toMatchObject({ device: { platform: 'ios', unlockMethod: 'biometric' } });
+    expect(
+      AuthenticationCapabilityEnvelopeSchema.parse(
+        envelope({
+          source: 'mobile',
+          input: input({}, { platform: 'android', unlockMethod: 'biometric' }),
+        }),
+      ),
+    ).toMatchObject({ source: 'mobile' });
+  });
+
+  test('a partner device never mixes its platform and its credential', () => {
+    for (const device of [
+      { platform: 'ios', unlockMethod: 'secure-session-cookie' },
+      { platform: 'android', unlockMethod: 'secure-session-cookie' },
+      { platform: 'web', unlockMethod: 'biometric' },
+    ]) {
+      expect(() =>
+        CompleteOidcSignInInputSchema.parse(input({}, device)),
+      ).toThrow();
+    }
+  });
+
+  test('a native partner still cannot arrive as a native Google exchange', () => {
     expect(() =>
       AuthenticationCapabilityEnvelopeSchema.parse(
-        envelope({ source: 'mobile' }),
+        envelope({
+          source: 'mobile',
+          input: input({}, { platform: 'ios', unlockMethod: 'biometric' }),
+          transport: {
+            kind: 'mobile-oidc-code-exchange',
+            method: 'POST',
+            stateVerified: true,
+            nonceVerified: true,
+            pkceVerified: true,
+            signatureVerified: true,
+          },
+        }),
       ),
     ).toThrow();
+  });
+
+  test('the native partner flow token is the native label only', () => {
+    const sealed = `n1.${'a'.repeat(16)}.${'b'.repeat(40)}.${'c'.repeat(22)}`;
+    expect(MobilePartnerSignInFlowTokenSchema.parse(sealed)).toBe(sealed);
+    // The browser's sealed partner flow carries the `p1` label and must not
+    // be accepted here, so one surface can never finish the other's sign-in.
+    expect(() =>
+      MobilePartnerSignInFlowTokenSchema.parse(
+        `p1.${'a'.repeat(16)}.${'b'.repeat(40)}.${'c'.repeat(22)}`,
+      ),
+    ).toThrow();
+    expect(() =>
+      MobilePartnerSignInFlowTokenSchema.parse(`n1.${'a'.repeat(16)}`),
+    ).toThrow();
+  });
+
+  test('the native partner steps read the address from the sealed flow', () => {
+    const flowToken = `n1.${'a'.repeat(16)}.${'b'.repeat(40)}.${'c'.repeat(22)}`;
+    expect(
+      MobilePartnerSignInStartRequestSchema.parse({
+        email: 'Responder@Agency.Example.Invalid',
+        platform: 'ios',
+        installationId: 'native-installation-identifier',
+      }),
+    ).toMatchObject({ email: 'responder@agency.example.invalid' });
+    expect(
+      MobilePartnerSignInVerifyRequestSchema.parse({
+        flowToken,
+        code: '123456',
+      }),
+    ).toMatchObject({ code: '123456' });
+    // No address on the verification: the sealed flow owns it.
+    expect(() =>
+      MobilePartnerSignInVerifyRequestSchema.parse({
+        flowToken,
+        code: '123456',
+        email: 'someone.else@agency.example.invalid',
+      }),
+    ).toThrow();
+    for (const code of ['12345', '123456789', '12345a', '']) {
+      expect(() =>
+        MobilePartnerSignInVerifyRequestSchema.parse({ flowToken, code }),
+      ).toThrow();
+    }
   });
 });
