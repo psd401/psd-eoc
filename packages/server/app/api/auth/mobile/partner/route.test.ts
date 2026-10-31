@@ -20,7 +20,12 @@ import { POST as VERIFY } from './verify/route';
  * database at all.
  */
 
-const EMAIL = 'responder@agency.example.invalid';
+/**
+ * Addresses this file alone uses. The limiter's per-address budget is
+ * process-wide, so sharing an address with the browser route's tests would
+ * let one file spend the other's codes in a sharded run.
+ */
+const EMAIL = 'native-responder@agency.example.invalid';
 const INSTALLATION = 'native-installation-identifier';
 const SECRET = Buffer.alloc(32, 11).toString('base64url');
 
@@ -45,10 +50,23 @@ function useSyntheticPool(): void {
   }
 }
 
-function request(path: string, body: unknown): NextRequest {
+/**
+ * The rate limiter is one process-wide budget, and a request with no
+ * forwarded address shares one bucket with every other such request — in a
+ * sharded run, with every other test file too. Each test therefore names its
+ * own caller, so no test can exhaust another's budget or be exhausted by it.
+ */
+function request(
+  path: string,
+  body: unknown,
+  client = `203.0.113.${Math.floor(Math.random() * 254) + 1}`,
+): NextRequest {
   return new NextRequest(`http://127.0.0.1/api/auth/mobile/partner/${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-forwarded-for': client,
+    },
     body: JSON.stringify(body),
   });
 }
@@ -103,7 +121,7 @@ describe('the native partner sign-in steps', () => {
     );
     const unknown = await START(
       request('start', {
-        email: 'nobody@agency.example.invalid',
+        email: 'native-nobody@agency.example.invalid',
         platform: 'android',
         installationId: INSTALLATION,
       }),
@@ -207,15 +225,16 @@ describe('the native partner sign-in steps', () => {
     );
   });
 
-  test('the two steps charge one budget together', async () => {
+  test('one address gets a fixed number of codes in the window', async () => {
     // Five sends per address in the window, then the sixth is refused with
-    // the retry hint the app shows.
+    // the retry hint the app shows. Each attempt comes from a different
+    // caller, so it is the address's budget being spent and not a caller's.
     const responses = [];
     for (let attempt = 0; attempt < 6; attempt += 1) {
       responses.push(
         await START(
           request('start', {
-            email: `budget-${String(attempt < 6 ? 0 : attempt)}@agency.example.invalid`,
+            email: 'native-budget@agency.example.invalid',
             platform: 'ios',
             installationId: INSTALLATION,
           }),
