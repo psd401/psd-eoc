@@ -60,6 +60,7 @@ EOC is not a 911 service.
 - [SMS registration](sms-registration.md)
 - [Custom domain](eoc-custom-domain.md)
 - [App store review account](app-store-review.md)
+- [Partner access rollout and administration](partner-access.md)
 - [App-store setup](appstore-setup.md)
 - [Google OAuth rotation](rotation-google-oauth.md)
 - [Expo token rotation](rotation-expo-token.md)
