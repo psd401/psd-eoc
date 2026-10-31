@@ -247,9 +247,7 @@ describe('installed mobile builds against the partner-capable server', () => {
     // parse, so the server does not grow a second session shape. The only
     // difference is which arm of the authorization union it carries, and the
     // staff arm is byte-for-byte what it was.
-    const partner = MobileSessionResponseSchema.parse(
-      PARTNER_SESSION_RESPONSE,
-    );
+    const partner = MobileSessionResponseSchema.parse(PARTNER_SESSION_RESPONSE);
     expect(keysOf(partner)).toEqual(keysOf(INSTALLED_STAFF_SESSION_RESPONSE));
     expect(keysOf(partner.session)).toEqual(
       keysOf(INSTALLED_STAFF_SESSION_RESPONSE.session),
@@ -281,13 +279,12 @@ describe('installed mobile builds against the partner-capable server', () => {
     const staff = MobileSessionResponseSchema.parse(
       INSTALLED_STAFF_SESSION_RESPONSE,
     );
-    const partner = MobileSessionResponseSchema.parse(
-      PARTNER_SESSION_RESPONSE,
-    );
+    const partner = MobileSessionResponseSchema.parse(PARTNER_SESSION_RESPONSE);
     // The staff deadline is unchanged, so an installed build's cached-shell
     // arithmetic is unchanged.
-    expect(sessionAuthorizationUsableUntil(staff.session.session.authorization))
-      .toBe('2026-11-07T00:00:00.000Z');
+    expect(
+      sessionAuthorizationUsableUntil(staff.session.session.authorization),
+    ).toBe('2026-11-07T00:00:00.000Z');
     expect(
       sessionAuthorizationUsableUntil(partner.session.session.authorization),
     ).toBe('2027-01-01T00:00:00.000Z');

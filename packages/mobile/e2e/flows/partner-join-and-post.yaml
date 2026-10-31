@@ -1,0 +1,46 @@
+appId: ${APP_ID}
+name: Issue 598 - a partner joins the active event and posts to it
+tags: [issue-598, synthetic-only, event-room]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse partner event participation outside the synthetic harness
+- extendedWaitUntil:
+    visible: 'PARTNER AGENCY OPERATIONS'
+    timeout: 60000
+
+# The drill a district administrator started at the one non-isolated school is
+# the only thing on this screen a partner may act on.
+- assertVisible: 'Active events'
+- scrollUntilVisible:
+    element:
+      text: '.*Synthetic earthquake drill.*'
+    direction: DOWN
+- assertVisible: '.*${FACILITY_NAME}.*'
+- tapOn: '.*Synthetic earthquake drill.*'
+
+- extendedWaitUntil:
+    visible: 'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.'
+    timeout: 60000
+- assertVisible: '.*DRILL — TRAINING ONLY.*'
+- assertNotVisible: '^REAL INCIDENT$'
+- assertVisible: 'Status: active'
+# The event's own school ends it. A partner reads and posts, and the control
+# that would end it is not on their screen.
+- assertNotVisible: 'End event…'
+
+- tapOn: 'Timeline text update.*'
+- inputText: 'Synthetic partner on scene, issue 598.'
+# Post is tapped with the keyboard still up. A composer left under the
+# keyboard puts the tap on a key instead, and the update never posts.
+- takeScreenshot: partner-event-room-keyboard-up
+- tapOn:
+    text: 'Post'
+    enabled: true
+- extendedWaitUntil:
+    visible: '.*Synthetic partner on scene, issue 598.*'
+    timeout: 30000
+# The entry is the partner's own, written by the partner session the emailed
+# code issued.
+- assertVisible: '.*Synthetic Mobile Responder.*'
+- assertNotVisible: 'End event…'

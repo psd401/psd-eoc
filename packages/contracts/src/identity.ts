@@ -1082,7 +1082,10 @@ export type MobilePartnerSignInStartResponse = z.infer<
 export const MobilePartnerSignInVerifyRequestSchema = z
   .object({
     flowToken: MobilePartnerSignInFlowTokenSchema,
-    code: z.string().trim().regex(/^[0-9]{6,8}$/u, 'Enter the 6-digit code.'),
+    code: z
+      .string()
+      .trim()
+      .regex(/^[0-9]{6,8}$/u, 'Enter the 6-digit code.'),
   })
   .strict()
   .readonly();

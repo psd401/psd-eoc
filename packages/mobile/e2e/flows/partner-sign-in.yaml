@@ -1,0 +1,86 @@
+appId: ${APP_ID}
+name: Issue 598 - a partner signs in with an emailed one-time code
+tags: [issue-598, synthetic-only]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse to run outside the synthetic mobile harness
+- extendedWaitUntil:
+    visible: 'Continue|Close|Sign in to PSD EOC'
+    timeout: 120000
+# The development client's first-launch notice, if it is in the way.
+- tapOn:
+    text: '^Continue$'
+    waitUntilVisible: true
+    optional: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          id: 'xmark'
+          waitUntilVisible: true
+          optional: true
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn:
+          text: '^Close$'
+          waitUntilVisible: true
+          optional: true
+
+- extendedWaitUntil:
+    visible: 'Sign in to PSD EOC'
+    timeout: 120000
+# A partner is not district staff, so the Google button is not their way in.
+- assertVisible: 'Sign in with Google'
+- scrollUntilVisible:
+    element:
+      id: 'partner-sign-in-toggle'
+    direction: DOWN
+# Nothing about partner sign-in is on screen until it is asked for.
+- assertNotVisible:
+    id: 'partner-sign-in-email'
+- tapOn:
+    id: 'partner-sign-in-toggle'
+
+- assertVisible: 'Partner agency'
+- tapOn:
+    id: 'partner-sign-in-email'
+- inputText: ${PARTNER_EMAIL}
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      id: 'partner-sign-in-request-code'
+    direction: DOWN
+- tapOn:
+    id: 'partner-sign-in-request-code'
+
+# The second step. The server says the same thing for every address, so this
+# screen is never an answer about who holds partner access.
+- extendedWaitUntil:
+    visible:
+      id: 'partner-sign-in-code'
+    timeout: 60000
+- tapOn:
+    id: 'partner-sign-in-code'
+# The code the synthetic pool derives from the address, typed the way a
+# partner types one read out of an email.
+- inputText: ${PARTNER_CODE}
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      id: 'partner-sign-in-verify'
+    direction: DOWN
+- tapOn:
+    id: 'partner-sign-in-verify'
+
+# The session is issued, stored, and the shell opens as a partner.
+- extendedWaitUntil:
+    visible: 'PARTNER AGENCY OPERATIONS'
+    timeout: 120000
+- assertVisible: 'Join an active event at a site you cover and post what you are seeing. District staff start and end events.'
+- assertNotVisible: 'STAFF EMERGENCY OPERATIONS'
+# Starting an event is staff work, and the screen does not offer it.
+- assertNotVisible: 'Start an event'
