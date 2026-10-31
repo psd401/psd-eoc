@@ -29,6 +29,7 @@ import { resolve } from 'node:path';
 import {
   captureScreen,
   createCommandRunner,
+  NATIVE_BUILD_LOCALE,
   ephemeralPort,
   selectAndroidDevice,
   selectIosDevice,
@@ -49,6 +50,7 @@ interface MobilePartnerFixture {
   readonly partnerEmail: string;
   readonly partnerCode: string;
   readonly facilityName: string;
+  readonly eventTypeName: string;
   readonly eventId: string;
 }
 
@@ -72,6 +74,7 @@ const apiBaseUrl = `http://127.0.0.1:${port}`;
 
 const childEnvironment: Record<string, string | undefined> = {
   ...process.env,
+  ...NATIVE_BUILD_LOCALE,
   CI: 'true',
   EXPO_PUBLIC_PSD_EOC_API_BASE_URL: apiBaseUrl,
   EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
@@ -94,6 +97,9 @@ const identity = mobileE2EIdentity(
   platform,
 );
 childEnvironment.APP_ID = identity.appId;
+
+const skipNativeBuild =
+  process.env.PSD_EOC_MOBILE_E2E_SKIP_NATIVE_BUILD === 'true';
 
 const artifactRoot = resolve(
   process.env.PSD_EOC_MOBILE_E2E_ARTIFACT_DIR ??
@@ -204,6 +210,7 @@ await Bun.write(
     'partnerPool=synthetic',
     `apiOrigin=${apiBaseUrl}`,
     'pushRegistration=false',
+    `nativeBuild=${skipNativeBuild ? 'reused' : 'this-run'}`,
     '',
   ].join('\n'),
 );
@@ -251,48 +258,56 @@ try {
     ]);
   }
 
-  await runner.run(
-    ['bunx', 'expo', 'prebuild', '--platform', platform, '--no-install'],
-    mobileRoot,
-  );
-  await runner.bestEffort(
-    platform === 'ios'
-      ? ['xcrun', 'simctl', 'uninstall', deviceId, identity.appId]
-      : ['adb', '-s', deviceId, 'uninstall', identity.appId],
-  );
-  try {
+  if (skipNativeBuild) {
+    // Iteration only, and recorded in the safety context: the installed
+    // build is whatever a previous run of this harness put on the device.
+    console.warn(
+      'Reusing the installed development client; this run did not build it.',
+    );
+  } else {
     await runner.run(
-      platform === 'ios'
-        ? ['bunx', 'expo', 'run:ios', '--device', deviceId, '--no-bundler']
-        : [
-            'bunx',
-            'expo',
-            'run:android',
-            '--device',
-            androidExpoName ?? '',
-            '--no-bundler',
-          ],
+      ['bunx', 'expo', 'prebuild', '--platform', platform, '--no-install'],
       mobileRoot,
     );
-  } catch (error) {
-    if (!(error instanceof CommandExitError)) throw error;
-    // Expo can install the exact build and still fail to open its own
-    // development URL. A present installation proves this run put it there.
-    await runner.output(
+    await runner.bestEffort(
       platform === 'ios'
-        ? [
-            'xcrun',
-            'simctl',
-            'get_app_container',
-            deviceId,
-            identity.appId,
-            'app',
-          ]
-        : ['adb', '-s', deviceId, 'shell', 'pm', 'path', identity.appId],
+        ? ['xcrun', 'simctl', 'uninstall', deviceId, identity.appId]
+        : ['adb', '-s', deviceId, 'uninstall', identity.appId],
     );
-    console.warn(
-      `Expo installed the exact ${platform} build but its development URL did not open; continuing with the bounded localhost launch.`,
-    );
+    try {
+      await runner.run(
+        platform === 'ios'
+          ? ['bunx', 'expo', 'run:ios', '--device', deviceId, '--no-bundler']
+          : [
+              'bunx',
+              'expo',
+              'run:android',
+              '--device',
+              androidExpoName ?? '',
+              '--no-bundler',
+            ],
+        mobileRoot,
+      );
+    } catch (error) {
+      if (!(error instanceof CommandExitError)) throw error;
+      // Expo can install the exact build and still fail to open its own
+      // development URL. A present installation proves this run put it there.
+      await runner.output(
+        platform === 'ios'
+          ? [
+              'xcrun',
+              'simctl',
+              'get_app_container',
+              deviceId,
+              identity.appId,
+              'app',
+            ]
+          : ['adb', '-s', deviceId, 'shell', 'pm', 'path', identity.appId],
+      );
+      console.warn(
+        `Expo installed the exact ${platform} build but its development URL did not open; continuing with the bounded localhost launch.`,
+      );
+    }
   }
 
   await runner.bestEffort(
@@ -377,6 +392,7 @@ try {
   );
   await maestro('partner-join-and-post.yaml', {
     FACILITY_NAME: fixture.facilityName,
+    EVENT_TYPE_NAME: fixture.eventTypeName,
   });
   await captureScreen(
     runner,

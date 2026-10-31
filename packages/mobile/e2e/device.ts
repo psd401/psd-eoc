@@ -11,6 +11,19 @@ export type MobileE2EPlatform = 'ios' | 'android';
 
 export type CommandEnvironment = Record<string, string | undefined>;
 
+/**
+ * The locale every native build step runs under. CocoaPods normalizes the
+ * Podfile path as Unicode and aborts on `ASCII-8BIT`, so a non-interactive
+ * runner that inherits no locale cannot install pods at all. Setting it here
+ * keeps the fix with the code that spawns the build rather than in whatever
+ * shell happens to start the run.
+ */
+export const NATIVE_BUILD_LOCALE: Readonly<Record<string, string>> =
+  Object.freeze({
+    LANG: 'en_US.UTF-8',
+    LC_ALL: 'en_US.UTF-8',
+  });
+
 export class CommandExitError extends Error {
   public constructor(
     public readonly exitCode: number,

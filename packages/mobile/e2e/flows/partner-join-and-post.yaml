@@ -12,15 +12,17 @@ tags: [issue-598, synthetic-only, event-room]
 # The drill a district administrator started at the one non-isolated school is
 # the only thing on this screen a partner may act on.
 - assertVisible: 'Active events'
-- scrollUntilVisible:
-    element:
-      text: '.*Synthetic earthquake drill.*'
-    direction: DOWN
-- assertVisible: '.*${FACILITY_NAME}.*'
-- tapOn: '.*Synthetic earthquake drill.*'
+# The event's labels come from the seeded rows the fixture read back, so this
+# flow cannot drift from what the seed actually publishes.
+# The card is one accessible control, so it is matched by the label it
+# announces rather than by the words drawn inside it.
+- extendedWaitUntil:
+    visible: '.*Join existing.*${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*'
+    timeout: 60000
+- tapOn: '.*Join existing.*${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*'
 
 - extendedWaitUntil:
-    visible: 'Synthetic earthquake drill. Threat: Synthetic wildlife. Synthetic Test School, SYNTH.'
+    visible: '.*${EVENT_TYPE_NAME}.*'
     timeout: 60000
 - assertVisible: '.*DRILL — TRAINING ONLY.*'
 - assertNotVisible: '^REAL INCIDENT$'

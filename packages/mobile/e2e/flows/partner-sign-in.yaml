@@ -46,35 +46,37 @@ tags: [issue-598, synthetic-only]
     id: 'partner-sign-in-toggle'
 
 - assertVisible: 'Partner agency'
+# The card opens below the fold on a phone, so every field is scrolled to
+# before it is touched.
+- scrollUntilVisible:
+    element:
+      id: 'partner-sign-in-email'
+    direction: DOWN
 - tapOn:
     id: 'partner-sign-in-email'
 - inputText: ${PARTNER_EMAIL}
-- hideKeyboard
-- scrollUntilVisible:
-    element:
-      id: 'partner-sign-in-request-code'
-    direction: DOWN
-- tapOn:
-    id: 'partner-sign-in-request-code'
+# Both steps are submitted from the keyboard's return key, which is what the
+# fields' own submit handlers are for. Tapping the button underneath instead
+# would land on a key: the keyboard covers it on a phone, and `hideKeyboard`
+# is not available on iOS. The buttons themselves are driven by the colocated
+# native test.
+- pressKey: Enter
 
 # The second step. The server says the same thing for every address, so this
 # screen is never an answer about who holds partner access.
 - extendedWaitUntil:
-    visible:
-      id: 'partner-sign-in-code'
+    visible: '.*a code is on its way to it.*'
     timeout: 60000
-- tapOn:
-    id: 'partner-sign-in-code'
-# The code the synthetic pool derives from the address, typed the way a
-# partner types one read out of an email.
-- inputText: ${PARTNER_CODE}
-- hideKeyboard
 - scrollUntilVisible:
     element:
-      id: 'partner-sign-in-verify'
+      id: 'partner-sign-in-code'
     direction: DOWN
+# The keyboard is down between the steps, so the field is tapped before the
+# code is typed into it.
 - tapOn:
-    id: 'partner-sign-in-verify'
+    id: 'partner-sign-in-code'
+- inputText: ${PARTNER_CODE}
+- pressKey: Enter
 
 # The session is issued, stored, and the shell opens as a partner.
 - extendedWaitUntil:

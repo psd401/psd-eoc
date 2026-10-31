@@ -27,10 +27,16 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { eq } from 'drizzle-orm';
 import postgres from 'postgres';
 
 import { createDatabaseClient } from '../db/client';
-import { groupMembers, groupSources } from '../db/schema';
+import {
+  eventTypeVersions,
+  facilities,
+  groupMembers,
+  groupSources,
+} from '../db/schema';
 import { seedDatabase } from '../db/seed';
 import { migrateDatabase } from '../drizzle/migrate';
 import { syntheticPartnerOtpCode } from '../lib/auth/partner-otp';
@@ -39,14 +45,14 @@ import {
   requireSyntheticTestDatabaseUrl,
 } from '../lib/testing/database';
 import {
+  SYNTHETIC_DRILL_VERSION_ID,
+  SYNTHETIC_FACILITY_ID,
   accessGroup,
   admitPartner,
   createSyntheticDrill,
   issueIdentity,
 } from './synthetic-fixture';
 
-/** The seeded non-isolated school the drill is started at. */
-const FACILITY_NAME = 'Synthetic Test School';
 const PARTNER_EMAIL = 'mobile-responder@agency.example.invalid';
 const PARTNER_DISPLAY_NAME = 'Synthetic Mobile Responder';
 const ADMINISTRATOR_EMAIL = 'mobile-district-admin@example.invalid';
@@ -56,7 +62,10 @@ export interface MobilePartnerFixture {
   readonly partnerEmail: string;
   /** What the synthetic pool would have emailed; never a real code. */
   readonly partnerCode: string;
+  /** The seeded non-isolated school the drill is started at. */
   readonly facilityName: string;
+  /** What the drill's published event type version is called. */
+  readonly eventTypeName: string;
   readonly eventId: string;
 }
 
@@ -97,11 +106,28 @@ async function create(): Promise<MobilePartnerFixture> {
       admittedAt: now,
     });
     const eventId = await createSyntheticDrill(connection, administrator);
+    // The names come out of the seeded rows rather than being restated here,
+    // so a change to the seed cannot leave the Maestro flow asserting on a
+    // label that no longer exists.
+    const [facility] = await connection.db
+      .select({ name: facilities.name })
+      .from(facilities)
+      .where(eq(facilities.id, SYNTHETIC_FACILITY_ID))
+      .limit(1);
+    const [version] = await connection.db
+      .select({ name: eventTypeVersions.name })
+      .from(eventTypeVersions)
+      .where(eq(eventTypeVersions.id, SYNTHETIC_DRILL_VERSION_ID))
+      .limit(1);
+    if (facility === undefined || version === undefined) {
+      throw new Error('The seeded drill facility or event type is missing.');
+    }
     return Object.freeze({
       databaseUrl: disposable.url,
       partnerEmail: PARTNER_EMAIL,
       partnerCode: syntheticPartnerOtpCode(PARTNER_EMAIL),
-      facilityName: FACILITY_NAME,
+      facilityName: facility.name,
+      eventTypeName: version.name,
       eventId,
     });
   } catch (error) {

@@ -32,13 +32,14 @@ import {
   MobileAuthController,
   type AuthStorage,
   type AuthState,
+  type LocalAuthenticator,
 } from './auth-controller';
 import { MobileAuthError } from './auth-errors';
 import { expoOidcBrowser, expoPkceSource } from './expo-oidc';
 import {
-  createIssue32SyntheticAuthenticator,
-  isIssue32SyntheticAuthenticatorEnabled,
-} from './issue-32-synthetic-authenticator';
+  createSyntheticSimulatorAuthenticator,
+  isSyntheticSimulatorAuthenticatorEnabled,
+} from './synthetic-simulator-authenticator';
 import { createLocalAuthenticator } from './local-authenticator';
 import { MobileOidcClient } from './oidc-client';
 import { isPartnerSession } from './partner-session';
@@ -116,6 +117,18 @@ interface AuthRuntime {
 
 const MobileAuthContext = createContext<MobileAuthContextValue | null>(null);
 
+/**
+ * The device owner's unlock, or the simulator stand-in one of the end-to-end
+ * journeys qualifies for. Every build anyone installs takes the first branch,
+ * because the stand-in's own gate refuses a release build and any origin but
+ * this machine's loopback.
+ */
+function localAuthenticator(): LocalAuthenticator {
+  return isSyntheticSimulatorAuthenticatorEnabled()
+    ? createSyntheticSimulatorAuthenticator()
+    : createLocalAuthenticator();
+}
+
 function createRuntime(): AuthRuntime {
   if (isIssue21SyntheticFixtureEnabled()) {
     if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
@@ -130,9 +143,7 @@ function createRuntime(): AuthRuntime {
         api: fixture.api,
         authenticatedApi: createIssue21SyntheticFixtureTransport(Platform.OS),
         storage: fixture.storage,
-        localAuthenticator: isIssue32SyntheticAuthenticatorEnabled()
-          ? createIssue32SyntheticAuthenticator()
-          : createLocalAuthenticator(),
+        localAuthenticator: localAuthenticator(),
         createIdempotencyKey: () => Crypto.randomUUID(),
       }),
       storage: fixture.storage,
@@ -178,7 +189,7 @@ function createRuntime(): AuthRuntime {
       diagnostics,
     ),
     storage,
-    localAuthenticator: createLocalAuthenticator(),
+    localAuthenticator: localAuthenticator(),
     createIdempotencyKey: () => Crypto.randomUUID(),
   });
   return Object.freeze({
