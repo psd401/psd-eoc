@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="36.874" timestamp="2026-11-01T01:44:50">
-    <testcase id="Issue 598 - a partner signs in with an emailed one-time code" name="Issue 598 - a partner signs in with an emailed one-time code" classname="Issue 598 - a partner signs in with an emailed one-time code" file="packages/mobile/e2e/flows/partner-sign-in.yaml" time="36.861" timestamp="2026-11-01T01:44:50" status="SUCCESS">
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="36.783" timestamp="2026-11-01T02:54:59">
+    <testcase id="Issue 598 - a partner signs in with an emailed one-time code" name="Issue 598 - a partner signs in with an emailed one-time code" classname="Issue 598 - a partner signs in with an emailed one-time code" file="packages/mobile/e2e/flows/partner-sign-in.yaml" time="36.769" timestamp="2026-11-01T02:54:59" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-598, synthetic-only"/>
       </properties>
