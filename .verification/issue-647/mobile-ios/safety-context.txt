@@ -3,6 +3,6 @@ appId=net.psd401.eoc
 classification=drill
 roster=synthetic
 partnerPool=synthetic
-apiOrigin=http://127.0.0.1:39701
+apiOrigin=http://127.0.0.1:22572
 pushRegistration=false
 nativeBuild=this-run

@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="6.266" timestamp="2026-11-01T01:48:26">
-    <testcase id="Issue 647 - a partner declines the passkey and keeps the emailed code" name="Issue 647 - a partner declines the passkey and keeps the emailed code" classname="Issue 647 - a partner declines the passkey and keeps the emailed code" file="packages/mobile/e2e/flows/partner-passkey-decline.yaml" time="6.258" timestamp="2026-11-01T01:48:26" status="SUCCESS">
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="5.212" timestamp="2026-11-01T01:42:09">
+    <testcase id="Issue 647 - a partner declines the passkey and keeps the emailed code" name="Issue 647 - a partner declines the passkey and keeps the emailed code" classname="Issue 647 - a partner declines the passkey and keeps the emailed code" file="packages/mobile/e2e/flows/partner-passkey-decline.yaml" time="5.204" timestamp="2026-11-01T01:42:09" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-647, synthetic-only"/>
       </properties>

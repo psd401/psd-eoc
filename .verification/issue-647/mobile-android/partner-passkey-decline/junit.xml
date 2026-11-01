@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <testsuites>
-  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="8.899" timestamp="2026-11-01T01:51:58">
-    <testcase id="Issue 647 - a partner declines the passkey and keeps the emailed code" name="Issue 647 - a partner declines the passkey and keeps the emailed code" classname="Issue 647 - a partner declines the passkey and keeps the emailed code" file="packages/mobile/e2e/flows/partner-passkey-decline.yaml" time="8.891" timestamp="2026-11-01T01:51:58" status="SUCCESS">
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="8.656" timestamp="2026-11-01T01:45:43">
+    <testcase id="Issue 647 - a partner declines the passkey and keeps the emailed code" name="Issue 647 - a partner declines the passkey and keeps the emailed code" classname="Issue 647 - a partner declines the passkey and keeps the emailed code" file="packages/mobile/e2e/flows/partner-passkey-decline.yaml" time="8.649" timestamp="2026-11-01T01:45:43" status="SUCCESS">
       <properties>
         <property name="tags" value="issue-647, synthetic-only"/>
       </properties>
