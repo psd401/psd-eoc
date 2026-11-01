@@ -254,7 +254,11 @@ function validatePartnerInvocation(
     // The source is checked against the device by the delivery rule above;
     // here it only has to be one of the two partner surfaces.
     (envelope.source !== 'web' && envelope.source !== 'mobile') ||
-    envelope.transport.kind !== 'partner-email-otp' ||
+    // One of the two partner first factors, and nothing else: a Google
+    // callback or a native code exchange cannot issue a partner session even
+    // if it reached this handler.
+    (envelope.transport.kind !== 'partner-email-otp' &&
+      envelope.transport.kind !== 'partner-passkey') ||
     envelope.idempotencyKey !== `oidc:${responseDigest}` ||
     JSON.stringify(envelope.input) !== JSON.stringify(input)
   ) {

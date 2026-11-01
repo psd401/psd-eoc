@@ -113,7 +113,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let connection: DatabaseConnection | undefined;
   try {
-    const claims = await provider.verify({
+    const { claims } = await provider.verify({
       email: flow.email,
       flowSession: flow.flowSession,
       code: body.code,

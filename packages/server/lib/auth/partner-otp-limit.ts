@@ -30,9 +30,42 @@ export const PARTNER_OTP_SENDS_PER_EMAIL = 5;
 export const PARTNER_OTP_VERIFIES_PER_EMAIL = 10;
 export const PARTNER_OTP_SENDS_PER_CLIENT = 20;
 export const PARTNER_OTP_VERIFIES_PER_CLIENT = 40;
+/**
+ * Every passkey attempt has its own budget, separate from the code's (#599).
+ *
+ * This is not tidiness. A budget keyed to an address is something anyone who
+ * knows that address can spend, because an attempt is charged before it is
+ * known to be genuine — that is what makes it a budget. So a shared budget
+ * would mean anyone who knows a partner's address could exhaust it with
+ * rejected passkey assertions and leave that partner unable to sign in with
+ * an emailed code either. In an emergency tool the code is the fallback that
+ * must survive everything, so the two factors never spend each other's
+ * allowance: burning the passkey budget costs a partner their passkey for a
+ * quarter of an hour and nothing else.
+ *
+ * Starting a passkey sign-in also sends no mail, so it must not spend the
+ * budget that bounds how much a partner's inbox can be made to receive
+ * either: a passkey attempt that fell back to a code would otherwise cost
+ * two sends and halve the real budget.
+ *
+ * Enrolling needs a budget for a different reason. It is already behind the
+ * sealed hand-off from a completed sign-in, so it is not anonymous, but each
+ * attempt is still a call to the pool and nothing else bounds how many a
+ * script could make inside the hand-off's ten minutes. One enrollment spends
+ * two of it, because a ceremony is two calls, so the budget is twice the
+ * number of attempts a partner is actually allowed: cancelling the device
+ * prompt and trying again is ordinary, not abuse.
+ */
+export const PARTNER_PASSKEY_STARTS_PER_EMAIL = 10;
+export const PARTNER_PASSKEY_STARTS_PER_CLIENT = 40;
+export const PARTNER_PASSKEY_VERIFIES_PER_EMAIL = 10;
+export const PARTNER_PASSKEY_VERIFIES_PER_CLIENT = 40;
+export const PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL = 20;
+export const PARTNER_PASSKEY_REGISTRATIONS_PER_CLIENT = 60;
 export const PARTNER_OTP_WINDOW_MS = WINDOW_MS;
 
-export type PartnerOtpAttemptKind = 'send' | 'verify';
+export type PartnerOtpAttemptKind =
+  'send' | 'verify' | 'passkey-start' | 'passkey-verify' | 'passkey-register';
 
 export type PartnerOtpLimitDecision =
   | Readonly<{ admitted: true }>
@@ -84,23 +117,32 @@ export function createPartnerOtpLimiter(): PartnerOtpLimiter {
   const limiter: PartnerOtpLimiter = {
     admit(input, nowValue): PartnerOtpLimitDecision {
       const now = slidingWindowClock(nowValue, 'The partner sign-in limiter');
-      const send = input.kind === 'send';
       const email = input.email.trim().toLowerCase();
       const client = input.client?.trim() ?? '';
       // Both budgets are decided before either is charged, so a refusal on
       // one does not spend the other's allowance.
+      const perEmail: Readonly<Record<PartnerOtpAttemptKind, number>> = {
+        send: PARTNER_OTP_SENDS_PER_EMAIL,
+        verify: PARTNER_OTP_VERIFIES_PER_EMAIL,
+        'passkey-start': PARTNER_PASSKEY_STARTS_PER_EMAIL,
+        'passkey-verify': PARTNER_PASSKEY_VERIFIES_PER_EMAIL,
+        'passkey-register': PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL,
+      };
+      const perClient: Readonly<Record<PartnerOtpAttemptKind, number>> = {
+        send: PARTNER_OTP_SENDS_PER_CLIENT,
+        verify: PARTNER_OTP_VERIFIES_PER_CLIENT,
+        'passkey-start': PARTNER_PASSKEY_STARTS_PER_CLIENT,
+        'passkey-verify': PARTNER_PASSKEY_VERIFIES_PER_CLIENT,
+        'passkey-register': PARTNER_PASSKEY_REGISTRATIONS_PER_CLIENT,
+      };
       const budgets = [
         {
           key: keyDigest(`email-${input.kind}`, email),
-          limit: send
-            ? PARTNER_OTP_SENDS_PER_EMAIL
-            : PARTNER_OTP_VERIFIES_PER_EMAIL,
+          limit: perEmail[input.kind],
         },
         {
           key: keyDigest(`client-${input.kind}`, client),
-          limit: send
-            ? PARTNER_OTP_SENDS_PER_CLIENT
-            : PARTNER_OTP_VERIFIES_PER_CLIENT,
+          limit: perClient[input.kind],
         },
       ] as const;
       const windowsToCharge = budgets.map((budget) => ({
