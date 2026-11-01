@@ -77,6 +77,13 @@ variable "passkey_relying_party_id" {
     The WebAuthn relying-party id for partner passkeys: the application's own
     hostname, such as eoc.example.invalid. A passkey is bound to this value, so
     changing it after partners have enrolled invalidates every passkey.
+
+    It must be the host part of the stack's psdEoc:applicationOrigin, which the
+    server derives the same id from rather than reading a second copy of it.
+    The two naming different hostnames is the one way this value can be wrong:
+    the server then refuses every ceremony the pool offers, so partner passkey
+    sign-in and enrollment are unavailable while the emailed code is
+    unaffected. See docs/CONFIGURATION.md.
   EOT
   type        = string
 
