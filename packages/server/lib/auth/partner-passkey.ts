@@ -198,6 +198,44 @@ export type PartnerPasskeyStart =
   | Readonly<{ kind: 'code' }>
   | Readonly<{ kind: 'code-sent' }>;
 
+/**
+ * Whether this pool has ever mailed a code while merely being asked what a
+ * partner could use.
+ *
+ * A pool that behaves as documented never does, and this stays false
+ * forever. A pool that does it once will do it for every partner whose only
+ * factor is email, so the caller stops probing whenever a send could not be
+ * afforded, rather than mailing a discarded code each time. One observation
+ * is enough to change that behaviour, and nothing ever changes it back: a
+ * directory that mails on a question is not something to re-test against a
+ * partner's inbox.
+ *
+ * Per process, like the limiter beside it, and held off `globalThis` for the
+ * same reason — the development server re-evaluates a route's modules
+ * between requests. Losing it costs at most one more discarded mail.
+ */
+const POOL_MAILED_ON_PROBE = Symbol.for('psd-eoc.partner-pool-mails-on-probe');
+
+export function poolMailsOnProbe(): boolean {
+  return (
+    (globalThis as unknown as Record<symbol, unknown>)[POOL_MAILED_ON_PROBE] ===
+    true
+  );
+}
+
+export function recordPoolMailedOnProbe(): void {
+  (globalThis as unknown as Record<symbol, unknown>)[POOL_MAILED_ON_PROBE] =
+    true;
+}
+
+/** Forgets the observation. For tests that need a pool with no history. */
+export function resetPoolMailsOnProbe(): void {
+  Reflect.deleteProperty(
+    globalThis as unknown as Record<symbol, unknown>,
+    POOL_MAILED_ON_PROBE,
+  );
+}
+
 const USE_A_CODE: PartnerPasskeyStart = Object.freeze({ kind: 'code' });
 const CODE_WAS_SENT: PartnerPasskeyStart = Object.freeze({ kind: 'code-sent' });
 

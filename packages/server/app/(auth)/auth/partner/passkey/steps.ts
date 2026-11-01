@@ -29,7 +29,9 @@ import {
   readPartnerPasskeyCookie,
 } from '../../../../../lib/auth/partner-passkey-enrollment';
 import {
+  poolMailsOnProbe,
   readPasskeyClientData,
+  recordPoolMailedOnProbe,
   type resolvePartnerPasskeyProvider,
   type PartnerPasskeyStart,
 } from '../../../../../lib/auth/partner-passkey';
@@ -136,6 +138,30 @@ export async function signInStart(
     return rateLimited(decision.retryAfterSeconds);
   }
 
+  // A pool that has been seen mailing a code merely for being asked what a
+  // partner could use will do it again. Once that is known, a probe is
+  // treated as the send it turns out to be: if that address cannot afford
+  // one, the pool is not asked at all, and the page is told to use a code —
+  // which is where it was heading anyway. A pool that behaves as documented
+  // never reaches this, so a passkey is never gated on the mail budget.
+  if (
+    poolMailsOnProbe() &&
+    !getPartnerOtpLimiter().allows(
+      {
+        kind: 'send',
+        email: input.email,
+        client: forwardedClientAddress(request),
+      },
+      input.now,
+    )
+  ) {
+    return noStore(
+      NextResponse.json(
+        PartnerPasskeySignInStartResponseSchema.parse({ method: 'code' }),
+      ),
+    );
+  }
+
   let started: PartnerPasskeyStart;
   try {
     started = await input.provider.startSignIn(
@@ -151,12 +177,13 @@ export async function signInStart(
   if (started.kind !== 'passkey') {
     if (started.kind === 'code-sent') {
       // The pool put a code in that inbox, so the budget that bounds how
-      // much mail an inbox can be made to receive is charged for it — even
-      // though the attempt was already admitted on the passkey budget, and
-      // even though the answer to the page is unchanged. The mail has gone;
-      // refusing now would un-send nothing, so this is a charge rather than
-      // a decision.
-      getPartnerOtpLimiter().admit(
+      // much mail an inbox can be made to receive carries it — even though
+      // the attempt was admitted on the passkey budget, and even though the
+      // answer to the page is unchanged. `charge` rather than `admit`: the
+      // mail has gone, so it is recorded whether or not there was room,
+      // because a budget that stopped counting once full would stop
+      // describing what actually reached the inbox.
+      getPartnerOtpLimiter().charge(
         {
           kind: 'send',
           email: input.email,
@@ -164,6 +191,9 @@ export async function signInStart(
         },
         input.now,
       );
+      // And this pool is now known to mail on a question, so the next probe
+      // for an address with no send left does not ask it again.
+      recordPoolMailedOnProbe();
     }
     return noStore(
       NextResponse.json(

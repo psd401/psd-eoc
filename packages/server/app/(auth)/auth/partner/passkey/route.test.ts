@@ -16,6 +16,8 @@ import {
   partnerPasskeyCookieHeader,
 } from '../../../../../lib/auth/partner-passkey-enrollment';
 import {
+  poolMailsOnProbe,
+  resetPoolMailsOnProbe,
   resetSyntheticPartnerPasskeys,
   syntheticPartnerHasPasskey,
 } from '../../../../../lib/auth/partner-passkey';
@@ -204,6 +206,7 @@ beforeEach(() => {
   Reflect.set(process.env, 'GOOGLE_OIDC_COOKIE_SECRET', COOKIE_SECRET);
   Reflect.deleteProperty(process.env, 'NODE_ENV');
   resetSyntheticPartnerPasskeys();
+  resetPoolMailsOnProbe();
 });
 
 afterEach(() => {
@@ -216,6 +219,7 @@ afterEach(() => {
     }
   }
   resetSyntheticPartnerPasskeys();
+  resetPoolMailsOnProbe();
 });
 
 describe('the partner passkey route', () => {
@@ -483,6 +487,57 @@ describe('the partner passkey route', () => {
       now: new Date(),
     });
     expect(remainingSends(quiet, client)).toBe(PARTNER_OTP_SENDS_PER_EMAIL);
+  });
+
+  test('once the pool mails on a probe, a spent send budget stops asking it', async () => {
+    // The charge above records the mail even past the limit, but recording
+    // does not un-send. What bounds a pool that mails on every question is
+    // not asking it again: after one observation, an address with no send
+    // left is answered 'code' without the pool being touched.
+    const spent = 'spent-budget@agency.example.invalid';
+    const client = '198.51.100.11';
+    let asked = 0;
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => {
+        asked += 1;
+        return Promise.resolve({ kind: 'code-sent' as const });
+      },
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+    const start = () =>
+      signInStart(probeRequest(client), {
+        provider,
+        relyingPartyId: 'localhost',
+        email: spent,
+        now: new Date(),
+      });
+
+    // The first probe mails, is charged, and teaches the server this pool
+    // mails on a question.
+    await start();
+    expect(asked).toBe(1);
+    expect(poolMailsOnProbe()).toBe(true);
+
+    // Spend the rest of this address's send budget.
+    while (
+      getPartnerOtpLimiter().admit(
+        { kind: 'send', email: spent, client },
+        new Date(),
+      ).admitted
+    ) {
+      /* spend it */
+    }
+
+    // Now the pool is not asked at all, so no further mail can reach that
+    // inbox however many times the probe is called.
+    const response = await start();
+    expect(asked).toBe(1);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ method: 'code' });
   });
 
   test('an assertion with no flow at all is refused', async () => {
