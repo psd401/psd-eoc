@@ -152,15 +152,23 @@ resource "aws_sesv2_configuration_set_event_destination" "cognito" {
   depends_on = [aws_sns_topic_policy.cognito_email_events]
 }
 
-# Cognito sends DEVELOPER-configured mail through this role, which allows only
-# ses:SendEmail and ses:SendRawEmail. It is one per account, so it outlives
-# this pool: deleting it would stop every SES-backed user pool in the account.
-resource "aws_iam_service_linked_role" "cognito_email" {
-  aws_service_name = "email.cognito-idp.amazonaws.com"
-  description      = "Lets Cognito user pools send email through the account's verified SES identities."
+# Cognito sends DEVELOPER-configured mail through its email service-linked
+# role, AWSServiceRoleForAmazonCognitoIdpEmailService, which allows only
+# ses:SendEmail and ses:SendRawEmail. Cognito creates that role itself when a
+# pool is configured to send through SES, by console, CLI or API, as long as
+# the caller may iam:CreateServiceLinkedRole (Cognito developer guide,
+# using-service-linked-roles.html); the apply role may, for this service only.
+#
+# This root managed the role until 2026-11-01. Its first apply created it but
+# then failed to tag it (the provider's default tags need iam:TagRole, which
+# the apply role does not hold), leaving it tainted, and a tainted resource
+# under prevent_destroy refuses every later plan. The role is one per account
+# and outlives this pool, so the root forgets it without deleting it.
+removed {
+  from = aws_iam_service_linked_role.cognito_email
 
   lifecycle {
-    prevent_destroy = true
+    destroy = false
   }
 }
 
@@ -223,7 +231,7 @@ resource "aws_cognito_user_pool" "partner" {
   # passwords "require Essentials feature plan or higher and Amazon SES email
   # configuration" (Cognito developer guide, user-pool-email.html), so with
   # COGNITO_DEFAULT the EMAIL_OTP factor above could never deliver a code.
-  # Cognito sends through its email service-linked role below; the SES account
+  # Cognito sends through its email service-linked role (above); the SES account
   # must be out of the sandbox in ses_region before partners can be emailed.
   # source_arn is the identity's ARN in ses_region, which is what lets a pool
   # in another supported region send through it.
@@ -235,7 +243,6 @@ resource "aws_cognito_user_pool" "partner" {
   }
 
   depends_on = [
-    aws_iam_service_linked_role.cognito_email,
     aws_sesv2_configuration_set_event_destination.cognito,
   ]
 

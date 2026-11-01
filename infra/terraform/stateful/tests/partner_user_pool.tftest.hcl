@@ -153,11 +153,6 @@ run "partner_pool_plan" {
     )
     error_message = "The owner group is the topic's one subscriber, by email."
   }
-
-  assert {
-    condition     = aws_iam_service_linked_role.cognito_email.aws_service_name == "email.cognito-idp.amazonaws.com"
-    error_message = "Cognito needs its email service-linked role to send through SES."
-  }
 }
 
 // An identity that SES has not verified would leave every partner without a

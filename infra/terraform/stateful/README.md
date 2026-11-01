@@ -105,12 +105,18 @@ Cognito's own mailbox. The root:
   `psdEoc:sesIdentityDomain`) and refuses to plan if SES has not verified it
   for sending — the identity is shared with other district senders, so this
   root never owns it;
-- creates Cognito's email service-linked role,
+- relies on Cognito's email service-linked role,
   `AWSServiceRoleForAmazonCognitoIdpEmailService`, which may only call
-  `ses:SendEmail` and `ses:SendRawEmail`. It is one per account and outlives
-  this pool. The apply role needs `iam:CreateServiceLinkedRole`, limited by
+  `ses:SendEmail` and `ses:SendRawEmail`. Cognito creates it itself when the
+  pool is configured to send through SES, so the apply role needs
+  `iam:CreateServiceLinkedRole`, limited by
   `iam:AWSServiceName = email.cognito-idp.amazonaws.com` (approved
-  2026-10-23; the role itself comes from `state-bootstrap`);
+  2026-10-23; the apply role itself comes from `state-bootstrap`). The role is
+  one per account and outlives this pool. This root managed it until
+  2026-11-01, when a `removed` block forgot it without deleting it: the first
+  apply had created it but could not tag it, because default tags need
+  `iam:TagRole`, and the tainted resource under `prevent_destroy` refused every
+  later plan;
 - sends from `partner_email_from_address`, which must be an address in that
   domain. The tenant uses the stack's own sender, `psdEoc:sesFromDisplayName`
   and `psdEoc:sesFromAddress` as `Name <address>` (product owner,
