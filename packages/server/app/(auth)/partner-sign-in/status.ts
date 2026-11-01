@@ -4,6 +4,12 @@ export const PARTNER_SIGN_IN_PATH = '/partner-sign-in';
 /** The partner sign-in form's POST target. */
 export const PARTNER_SIGN_IN_ACTION = '/auth/partner';
 
+/** Where a partner is offered a passkey, right after a code sign-in. */
+export const PARTNER_PASSKEY_PATH = '/partner-sign-in/passkey';
+
+/** The passkey ceremony's JSON endpoint, named once so the page agrees. */
+export const PARTNER_PASSKEY_ACTION = '/auth/partner/passkey';
+
 /**
  * Everything the partner sign-in page can say.
  *

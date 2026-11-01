@@ -111,6 +111,21 @@ function signIn(
   });
 }
 
+/** The same sign-in, with a passkey as the first factor instead of a code. */
+function signInWithPasskey(
+  verified: PartnerVerifiedClaims,
+  now = new Date(),
+): ReturnType<typeof completePartnerSignIn> {
+  return completePartnerSignIn(database(), {
+    claims: verified,
+    installationId: `web.${randomUUID()}`,
+    factor: 'passkey',
+    requestId: randomUUID(),
+    now,
+    staffDomain: STAFF_DOMAIN,
+  });
+}
+
 function signInFromApp(
   verified: PartnerVerifiedClaims,
   platform: 'ios' | 'android',
@@ -420,6 +435,111 @@ describeWithDatabase('partner web sign-in', () => {
     expect(await expectRefusal(signIn(claims(email, subject)))).toBe(
       'ACCOUNT_DISABLED',
     );
+  });
+
+  /**
+   * Issue #599. A passkey is a second first factor, never a second set of
+   * rules. Every refusal the emailed code gets, the passkey gets, because the
+   * admission is checked after the pool has proven the factor and knows
+   * nothing about which factor it was.
+   */
+  describe('a passkey is a faster way in, never a wider one', () => {
+    test('an admitted partner signs in with a passkey, one-day session', async () => {
+      const email = `passkey-${randomUUID()}@agency.example.invalid`;
+      await admit(email);
+      const now = new Date();
+      const completed = await signInWithPasskey(claims(email), now);
+      expect(completed.session.user.roles).toEqual(['partner']);
+      expect(completed.cookie.maxAge).toBeLessThanOrEqual(DAY_MS / 1_000);
+      // A passkey sign-in is recorded in the access-gate ledger exactly as a
+      // code sign-in is.
+      expect(await successAudit(completed.session.session.id)).toEqual({
+        outcome: 'success',
+        source: 'web',
+      });
+    });
+
+    test('a disabled account’s passkey is refused', async () => {
+      // Two layers stop a disabled partner: the pool refuses the assertion
+      // because AdminDisableUser killed the credential, and this check
+      // refuses the sign-in even if a pool somehow proved one.
+      const email = `passkey-disabled-${randomUUID()}@agency.example.invalid`;
+      await admit(email);
+      const subject = `cognito-${randomUUID()}`;
+      const completed = await signInWithPasskey(claims(email, subject));
+      await database()
+        .update(users)
+        .set({ disabledAt: new Date() })
+        .where(eq(users.id, completed.session.user.id));
+      expect(
+        await expectRefusal(signInWithPasskey(claims(email, subject))),
+      ).toBe('ACCOUNT_DISABLED');
+    });
+
+    test('an ended admission’s passkey is refused', async () => {
+      const email = `passkey-ended-${randomUUID()}@agency.example.invalid`;
+      const admissionId = await admit(email);
+      await database().insert(partnerAdmissionEndings).values({
+        partnerAdmissionId: admissionId,
+        reason: 'disabled',
+        endedByUserId: adminId,
+        endedAt: new Date(),
+      });
+      expect(await expectRefusal(signInWithPasskey(claims(email)))).toBe(
+        'PARTNER_ADMISSION_ENDED',
+      );
+    });
+
+    test('an expired admission’s passkey is refused', async () => {
+      // Yearly expiry is what makes a passkey stop working without anyone
+      // having to go and delete it from the pool.
+      const email = `passkey-expired-${randomUUID()}@agency.example.invalid`;
+      await admit(email, {
+        admittedAt: new Date(Date.now() - YEAR_AND_A_DAY_MS),
+      });
+      expect(await expectRefusal(signInWithPasskey(claims(email)))).toBe(
+        'PARTNER_ADMISSION_EXPIRED',
+      );
+    });
+
+    test('an address with no admission gets no session from a passkey', async () => {
+      const email = `passkey-unknown-${randomUUID()}@agency.example.invalid`;
+      expect(await expectRefusal(signInWithPasskey(claims(email)))).toBe(
+        'NO_PARTNER_ADMISSION',
+      );
+    });
+
+    test('a district address never signs in as a partner with a passkey', async () => {
+      const email = `staff-${randomUUID()}@${STAFF_DOMAIN}`;
+      await admit(email);
+      expect(await expectRefusal(signInWithPasskey(claims(email)))).toBe(
+        'STAFF_ADDRESS',
+      );
+    });
+
+    test('one completed passkey sign-in cannot be replayed', async () => {
+      const email = `passkey-replay-${randomUUID()}@agency.example.invalid`;
+      await admit(email);
+      const verified = claims(email);
+      await signInWithPasskey(verified);
+      // The same proven exchange a second time is the same digest, so the
+      // idempotency reservation refuses it rather than issuing a second
+      // session.
+      await expect(signInWithPasskey(verified)).rejects.toThrow();
+    });
+
+    test('a code and a passkey for one identity are two exchanges', async () => {
+      // The factor is part of the response digest, so the same proven
+      // identity arriving by each factor is not read as a replay of the
+      // other — a partner may hold both.
+      const email = `passkey-both-${randomUUID()}@agency.example.invalid`;
+      await admit(email);
+      const verified = claims(email);
+      const byCode = await signIn(verified);
+      const byPasskey = await signInWithPasskey(verified);
+      expect(byPasskey.session.user.id).toBe(byCode.session.user.id);
+      expect(byPasskey.cookie.value).not.toBe(byCode.cookie.value);
+    });
   });
 
   test('a corrected name on a re-invite reaches the account', async () => {

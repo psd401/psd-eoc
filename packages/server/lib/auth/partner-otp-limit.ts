@@ -30,13 +30,58 @@ export const PARTNER_OTP_SENDS_PER_EMAIL = 5;
 export const PARTNER_OTP_VERIFIES_PER_EMAIL = 10;
 export const PARTNER_OTP_SENDS_PER_CLIENT = 20;
 export const PARTNER_OTP_VERIFIES_PER_CLIENT = 40;
+/**
+ * Every passkey attempt has its own budget, separate from the code's (#599).
+ *
+ * This is not tidiness. A budget keyed to an address is something anyone who
+ * knows that address can spend, because an attempt is charged before it is
+ * known to be genuine — that is what makes it a budget. So a shared budget
+ * would mean anyone who knows a partner's address could exhaust it with
+ * rejected passkey assertions and leave that partner unable to sign in with
+ * an emailed code either. In an emergency tool the code is the fallback that
+ * must survive everything, so the two factors never spend each other's
+ * allowance: burning the passkey budget costs a partner their passkey for a
+ * quarter of an hour and nothing else.
+ *
+ * Starting a passkey sign-in asks the pool what a partner could use, which
+ * is documented to send nothing, so it must not spend the budget that bounds
+ * how much a partner's inbox can be made to receive: a passkey attempt that
+ * fell back to a code would otherwise cost two sends and halve the real
+ * budget. Documented, not proved — this has never run against a real pool.
+ * So the provider reports when the pool mailed anyway: the send budget is
+ * charged for that mail even past its limit, and once a pool has been seen
+ * doing it, a probe for an address with no send left stops asking the pool
+ * at all. Recording a send does not un-send it; not asking again is what
+ * bounds the mail.
+ *
+ * Enrolling needs a budget for a different reason. It is already behind the
+ * sealed hand-off from a completed sign-in, so it is not anonymous, but each
+ * attempt is still a call to the pool and nothing else bounds how many a
+ * script could make inside the hand-off's ten minutes. One enrollment spends
+ * two of it, because a ceremony is two calls, so the budget is twice the
+ * number of attempts a partner is actually allowed: cancelling the device
+ * prompt and trying again is ordinary, not abuse.
+ */
+export const PARTNER_PASSKEY_STARTS_PER_EMAIL = 10;
+export const PARTNER_PASSKEY_STARTS_PER_CLIENT = 40;
+export const PARTNER_PASSKEY_VERIFIES_PER_EMAIL = 10;
+export const PARTNER_PASSKEY_VERIFIES_PER_CLIENT = 40;
+export const PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL = 20;
+export const PARTNER_PASSKEY_REGISTRATIONS_PER_CLIENT = 60;
 export const PARTNER_OTP_WINDOW_MS = WINDOW_MS;
 
-export type PartnerOtpAttemptKind = 'send' | 'verify';
+export type PartnerOtpAttemptKind =
+  'send' | 'verify' | 'passkey-start' | 'passkey-verify' | 'passkey-register';
 
 export type PartnerOtpLimitDecision =
   | Readonly<{ admitted: true }>
   | Readonly<{ admitted: false; retryAfterSeconds: number }>;
+
+export interface PartnerOtpAttempt {
+  readonly kind: PartnerOtpAttemptKind;
+  readonly email: string;
+  readonly client: string | null;
+}
 
 export interface PartnerOtpLimiter {
   /**
@@ -45,14 +90,18 @@ export interface PartnerOtpLimiter {
    * that does not say; an absent client still charges the shared bucket, so
    * it is never a way to escape the per-client budget.
    */
-  admit(
-    input: Readonly<{
-      kind: PartnerOtpAttemptKind;
-      email: string;
-      client: string | null;
-    }>,
-    now: Date,
-  ): PartnerOtpLimitDecision;
+  admit(input: PartnerOtpAttempt, now: Date): PartnerOtpLimitDecision;
+  /** Whether an attempt would be admitted, charging nothing either way. */
+  allows(input: PartnerOtpAttempt, now: Date): boolean;
+  /**
+   * Records an attempt that has already happened, full window or not.
+   *
+   * `admit` charges nothing once a budget is spent, because by then it is
+   * refusing. Something that cannot be refused — mail a provider has already
+   * sent — must be counted anyway, or the budget stops describing what
+   * actually reached the person it exists to protect.
+   */
+  charge(input: PartnerOtpAttempt, now: Date): void;
 }
 
 function keyDigest(prefix: string, value: string): string {
@@ -81,36 +130,58 @@ export function createPartnerOtpLimiter(): PartnerOtpLimiter {
     return window;
   }
 
+  const PER_EMAIL: Readonly<Record<PartnerOtpAttemptKind, number>> = {
+    send: PARTNER_OTP_SENDS_PER_EMAIL,
+    verify: PARTNER_OTP_VERIFIES_PER_EMAIL,
+    'passkey-start': PARTNER_PASSKEY_STARTS_PER_EMAIL,
+    'passkey-verify': PARTNER_PASSKEY_VERIFIES_PER_EMAIL,
+    'passkey-register': PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL,
+  };
+  const PER_CLIENT: Readonly<Record<PartnerOtpAttemptKind, number>> = {
+    send: PARTNER_OTP_SENDS_PER_CLIENT,
+    verify: PARTNER_OTP_VERIFIES_PER_CLIENT,
+    'passkey-start': PARTNER_PASSKEY_STARTS_PER_CLIENT,
+    'passkey-verify': PARTNER_PASSKEY_VERIFIES_PER_CLIENT,
+    'passkey-register': PARTNER_PASSKEY_REGISTRATIONS_PER_CLIENT,
+  };
+
+  /** The two windows one attempt is measured against, with their limits. */
+  function budgetsFor(
+    input: PartnerOtpAttempt,
+    now: number,
+  ): readonly Readonly<{ window: SlidingWindow; limit: number }>[] {
+    const email = input.email.trim().toLowerCase();
+    const client = input.client?.trim() ?? '';
+    return [
+      {
+        window: windowFor(keyDigest(`email-${input.kind}`, email), now),
+        limit: PER_EMAIL[input.kind],
+      },
+      {
+        window: windowFor(keyDigest(`client-${input.kind}`, client), now),
+        limit: PER_CLIENT[input.kind],
+      },
+    ];
+  }
+
+  /** The first budget with no room left, after pruning both. */
+  function exhaustedBudget(
+    budgets: readonly Readonly<{ window: SlidingWindow; limit: number }>[],
+    now: number,
+  ): Readonly<{ window: SlidingWindow; limit: number }> | undefined {
+    return budgets.find((budget) => {
+      pruneSlidingWindow(budget.window, now - WINDOW_MS);
+      return budget.window.admitted.length >= budget.limit;
+    });
+  }
+
   const limiter: PartnerOtpLimiter = {
     admit(input, nowValue): PartnerOtpLimitDecision {
       const now = slidingWindowClock(nowValue, 'The partner sign-in limiter');
-      const send = input.kind === 'send';
-      const email = input.email.trim().toLowerCase();
-      const client = input.client?.trim() ?? '';
       // Both budgets are decided before either is charged, so a refusal on
       // one does not spend the other's allowance.
-      const budgets = [
-        {
-          key: keyDigest(`email-${input.kind}`, email),
-          limit: send
-            ? PARTNER_OTP_SENDS_PER_EMAIL
-            : PARTNER_OTP_VERIFIES_PER_EMAIL,
-        },
-        {
-          key: keyDigest(`client-${input.kind}`, client),
-          limit: send
-            ? PARTNER_OTP_SENDS_PER_CLIENT
-            : PARTNER_OTP_VERIFIES_PER_CLIENT,
-        },
-      ] as const;
-      const windowsToCharge = budgets.map((budget) => ({
-        window: windowFor(budget.key, now),
-        limit: budget.limit,
-      }));
-      const exhausted = windowsToCharge.find((budget) => {
-        pruneSlidingWindow(budget.window, now - WINDOW_MS);
-        return budget.window.admitted.length >= budget.limit;
-      });
+      const budgets = budgetsFor(input, now);
+      const exhausted = exhaustedBudget(budgets, now);
       if (exhausted !== undefined) {
         return Object.freeze({
           admitted: false as const,
@@ -125,7 +196,7 @@ export function createPartnerOtpLimiter(): PartnerOtpLimiter {
           ),
         });
       }
-      for (const budget of windowsToCharge) {
+      for (const budget of budgets) {
         decideSlidingWindow(
           budget.window,
           input.kind,
@@ -135,6 +206,23 @@ export function createPartnerOtpLimiter(): PartnerOtpLimiter {
         );
       }
       return Object.freeze({ admitted: true as const });
+    },
+
+    allows(input, nowValue): boolean {
+      const now = slidingWindowClock(nowValue, 'The partner sign-in limiter');
+      return exhaustedBudget(budgetsFor(input, now), now) === undefined;
+    },
+
+    charge(input, nowValue): void {
+      const now = slidingWindowClock(nowValue, 'The partner sign-in limiter');
+      for (const budget of budgetsFor(input, now)) {
+        pruneSlidingWindow(budget.window, now - WINDOW_MS);
+        // Past the limit on purpose: this records something that already
+        // happened, so the window has to carry it whether there was room or
+        // not. A window over its limit simply refuses everything until the
+        // entries age out, which is the intended effect.
+        budget.window.admitted.push(now);
+      }
     },
   };
   return Object.freeze(limiter);

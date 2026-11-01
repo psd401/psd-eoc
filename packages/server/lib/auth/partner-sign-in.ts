@@ -5,6 +5,7 @@ import {
   CompleteOidcSignInInputSchema,
   parseCapabilityEnvelopeFor,
   PartnerOtpCompletionTransportSchema,
+  PartnerPasskeyCompletionTransportSchema,
   PreSessionOidcPrincipalSchema,
   type AuthenticationCapabilityEnvelope,
   type CompleteOidcSignInInput,
@@ -80,6 +81,18 @@ export type PartnerSignInSurface =
 
 const WEB_SURFACE: PartnerSignInSurface = Object.freeze({ kind: 'web' });
 
+/**
+ * Which first factor the pool proved for one sign-in.
+ *
+ * It decides the recorded transport and nothing else. Both factors are the
+ * pool's own first factors, both end in a verified identity token, and both
+ * reach the same authorizer: a partner with a passkey has not been granted
+ * anything a partner with a code lacks.
+ */
+export type PartnerSignInFactor = 'email-otp' | 'passkey';
+
+const DEFAULT_FACTOR: PartnerSignInFactor = 'email-otp';
+
 /** Verified adapter output ready for the canonical sign-in capability. */
 export interface PartnerSignInCompletion {
   readonly capabilityInput: CompleteOidcSignInInput;
@@ -101,9 +114,11 @@ export function createPartnerSignInCompletion(
     displayName: string;
     installationId: string;
     surface?: PartnerSignInSurface;
+    factor?: PartnerSignInFactor;
   }>,
 ): PartnerSignInCompletion {
   const surface = input.surface ?? WEB_SURFACE;
+  const factor = input.factor ?? DEFAULT_FACTOR;
   const subjectDigest = sha256Hex(input.claims.subject);
   // The browser's digest is unchanged. A native sign-in commits to its own
   // device as well, because the same partner may hold a browser session and
@@ -111,18 +126,19 @@ export function createPartnerSignInCompletion(
   // is derived from the address rather than from a fresh token: without the
   // device in the digest, a second device's sign-in would look like a replay
   // of the first.
+  // The factor is part of the label, so one proven identity cannot produce
+  // the same digest through two different factors. The email-code labels are
+  // unchanged, so a sign-in in flight across a deployment is unaffected.
+  const label =
+    factor === 'passkey' ? 'partner-passkey-sign-in' : 'partner-otp-sign-in';
   const responseDigest =
     surface.kind === 'web'
       ? sha256Hex(
-          [
-            'partner-otp-sign-in-v1',
-            subjectDigest,
-            input.claims.claimsDigest,
-          ].join('\n'),
+          [`${label}-v1`, subjectDigest, input.claims.claimsDigest].join('\n'),
         )
       : sha256Hex(
           [
-            'partner-otp-sign-in-native-v1',
+            `${label}-native-v1`,
             surface.platform,
             input.installationId,
             subjectDigest,
@@ -174,6 +190,7 @@ export function createCompletePartnerSignInEnvelope(
   completion: PartnerSignInCompletion,
   context: Readonly<{ requestId: string; serverTime: string }>,
   surface: PartnerSignInSurface = WEB_SURFACE,
+  factor: PartnerSignInFactor = DEFAULT_FACTOR,
 ): AuthenticationCapabilityEnvelope {
   return AuthenticationCapabilityEnvelopeSchema.parse({
     capabilityId: 'complete-oidc-sign-in',
@@ -184,12 +201,24 @@ export function createCompletePartnerSignInEnvelope(
     serverTime: context.serverTime,
     input: completion.capabilityInput,
     idempotencyKey: completion.idempotencyKey,
-    transport: PartnerOtpCompletionTransportSchema.parse({
-      kind: 'partner-email-otp',
-      method: 'POST',
-      otpVerified: true,
-      signatureVerified: true,
-    }),
+    // The recorded evidence names the factor the pool actually proved. A
+    // passkey sign-in must not record `otpVerified`: the audit would then
+    // claim a code was read from an inbox that never received one.
+    transport:
+      factor === 'passkey'
+        ? PartnerPasskeyCompletionTransportSchema.parse({
+            kind: 'partner-passkey',
+            method: 'POST',
+            passkeyVerified: true,
+            userVerified: true,
+            signatureVerified: true,
+          })
+        : PartnerOtpCompletionTransportSchema.parse({
+            kind: 'partner-email-otp',
+            method: 'POST',
+            otpVerified: true,
+            signatureVerified: true,
+          }),
   });
 }
 
@@ -198,6 +227,8 @@ export interface CompletePartnerSignInInput {
   readonly installationId: string;
   readonly requestId: string;
   readonly now: Date;
+  /** The first factor the pool proved; the emailed code when unstated. */
+  readonly factor?: PartnerSignInFactor;
   readonly policy?: PartnerSessionPolicy;
   /** Injected only by tests that have no PostgreSQL. */
   readonly store?: PartnerSessionStore;
@@ -296,11 +327,13 @@ async function issuePartnerSession(
   }
 
   const serverTime = input.now.toISOString();
+  const factor = input.factor ?? DEFAULT_FACTOR;
   const completion = createPartnerSignInCompletion({
     claims: input.claims,
     displayName: access.user.displayName,
     installationId: input.installationId,
     surface,
+    factor,
   });
   const envelope = parseCapabilityEnvelopeFor(
     'complete-oidc-sign-in',
@@ -308,6 +341,7 @@ async function issuePartnerSession(
       completion,
       { requestId: input.requestId, serverTime },
       surface,
+      factor,
     ),
   );
 

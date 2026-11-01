@@ -1,9 +1,6 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  hkdfSync,
-  randomBytes,
-} from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+
+import { deriveTransientCookieKey } from './transient-cookie-secret';
 
 /**
  * The transient state of one partner sign-in, between asking for a code and
@@ -47,12 +44,29 @@ export type Environment = Readonly<Record<string, string | undefined>>;
  */
 export type PartnerFlowSurface = 'web' | 'native';
 
+/**
+ * Which first factor one flow's challenge is for.
+ *
+ * The pool's continuation handle is opaque and belongs to exactly one
+ * challenge, so answering an `email-otp` session with a passkey assertion (or
+ * the reverse) would be refused by the pool anyway. Naming the factor in the
+ * seal refuses it here instead, before a provider call is made and before the
+ * verify budget is spent, and makes the separation a property a test can
+ * state rather than a behaviour of Amazon's service.
+ *
+ * A seal written before this field existed has no factor and is read as
+ * `email-otp`, which is what every such flow was.
+ */
+export type PartnerSignInFactor = 'email-otp' | 'passkey';
+
 export interface PartnerSignInFlow {
   readonly email: string;
   /** The identity provider's opaque continuation for this one challenge. */
   readonly flowSession: string;
   /** The installation this sign-in enrolls. */
   readonly installationId: string;
+  /** The first factor this challenge is for; absent means `email-otp`. */
+  readonly factor?: PartnerSignInFactor;
   /**
    * The native platform this flow enrolls, absent on the browser. Carrying
    * it in the seal is what stops the second step from enrolling a different
@@ -82,27 +96,19 @@ export class PartnerFlowCookieError extends Error {
  * destination cookie validates it, then stretched into this cookie's own key.
  */
 function cookieKey(environment: Environment): Buffer {
-  const value = environment.GOOGLE_OIDC_COOKIE_SECRET;
-  if (
-    value === undefined ||
-    value !== value.trim() ||
-    !/^[A-Za-z0-9_-]+$/u.test(value)
-  ) {
+  try {
+    return deriveTransientCookieKey(environment, {
+      salt: COOKIE_NAME,
+      info: KEY_INFO,
+      message: 'The partner sign-in cookie secret is invalid.',
+    });
+  } catch (error) {
     throw new PartnerFlowCookieError(
-      'The partner sign-in cookie secret is invalid.',
+      error instanceof Error
+        ? error.message
+        : 'The partner sign-in cookie secret is invalid.',
     );
   }
-  const decoded = Buffer.from(value, 'base64url');
-  if (
-    decoded.byteLength < 32 ||
-    decoded.byteLength > 64 ||
-    decoded.toString('base64url') !== value
-  ) {
-    throw new PartnerFlowCookieError(
-      'The partner sign-in cookie secret is invalid.',
-    );
-  }
-  return Buffer.from(hkdfSync('sha256', decoded, COOKIE_NAME, KEY_INFO, 32));
 }
 
 /** Serializes one flow into a sealed value for the surface that asked. */
@@ -180,7 +186,17 @@ export function openPartnerSignInFlow(
     return null;
   }
   const record = parsed as Readonly<Record<string, unknown>>;
-  const { email, flowSession, installationId, platform, expiresAt } = record;
+  const { email, flowSession, installationId, platform, factor, expiresAt } =
+    record;
+  // An absent factor is the email code, which is what every flow sealed
+  // before passkeys existed was. An unrecognized one is not defaulted: it is
+  // a value this build does not understand, so the flow does not open.
+  const resolvedFactor: PartnerSignInFactor | null =
+    factor === undefined || factor === 'email-otp'
+      ? 'email-otp'
+      : factor === 'passkey'
+        ? 'passkey'
+        : null;
   // A native flow names the platform it enrolls and a browser flow never
   // does, so a seal cannot be carried from one surface's shape to the
   // other's even if its label were somehow accepted. Narrowing here rather
@@ -202,6 +218,7 @@ export function openPartnerSignInFlow(
     installationId.length < 16 ||
     installationId.length > 255 ||
     !platformValid ||
+    resolvedFactor === null ||
     typeof expiresAt !== 'number' ||
     !Number.isSafeInteger(expiresAt) ||
     expiresAt <= now.getTime()
@@ -215,9 +232,16 @@ export function openPartnerSignInFlow(
           flowSession,
           installationId,
           platform: nativePlatform,
+          factor: resolvedFactor,
           expiresAt,
         }
-      : { email, flowSession, installationId, expiresAt },
+      : {
+          email,
+          flowSession,
+          installationId,
+          factor: resolvedFactor,
+          expiresAt,
+        },
   );
 }
 

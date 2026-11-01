@@ -25,6 +25,10 @@ import {
 } from '../../../../lib/auth/partner-otp';
 import { getPartnerOtpLimiter } from '../../../../lib/auth/partner-otp-limit';
 import {
+  PARTNER_PASSKEY_ENROLLMENT_LIFETIME_SECONDS,
+  partnerPasskeyCookieHeader,
+} from '../../../../lib/auth/partner-passkey-enrollment';
+import {
   completePartnerSignIn,
   PartnerSignInError,
 } from '../../../../lib/auth/partner-sign-in';
@@ -34,6 +38,7 @@ import {
 } from '../../../../lib/auth/sign-in-audit';
 import { forwardedClientAddress } from '../../../../lib/http/client-address';
 import {
+  PARTNER_PASSKEY_PATH,
   PARTNER_SIGN_IN_PATH,
   type PartnerSignInStatus,
 } from '../../partner-sign-in/status';
@@ -125,6 +130,35 @@ function createConnection(): DatabaseConnection {
 }
 
 /**
+ * The `Set-Cookie` that opens a passkey enrollment, or null when this
+ * sign-in cannot offer one.
+ *
+ * A sign-in with no pool access token has nothing to enroll against, and a
+ * deployment whose origin cannot be a relying-party id has nowhere to bind a
+ * passkey to. Neither is a failure of the sign-in that just succeeded, so
+ * both simply mean no offer.
+ */
+function passkeyEnrollmentOffer(
+  email: string,
+  accessToken: string | null,
+  now: Date,
+): string | null {
+  if (accessToken === null) {
+    return null;
+  }
+  try {
+    return partnerPasskeyCookieHeader({
+      email,
+      accessToken,
+      expiresAt:
+        now.getTime() + PARTNER_PASSKEY_ENROLLMENT_LIFETIME_SECONDS * 1_000,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Partner sign-in: ask for a code, then answer with it.
  *
  * Both steps are POSTs from this deployment's own page, checked by Origin.
@@ -205,6 +239,12 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (flow === null) {
     return back(request, 'expired', { clearFlow: true });
   }
+  // A flow opened for a passkey challenge is not answered with a code. The
+  // pool's continuation belongs to one challenge and would refuse it anyway;
+  // refusing here spends no verify budget and makes no provider call.
+  if (flow.factor === 'passkey') {
+    return back(request, 'expired', { clearFlow: true });
+  }
   const code = singleValue(form, 'code') ?? '';
   if (!OTP_CODE_PATTERN.test(code)) {
     return back(request, 'refused', { step: 'code' });
@@ -218,7 +258,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   let connection: DatabaseConnection | undefined;
   const requestId = randomUUID();
   try {
-    const claims = await provider.verify({
+    const { claims, accessToken } = await provider.verify({
       email: flow.email,
       flowSession: flow.flowSession,
       code,
@@ -227,11 +267,21 @@ export async function POST(request: Request): Promise<NextResponse> {
     const completed = await completePartnerSignIn(connection.db, {
       claims,
       installationId: flow.installationId,
+      factor: 'email-otp',
       requestId,
       now,
     });
+    // A partner who just proved their address is offered a passkey, so the
+    // next sign-in needs no inbox. The offer is a page, not a requirement:
+    // declining it lands in the application exactly as before. Without the
+    // pool's access token there is nothing to enroll against, so the offer is
+    // simply not made.
+    const enrollment = passkeyEnrollmentOffer(flow.email, accessToken, now);
     const response = NextResponse.redirect(
-      new URL('/', `${applicationOriginForRequest(request.url)}/`),
+      new URL(
+        enrollment === null ? '/' : PARTNER_PASSKEY_PATH,
+        `${applicationOriginForRequest(request.url)}/`,
+      ),
       303,
     );
     response.cookies.set(completed.cookie);
@@ -243,6 +293,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     // NextResponse.cookies rewrites Set-Cookie, so the flow-cookie clearing
     // is appended only after every cookie-writer call has completed.
     response.headers.append('Set-Cookie', clearPartnerFlowCookieHeader());
+    if (enrollment !== null) {
+      response.headers.append('Set-Cookie', enrollment);
+    }
     return noStore(response);
   } catch (error) {
     if (error instanceof PartnerSignInError) {

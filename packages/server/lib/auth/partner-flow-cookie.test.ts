@@ -33,7 +33,44 @@ describe('the partner sign-in flow cookie', () => {
     const sealed = sealPartnerSignInFlow(flow, environment);
     expect(sealed).not.toContain(flow.email);
     expect(sealed).not.toContain(flow.flowSession);
-    expect(openPartnerSignInFlow(sealed, now, environment)).toEqual(flow);
+    // A flow sealed without a factor opens as the emailed code, which is
+    // what every flow sealed before passkeys existed was.
+    expect(openPartnerSignInFlow(sealed, now, environment)).toEqual({
+      ...flow,
+      factor: 'email-otp',
+    });
+  });
+
+  test('a flow states the first factor its challenge is for', () => {
+    const passkeyFlow: PartnerSignInFlow = Object.freeze({
+      ...flow,
+      factor: 'passkey',
+    });
+    expect(
+      openPartnerSignInFlow(
+        sealPartnerSignInFlow(passkeyFlow, environment),
+        now,
+        environment,
+      ),
+    ).toEqual(passkeyFlow);
+    expect(
+      openPartnerSignInFlow(
+        sealPartnerSignInFlow({ ...flow, factor: 'email-otp' }, environment),
+        now,
+        environment,
+      ),
+    ).toMatchObject({ factor: 'email-otp' });
+  });
+
+  test('a factor this build does not understand does not open', () => {
+    // Not defaulted to the code: an unrecognized factor is a value from
+    // another build, and guessing which challenge it named would be the one
+    // way a passkey challenge could be answered with a code.
+    const sealed = sealPartnerSignInFlow(
+      { ...flow, factor: 'sms-otp' } as unknown as PartnerSignInFlow,
+      environment,
+    );
+    expect(openPartnerSignInFlow(sealed, now, environment)).toBeNull();
   });
 
   test('a tampered flow does not open', () => {
@@ -138,7 +175,7 @@ describe('the partner sign-in flow cookie', () => {
       expect(sealed).not.toContain(nativeFlow.email);
       expect(sealed).not.toContain(nativeFlow.flowSession);
       expect(openPartnerSignInFlow(sealed, now, environment, 'native')).toEqual(
-        nativeFlow,
+        { ...nativeFlow, factor: 'email-otp' },
       );
     });
 

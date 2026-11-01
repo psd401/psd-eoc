@@ -158,6 +158,10 @@ replaces the earlier decision to attach no set:
 
 ## Changing the relying-party id
 
+`passkey_relying_party_id` must be the host part of the stack's
+`psdEoc:applicationOrigin`; the server derives the same id from that origin
+rather than reading a second copy, so the two must name one hostname.
+
 A passkey is bound to `passkey_relying_party_id`. Changing it after partners
 have enrolled invalidates every enrolled passkey, and they all re-enroll. It is
 the application's own hostname and should change only when that hostname does.

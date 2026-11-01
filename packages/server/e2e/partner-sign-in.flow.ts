@@ -36,7 +36,7 @@ test.describe('partner-sign-in', () => {
     });
 
     await page.getByLabel('Your agency email address').fill(PARTNER_EMAIL);
-    await page.getByRole('button', { name: 'Email me a sign-in code' }).click();
+    await page.getByRole('button', { name: 'Continue' }).click();
     await expect(page.locator('p.form-message[role="alert"]')).toContainText(
       'a sign-in code is on its way',
     );
@@ -50,6 +50,14 @@ test.describe('partner-sign-in', () => {
       .getByLabel('Sign-in code from your email')
       .fill(syntheticPartnerOtpCode(PARTNER_EMAIL));
     await page.getByRole('button', { name: 'Sign in' }).click();
+
+    // A code sign-in is offered a passkey first (#599). The offer is not a
+    // gate — the session already exists — so declining it lands in the
+    // application exactly as this flow always did.
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Set up a passkey' }),
+    ).toBeVisible({ timeout: 30_000 });
+    await page.getByRole('link', { name: 'Not now' }).click();
 
     // Signed in: the partner lands in the application and the navigation
     // shows the one role a partner ever holds.
@@ -103,7 +111,7 @@ test.describe('partner-sign-in', () => {
   }) => {
     await page.goto('/partner-sign-in');
     await page.getByLabel('Your agency email address').fill(UNKNOWN_EMAIL);
-    await page.getByRole('button', { name: 'Email me a sign-in code' }).click();
+    await page.getByRole('button', { name: 'Continue' }).click();
     // Step one says the same thing for every address, so it answers no
     // question about who has partner access.
     await expect(page.locator('p.form-message[role="alert"]')).toContainText(
@@ -128,7 +136,7 @@ test.describe('partner-sign-in', () => {
   test('a wrong code is refused and issues no session', async ({ page }) => {
     await page.goto('/partner-sign-in');
     await page.getByLabel('Your agency email address').fill(PARTNER_EMAIL);
-    await page.getByRole('button', { name: 'Email me a sign-in code' }).click();
+    await page.getByRole('button', { name: 'Continue' }).click();
     await page.getByLabel('Sign-in code from your email').fill('000000');
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect(page.locator('p.form-message[role="alert"]')).toContainText(

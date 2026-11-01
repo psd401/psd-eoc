@@ -1,0 +1,642 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+
+import {
+  openPartnerSignInFlow,
+  PARTNER_FLOW_COOKIE_NAME,
+  partnerFlowCookieHeader,
+} from '../../../../../lib/auth/partner-flow-cookie';
+import { syntheticPartnerAccessToken } from '../../../../../lib/auth/partner-otp';
+import {
+  getPartnerOtpLimiter,
+  PARTNER_OTP_SENDS_PER_EMAIL,
+  PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL,
+} from '../../../../../lib/auth/partner-otp-limit';
+import {
+  PARTNER_PASSKEY_COOKIE_NAME,
+  partnerPasskeyCookieHeader,
+} from '../../../../../lib/auth/partner-passkey-enrollment';
+import {
+  poolMailsOnProbe,
+  resetPoolMailsOnProbe,
+  resetSyntheticPartnerPasskeys,
+  syntheticPartnerHasPasskey,
+} from '../../../../../lib/auth/partner-passkey';
+import { POST } from './route';
+import { signInStart } from './steps';
+
+/** A same-origin probe request from one caller. */
+function probeRequest(client: string): Request {
+  return new Request(ACTION, {
+    method: 'POST',
+    headers: new Headers({
+      'content-type': 'application/json',
+      origin: ORIGIN,
+      'x-forwarded-for': client,
+    }),
+    body: JSON.stringify({ step: 'sign-in-start', email: 'unused@x.invalid' }),
+  });
+}
+
+/**
+ * How much of this address's send budget is left, by spending it.
+ *
+ * The limiter counts rather than reports, so the only honest way to ask what
+ * it holds is to use it up. Every caller passes a throwaway address, so
+ * spending it costs nothing.
+ */
+function remainingSends(email: string, client: string): number {
+  const limiter = getPartnerOtpLimiter();
+  const now = new Date();
+  let remaining = 0;
+  while (limiter.admit({ kind: 'send', email, client }, now).admitted) {
+    remaining += 1;
+    if (remaining > 100) break;
+  }
+  return remaining;
+}
+
+/**
+ * Issue #599. The partner passkey endpoint: what it accepts, what it
+ * refuses, and what it declines to say.
+ *
+ * Nothing here reaches a database. Every path tested either refuses before a
+ * session could be issued, or stops at the enrollment hand-off, which never
+ * touches one.
+ */
+
+const ORIGIN = 'http://localhost:3000';
+const ACTION = `${ORIGIN}/auth/partner/passkey`;
+const COOKIE_SECRET = Buffer.alloc(32, 43).toString('base64url');
+const EMAIL = 'responder@agency.example.invalid';
+
+const names = [
+  'PSD_EOC_PARTNER_USER_POOL_ID',
+  'PSD_EOC_PARTNER_USER_POOL_CLIENT_ID',
+  'PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN',
+  'PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN',
+  'DATABASE_URL',
+  'DATABASE_HOST',
+  'DATABASE_SSL_ROOT_CERT',
+  'GOOGLE_OIDC_COOKIE_SECRET',
+  'NODE_ENV',
+] as const;
+const original = new Map<string, string | undefined>();
+
+function base64url(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64url');
+}
+
+function clientData(overrides: Readonly<Record<string, unknown>> = {}): string {
+  return base64url(
+    JSON.stringify({
+      type: 'webauthn.get',
+      challenge: 'Y2hhbGxlbmdl',
+      origin: ORIGIN,
+      ...overrides,
+    }),
+  );
+}
+
+function assertionCredential(
+  clientDataJSON = clientData(),
+): Readonly<Record<string, unknown>> {
+  return {
+    id: 'Y3JlZGVudGlhbC1pZA',
+    rawId: 'Y3JlZGVudGlhbC1pZA',
+    type: 'public-key',
+    response: {
+      clientDataJSON,
+      authenticatorData: 'YXV0aA',
+      signature: 'c2ln',
+    },
+  };
+}
+
+function registrationCredential(
+  clientDataJSON: string,
+): Readonly<Record<string, unknown>> {
+  return {
+    id: 'Y3JlZGVudGlhbC1pZA',
+    rawId: 'Y3JlZGVudGlhbC1pZA',
+    type: 'public-key',
+    response: { clientDataJSON, attestationObject: 'YXR0ZXN0YXRpb24' },
+  };
+}
+
+function post(
+  body: unknown,
+  options: Readonly<{
+    origin?: string | null;
+    cookie?: string;
+    contentType?: string | null;
+    client?: string;
+  }> = {},
+): Promise<Response> {
+  const headers = new Headers();
+  if (options.client !== undefined) {
+    headers.set('x-forwarded-for', options.client);
+  }
+  const contentType =
+    options.contentType === undefined
+      ? 'application/json'
+      : options.contentType;
+  if (contentType !== null) headers.set('content-type', contentType);
+  const origin = options.origin === undefined ? ORIGIN : options.origin;
+  if (origin !== null) headers.set('origin', origin);
+  if (options.cookie !== undefined) headers.set('cookie', options.cookie);
+  return POST(
+    new Request(ACTION, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    }),
+  ) as Promise<Response>;
+}
+
+function enrollmentCookie(email = EMAIL): string {
+  return `${PARTNER_PASSKEY_COOKIE_NAME}=${
+    partnerPasskeyCookieHeader(
+      {
+        email,
+        accessToken: syntheticPartnerAccessToken(email),
+        expiresAt: Date.now() + 10 * 60 * 1_000,
+      },
+      process.env,
+    )
+      .split(';', 1)[0]
+      ?.split('=')
+      .slice(1)
+      .join('=') ?? ''
+  }`;
+}
+
+async function enrollPasskey(): Promise<void> {
+  const started = await post(
+    { step: 'register-start' },
+    {
+      cookie: enrollmentCookie(),
+    },
+  );
+  const { options } = (await started.json()) as {
+    options: { challenge: string };
+  };
+  const finished = await post(
+    {
+      step: 'register-finish',
+      credential: registrationCredential(
+        clientData({ type: 'webauthn.create', challenge: options.challenge }),
+      ),
+    },
+    { cookie: enrollmentCookie() },
+  );
+  expect(finished.status).toBe(200);
+}
+
+beforeEach(() => {
+  for (const name of names) original.set(name, process.env[name]);
+  Reflect.set(process.env, 'PSD_EOC_PARTNER_USER_POOL_ID', 'SYNTHETIC');
+  Reflect.set(process.env, 'PSD_EOC_SYNTHETIC_PARTNER_SIGN_IN', 'allowed');
+  Reflect.set(
+    process.env,
+    'DATABASE_URL',
+    'postgresql://psd_eoc_test@127.0.0.1:55432/psd_eoc_test',
+  );
+  Reflect.deleteProperty(process.env, 'DATABASE_HOST');
+  Reflect.deleteProperty(process.env, 'DATABASE_SSL_ROOT_CERT');
+  Reflect.set(process.env, 'GOOGLE_OIDC_COOKIE_SECRET', COOKIE_SECRET);
+  Reflect.deleteProperty(process.env, 'NODE_ENV');
+  resetSyntheticPartnerPasskeys();
+  resetPoolMailsOnProbe();
+});
+
+afterEach(() => {
+  for (const name of names) {
+    const value = original.get(name);
+    if (value === undefined) {
+      Reflect.deleteProperty(process.env, name);
+    } else {
+      Reflect.set(process.env, name, value);
+    }
+  }
+  resetSyntheticPartnerPasskeys();
+  resetPoolMailsOnProbe();
+});
+
+describe('the partner passkey route', () => {
+  test('refuses a submission from another site', async () => {
+    for (const origin of [null, 'https://evil.example.invalid']) {
+      const response = await post(
+        { step: 'sign-in-start', email: EMAIL },
+        { origin },
+      );
+      expect(response.status).toBe(401);
+    }
+  });
+
+  test('refuses anything that is not one of the four steps', async () => {
+    for (const body of [
+      { step: 'list-credentials' },
+      { step: 'sign-in-start' },
+      { step: 'sign-in-start', email: 'not-an-address' },
+      {},
+    ]) {
+      expect((await post(body)).status).toBeGreaterThanOrEqual(400);
+    }
+    // A body that is not JSON at all is refused before it is parsed.
+    expect(
+      (await post({ step: 'register-start' }, { contentType: 'text/plain' }))
+        .status,
+    ).toBe(400);
+  });
+
+  test('an address with no passkey is told to use a code', async () => {
+    const response = await post({ step: 'sign-in-start', email: EMAIL });
+    expect(response.status).toBe(200);
+    // The answer carries nothing but the method, so it reveals nothing about
+    // whether the address has partner access or an account at all.
+    expect(await response.json()).toEqual({ method: 'code' });
+    expect(response.headers.getSetCookie()).toEqual([]);
+  });
+
+  test('every response forbids caching and referrers', async () => {
+    const response = await post({ step: 'sign-in-start', email: EMAIL });
+    expect(response.headers.get('cache-control')).toBe('no-store, max-age=0');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+  });
+
+  test('a deployment with no partner pool has no passkey path', async () => {
+    Reflect.set(process.env, 'PSD_EOC_PARTNER_USER_POOL_ID', 'UNCONFIGURED');
+    const response = await post({ step: 'sign-in-start', email: EMAIL });
+    expect(response.status).toBe(503);
+  });
+
+  test('registration needs the hand-off, never a session', async () => {
+    // A session is this application's own credential and cannot authorize a
+    // change inside the pool, so a request with no hand-off is refused.
+    expect((await post({ step: 'register-start' })).status).toBe(401);
+    expect(
+      (
+        await post({
+          step: 'register-finish',
+          credential: registrationCredential(
+            clientData({ type: 'webauthn.create' }),
+          ),
+        })
+      ).status,
+    ).toBe(401);
+  });
+
+  test('a partner enrolls a passkey and the hand-off is then spent', async () => {
+    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(false);
+    await enrollPasskey();
+    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(true);
+    // One enrollment per code sign-in: the finish clears the cookie.
+    const started = await post(
+      { step: 'register-start' },
+      {
+        cookie: enrollmentCookie(),
+      },
+    );
+    const { options } = (await started.json()) as {
+      options: { challenge: string };
+    };
+    const replayed = await post(
+      {
+        step: 'register-finish',
+        credential: registrationCredential(
+          clientData({ type: 'webauthn.create', challenge: options.challenge }),
+        ),
+      },
+      { cookie: enrollmentCookie() },
+    );
+    expect(replayed.headers.getSetCookie().join(' ')).toContain(
+      `${PARTNER_PASSKEY_COOKIE_NAME}=;`,
+    );
+  });
+
+  test('a ceremony performed for another origin is refused', async () => {
+    const started = await post(
+      { step: 'register-start' },
+      {
+        cookie: enrollmentCookie(),
+      },
+    );
+    const { options } = (await started.json()) as {
+      options: { challenge: string };
+    };
+    const response = await post(
+      {
+        step: 'register-finish',
+        credential: registrationCredential(
+          clientData({
+            type: 'webauthn.create',
+            challenge: options.challenge,
+            origin: 'https://evil.example.invalid',
+          }),
+        ),
+      },
+      { cookie: enrollmentCookie() },
+    );
+    expect(response.status).toBe(401);
+    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(false);
+  });
+
+  test('a sign-in assertion presented as a registration is refused', async () => {
+    const response = await post(
+      {
+        step: 'register-finish',
+        // `webauthn.get` client data in a registration: the ceremony the
+        // authenticator performed is not the one being completed.
+        credential: registrationCredential(clientData()),
+      },
+      { cookie: enrollmentCookie() },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  test('an enrolled address is offered its passkey, bound to this host', async () => {
+    await enrollPasskey();
+    const response = await post({ step: 'sign-in-start', email: EMAIL });
+    expect(response.status).toBe(200);
+    const answer = (await response.json()) as {
+      method: string;
+      options: { rpId: string; userVerification: string };
+    };
+    expect(answer.method).toBe('passkey');
+    // Derived from the request origin outside production, so the ceremony is
+    // always bound to the host the page was served from.
+    expect(answer.options.rpId).toBe('localhost');
+    expect(answer.options.userVerification).toBe('required');
+    // The flow carries the pool's continuation, sealed, and names the factor.
+    const flowCookie = response.headers
+      .getSetCookie()
+      .find((value) => value.startsWith(`${PARTNER_FLOW_COOKIE_NAME}=`));
+    expect(flowCookie).toBeDefined();
+    const sealed = flowCookie?.split(';', 1)[0]?.split('=').slice(1).join('=');
+    expect(
+      openPartnerSignInFlow(sealed ?? null, new Date(), process.env),
+    ).toMatchObject({ email: EMAIL, factor: 'passkey' });
+  });
+
+  test('a flow opened for a code is never answered with an assertion', async () => {
+    await enrollPasskey();
+    const codeFlow = partnerFlowCookieHeader(
+      {
+        email: EMAIL,
+        flowSession: 'provider-session-handle',
+        installationId: 'web.installation-identifier',
+        factor: 'email-otp',
+        expiresAt: Date.now() + 5 * 60 * 1_000,
+      },
+      process.env,
+    );
+    const response = await post(
+      { step: 'sign-in-finish', credential: assertionCredential() },
+      {
+        cookie: `${PARTNER_FLOW_COOKIE_NAME}=${
+          codeFlow.split(';', 1)[0]?.split('=').slice(1).join('=') ?? ''
+        }`,
+      },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  test('enrolling is bounded, and never spends the code’s budget', async () => {
+    // Behind the sealed hand-off, so not anonymous — but each attempt is a
+    // call to the pool, and nothing else bounds how many a script could make
+    // inside the hand-off's ten minutes.
+    // Its own address and its own caller: the limiter is one per process, so
+    // spending a budget here would otherwise spend it for every test after
+    // this one.
+    const bounded = 'enrolment-budget@agency.example.invalid';
+    const client = '198.51.100.7';
+    let limited = false;
+    for (
+      let attempt = 0;
+      attempt < PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL + 1;
+      attempt += 1
+    ) {
+      const response = await post(
+        { step: 'register-start' },
+        { cookie: enrollmentCookie(bounded), client },
+      );
+      if (response.status === 429) {
+        limited = true;
+        break;
+      }
+      expect(response.status).toBe(200);
+    }
+    expect(limited).toBe(true);
+
+    // The emailed code is untouched: a partner whose enrolment budget is
+    // spent can still ask for a code and answer it.
+    const decision = getPartnerOtpLimiter().admit(
+      { kind: 'send', email: bounded, client },
+      new Date(),
+    );
+    expect(decision.admitted).toBe(true);
+  });
+
+  test('a probe that made the pool mail a code spends the send budget', async () => {
+    // The stand-in never mails, so the pool is a stub here. What is being
+    // proved is the route's half of the contract: when the provider reports
+    // that a code reached the inbox, the budget that bounds how much mail an
+    // inbox can be made to receive is charged for it, counted on the limiter
+    // rather than inferred from the answer the page gets.
+    const mailed = 'mailed-anyway@agency.example.invalid';
+    const client = '198.51.100.9';
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => Promise.resolve({ kind: 'code-sent' as const }),
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+
+    const response = await signInStart(probeRequest(client), {
+      provider,
+      relyingPartyId: 'localhost',
+      email: mailed,
+      now: new Date(),
+    });
+    // The page is told the same thing either way: ask for a code.
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ method: 'code' });
+    // One send is gone from this address's budget, counted on the limiter.
+    expect(remainingSends(mailed, client)).toBe(
+      PARTNER_OTP_SENDS_PER_EMAIL - 1,
+    );
+  });
+
+  test('a probe that mailed nothing leaves the send budget alone', async () => {
+    const quiet = 'nothing-mailed@agency.example.invalid';
+    const client = '198.51.100.10';
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => Promise.resolve({ kind: 'code' as const }),
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+    await signInStart(probeRequest(client), {
+      provider,
+      relyingPartyId: 'localhost',
+      email: quiet,
+      now: new Date(),
+    });
+    expect(remainingSends(quiet, client)).toBe(PARTNER_OTP_SENDS_PER_EMAIL);
+  });
+
+  test('once the pool mails on a probe, a spent send budget stops asking it', async () => {
+    // The charge above records the mail even past the limit, but recording
+    // does not un-send. What bounds a pool that mails on every question is
+    // not asking it again: after one observation, an address with no send
+    // left is answered 'code' without the pool being touched.
+    const spent = 'spent-budget@agency.example.invalid';
+    const client = '198.51.100.11';
+    let asked = 0;
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => {
+        asked += 1;
+        return Promise.resolve({ kind: 'code-sent' as const });
+      },
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+    const start = () =>
+      signInStart(probeRequest(client), {
+        provider,
+        relyingPartyId: 'localhost',
+        email: spent,
+        now: new Date(),
+      });
+
+    // The first probe mails, is charged, and teaches the server this pool
+    // mails on a question.
+    await start();
+    expect(asked).toBe(1);
+    expect(poolMailsOnProbe()).toBe(true);
+
+    // Spend the rest of this address's send budget.
+    while (
+      getPartnerOtpLimiter().admit(
+        { kind: 'send', email: spent, client },
+        new Date(),
+      ).admitted
+    ) {
+      /* spend it */
+    }
+
+    // Now the pool is not asked at all, so no further mail can reach that
+    // inbox however many times the probe is called.
+    const response = await start();
+    expect(asked).toBe(1);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ method: 'code' });
+  });
+
+  test('a spent send budget never gates a pool that has not mailed', async () => {
+    // The invariant the gate exists to preserve: gating every probe on the
+    // mail budget would let anyone who knows an address deny that partner
+    // their passkey with five posts to the email form. A pool that behaves
+    // as documented must never reach the gate, however spent the budget.
+    const quiet = 'budget-spent-quiet@agency.example.invalid';
+    const client = '198.51.100.12';
+    let asked = 0;
+    const options = {
+      rpId: 'localhost',
+      challenge: 'Y2hhbGxlbmdl',
+      userVerification: 'required' as const,
+    };
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => {
+        asked += 1;
+        return Promise.resolve({
+          kind: 'passkey' as const,
+          challenge: { flowSession: 'stub-session', options },
+        });
+      },
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+
+    // Spend every send this address has.
+    while (
+      getPartnerOtpLimiter().admit(
+        { kind: 'send', email: quiet, client },
+        new Date(),
+      ).admitted
+    ) {
+      /* spend it */
+    }
+    expect(poolMailsOnProbe()).toBe(false);
+
+    const response = await signInStart(probeRequest(client), {
+      provider,
+      relyingPartyId: 'localhost',
+      email: quiet,
+      now: new Date(),
+    });
+    expect(asked).toBe(1);
+    expect(await response.json()).toMatchObject({ method: 'passkey' });
+  });
+
+  test('a burst of probes for one address asks the pool once', async () => {
+    // Without this the whole burst reads the observation before the first
+    // answer arrives, so a mailing pool mails for every one of them.
+    const burst = 'burst@agency.example.invalid';
+    const client = '198.51.100.13';
+    let asked = 0;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: async () => {
+        asked += 1;
+        await held;
+        return { kind: 'code-sent' as const };
+      },
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+    const start = () =>
+      signInStart(probeRequest(client), {
+        provider,
+        relyingPartyId: 'localhost',
+        email: burst,
+        now: new Date(),
+      });
+
+    const all = [start(), start(), start(), start(), start()];
+    release?.();
+    const answers = await Promise.all(all);
+    // One question reached the pool, so one code at most reached the inbox.
+    expect(asked).toBe(1);
+    for (const answer of answers) {
+      expect(await answer.json()).toEqual({ method: 'code' });
+    }
+  });
+
+  test('an assertion with no flow at all is refused', async () => {
+    expect(
+      (
+        await post({
+          step: 'sign-in-finish',
+          credential: assertionCredential(),
+        })
+      ).status,
+    ).toBe(401);
+  });
+});

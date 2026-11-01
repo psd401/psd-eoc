@@ -1,5 +1,6 @@
 import { organizationName } from '../../../lib/config/deployment';
 import { partnerSignInConfigured } from '../../../lib/auth/identity-providers';
+import { PartnerPasskeySignInForm } from './passkey-sign-in-form';
 import {
   isPartnerSignInStatus,
   PARTNER_SIGN_IN_ACTION,
@@ -85,24 +86,7 @@ export default async function PartnerSignInPage({
             </button>
           </form>
         ) : (
-          <form method="post" action={PARTNER_SIGN_IN_ACTION}>
-            <input type="hidden" name="step" value="send-code" />
-            <label className="field-label" htmlFor="partner-email">
-              Your agency email address
-            </label>
-            <input
-              className="field-input"
-              id="partner-email"
-              name="email"
-              type="email"
-              autoComplete="email"
-              maxLength={320}
-              required
-            />
-            <button className="button-link" type="submit">
-              Email me a sign-in code
-            </button>
-          </form>
+          <PartnerPasskeySignInForm organization={organization} />
         )}
         {onCodeStep ? (
           <p className="supporting-text">

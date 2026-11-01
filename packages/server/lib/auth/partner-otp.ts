@@ -74,26 +74,53 @@ export interface PartnerOtpChallenge {
   readonly flowSession: string;
 }
 
+/**
+ * One completed first factor: the identity it proved, and the pool's own
+ * access token for it.
+ *
+ * The access token is carried separately from the claims rather than on them
+ * because almost nothing wants it. The session the application issues is its
+ * own; the pool's token authorizes exactly one thing this application
+ * exposes, which is enrolling a passkey for the partner who just signed in
+ * (`partner-passkey.ts`). Keeping it out of `PartnerVerifiedClaims` means it
+ * cannot ride along into the capability envelope, the audit record, or a
+ * response digest by accident. A provider that issues no token answers null,
+ * and the caller then simply offers no passkey enrollment.
+ */
+export interface PartnerFactorVerification {
+  readonly claims: PartnerVerifiedClaims;
+  readonly accessToken: string | null;
+}
+
 export interface PartnerOtpProvider {
   readonly issuer: string;
   readonly audience: string;
   /** Asks the pool to email one code; never reveals whether it did. */
   start(email: string): Promise<PartnerOtpChallenge>;
-  /** Answers one challenge and returns the pool's verified claims. */
+  /** Answers one challenge and returns the pool's verified identity. */
   verify(
     input: Readonly<{ email: string; flowSession: string; code: string }>,
-  ): Promise<PartnerVerifiedClaims>;
+  ): Promise<PartnerFactorVerification>;
 }
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function refused(): never {
+/**
+ * The one refusal. Exported because the passkey provider beside this one must
+ * raise exactly the same failure: a partner must not be able to tell a wrong
+ * code from an unenrolled address from a rejected assertion.
+ */
+export function refusePartnerSignIn(): never {
   throw new PartnerOtpError(
     'PARTNER_SIGN_IN_REFUSED',
     'The partner sign-in details were not accepted.',
   );
+}
+
+function refused(): never {
+  refusePartnerSignIn();
 }
 
 /**
@@ -111,6 +138,25 @@ export function syntheticPartnerOtpCode(email: string): string {
 /** The subject the synthetic directory derives for one partner address. */
 export function syntheticPartnerSubject(email: string): string {
   return `synthetic-${sha256Hex(email.trim().toLowerCase()).slice(0, 32)}`;
+}
+
+/** The prefix that marks a stand-in access token; never a pool's own. */
+export const SYNTHETIC_ACCESS_TOKEN_PREFIX = 'synthetic-partner-access:';
+
+/**
+ * The stand-in's access token for one address.
+ *
+ * The real pool issues an opaque JWT the server only ever hands back to it.
+ * The stand-in needs the same hand-off to carry an address, because its
+ * passkey registration has no pool to ask who the token belongs to, so the
+ * address is derived into the token and read back out of it. It is prefixed
+ * so it can never be mistaken for a pool token, and the stand-in is reachable
+ * only from a loopback database with the test-only variable set.
+ */
+export function syntheticPartnerAccessToken(email: string): string {
+  return `${SYNTHETIC_ACCESS_TOKEN_PREFIX}${sha256Hex(
+    email.trim().toLowerCase(),
+  )}`;
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -207,8 +253,14 @@ function partnerJwkSet(
   return created;
 }
 
-/** Reads the app-client credential by complete ARN, once per process. */
-function createClientSecretReader(
+/**
+ * Reads the app-client credential by complete ARN, once per process.
+ *
+ * Exported so the passkey provider shares this reader rather than opening a
+ * second cache of the same secret: one failed read must invalidate one cache,
+ * not leave a second one holding a credential the first has given up on.
+ */
+export function createPartnerClientSecretReader(
   clientSecretArn: string,
   client: Pick<SecretsManagerClient, 'send'> = new SecretsManagerClient({
     maxAttempts: 1,
@@ -263,7 +315,13 @@ function createClientSecretReader(
   };
 }
 
-function secretHash(
+/**
+ * The confidential client's `SECRET_HASH` for one username.
+ *
+ * Exported because every call the server makes to this pool on a partner's
+ * behalf needs it, including the passkey challenge beside the code one.
+ */
+export function partnerSecretHash(
   clientSecret: string,
   email: string,
   clientId: string,
@@ -271,6 +329,14 @@ function secretHash(
   return createHmac('sha256', clientSecret)
     .update(`${email}${clientId}`, 'utf8')
     .digest('base64');
+}
+
+function secretHash(
+  clientSecret: string,
+  email: string,
+  clientId: string,
+): string {
+  return partnerSecretHash(clientSecret, email, clientId);
 }
 
 /** Cognito, at the dependency boundary. SDK retries stay off; a retry is ours. */
@@ -297,7 +363,7 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
     this.audience = configuration.clientId;
     this.readClientSecret =
       readClientSecret ??
-      createClientSecretReader(configuration.clientSecretArn);
+      createPartnerClientSecretReader(configuration.clientSecretArn);
   }
 
   public async start(email: string): Promise<PartnerOtpChallenge> {
@@ -355,7 +421,7 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
 
   public async verify(
     input: Readonly<{ email: string; flowSession: string; code: string }>,
-  ): Promise<PartnerVerifiedClaims> {
+  ): Promise<PartnerFactorVerification> {
     if (
       !OTP_CODE_PATTERN.test(input.code) ||
       input.flowSession.startsWith(UNENROLLED_FLOW_PREFIX)
@@ -364,6 +430,7 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
     }
     const clientSecret = await this.readClientSecret();
     let idToken: string | undefined;
+    let accessToken: string | undefined;
     try {
       const response = await this.client.send(
         new AdminRespondToAuthChallengeCommand({
@@ -383,6 +450,7 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
         }),
       );
       idToken = response.AuthenticationResult?.IdToken;
+      accessToken = response.AuthenticationResult?.AccessToken;
     } catch {
       // A wrong code, an expired flow, and a disabled account all land here
       // and are all one refusal.
@@ -395,7 +463,9 @@ export class CognitoPartnerOtpProvider implements PartnerOtpProvider {
     if (claims.email !== input.email) {
       refused();
     }
-    return claims;
+    // A missing access token is not a refusal: the identity was proven, and
+    // the only thing lost is the offer to enroll a passkey.
+    return Object.freeze({ claims, accessToken: accessToken ?? null });
   }
 }
 
@@ -432,13 +502,16 @@ export function syntheticPartnerOtpProvider(
         refused();
       }
       return Object.freeze({
-        issuer: configuration.issuer,
-        audience: configuration.clientId,
-        subject: syntheticPartnerSubject(input.email),
-        email: input.email,
-        claimsDigest: sha256Hex(
-          `${SYNTHETIC_FLOW_PREFIX}${input.email}\n${input.flowSession}`,
-        ),
+        claims: Object.freeze({
+          issuer: configuration.issuer,
+          audience: configuration.clientId,
+          subject: syntheticPartnerSubject(input.email),
+          email: input.email,
+          claimsDigest: sha256Hex(
+            `${SYNTHETIC_FLOW_PREFIX}${input.email}\n${input.flowSession}`,
+          ),
+        }),
+        accessToken: syntheticPartnerAccessToken(input.email),
       });
     },
   });

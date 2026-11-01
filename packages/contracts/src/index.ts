@@ -22,6 +22,7 @@ export * from './notification';
 export * from './partner-admission';
 export * from './partner-alert-settings';
 export * from './partner-capabilities';
+export * from './partner-passkey';
 export * from './push-runtime';
 export * from './readiness';
 export * from './report';
