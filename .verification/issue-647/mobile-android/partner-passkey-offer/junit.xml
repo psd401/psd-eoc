@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="7.893" timestamp="2026-11-01T02:55:43">
+    <testcase id="Issue 647 - a partner is offered a passkey after an emailed-code sign-in" name="Issue 647 - a partner is offered a passkey after an emailed-code sign-in" classname="Issue 647 - a partner is offered a passkey after an emailed-code sign-in" file="packages/mobile/e2e/flows/partner-passkey-offer.yaml" time="7.883" timestamp="2026-11-01T02:55:43" status="SUCCESS">
+      <properties>
+        <property name="tags" value="issue-647, synthetic-only"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

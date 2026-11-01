@@ -33,6 +33,18 @@ import { deriveTransientCookieKey } from './transient-cookie-secret';
 
 const COOKIE_NAME = '__Host-psd-eoc-partner-passkey';
 const COOKIE_VERSION = 'k1';
+/**
+ * The native app's label for the same sealed hand-off.
+ *
+ * The app has no cookie jar this deployment is willing to depend on, so it is
+ * handed the identical sealed value as an opaque token and returns it
+ * untouched. A different version tag and a different associated-data string
+ * mean a value sealed for the browser cannot be presented by the app and a
+ * value sealed for the app cannot be presented as the cookie, which is the
+ * same separation `partner-flow-cookie` keeps between the two surfaces'
+ * sign-in flows (issue #647).
+ */
+const NATIVE_VERSION = 'e1';
 /** The HKDF label that separates this cookie's derived key from every
  * other transient cookie's. Public, fixed, and not a credential. */
 const DERIVATION_LABEL = 'psd-eoc-partner-passkey-v1';
@@ -54,6 +66,13 @@ export class PartnerPasskeyEnrollmentError extends Error {
   }
 }
 
+/** Which surface a hand-off was sealed for. */
+export type PartnerPasskeySurface = 'web' | 'native';
+
+function versionFor(surface: PartnerPasskeySurface): string {
+  return surface === 'native' ? NATIVE_VERSION : COOKIE_VERSION;
+}
+
 export interface PartnerPasskeyEnrollment {
   /** The pool username, which is the lower-cased address. */
   readonly email: string;
@@ -66,11 +85,21 @@ export interface PartnerPasskeyEnrollment {
    * in a cookie would add a check that can disagree with the authority.
    */
   readonly accessToken: string;
+  /**
+   * The native platform this enrollment creates a passkey on, absent on the
+   * browser.
+   *
+   * It is here rather than in the request because it decides which ceremony
+   * origin the created credential is checked against: iOS reports an https
+   * origin and Android an `android:apk-key-hash:` one. Taking it from the
+   * seal means a caller cannot choose which check applies to it (issue #647).
+   */
+  readonly platform?: 'ios' | 'android';
   readonly expiresAt: number;
 }
 
-function associatedData(): Buffer {
-  return Buffer.from(`${COOKIE_NAME}.${COOKIE_VERSION}`, 'utf8');
+function associatedData(surface: PartnerPasskeySurface): Buffer {
+  return Buffer.from(`${COOKIE_NAME}.${versionFor(surface)}`, 'utf8');
 }
 
 function cookieKey(environment: Environment): Buffer {
@@ -93,18 +122,19 @@ function cookieKey(environment: Environment): Buffer {
 export function sealPartnerPasskeyEnrollment(
   enrollment: PartnerPasskeyEnrollment,
   environment: Environment = process.env,
+  surface: PartnerPasskeySurface = 'web',
 ): string {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', cookieKey(environment), iv, {
     authTagLength: 16,
   });
-  cipher.setAAD(associatedData());
+  cipher.setAAD(associatedData(surface));
   const sealed = Buffer.concat([
     cipher.update(JSON.stringify(enrollment), 'utf8'),
     cipher.final(),
   ]);
   return [
-    COOKIE_VERSION,
+    versionFor(surface),
     iv.toString('base64url'),
     sealed.toString('base64url'),
     cipher.getAuthTag().toString('base64url'),
@@ -116,6 +146,7 @@ export function openPartnerPasskeyEnrollment(
   value: string | null | undefined,
   now: Date,
   environment: Environment = process.env,
+  surface: PartnerPasskeySurface = 'web',
 ): PartnerPasskeyEnrollment | null {
   if (
     value === null ||
@@ -127,7 +158,7 @@ export function openPartnerPasskeyEnrollment(
   }
   const [version, ivPart, sealedPart, tagPart, ...rest] = value.split('.');
   if (
-    version !== COOKIE_VERSION ||
+    version !== versionFor(surface) ||
     ivPart === undefined ||
     sealedPart === undefined ||
     tagPart === undefined ||
@@ -143,7 +174,7 @@ export function openPartnerPasskeyEnrollment(
       Buffer.from(ivPart, 'base64url'),
       { authTagLength: 16 },
     );
-    decipher.setAAD(associatedData());
+    decipher.setAAD(associatedData(surface));
     decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
     plaintext = Buffer.concat([
       decipher.update(Buffer.from(sealedPart, 'base64url')),
@@ -162,7 +193,16 @@ export function openPartnerPasskeyEnrollment(
     return null;
   }
   const record = parsed as Readonly<Record<string, unknown>>;
-  const { email, accessToken, expiresAt } = record;
+  const { email, accessToken, platform, expiresAt } = record;
+  // A native hand-off names the platform it enrolls and a browser one never
+  // does, so a seal cannot be carried from one surface's shape to the other's
+  // even if its label were somehow accepted. Narrowing here rather than
+  // testing it separately is what lets the result be built without an
+  // assertion the compiler cannot check.
+  const nativePlatform =
+    platform === 'ios' || platform === 'android' ? platform : null;
+  const platformValid =
+    surface === 'native' ? nativePlatform !== null : platform === undefined;
   if (
     typeof email !== 'string' ||
     email.length === 0 ||
@@ -171,13 +211,18 @@ export function openPartnerPasskeyEnrollment(
     typeof accessToken !== 'string' ||
     accessToken.length === 0 ||
     accessToken.length > 6 * 1_024 ||
+    !platformValid ||
     typeof expiresAt !== 'number' ||
     !Number.isSafeInteger(expiresAt) ||
     expiresAt <= now.getTime()
   ) {
     return null;
   }
-  return Object.freeze({ email, accessToken, expiresAt });
+  return Object.freeze(
+    nativePlatform !== null && surface === 'native'
+      ? { email, accessToken, platform: nativePlatform, expiresAt }
+      : { email, accessToken, expiresAt },
+  );
 }
 
 /**

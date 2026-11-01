@@ -141,6 +141,23 @@ function signInFromApp(
   });
 }
 
+/** The same native sign-in, with a passkey as the first factor. */
+function signInFromAppWithPasskey(
+  verified: PartnerVerifiedClaims,
+  platform: 'ios' | 'android',
+  now = new Date(),
+): ReturnType<typeof completeNativePartnerSignIn> {
+  return completeNativePartnerSignIn(database(), {
+    claims: verified,
+    installationId: `native.${randomUUID()}`,
+    platform,
+    factor: 'passkey',
+    requestId: randomUUID(),
+    now,
+    staffDomain: STAFF_DOMAIN,
+  });
+}
+
 /** The one success entry the access-gate ledger holds for one sign-in. */
 async function successAudit(
   sessionId: string,
@@ -539,6 +556,89 @@ describeWithDatabase('partner web sign-in', () => {
       const byPasskey = await signInWithPasskey(verified);
       expect(byPasskey.session.user.id).toBe(byCode.session.user.id);
       expect(byPasskey.cookie.value).not.toBe(byCode.cookie.value);
+    });
+  });
+
+  /**
+   * Issue #647. The app's passkey path is the same path: the pool proves the
+   * factor, the admission decides, and the ledger records the phone it came
+   * from. What is worth proving against a real database is that none of the
+   * refusals the emailed code gets are missing here, because a passkey that
+   * outlived an admission would be a credential nobody can see to revoke.
+   */
+  describe('a partner signs in from the app with a passkey', () => {
+    test('an admitted partner is let in, on a one-day mobile session', async () => {
+      for (const platform of ['ios', 'android'] as const) {
+        const email = `app-passkey-${platform}-${randomUUID()}@agency.example.invalid`;
+        await admit(email);
+        const now = new Date();
+        const completed = await signInFromAppWithPasskey(
+          claims(email),
+          platform,
+          now,
+        );
+        expect(completed.session.user.roles).toEqual(['partner']);
+        expect(completed.session.deviceEnrollment.platform).toBe(platform);
+        expect(
+          Date.parse(completed.session.session.expiresAt) - now.getTime(),
+        ).toBeLessThanOrEqual(DAY_MS);
+        expect(await successAudit(completed.session.session.id)).toEqual({
+          outcome: 'success',
+          source: 'mobile',
+        });
+      }
+    });
+
+    test('an ended, expired, or disabled account is refused', async () => {
+      const ended = `app-passkey-ended-${randomUUID()}@agency.example.invalid`;
+      const admissionId = await admit(ended);
+      await database().insert(partnerAdmissionEndings).values({
+        partnerAdmissionId: admissionId,
+        reason: 'disabled',
+        endedByUserId: adminId,
+        endedAt: new Date(),
+      });
+      expect(
+        await expectRefusal(signInFromAppWithPasskey(claims(ended), 'ios')),
+      ).toBe('PARTNER_ADMISSION_ENDED');
+
+      const expired = `app-passkey-expired-${randomUUID()}@agency.example.invalid`;
+      await admit(expired, {
+        admittedAt: new Date(Date.now() - YEAR_AND_A_DAY_MS),
+      });
+      expect(
+        await expectRefusal(
+          signInFromAppWithPasskey(claims(expired), 'android'),
+        ),
+      ).toBe('PARTNER_ADMISSION_EXPIRED');
+
+      const disabled = `app-passkey-disabled-${randomUUID()}@agency.example.invalid`;
+      await admit(disabled);
+      const subject = `cognito-${randomUUID()}`;
+      const completed = await signInFromAppWithPasskey(
+        claims(disabled, subject),
+        'ios',
+      );
+      await database()
+        .update(users)
+        .set({ disabledAt: new Date() })
+        .where(eq(users.id, completed.session.user.id));
+      expect(
+        await expectRefusal(
+          signInFromAppWithPasskey(claims(disabled, subject), 'ios'),
+        ),
+      ).toBe('ACCOUNT_DISABLED');
+
+      const unknown = `app-passkey-unknown-${randomUUID()}@agency.example.invalid`;
+      expect(
+        await expectRefusal(signInFromAppWithPasskey(claims(unknown), 'ios')),
+      ).toBe('NO_PARTNER_ADMISSION');
+
+      const staff = `app-passkey-staff-${randomUUID()}@${STAFF_DOMAIN}`;
+      await admit(staff);
+      expect(
+        await expectRefusal(signInFromAppWithPasskey(claims(staff), 'android')),
+      ).toBe('STAFF_ADDRESS');
     });
   });
 

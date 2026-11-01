@@ -1,0 +1,40 @@
+appId: ${APP_ID}
+name: Issue 647 - a partner declines the passkey and keeps the emailed code
+tags: [issue-647, synthetic-only]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse to run outside the synthetic mobile harness
+# Maestro's driver can leave the device on its home screen when a session
+# ends, so the app this journey signed in is sometimes backgrounded between
+# flows. It is brought forward only when it is not already in front: on a
+# platform that kept it there, relaunching would be the thing that lost the
+# screen this flow is about. The offer the flow before this one left on
+# screen is what "in front" means here, because this one starts scrolled to
+# it rather than at the top.
+- runFlow:
+    when:
+      notVisible: 'Sign in faster next time'
+    commands:
+      - launchApp:
+          appId: ${APP_ID}
+          stopApp: false
+
+# Declining is one press and costs nothing. The card is taller than the fold
+# on a phone, so the control is scrolled to before it is touched.
+- scrollUntilVisible:
+    element:
+      id: 'partner-passkey-dismiss'
+    direction: DOWN
+- tapOn:
+    id: 'partner-passkey-dismiss'
+- extendedWaitUntil:
+    notVisible: 'Sign in faster next time'
+    timeout: 20000
+
+# This flow leaves the screen where the journey found it, at the top, so the
+# event journey that follows starts from the same place it would have anyway.
+- scrollUntilVisible:
+    element:
+      text: 'PARTNER AGENCY OPERATIONS'
+    direction: UP

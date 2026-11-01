@@ -2,6 +2,9 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   DeploymentConfigurationError,
+  androidApplicationId,
+  androidSigningFingerprints,
+  appleAppTeamId,
   applicationOrigin,
   displayTimeZone,
   iosBundleId,
@@ -37,6 +40,32 @@ describe('deployment configuration', () => {
       'https://www.example.invalid/contact',
     );
     expect(displayTimeZone(environment)).toBe('America/New_York');
+  });
+
+  test('store identities are optional and absent by default', () => {
+    // A district that ships no store build is a legitimate deployment: the
+    // association documents are then not served, native passkeys are
+    // unavailable, and the emailed code needs none of this.
+    expect(appleAppTeamId({})).toBeNull();
+    expect(androidApplicationId({})).toBeNull();
+    expect(androidSigningFingerprints({})).toEqual([]);
+  });
+
+  test('store identities are read and normalized when configured', () => {
+    const fingerprint = `${'AB:'.repeat(31)}CD`;
+    expect(appleAppTeamId({ PSD_EOC_APPLE_APP_TEAM_ID: ' A1B2C3D4E5 ' })).toBe(
+      'A1B2C3D4E5',
+    );
+    expect(
+      androidApplicationId({
+        PSD_EOC_ANDROID_APPLICATION_ID: 'invalid.example.alerts',
+      }),
+    ).toBe('invalid.example.alerts');
+    expect(
+      androidSigningFingerprints({
+        PSD_EOC_ANDROID_SIGNING_FINGERPRINTS: fingerprint.toLowerCase(),
+      }),
+    ).toEqual([fingerprint]);
   });
 
   test('requires a valid configured display time zone', () => {

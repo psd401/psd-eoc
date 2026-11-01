@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="Test Suite" device="medium_phone" tests="1" failures="0" time="28.513" timestamp="2026-11-01T02:56:18">
+    <testcase id="Issue 598 - a partner joins the active event and posts to it" name="Issue 598 - a partner joins the active event and posts to it" classname="Issue 598 - a partner joins the active event and posts to it" file="packages/mobile/e2e/flows/partner-join-and-post.yaml" time="28.501" timestamp="2026-11-01T02:56:19" status="SUCCESS">
+      <properties>
+        <property name="tags" value="issue-598, synthetic-only, event-room"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

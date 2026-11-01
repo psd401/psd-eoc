@@ -188,3 +188,108 @@ export function iosBundleId(
   }
   return bundleId;
 }
+
+/**
+ * The store identities the mobile app association files are built from.
+ *
+ * Apple and Google each decide whether an app may use this deployment's
+ * hostname as a passkey relying party by fetching a document from that
+ * hostname and matching it against the installed app: Apple against the team
+ * identifier and bundle identifier the app was signed with, Google against the
+ * certificate the Play Store signed it with. Both are public values, and both
+ * identify one district's apps, so they are tenant configuration rather than
+ * application literals (issue #647).
+ *
+ * Each reader answers null when its value is absent, because a deployment
+ * with no store build is a legitimate deployment: the association documents
+ * are then not served at all, native passkeys are unavailable, and the
+ * emailed code — which needs none of this — is unaffected. A malformed value
+ * is still an error, since the failure it would otherwise produce is a
+ * document Apple or Google silently refuses.
+ */
+
+const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
+
+function optional(
+  environment: DeploymentEnvironment,
+  name: string,
+): string | null {
+  const value = environment[name]?.trim();
+  return value === undefined || value.length === 0 ? null : value;
+}
+
+/** The Apple Developer team identifier that signs this district's iOS app. */
+export function appleAppTeamId(
+  environment: DeploymentEnvironment = process.env,
+): string | null {
+  const teamId = optional(environment, 'PSD_EOC_APPLE_APP_TEAM_ID');
+  if (teamId === null) {
+    return null;
+  }
+  if (!APPLE_TEAM_ID_PATTERN.test(teamId)) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_APPLE_APP_TEAM_ID must be a ten-character Apple team identifier.',
+    );
+  }
+  return teamId;
+}
+
+/** The Android application id this district ships, as Play holds it. */
+export function androidApplicationId(
+  environment: DeploymentEnvironment = process.env,
+): string | null {
+  const applicationId = optional(environment, 'PSD_EOC_ANDROID_APPLICATION_ID');
+  if (applicationId === null) {
+    return null;
+  }
+  if (
+    applicationId.length > 255 ||
+    !BUNDLE_ID_PATTERN.test(applicationId) ||
+    applicationId !== applicationId.toLowerCase()
+  ) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_ANDROID_APPLICATION_ID must be a lower-case reverse-DNS application id.',
+    );
+  }
+  return applicationId;
+}
+
+const SHA256_FINGERPRINT_PATTERN = /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/u;
+/** More than one accommodates a signing-key rotation, and nothing beyond. */
+const MAX_SIGNING_FINGERPRINTS = 4;
+
+/**
+ * The SHA-256 fingerprints of the certificates Play signs this app with.
+ *
+ * A list rather than one value because an app-signing key rotation has two
+ * live certificates at once, and a document naming only one of them locks out
+ * every device holding the other.
+ */
+export function androidSigningFingerprints(
+  environment: DeploymentEnvironment = process.env,
+): readonly string[] {
+  const configured = optional(
+    environment,
+    'PSD_EOC_ANDROID_SIGNING_FINGERPRINTS',
+  );
+  if (configured === null) {
+    return Object.freeze([]);
+  }
+  const fingerprints = configured
+    .split(',')
+    .map((value) => value.trim().toUpperCase())
+    .filter((value) => value.length > 0);
+  if (
+    fingerprints.length === 0 ||
+    fingerprints.length > MAX_SIGNING_FINGERPRINTS ||
+    new Set(fingerprints).size !== fingerprints.length ||
+    fingerprints.some(
+      (fingerprint) => !SHA256_FINGERPRINT_PATTERN.test(fingerprint),
+    )
+  ) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_ANDROID_SIGNING_FINGERPRINTS must be up to four distinct colon-separated SHA-256 certificate fingerprints.',
+    );
+  }
+  return Object.freeze(fingerprints);
+}

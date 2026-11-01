@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites>
+  <testsuite name="Test Suite" device="iPhone 17 Pro - iOS 26.5 - B239FCB8-6A0F-466C-94C8-41BC08995542" tests="1" failures="0" time="21.352" timestamp="2026-11-01T03:03:27">
+    <testcase id="Issue 598 - a partner joins the active event and posts to it" name="Issue 598 - a partner joins the active event and posts to it" classname="Issue 598 - a partner joins the active event and posts to it" file="packages/mobile/e2e/flows/partner-join-and-post.yaml" time="21.333" timestamp="2026-11-01T03:03:27" status="SUCCESS">
+      <properties>
+        <property name="tags" value="issue-598, synthetic-only, event-room"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

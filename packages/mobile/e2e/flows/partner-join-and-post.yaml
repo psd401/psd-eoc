@@ -5,6 +5,18 @@ tags: [issue-598, synthetic-only, event-room]
 - assertTrue:
     condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
     label: Refuse partner event participation outside the synthetic harness
+# Maestro's driver can leave the device on its home screen when a session
+# ends, so the app this journey signed in is sometimes backgrounded between
+# flows. It is brought forward only when it is not already in front: on a
+# platform that kept it there, relaunching would be the thing that lost the
+# screen this flow is about.
+- runFlow:
+    when:
+      notVisible: 'PARTNER AGENCY OPERATIONS'
+    commands:
+      - launchApp:
+          appId: ${APP_ID}
+          stopApp: false
 - extendedWaitUntil:
     visible: 'PARTNER AGENCY OPERATIONS'
     timeout: 60000

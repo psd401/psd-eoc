@@ -3754,6 +3754,37 @@ export class PsdEocStack extends Stack {
                   name: 'PSD_EOC_IOS_BUNDLE_ID',
                   value: deploymentIdentity.iosBundleId,
                 },
+                // The mobile app association documents (issue #647). Each is
+                // present only when the district has configured it, so a
+                // deployment with no store build carries no empty claim about
+                // which app may ask this origin for a credential.
+                ...(deploymentIdentity.appleAppTeamId === null
+                  ? []
+                  : [
+                      {
+                        name: 'PSD_EOC_APPLE_APP_TEAM_ID',
+                        value: deploymentIdentity.appleAppTeamId,
+                      },
+                    ]),
+                ...(deploymentIdentity.androidApplicationId === null
+                  ? []
+                  : [
+                      {
+                        name: 'PSD_EOC_ANDROID_APPLICATION_ID',
+                        value: deploymentIdentity.androidApplicationId,
+                      },
+                    ]),
+                ...(deploymentIdentity.androidSigningFingerprints.length === 0
+                  ? []
+                  : [
+                      {
+                        name: 'PSD_EOC_ANDROID_SIGNING_FINGERPRINTS',
+                        value:
+                          deploymentIdentity.androidSigningFingerprints.join(
+                            ',',
+                          ),
+                      },
+                    ]),
                 {
                   name: 'PSD_EOC_ORGANIZATION_NAME',
                   value: deploymentIdentity.organizationName,

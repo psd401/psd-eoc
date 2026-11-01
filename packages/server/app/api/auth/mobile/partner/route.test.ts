@@ -223,6 +223,34 @@ describe('the native partner sign-in steps', () => {
     expect(ApiErrorSchema.parse(await stale.json()).message).toBe(
       'This sign-in request expired. Request a new code.',
     );
+
+    // Issue #647. A flow opened for a passkey is not answered with a code
+    // either. The pool would refuse it, since its continuation belongs to
+    // one challenge, but refusing it here is what makes the factor in the
+    // seal worth sealing: no provider call, and no verify budget spent.
+    const passkeyFlow = await VERIFY(
+      request('verify', {
+        flowToken: sealPartnerSignInFlow(
+          {
+            email: EMAIL,
+            flowSession: 'provider-session-handle',
+            installationId: INSTALLATION,
+            platform: 'ios',
+            factor: 'passkey',
+            expiresAt: now.getTime() + 60_000,
+          },
+          process.env,
+          'native',
+        ),
+        code: syntheticPartnerOtpCode(EMAIL),
+      }),
+    );
+    expect(passkeyFlow.status).toBe(401);
+    expectPrivateResponse(passkeyFlow);
+    // The same words as every other unusable flow.
+    expect(ApiErrorSchema.parse(await passkeyFlow.json()).message).toBe(
+      'This sign-in request expired. Request a new code.',
+    );
   });
 
   test('one address gets a fixed number of codes in the window', async () => {

@@ -118,6 +118,58 @@ describe('the partner passkey enrollment hand-off', () => {
     ).toThrow();
   });
 
+  test("the two surfaces cannot open each other's hand-off", () => {
+    // Issue #647. The app is handed the identical sealed value as an opaque
+    // token, under its own label, so neither surface can finish the other's
+    // enrollment even though both derive the same key. A native hand-off also
+    // names the platform it enrolls, which decides the ceremony origin the
+    // server will accept, so the two shapes are not interchangeable either.
+    const nativeEnrollment = Object.freeze({
+      ...enrollment,
+      platform: 'ios' as const,
+    });
+    const native = sealPartnerPasskeyEnrollment(
+      nativeEnrollment,
+      environment,
+      'native',
+    );
+    expect(native.startsWith('e1.')).toBe(true);
+    expect(
+      openPartnerPasskeyEnrollment(native, now, environment, 'native'),
+    ).toEqual(nativeEnrollment);
+    expect(openPartnerPasskeyEnrollment(native, now, environment)).toBeNull();
+    const web = sealPartnerPasskeyEnrollment(enrollment, environment);
+    expect(
+      openPartnerPasskeyEnrollment(web, now, environment, 'native'),
+    ).toBeNull();
+    // Relabelling one is not enough either: the label is authenticated.
+    expect(
+      openPartnerPasskeyEnrollment(
+        `e1.${web.slice('k1.'.length)}`,
+        now,
+        environment,
+        'native',
+      ),
+    ).toBeNull();
+    // A browser hand-off never names a platform and a native one always
+    // does, so each surface refuses the other's shape as well as its label.
+    expect(
+      openPartnerPasskeyEnrollment(
+        sealPartnerPasskeyEnrollment(enrollment, environment, 'native'),
+        now,
+        environment,
+        'native',
+      ),
+    ).toBeNull();
+    expect(
+      openPartnerPasskeyEnrollment(
+        sealPartnerPasskeyEnrollment(nativeEnrollment, environment),
+        now,
+        environment,
+      ),
+    ).toBeNull();
+  });
+
   test('the cookie is host-locked, HttpOnly and not sent across sites', () => {
     const header = partnerPasskeyCookieHeader(enrollment, environment);
     expect(header.startsWith(`${PARTNER_PASSKEY_COOKIE_NAME}=`)).toBe(true);

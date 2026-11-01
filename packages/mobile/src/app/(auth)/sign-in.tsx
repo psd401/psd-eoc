@@ -36,10 +36,10 @@ export default function SignInScreen() {
   const {
     beginAppReviewSignIn,
     beginGoogleSignIn,
+    beginPartnerSignIn,
     completePartnerSignIn,
     isSigningIn,
     partnerCodeRequested,
-    requestPartnerCode,
     resetPartnerSignIn,
     signInError,
     signOut,
@@ -102,14 +102,20 @@ export default function SignInScreen() {
     }
   }
 
-  async function handlePartnerCodeRequest(): Promise<void> {
+  /**
+   * One action for the partner's first step: the passkey if this device has
+   * one for them, the emailed code otherwise. The two are deliberately not
+   * two buttons — a partner should not have to know which they have, and the
+   * fallback must look the same as never having had a passkey at all.
+   */
+  async function handlePartnerContinue(): Promise<void> {
     setLocalError(null);
     setAttempted(false);
     setReviewAttempted(false);
     setPartnerAttempted(true);
     setPartnerCode('');
     try {
-      await requestPartnerCode(partnerEmail);
+      await beginPartnerSignIn(partnerEmail);
     } catch {
       setLocalError(UNEXPECTED_SIGN_IN_ERROR);
     }
@@ -318,7 +324,7 @@ export default function SignInScreen() {
               <Text style={styles.cardBody}>
                 {partnerCodeRequested
                   ? 'If that address holds a current partner admission, a code is on its way to it. Enter the code to finish signing in.'
-                  : 'For invited first responders. Enter the email address your agency was invited with and PSD EOC emails you a one-time code. District staff sign in with Google above.'}
+                  : 'For invited first responders. Enter the email address your agency was invited with. PSD EOC uses the passkey you added to this device, or emails you a one-time code. District staff sign in with Google above.'}
               </Text>
 
               {partnerCodeRequested ? (
@@ -406,7 +412,7 @@ export default function SignInScreen() {
                     onChangeText={setPartnerEmail}
                     onSubmitEditing={() => {
                       if (partnerEmailReady && !busy) {
-                        void handlePartnerCodeRequest();
+                        void handlePartnerContinue();
                       }
                     }}
                     placeholder="Partner agency email"
@@ -417,8 +423,8 @@ export default function SignInScreen() {
                     value={partnerEmail}
                   />
                   <Pressable
-                    accessibilityHint="Emails a one-time code to this address if it holds a partner admission"
-                    accessibilityLabel="Email me a code"
+                    accessibilityHint="Uses the passkey on this device for this address, or emails a one-time code"
+                    accessibilityLabel="Continue partner agency sign-in"
                     accessibilityRole="button"
                     accessibilityState={{
                       busy,
@@ -426,7 +432,7 @@ export default function SignInScreen() {
                     }}
                     disabled={busy || !partnerEmailReady}
                     onPress={() => {
-                      void handlePartnerCodeRequest();
+                      void handlePartnerContinue();
                     }}
                     style={({ pressed }) => [
                       styles.primaryButton,
@@ -440,8 +446,8 @@ export default function SignInScreen() {
                     ) : null}
                     <Text style={styles.primaryButtonText}>
                       {isSigningIn && partnerAttempted
-                        ? 'Sending a code'
-                        : 'Email me a code'}
+                        ? 'Checking this device'
+                        : 'Continue'}
                     </Text>
                   </Pressable>
                 </>

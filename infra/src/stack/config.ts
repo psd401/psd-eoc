@@ -169,6 +169,24 @@ export interface DeploymentIdentity {
    */
   readonly hostedZoneId: string;
   readonly iosBundleId: string;
+  /**
+   * The store identities the mobile app association documents are built from
+   * (issue #647).
+   *
+   * Apple and Google each decide whether this district's app may use the
+   * application origin as a passkey relying party by fetching a document from
+   * that origin and matching it against the installed app. Both values are
+   * public and both name one district's apps, so they belong here beside the
+   * bundle identifier rather than in application source.
+   *
+   * All three are optional, because a district that ships no store build is a
+   * legitimate deployment: the documents are then not served, native passkeys
+   * are unavailable, and the emailed code is unaffected.
+   */
+  readonly appleAppTeamId: string | null;
+  readonly androidApplicationId: string | null;
+  /** More than one accommodates a Play signing-key rotation, and no more. */
+  readonly androidSigningFingerprints: readonly string[];
   readonly organizationName: string;
   readonly privacyContactUrl: string;
   /**
@@ -331,6 +349,52 @@ export function readDeploymentIdentity(node: {
     }
     return value.trim();
   };
+  /**
+   * An absent key is an unconfigured capability, not a broken deployment. A
+   * present but malformed one is still an error, because the failure it would
+   * otherwise produce is an association document Apple or Google silently
+   * refuses, which looks like a passkey that never works and reads like a bug
+   * in the app.
+   */
+  const readOptional = (key: string, pattern: RegExp): string | null => {
+    const value = node.tryGetContext(key);
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (typeof value !== 'string' || !pattern.test(value.trim())) {
+      throw new Error(`CDK context ${key} is invalid.`);
+    }
+    return value.trim();
+  };
+  const androidSigningFingerprints = ((): readonly string[] => {
+    const value = node.tryGetContext('psdEoc:androidSigningFingerprints');
+    if (value === undefined || value === null) {
+      return Object.freeze([]);
+    }
+    const fingerprints = Array.isArray(value)
+      ? value.map((entry) => (typeof entry === 'string' ? entry.trim() : entry))
+      : null;
+    if (
+      fingerprints === null ||
+      fingerprints.length === 0 ||
+      fingerprints.length > 4 ||
+      new Set(fingerprints).size !== fingerprints.length ||
+      fingerprints.some(
+        (fingerprint) =>
+          typeof fingerprint !== 'string' ||
+          !/^(?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$/u.test(fingerprint),
+      )
+    ) {
+      throw new Error(
+        'CDK context psdEoc:androidSigningFingerprints must be up to four distinct colon-separated SHA-256 certificate fingerprints.',
+      );
+    }
+    return Object.freeze(
+      (fingerprints as string[]).map((fingerprint) =>
+        fingerprint.toUpperCase(),
+      ),
+    );
+  })();
   const organizationName = OrganizationNameSchema.safeParse(
     node.tryGetContext('psdEoc:organizationName'),
   );
@@ -394,6 +458,12 @@ export function readDeploymentIdentity(node: {
       'psdEoc:iosBundleId',
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
     ),
+    appleAppTeamId: readOptional('psdEoc:appleAppTeamId', /^[A-Z0-9]{10}$/u),
+    androidApplicationId: readOptional(
+      'psdEoc:androidApplicationId',
+      /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/u,
+    ),
+    androidSigningFingerprints,
     organizationName: organizationName.data,
     privacyContactUrl,
     smsSupportEmail: read(

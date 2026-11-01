@@ -47,6 +47,11 @@ const exampleConfiguration = Object.freeze({
     'invalid.example.eoc',
     'test.example.eoc',
   ),
+  // The mobile app association documents (issue #647). Reserved placeholders:
+  // the example synthesis never reaches Apple or Google.
+  appleAppTeamId: 'ABCDE12345',
+  androidApplicationId: 'invalid.example.eoc',
+  androidSigningFingerprints: [`${'AB:'.repeat(31)}CD`],
   monitoringRunbookBaseUrl: `https://operations.${exampleHostedDomain}/runbooks`,
   neighborhoods: [],
   organizationName: alternative(
@@ -90,6 +95,10 @@ const app = new App({
     // A placeholder zone: the example synthesis never reaches Route 53.
     'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
     'psdEoc:iosBundleId': exampleConfiguration.iosBundleId,
+    'psdEoc:appleAppTeamId': exampleConfiguration.appleAppTeamId,
+    'psdEoc:androidApplicationId': exampleConfiguration.androidApplicationId,
+    'psdEoc:androidSigningFingerprints':
+      exampleConfiguration.androidSigningFingerprints,
     'psdEoc:monitoringRunbookBaseUrl':
       exampleConfiguration.monitoringRunbookBaseUrl,
     'psdEoc:neighborhoods': exampleConfiguration.neighborhoods,
@@ -144,6 +153,18 @@ template.hasResourceProperties('AWS::AppRunner::Service', {
           {
             Name: 'PSD_EOC_IOS_BUNDLE_ID',
             Value: exampleConfiguration.iosBundleId,
+          },
+          {
+            Name: 'PSD_EOC_APPLE_APP_TEAM_ID',
+            Value: exampleConfiguration.appleAppTeamId,
+          },
+          {
+            Name: 'PSD_EOC_ANDROID_APPLICATION_ID',
+            Value: exampleConfiguration.androidApplicationId,
+          },
+          {
+            Name: 'PSD_EOC_ANDROID_SIGNING_FINGERPRINTS',
+            Value: exampleConfiguration.androidSigningFingerprints.join(','),
           },
           {
             Name: 'PSD_EOC_ORGANIZATION_NAME',
