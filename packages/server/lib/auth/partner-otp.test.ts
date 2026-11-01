@@ -13,6 +13,7 @@ import {
   resolvePartnerOtpProvider,
   syntheticPartnerOtpCode,
   syntheticPartnerOtpProvider,
+  syntheticPartnerAccessToken,
   syntheticPartnerSubject,
   verifyPartnerIdToken,
 } from './partner-otp';
@@ -254,9 +255,14 @@ describe('the synthetic partner provider', () => {
         code: syntheticPartnerOtpCode(EMAIL),
       }),
     ).toMatchObject({
-      issuer: synthetic.issuer,
-      subject: syntheticPartnerSubject(EMAIL),
-      email: EMAIL,
+      claims: {
+        issuer: synthetic.issuer,
+        subject: syntheticPartnerSubject(EMAIL),
+        email: EMAIL,
+      },
+      // The stand-in hands back an access token so the enrollment offer has
+      // something to enroll against, exactly as the pool does.
+      accessToken: syntheticPartnerAccessToken(EMAIL),
     });
     await expect(
       provider.verify({ email: EMAIL, flowSession, code: '999999' }),

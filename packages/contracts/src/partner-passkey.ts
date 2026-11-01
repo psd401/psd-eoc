@@ -43,6 +43,14 @@ export const PasskeyRelyingPartyIdSchema = z
   .regex(
     /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/u,
     'Must be a lower-case hostname with no scheme, port, or path.',
+  )
+  // WebAuthn requires a domain, and an address literal is not one: a passkey
+  // bound to an IP address is refused by every browser. Rejecting a final
+  // label that is entirely digits rules out IPv4 without rejecting a
+  // single-label name such as `localhost`.
+  .refine(
+    (value) => !/(^|\.)[0-9]+$/u.test(value),
+    'A relying-party id is a domain name, never an address literal.',
   );
 
 /**
