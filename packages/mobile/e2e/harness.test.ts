@@ -115,6 +115,8 @@ describe('issue-32 mobile E2E harness', () => {
       'open-push-android.yaml',
       'open-push-ios.yaml',
       'partner-join-and-post.yaml',
+      'partner-passkey-decline.yaml',
+      'partner-passkey-offer.yaml',
       'partner-sign-in.yaml',
       'prepare-ios.yaml',
       'push-opened-event-room.yaml',
@@ -131,6 +133,26 @@ describe('issue-32 mobile E2E harness', () => {
       expect(flow).toContain('PSD_EOC_E2E_SYNTHETIC_ONLY');
       expect(flow).not.toMatch(/^appId: [a-z0-9_.-]+$/mu);
     }
+
+    // Issue #647. The passkey offer sits below the operational content, and
+    // the journey leaves the screen where it found it: an offer flow that
+    // scrolled away and stayed there would fail the event journey after it
+    // for a reason that has nothing to do with events.
+    const passkeyOffer = await Bun.file(
+      resolve(flowRoot, 'partner-passkey-offer.yaml'),
+    ).text();
+    expect(passkeyOffer).toContain("- assertVisible: 'Active events'");
+    expect(passkeyOffer).toContain("id: 'partner-passkey-offer'");
+    expect(passkeyOffer).toContain(
+      "- assertVisible: '.*Your emailed code keeps working either way.*'",
+    );
+    const passkeyDecline = await Bun.file(
+      resolve(flowRoot, 'partner-passkey-decline.yaml'),
+    ).text();
+    expect(passkeyDecline).toContain("id: 'partner-passkey-dismiss'");
+    expect(passkeyDecline).toContain(
+      "text: 'PARTNER AGENCY OPERATIONS'\n    direction: UP",
+    );
 
     const start = await Bun.file(resolve(flowRoot, 'start-drill.yaml')).text();
     expect(start).toContain(

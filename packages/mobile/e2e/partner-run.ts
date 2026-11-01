@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 
 /**
- * Issue #598 native partner journey: sign in with an emailed code, join the
- * event somebody else started, and post to its timeline — on an iOS simulator
- * and on an Android emulator.
+ * The native partner journey: sign in with an emailed code, decline the offer
+ * to add a passkey (#647), join the event somebody else started, and post to
+ * its timeline — on an iOS simulator and on an Android emulator (#598).
  *
  * This is the one mobile harness that drives the real authentication client
  * against a real server, because what is under test is two server endpoints
@@ -393,6 +393,18 @@ try {
     deviceId,
     resolve(artifactRoot, `${platform}-partner-signed-in.png`),
   );
+  // Issue #647: the offer to add a passkey, which only a partner who signed
+  // in with a code on a passkey-capable device is shown. The offer is
+  // photographed while it is up, and declined in the flow after it, because
+  // declining it is as much a part of the offer as making it.
+  await maestro('partner-passkey-offer.yaml', {});
+  await captureScreen(
+    runner,
+    platform,
+    deviceId,
+    resolve(artifactRoot, `${platform}-partner-passkey-offer.png`),
+  );
+  await maestro('partner-passkey-decline.yaml', {});
   await maestro('partner-join-and-post.yaml', {
     FACILITY_NAME: fixture.facilityName,
     EVENT_TYPE_NAME: fixture.eventTypeName,

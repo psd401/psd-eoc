@@ -357,9 +357,6 @@ export default function HomeScreen() {
         </View>
 
         {SYNTHETIC_FIXTURE_ENABLED ? <SyntheticModeBanner /> : null}
-        {/* Shown only to a partner who just signed in with a code and whose
-            device can run a ceremony; it renders nothing otherwise. */}
-        <PartnerPasskeyOffer />
         <Call911Affordance />
         {mutationSnapshot.phase === 'unresolved' ||
         mutationSnapshot.phase === 'unresolved-other-session' ? (
@@ -532,6 +529,15 @@ export default function HomeScreen() {
             )}
           </>
         )}
+
+        {/*
+          Below the operational content, deliberately. It is shown only to a
+          partner who just signed in with a code on a device that can run a
+          ceremony, and it is about the next sign-in rather than this one:
+          nothing about adding a passkey may push an active event below the
+          fold on the screen somebody opens during an incident.
+        */}
+        <PartnerPasskeyOffer />
 
         <View style={styles.releaseTools}>
           <Text style={styles.releaseToolsText}>

@@ -1,0 +1,25 @@
+appId: ${APP_ID}
+name: Issue 647 - a partner is offered a passkey after an emailed-code sign-in
+tags: [issue-647, synthetic-only]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse to run outside the synthetic mobile harness
+- extendedWaitUntil:
+    visible: 'PARTNER AGENCY OPERATIONS'
+    timeout: 60000
+
+# The operational content comes first on this screen. The offer is below it,
+# because nothing about adding a passkey may push an active event below the
+# fold on the screen somebody opens during an incident.
+- assertVisible: 'Active events'
+- scrollUntilVisible:
+    element:
+      id: 'partner-passkey-offer'
+    direction: DOWN
+- assertVisible: 'Sign in faster next time'
+# Accepting or declining never takes the emailed code away, and the screen
+# says so.
+- assertVisible: '.*Your emailed code keeps working either way.*'
+# The offer is left on screen: the harness photographs it here, and the flow
+# beside this one declines it.
