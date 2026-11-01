@@ -31,7 +31,7 @@ Read this before changing `infra/terraform/state-bootstrap`, `.github/workflows/
 
 ## What is built and what is not applied
 
-The pipeline is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md). Its code exists, but nothing has been applied to any AWS account. Per the stateful README and the state-bootstrap README, the state bucket, the plan and apply roles, and the `production` environment do not exist yet, and the workflow has never run.
+The pipeline is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md). Its code exists and the readiness register records two live steps: a product-owner `state-bootstrap` apply, and a 2026-10-24 `production` run of the workflow that partly applied the stateful root and then failed (see [infrastructure](infrastructure.md#partner-first-responder-directory-terraform-stateful-root)). The stateful README and the state-bootstrap README still describe the roles, state bucket and `production` environment as not yet created, and the register's older "never run" sentences conflict with the dated run, so treat the live state as unconfirmed until the owner checks it.
 
 ## State bootstrap root (`infra/terraform/state-bootstrap`)
 
