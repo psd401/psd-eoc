@@ -38,9 +38,9 @@ run "partner_pool_plan" {
   assert {
     condition = (
       length(aws_cognito_user_pool.partner.sign_in_policy) == 1 &&
-      aws_cognito_user_pool.partner.sign_in_policy[0].allowed_first_auth_factors == toset(["EMAIL_OTP", "WEB_AUTHN"])
+      aws_cognito_user_pool.partner.sign_in_policy[0].allowed_first_auth_factors == toset(["PASSWORD", "EMAIL_OTP", "WEB_AUTHN"])
     )
-    error_message = "Email OTP and WebAuthn passkeys must be the only first-factor sign-in methods."
+    error_message = "Email OTP and WebAuthn passkeys are the sign-in methods; PASSWORD is listed only because CreateUserPool requires it."
   }
 
   assert {
