@@ -67,8 +67,7 @@ Partners are first responders admitted one by one outside the district ([partner
 
 `createActivationPreviewRecord` (`packages/server/lib/capabilities/start.ts`) calls `resolvePartnerAudience` (`packages/server/lib/partners/audience.ts`) with the preview's own clock. The function returns no partner unless every condition holds:
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: a semicolon inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart TD
   Q[Preview query] --> K{"Live incident (incident, real, staff)?"}
   K -- no --> NONE[No partners]
@@ -78,7 +77,7 @@ flowchart TD
   R -- no --> NONE
   R -- yes --> A["Admitted, unexpired, unended partners ordered by id"]
   A --> B{"More than 1200?"}
-  B -- yes --> CAP["First 1200 pinned, overflow logged; staff activation proceeds"]
+  B -- yes --> CAP["First 1200 pinned, overflow logged, staff activation proceeds"]
   B -- no --> PIN[Pinned with the preview]
 ```
 
