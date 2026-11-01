@@ -59,3 +59,45 @@ branch. Before merge, a maintainer can apply the `mobile-e2e` pull-request
 label to opt into both native jobs through the ordinary CI workflow; later
 commits rerun them while the label remains applied. Code pull requests run the
 web Playwright and axe journeys in that workflow.
+
+## Issue 598 native partner journey
+
+A second journey runs the partner sign-in and participation path on the same
+two platforms:
+
+1. open "Partner agency sign-in" on the sign-in screen;
+2. enter the invited address and ask the partner pool for a code;
+3. enter the code the synthetic pool derived from that address;
+4. land on the partner shell, which offers no way to start an event;
+5. join the drill a district administrator started; and
+6. post `Synthetic partner on scene, issue 598.` to its timeline, with no
+   control that would end the event.
+
+Unlike the issue-32 journey this one drives the **real** authentication client
+against a **real** server, because what is under test is two server endpoints
+and the screen that calls them. Everything it touches is still synthetic. The
+server is this machine's development server on an http loopback port, which is
+the only origin the app and `requireLoopbackApiOrigin` accept, so a run cannot
+be pointed at a deployment. Its database is created, seeded and dropped by
+`packages/server/e2e/mobile-partner-fixture.ts`, which also prints the code the
+synthetic pool would have emailed. Its partner pool is the same `SYNTHETIC`
+stand-in the browser flows use: no pool is contacted and no mail is sent. The
+device keeps the exact-flag synthetic local authenticator and keeps push
+registration disabled.
+
+The in-process app fixtures must be absent, and `partner-run.ts` refuses to
+start if either is set, because an in-process fixture would stop the app ever
+reaching the endpoints under test. This journey also labels the unlock
+stand-in `issue-598` rather than `issue-32`: each journey names itself, and
+neither label opens the other's arm, so a build left over from one cannot
+stand in during the other.
+
+```bash
+bun run test:db:start
+bun run test:e2e:mobile:partner:ios
+bun run test:e2e:mobile:partner:android
+```
+
+`PSD_EOC_IOS_UDID` and `ANDROID_SERIAL` select a device as above. Artifacts,
+including a signed-in screenshot and a posted-entry screenshot per platform,
+land under `.verification/issue-598/mobile-<platform>`.

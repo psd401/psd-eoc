@@ -1012,6 +1012,89 @@ export type MobileAppReviewSignInRequest = z.infer<
   typeof MobileAppReviewSignInRequestSchema
 >;
 
+/**
+ * Opaque, authenticated partner one-time-password flow state for the native
+ * app, the counterpart of the browser's sealed partner flow cookie. The `n1`
+ * prefix is the native label: a value sealed for the browser cannot be
+ * presented here and a value sealed here cannot be presented as the cookie,
+ * so the two surfaces can never complete each other's sign-in. Clients retain
+ * and return it untouched; its encrypted representation is deliberately not a
+ * public data model.
+ */
+export const MobilePartnerSignInFlowTokenSchema = z
+  .string()
+  .min(32)
+  .max(4_096)
+  .regex(
+    /^n1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u,
+    'Partner flow token must be a sealed native partner flow.',
+  );
+
+/** Opaque native partner flow token inferred from its schema. */
+export type MobilePartnerSignInFlowToken = z.infer<
+  typeof MobilePartnerSignInFlowTokenSchema
+>;
+
+/**
+ * Asks the partner pool to email a one-time code to an address, the native
+ * counterpart of the browser's first partner sign-in step. It answers the
+ * same way for every address: whether an address holds a partner admission
+ * is decided only after the pool has proven the code, so this request can
+ * never be used to ask who has partner access.
+ */
+export const MobilePartnerSignInStartRequestSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email().max(320),
+    platform: NativeDevicePlatformSchema,
+    installationId: z.string().trim().min(16).max(255),
+  })
+  .strict()
+  .readonly();
+
+/** Native partner code request inferred from its schema. */
+export type MobilePartnerSignInStartRequest = z.infer<
+  typeof MobilePartnerSignInStartRequestSchema
+>;
+
+/**
+ * The only thing the first step hands back: the sealed flow to return with
+ * the code, and when it stops being usable. It carries no statement about
+ * the address.
+ */
+export const MobilePartnerSignInStartResponseSchema = z
+  .object({
+    flowToken: MobilePartnerSignInFlowTokenSchema,
+    expiresAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Native partner code response inferred from its schema. */
+export type MobilePartnerSignInStartResponse = z.infer<
+  typeof MobilePartnerSignInStartResponseSchema
+>;
+
+/**
+ * Completes one native partner sign-in. The address is read from the sealed
+ * flow, never from this request, so the code cannot be answered on behalf of
+ * a different address.
+ */
+export const MobilePartnerSignInVerifyRequestSchema = z
+  .object({
+    flowToken: MobilePartnerSignInFlowTokenSchema,
+    code: z
+      .string()
+      .trim()
+      .regex(/^[0-9]{6,8}$/u, 'Enter the 6-digit code.'),
+  })
+  .strict()
+  .readonly();
+
+/** Native partner verification inferred from its schema. */
+export type MobilePartnerSignInVerifyRequest = z.infer<
+  typeof MobilePartnerSignInVerifyRequestSchema
+>;
+
 /** Opaque application session bearer accepted by the shared session service. */
 export const OpaqueSessionBearerSchema = z
   .string()
@@ -1084,15 +1167,11 @@ export const CompleteOidcSignInInputSchema = z
         path: ['claims', 'hostedDomain'],
       });
     }
-    // Partner sign-in is a browser flow only; the native partner app is a
-    // later change (#598) and must widen this rule deliberately.
-    if (input.device.platform !== 'web') {
-      context.addIssue({
-        code: 'custom',
-        message: 'Partner sign-in completes on the web only.',
-        path: ['device', 'platform'],
-      });
-    }
+    // A partner signs in in the browser or in the native app (#598). The
+    // unlock rule above already binds each platform to its own credential
+    // transport, so there is nothing further to narrow here: a partner on
+    // `web` carries the session cookie and a partner on `ios`/`android`
+    // carries the opaque bearer, exactly as staff do.
   })
   .readonly();
 

@@ -70,7 +70,8 @@ function startedLabel(event: StartHomeActiveEvent): string {
 export default function HomeScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
-  const { requestAuthenticated, retryConnection, state } = useMobileAuth();
+  const { isPartnerSession, requestAuthenticated, retryConnection, state } =
+    useMobileAuth();
   const startMutation = useStartMutation();
   const [data, setData] = useState<StartHomeData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -339,13 +340,18 @@ export default function HomeScreen() {
         style={styles.page}
       >
         <View style={styles.introduction}>
-          <Text style={styles.eyebrow}>STAFF EMERGENCY OPERATIONS</Text>
+          <Text style={styles.eyebrow}>
+            {isPartnerSession
+              ? 'PARTNER AGENCY OPERATIONS'
+              : 'STAFF EMERGENCY OPERATIONS'}
+          </Text>
           <Text accessibilityRole="header" style={styles.title}>
             PSD EOC
           </Text>
           <Text style={styles.subtitle}>
-            Join an active event or make an explicit choice to start a separate
-            incident or drill.
+            {isPartnerSession
+              ? 'Join an active event at a site you cover and post what you are seeing. District staff start and end events.'
+              : 'Join an active event or make an explicit choice to start a separate incident or drill.'}
           </Text>
         </View>
 
@@ -456,60 +462,70 @@ export default function HomeScreen() {
               )}
             </View>
 
-            <View style={styles.section}>
-              <Text accessibilityRole="header" style={styles.sectionHeading}>
-                Start an event
-              </Text>
-              <Text style={styles.sectionIntro}>
-                Choosing a site and mode does not start an event or notify
-                anyone. You confirm before anything is sent.
-              </Text>
+            {/*
+              A partner never starts an event. The server refuses
+              `create-activation-preview` and `start-event` for a partner
+              admission whatever this screen offers, but `list-facilities`
+              returns every non-isolated site in the district to a partner, so
+              without this the screen would offer a start card per school that
+              could only ever be refused.
+            */}
+            {isPartnerSession ? null : (
+              <View style={styles.section}>
+                <Text accessibilityRole="header" style={styles.sectionHeading}>
+                  Start an event
+                </Text>
+                <Text style={styles.sectionIntro}>
+                  Choosing a site and mode does not start an event or notify
+                  anyone. You confirm before anything is sent.
+                </Text>
 
-              {data.facilities.length === 0 ? (
-                <View accessibilityRole="alert" style={styles.error}>
-                  <Text style={styles.errorHeading}>
-                    No active assigned site
-                  </Text>
-                  <Text style={styles.errorText}>
-                    No event was started. Contact a PSD EOC administrator.
-                  </Text>
-                </View>
-              ) : (
-                <View style={styles.facilityList}>
-                  {data.facilities.map((facility) => (
-                    <View style={styles.facilityCard} key={facility.id}>
-                      <Text style={styles.facilityCode}>{facility.code}</Text>
-                      <Text
-                        accessibilityRole="header"
-                        style={styles.facilityName}
-                      >
-                        {facility.name}
-                      </Text>
-                      <StartModeAction
-                        disabled={mutationPending}
-                        facilityName={facility.name}
-                        mode="real"
-                        onPress={() => {
-                          openStart(facility.id, 'real');
-                        }}
-                      />
-                      <StartModeAction
-                        disabled={mutationPending}
-                        facilityName={facility.name}
-                        mode="drill"
-                        onPress={() => {
-                          openStart(facility.id, 'drill');
-                        }}
-                        {...(SYNTHETIC_FIXTURE_ENABLED &&
-                        onlyFacility?.id === facility.id
-                          ? { testID: ISSUE_21_MAESTRO_IDS.startDrill }
-                          : {})}
-                      />
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
+                {data.facilities.length === 0 ? (
+                  <View accessibilityRole="alert" style={styles.error}>
+                    <Text style={styles.errorHeading}>
+                      No active assigned site
+                    </Text>
+                    <Text style={styles.errorText}>
+                      No event was started. Contact a PSD EOC administrator.
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.facilityList}>
+                    {data.facilities.map((facility) => (
+                      <View style={styles.facilityCard} key={facility.id}>
+                        <Text style={styles.facilityCode}>{facility.code}</Text>
+                        <Text
+                          accessibilityRole="header"
+                          style={styles.facilityName}
+                        >
+                          {facility.name}
+                        </Text>
+                        <StartModeAction
+                          disabled={mutationPending}
+                          facilityName={facility.name}
+                          mode="real"
+                          onPress={() => {
+                            openStart(facility.id, 'real');
+                          }}
+                        />
+                        <StartModeAction
+                          disabled={mutationPending}
+                          facilityName={facility.name}
+                          mode="drill"
+                          onPress={() => {
+                            openStart(facility.id, 'drill');
+                          }}
+                          {...(SYNTHETIC_FIXTURE_ENABLED &&
+                          onlyFacility?.id === facility.id
+                            ? { testID: ISSUE_21_MAESTRO_IDS.startDrill }
+                            : {})}
+                        />
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
           </>
         )}
 

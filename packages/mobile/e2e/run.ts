@@ -3,6 +3,7 @@
 import { mkdir, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+import { NATIVE_BUILD_LOCALE } from './device';
 import {
   expoDevelopmentClientUrl,
   IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS,
@@ -21,6 +22,7 @@ if (platform !== 'ios' && platform !== 'android') {
 }
 const childEnvironment: Record<string, string | undefined> = {
   ...process.env,
+  ...NATIVE_BUILD_LOCALE,
   CI: 'true',
   EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
   EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-32',

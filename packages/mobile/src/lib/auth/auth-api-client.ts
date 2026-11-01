@@ -4,6 +4,9 @@ import {
   MobileOidcExchangeRequestSchema,
   MobileOidcStartRequestSchema,
   MobileOidcStartResponseSchema,
+  MobilePartnerSignInStartRequestSchema,
+  MobilePartnerSignInStartResponseSchema,
+  MobilePartnerSignInVerifyRequestSchema,
   MobileSessionResponseSchema,
   RevokeSessionInputSchema,
   SessionRevocationSchema,
@@ -11,6 +14,9 @@ import {
   type MobileOidcExchangeRequest,
   type MobileOidcStartRequest,
   type MobileOidcStartResponse,
+  type MobilePartnerSignInStartRequest,
+  type MobilePartnerSignInStartResponse,
+  type MobilePartnerSignInVerifyRequest,
   type MobileSessionResponse,
 } from '@psd-eoc/contracts';
 
@@ -208,6 +214,35 @@ export class AuthApiClient implements SessionApi {
     return this.post(
       '/api/auth/mobile/app-review',
       MobileAppReviewSignInRequestSchema.parse(input),
+      MobileSessionResponseSchema,
+    );
+  }
+
+  /**
+   * Partner sign-in, first step: ask the partner pool to email a code.
+   *
+   * It answers the same way for every address, so a caller cannot learn from
+   * it whether an address holds partner access. The sealed flow it hands back
+   * carries the address and the device this sign-in would enroll; the app
+   * returns it untouched with the code and never reads it.
+   */
+  public partnerSignInStart(
+    input: MobilePartnerSignInStartRequest,
+  ): Promise<MobilePartnerSignInStartResponse> {
+    return this.post(
+      '/api/auth/mobile/partner/start',
+      MobilePartnerSignInStartRequestSchema.parse(input),
+      MobilePartnerSignInStartResponseSchema,
+    );
+  }
+
+  /** Partner sign-in, second step: answer the sealed flow with its code. */
+  public partnerSignInVerify(
+    input: MobilePartnerSignInVerifyRequest,
+  ): Promise<MobileSessionResponse> {
+    return this.post(
+      '/api/auth/mobile/partner/verify',
+      MobilePartnerSignInVerifyRequestSchema.parse(input),
       MobileSessionResponseSchema,
     );
   }

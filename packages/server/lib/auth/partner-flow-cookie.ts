@@ -22,6 +22,15 @@ import {
 
 const COOKIE_NAME = '__Host-psd-eoc-partner-flow';
 const COOKIE_VERSION = 'p1';
+/**
+ * The native app's label for the same sealed flow. It is a different version
+ * tag and a different associated-data string, so a value sealed for the
+ * browser cannot be opened by the native endpoints and a value sealed for
+ * the native app cannot be opened as the cookie. Neither surface can finish
+ * the other's sign-in, which is the same separation this module already
+ * keeps between the partner flow and the Google callback cookie.
+ */
+const NATIVE_VERSION = 'n1';
 const FLOW_LIFETIME_SECONDS = 5 * 60;
 const KEY_INFO = 'psd-eoc-partner-otp-flow-v1';
 const IV_BYTES = 12;
@@ -32,13 +41,33 @@ export const PARTNER_FLOW_LIFETIME_SECONDS = FLOW_LIFETIME_SECONDS;
 
 export type Environment = Readonly<Record<string, string | undefined>>;
 
+/**
+ * Which surface sealed a flow. `web` is the browser cookie; `native` is the
+ * opaque token the mobile endpoints hand back and read.
+ */
+export type PartnerFlowSurface = 'web' | 'native';
+
 export interface PartnerSignInFlow {
   readonly email: string;
   /** The identity provider's opaque continuation for this one challenge. */
   readonly flowSession: string;
-  /** The browser installation this sign-in enrolls. */
+  /** The installation this sign-in enrolls. */
   readonly installationId: string;
+  /**
+   * The native platform this flow enrolls, absent on the browser. Carrying
+   * it in the seal is what stops the second step from enrolling a different
+   * device kind than the first step asked for.
+   */
+  readonly platform?: 'ios' | 'android';
   readonly expiresAt: number;
+}
+
+function versionFor(surface: PartnerFlowSurface): string {
+  return surface === 'native' ? NATIVE_VERSION : COOKIE_VERSION;
+}
+
+function associatedData(surface: PartnerFlowSurface): Buffer {
+  return Buffer.from(`${COOKIE_NAME}.${versionFor(surface)}`, 'utf8');
 }
 
 export class PartnerFlowCookieError extends Error {
@@ -76,33 +105,35 @@ function cookieKey(environment: Environment): Buffer {
   return Buffer.from(hkdfSync('sha256', decoded, COOKIE_NAME, KEY_INFO, 32));
 }
 
-/** Serializes one flow into a sealed cookie value. */
+/** Serializes one flow into a sealed value for the surface that asked. */
 export function sealPartnerSignInFlow(
   flow: PartnerSignInFlow,
   environment: Environment = process.env,
+  surface: PartnerFlowSurface = 'web',
 ): string {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', cookieKey(environment), iv, {
     authTagLength: 16,
   });
-  cipher.setAAD(Buffer.from(`${COOKIE_NAME}.${COOKIE_VERSION}`, 'utf8'));
+  cipher.setAAD(associatedData(surface));
   const sealed = Buffer.concat([
     cipher.update(JSON.stringify(flow), 'utf8'),
     cipher.final(),
   ]);
   return [
-    COOKIE_VERSION,
+    versionFor(surface),
     iv.toString('base64url'),
     sealed.toString('base64url'),
     cipher.getAuthTag().toString('base64url'),
   ].join('.');
 }
 
-/** Opens one sealed cookie value, or null when it cannot be trusted. */
+/** Opens one sealed value, or null when it cannot be trusted. */
 export function openPartnerSignInFlow(
   value: string | null | undefined,
   now: Date,
   environment: Environment = process.env,
+  surface: PartnerFlowSurface = 'web',
 ): PartnerSignInFlow | null {
   if (
     value === null ||
@@ -114,7 +145,7 @@ export function openPartnerSignInFlow(
   }
   const [version, ivPart, sealedPart, tagPart, ...rest] = value.split('.');
   if (
-    version !== COOKIE_VERSION ||
+    version !== versionFor(surface) ||
     ivPart === undefined ||
     sealedPart === undefined ||
     tagPart === undefined ||
@@ -130,7 +161,7 @@ export function openPartnerSignInFlow(
       Buffer.from(ivPart, 'base64url'),
       { authTagLength: 16 },
     );
-    decipher.setAAD(Buffer.from(`${COOKIE_NAME}.${COOKIE_VERSION}`, 'utf8'));
+    decipher.setAAD(associatedData(surface));
     decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
     plaintext = Buffer.concat([
       decipher.update(Buffer.from(sealedPart, 'base64url')),
@@ -149,7 +180,16 @@ export function openPartnerSignInFlow(
     return null;
   }
   const record = parsed as Readonly<Record<string, unknown>>;
-  const { email, flowSession, installationId, expiresAt } = record;
+  const { email, flowSession, installationId, platform, expiresAt } = record;
+  // A native flow names the platform it enrolls and a browser flow never
+  // does, so a seal cannot be carried from one surface's shape to the
+  // other's even if its label were somehow accepted. Narrowing here rather
+  // than testing it separately is what lets the result be built without an
+  // assertion the compiler cannot check.
+  const nativePlatform =
+    platform === 'ios' || platform === 'android' ? platform : null;
+  const platformValid =
+    surface === 'native' ? nativePlatform !== null : platform === undefined;
   if (
     typeof email !== 'string' ||
     email.length === 0 ||
@@ -161,13 +201,24 @@ export function openPartnerSignInFlow(
     typeof installationId !== 'string' ||
     installationId.length < 16 ||
     installationId.length > 255 ||
+    !platformValid ||
     typeof expiresAt !== 'number' ||
     !Number.isSafeInteger(expiresAt) ||
     expiresAt <= now.getTime()
   ) {
     return null;
   }
-  return Object.freeze({ email, flowSession, installationId, expiresAt });
+  return Object.freeze(
+    nativePlatform !== null && surface === 'native'
+      ? {
+          email,
+          flowSession,
+          installationId,
+          platform: nativePlatform,
+          expiresAt,
+        }
+      : { email, flowSession, installationId, expiresAt },
+  );
 }
 
 /**

@@ -42,6 +42,7 @@ import {
   isRetryableSessionTransactionError,
   WebSessionIssuanceError,
   WEB_SESSION_COOKIE_NAME,
+  type MobileSessionBearerSink,
   type WebSessionCookie,
   type WebSessionCookieSink,
 } from './session-cookie';
@@ -111,10 +112,18 @@ export interface PartnerAuthorizedIdentity {
   readonly capturedAt: Date;
 }
 
-/** Server-owned context used by the partner sign-in capability handler. */
+/**
+ * Server-owned context used by the partner sign-in capability handler.
+ *
+ * Exactly one sink is present, and which one it is has to agree with the
+ * device being enrolled: a browser partner gets the session cookie, a native
+ * partner gets the opaque bearer. The staff path draws the same line in
+ * `CompleteOidcSignInContext`.
+ */
 export interface PartnerSignInContext {
   readonly authorization: PartnerAuthorizedIdentity;
-  readonly cookieSink: WebSessionCookieSink;
+  readonly cookieSink?: WebSessionCookieSink;
+  readonly bearerSink?: MobileSessionBearerSink;
   readonly envelope: RegisteredCapabilityEnvelope<'complete-oidc-sign-in'>;
   /** Digest of the completed one-time-password exchange, never its code. */
   readonly responseDigest: string;
@@ -242,7 +251,9 @@ function validatePartnerInvocation(
   const responseDigest = context.responseDigest;
   if (
     !/^[a-f0-9]{64}$/u.test(responseDigest) ||
-    envelope.source !== 'web' ||
+    // The source is checked against the device by the delivery rule above;
+    // here it only has to be one of the two partner surfaces.
+    (envelope.source !== 'web' && envelope.source !== 'mobile') ||
     envelope.transport.kind !== 'partner-email-otp' ||
     envelope.idempotencyKey !== `oidc:${responseDigest}` ||
     JSON.stringify(envelope.input) !== JSON.stringify(input)
@@ -277,21 +288,45 @@ function validatePartnerInvocation(
   });
 }
 
+type PartnerCredentialDelivery =
+  | Readonly<{ kind: 'web'; sink: WebSessionCookieSink }>
+  | Readonly<{ kind: 'mobile'; sink: MobileSessionBearerSink }>;
+
+/**
+ * Binds the credential transport to the device being enrolled. A browser
+ * partner must present the web invocation source, the `web` platform, the
+ * cookie unlock method and a cookie sink alone; a native partner must
+ * present the mobile source, a native platform, the biometric unlock method
+ * and a bearer sink alone. Anything mixed is refused before a credential
+ * exists, so a session cannot be delivered down a transport its enrollment
+ * does not match.
+ */
 function assertPartnerCredentialDelivery(
   input: CompleteOidcSignInInput,
   context: PartnerSignInContext,
-): WebSessionCookieSink {
+): PartnerCredentialDelivery {
   if (
-    context.envelope.source !== 'web' ||
-    input.device.platform !== 'web' ||
-    input.device.unlockMethod !== 'secure-session-cookie'
+    context.envelope.source === 'web' &&
+    input.device.platform === 'web' &&
+    input.device.unlockMethod === 'secure-session-cookie' &&
+    context.cookieSink !== undefined &&
+    context.bearerSink === undefined
   ) {
-    throw new WebSessionIssuanceError(
-      'INVALID_AUTHORIZATION_CONTEXT',
-      'A partner session is delivered only as a browser cookie.',
-    );
+    return Object.freeze({ kind: 'web', sink: context.cookieSink });
   }
-  return context.cookieSink;
+  if (
+    context.envelope.source === 'mobile' &&
+    (input.device.platform === 'ios' || input.device.platform === 'android') &&
+    input.device.unlockMethod === 'biometric' &&
+    context.bearerSink !== undefined &&
+    context.cookieSink === undefined
+  ) {
+    return Object.freeze({ kind: 'mobile', sink: context.bearerSink });
+  }
+  throw new WebSessionIssuanceError(
+    'INVALID_AUTHORIZATION_CONTEXT',
+    'The partner credential transport does not match its device enrollment.',
+  );
 }
 
 function assertPersistedPartnerResult(
@@ -368,7 +403,7 @@ async function establishPartnerSession(
   dependencies: PartnerSessionIssuerDependencies,
 ): Promise<SessionEstablishmentResult> {
   const input = CompleteOidcSignInInputSchema.parse(inputValue);
-  const cookieSink = assertPartnerCredentialDelivery(input, context);
+  const delivery = assertPartnerCredentialDelivery(input, context);
   const invocation = validatePartnerInvocation(input, context);
   const policy = validatePartnerSessionPolicy(dependencies.policy);
   assertPartnerAuthorizedContext(input, context.authorization);
@@ -421,21 +456,28 @@ async function establishPartnerSession(
   );
   assertPersistedPartnerResult(result, request);
 
-  await cookieSink.set(
-    Object.freeze({
-      name: WEB_SESSION_COOKIE_NAME,
-      value: credential,
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: Math.max(
-        1,
-        Math.floor((expiresAt.getTime() - now.getTime()) / 1_000),
-      ),
-      expires: expiresAt,
-    }) satisfies WebSessionCookie,
-  );
+  if (delivery.kind === 'web') {
+    await delivery.sink.set(
+      Object.freeze({
+        name: WEB_SESSION_COOKIE_NAME,
+        value: credential,
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: Math.max(
+          1,
+          Math.floor((expiresAt.getTime() - now.getTime()) / 1_000),
+        ),
+        expires: expiresAt,
+      }) satisfies WebSessionCookie,
+    );
+  } else {
+    // The native partner's credential is the same opaque secret, handed to
+    // the app instead of a browser. Its deadline is the session's, which the
+    // client reads from the session it is given.
+    await delivery.sink.set(credential);
+  }
   return result;
 }
 
@@ -804,7 +846,12 @@ export function createDrizzlePartnerSessionStore(
                 occurredAt: request.createdAt.toISOString(),
                 userId: result.user.id,
                 sessionId: result.session.id,
-                source: 'web',
+                // The surface that actually signed in, derived the way the
+                // staff store derives it. A partner was a browser-only
+                // principal until #598; writing a constant here now would
+                // record every native sign-in as a browser one, in a ledger
+                // that is append-only and can only be corrected forward.
+                source: request.device.platform === 'web' ? 'web' : 'mobile',
               },
               previousAuditEntry ?? null,
             );

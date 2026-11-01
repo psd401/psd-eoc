@@ -1145,15 +1145,11 @@ export const AuthenticationCapabilityEnvelopeSchema = z
         path: ['transport'],
       });
     }
-    // Partner sign-in is a browser flow only; the native partner app is a
-    // later change (#598) and must widen this rule deliberately.
-    if (partner && envelope.source !== 'web') {
-      context.addIssue({
-        code: 'custom',
-        message: 'Partner sign-in completes on the web only.',
-        path: ['source'],
-      });
-    }
+    // A partner signs in from the browser or from the native app (#598).
+    // Both invocation sources carry the same `partner-email-otp` transport,
+    // because the evidence is the same: the pool proved the code and signed
+    // an identity token. The source decides only how the issued credential
+    // is delivered, which the session issuer binds to the device platform.
   })
   .readonly();
 

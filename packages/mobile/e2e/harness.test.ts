@@ -7,7 +7,9 @@ import {
   expoDevelopmentClientUrl,
   IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS,
   mobileE2EIdentity,
+  requireLoopbackApiOrigin,
   requireSyntheticMobileE2E,
+  requireSyntheticNativePartnerE2E,
   shouldRetryIosDevelopmentClientOpen,
 } from './harness';
 
@@ -45,6 +47,55 @@ describe('issue-32 mobile E2E harness', () => {
     }
   });
 
+  // Issue #598. The native partner journey's rules are the opposite shape:
+  // the in-process app fixtures must be absent, because the whole point is
+  // that the app reaches a real server, and the server it reaches must be on
+  // this machine.
+  test('the native partner journey refuses an app fixture or a remote server', () => {
+    const safe = {
+      PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
+      EXPO_PUBLIC_PSD_EOC_SYNTHETIC_AUTH_FIXTURE: 'issue-598',
+      EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
+      EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'http://127.0.0.1:34567',
+    };
+    expect(() => requireSyntheticNativePartnerE2E(safe)).not.toThrow();
+    for (const key of Object.keys(safe)) {
+      expect(() =>
+        requireSyntheticNativePartnerE2E({ ...safe, [key]: 'unsafe' }),
+      ).toThrow();
+    }
+    // An inherited in-process fixture would stop the app ever reaching the
+    // endpoints under test, so it is refused rather than ignored.
+    for (const fixture of [
+      'EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE',
+      'EXPO_PUBLIC_PSD_EOC_SYNTHETIC_PUSH_FIXTURE',
+    ]) {
+      expect(() =>
+        requireSyntheticNativePartnerE2E({ ...safe, [fixture]: 'issue-21' }),
+      ).toThrow('no in-process app fixture');
+    }
+  });
+
+  test('only an http loopback origin may serve a native partner run', () => {
+    expect(requireLoopbackApiOrigin('http://127.0.0.1:34567')).toBe(
+      'http://127.0.0.1:34567',
+    );
+    expect(requireLoopbackApiOrigin('http://localhost:34567/')).toBe(
+      'http://localhost:34567',
+    );
+    for (const value of [
+      undefined,
+      '',
+      'not-a-url',
+      'https://eoc.example.invalid',
+      'http://10.0.2.2:34567',
+      'http://127.0.0.1:34567/api',
+      'http://127.0.0.1:34567?token=x',
+    ]) {
+      expect(() => requireLoopbackApiOrigin(value)).toThrow();
+    }
+  });
+
   test('retries only the bounded iOS simulator URL-open timeout', () => {
     expect(IOS_DEVELOPMENT_CLIENT_OPEN_ATTEMPTS).toBe(3);
     expect(shouldRetryIosDevelopmentClientOpen(60, 1)).toBe(true);
@@ -63,6 +114,8 @@ describe('issue-32 mobile E2E harness', () => {
       'event-room-lifecycle.yaml',
       'open-push-android.yaml',
       'open-push-ios.yaml',
+      'partner-join-and-post.yaml',
+      'partner-sign-in.yaml',
       'prepare-ios.yaml',
       'push-opened-event-room.yaml',
       'reveal-push-ios.yaml',
