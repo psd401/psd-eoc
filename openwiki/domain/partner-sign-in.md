@@ -3,7 +3,7 @@ type: Domain Concept
 title: Partner web sign-in
 description: Partner (first-responder) sign-in on the web and in the native app, with an emailed one-time code or an optional passkey, admission-gated sessions of at most one day, the native bearer sign-in endpoints, and the partner capability allowlist.
 tags: [partner-access, identity, sign-in, sessions, cognito, passkey, webauthn, mobile]
-timestamp: 2026-11-01T07:36:12-08:00
+timestamp: 2026-11-01T10:45:46-08:00
 openwiki:
   roles: [domain, integration]
   change_kinds: [identity, sign-in, sessions, rate-limit, passkey, mobile]
@@ -261,7 +261,7 @@ With all three `PSD_EOC_PARTNER_USER_POOL_*` values set to a real pool, the serv
 
 The `passkey_relying_party_id` Terraform variable and the server's derivation from `psdEoc:applicationOrigin` must name one hostname; if they differ, passkey sign-in and enrollment are unavailable while the emailed code still works. The rule and the change procedure are in [configuration and readiness](../operations/configuration-and-readiness.md#partner-passkey-relying-party).
 
-The pool, the code flow, the passkey flow and the native flow (including native passkeys) have never been exercised against a real Cognito pool or a platform's association validator. `docs/INTEGRATIONS.md` records the readiness: the code and passkey paths are proven only against the synthetic stand-in and Chromium's virtual authenticator, and on the live deployment the parameters are still `UNCONFIGURED`, so no partner account exists and no partner sign-in is offered. Whether the real pool returns `CREDENTIAL_REQUEST_OPTIONS` alongside its selection is the open question the first real pool must answer; without it every partner keeps using the emailed code.
+The code flow, the passkey flow and the native flow (including native passkeys) have not been exercised end to end against a real Cognito pool or a platform's association validator. `docs/INTEGRATIONS.md` records the readiness: the code and passkey paths are proven only against the synthetic stand-in and Chromium's virtual authenticator. Its newest dated entry records the pool created and the parameters supplied on 2026-11-01, but no partner has been invited or has signed in, so the pool's email one-time code and passkeys remain unexercised. Whether the real pool returns `CREDENTIAL_REQUEST_OPTIONS` alongside its selection is the open question the first real pool must answer; without it every partner keeps using the emailed code.
 
 ## Change navigation
 

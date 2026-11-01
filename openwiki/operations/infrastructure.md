@@ -3,7 +3,7 @@ type: Operations Guide
 title: AWS CDK infrastructure, deployment, and monitoring
 description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the psd-dev-standards 08 deployment split (local direct cdk deploy, CI-only Terraform apply behind the production environment), bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
 tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda, cognito, partner-access]
-timestamp: 2026-11-01T10:19:46-08:00
+timestamp: 2026-11-01T10:45:46-08:00
 openwiki:
   roles: [operations, architecture, delivery]
   change_kinds: [infrastructure, deployment, monitoring, identity]
@@ -204,7 +204,7 @@ Change navigation:
 
 ## Terraform migration plan (phase 1 built, not applied)
 
-`docs/terraform-migration-plan.md` is a proposal with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. Phase 1 (scaffolding and CI) is built: the `state-bootstrap/` root and the `stateful/` root, plus the Terraform workflow, described in [Terraform state bootstrap and CI](terraform-ci-pipeline.md). The readiness register records a state-bootstrap apply and a partial stateful apply (2026-10-24), and no later phase has started. The `stateful/` root holds just the partner pool described [above](#partner-first-responder-directory-terraform-stateful-root); the `app/` and `scripts/` roots from the plan do not exist. The CDK code and the deploy model above remain the source of truth for everything else. Do not implement any phase from this page; read the plan itself first.
+`docs/terraform-migration-plan.md` is a proposal with every open question answered on 2026-10-23 and each phase awaiting product-owner approval. It would replace the `PsdEoc` CloudFormation stack (`infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`) with AWS Terraform roots under `infra/terraform/`. Phase 1 (scaffolding and CI) is built: the `state-bootstrap/` root and the `stateful/` root, plus the Terraform workflow, described in [Terraform state bootstrap and CI](terraform-ci-pipeline.md). The readiness register records a state-bootstrap apply, a partial stateful apply (2026-10-24), and a completed stateful apply that created the pool (2026-11-01). No later phase has started. The `stateful/` root holds just the partner pool described [above](#partner-first-responder-directory-terraform-stateful-root); the `app/` and `scripts/` roots from the plan do not exist. The CDK code and the deploy model above remain the source of truth for everything else. Do not implement any phase from this page; read the plan itself first.
 
 Key decisions the plan records:
 
@@ -244,3 +244,4 @@ Change navigation for this proposal:
 mation.
 n `main` with the `production` approval, so never validate it by applying. Details and the test-run names are in [Terraform state bootstrap and CI](terraform-ci-pipeline.md#change-navigation).
 - **Conditional:** `bun run --cwd infra typecheck` (includes synth) when touching stack code; never run `deploy`, `cdk deploy`, or Terraform apply from automation.
+utomation.
