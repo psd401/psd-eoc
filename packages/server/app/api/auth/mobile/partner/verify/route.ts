@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  MOBILE_PARTNER_PASSKEY_ENROLLMENT_HEADER,
   MobilePartnerSignInVerifyRequestSchema,
   MobileSessionResponseSchema,
+  type NativeDevicePlatform,
 } from '@psd-eoc/contracts';
 import { NextResponse, type NextRequest } from 'next/server';
 import { ZodError } from 'zod';
@@ -17,6 +19,10 @@ import {
   resolvePartnerOtpProvider,
 } from '../../../../../../lib/auth/partner-otp';
 import { getPartnerOtpLimiter } from '../../../../../../lib/auth/partner-otp-limit';
+import {
+  PARTNER_PASSKEY_ENROLLMENT_LIFETIME_SECONDS,
+  sealPartnerPasskeyEnrollment,
+} from '../../../../../../lib/auth/partner-passkey-enrollment';
 import {
   completeNativePartnerSignIn,
   PartnerSignInError,
@@ -37,6 +43,49 @@ import {
 } from '../_lib/http';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * The sealed hand-off that lets the partner who just proved a code enroll a
+ * passkey, or null when this sign-in cannot offer one.
+ *
+ * It is the native counterpart of the browser's enrollment cookie and carries
+ * the identical value: the pool's own access token for this sign-in, which is
+ * the only credential Cognito's registration calls accept. It travels in a
+ * response header because it is a transient credential envelope rather than
+ * application data — the browser carries it in a header of its own — and
+ * because adding a field to the session envelope every installed build parses
+ * strictly is what broke every enrolled phone in #470.
+ *
+ * A sign-in with no pool access token has nothing to enroll against, and a
+ * deployment whose cookie secret cannot derive a key has nowhere to seal it.
+ * Neither is a failure of the sign-in that just succeeded, so both simply
+ * mean no offer, and the app signs in exactly as it did before (issue #647).
+ */
+function passkeyEnrollmentOffer(
+  email: string,
+  accessToken: string | null,
+  platform: NativeDevicePlatform,
+  now: Date,
+): string | null {
+  if (accessToken === null) {
+    return null;
+  }
+  try {
+    return sealPartnerPasskeyEnrollment(
+      {
+        email,
+        accessToken,
+        platform,
+        expiresAt:
+          now.getTime() + PARTNER_PASSKEY_ENROLLMENT_LIFETIME_SECONDS * 1_000,
+      },
+      process.env,
+      'native',
+    );
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Native partner sign-in, second step: answer with the emailed code.
@@ -113,7 +162,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let connection: DatabaseConnection | undefined;
   try {
-    const { claims } = await provider.verify({
+    const { claims, accessToken } = await provider.verify({
       email: flow.email,
       flowSession: flow.flowSession,
       code: body.code,
@@ -126,13 +175,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       requestId,
       now,
     });
+    // A partner who just proved their address may add a passkey, so the next
+    // sign-in needs no inbox. The offer is an offer: an app that ignores the
+    // header, or a device with no passkey support, signs in exactly as before.
+    const enrollment = passkeyEnrollmentOffer(
+      flow.email,
+      accessToken,
+      flow.platform,
+      now,
+    );
     return NextResponse.json(
       MobileSessionResponseSchema.parse({
         session: completed.session,
         tokenType: 'Bearer',
         refreshToken: completed.bearer,
       }),
-      { headers: PARTNER_PRIVATE_HEADERS },
+      {
+        headers:
+          enrollment === null
+            ? PARTNER_PRIVATE_HEADERS
+            : {
+                ...PARTNER_PRIVATE_HEADERS,
+                [MOBILE_PARTNER_PASSKEY_ENROLLMENT_HEADER]: enrollment,
+              },
+      },
     );
   } catch (error) {
     if (error instanceof PartnerSignInError) {

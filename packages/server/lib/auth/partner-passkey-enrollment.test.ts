@@ -118,6 +118,35 @@ describe('the partner passkey enrollment hand-off', () => {
     ).toThrow();
   });
 
+  test("the two surfaces cannot open each other's hand-off", () => {
+    // Issue #647. The app is handed the identical sealed value as an opaque
+    // token, under its own label, so neither surface can finish the other's
+    // enrollment even though both derive the same key.
+    const native = sealPartnerPasskeyEnrollment(
+      enrollment,
+      environment,
+      'native',
+    );
+    expect(native.startsWith('e1.')).toBe(true);
+    expect(
+      openPartnerPasskeyEnrollment(native, now, environment, 'native'),
+    ).toEqual(enrollment);
+    expect(openPartnerPasskeyEnrollment(native, now, environment)).toBeNull();
+    const web = sealPartnerPasskeyEnrollment(enrollment, environment);
+    expect(
+      openPartnerPasskeyEnrollment(web, now, environment, 'native'),
+    ).toBeNull();
+    // Relabelling one is not enough either: the label is authenticated.
+    expect(
+      openPartnerPasskeyEnrollment(
+        `e1.${web.slice('k1.'.length)}`,
+        now,
+        environment,
+        'native',
+      ),
+    ).toBeNull();
+  });
+
   test('the cookie is host-locked, HttpOnly and not sent across sites', () => {
     const header = partnerPasskeyCookieHeader(enrollment, environment);
     expect(header.startsWith(`${PARTNER_PASSKEY_COOKIE_NAME}=`)).toBe(true);

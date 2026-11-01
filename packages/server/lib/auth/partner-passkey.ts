@@ -21,6 +21,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import { applicationOriginForRequest } from './application-origin';
+import { androidSigningFingerprints } from '../config/deployment';
 import {
   readPartnerPoolConfiguration,
   type Environment,
@@ -127,19 +128,62 @@ function constantTimeEqual(left: string, right: string): boolean {
 }
 
 /**
+ * The ceremony origins this deployment's own native app may report.
+ *
+ * A platform authenticator does not name a page, because a native app is not
+ * one. iOS reports the relying party itself as an https origin; Android
+ * reports `android:apk-key-hash:` followed by the base64url
+ * SHA-256 of the certificate the app was signed with, which is the same
+ * fingerprint `/.well-known/assetlinks.json` is built from. Deriving both
+ * from the one configured value is what keeps the association document and
+ * this check from disagreeing.
+ *
+ * An unconfigured Android fingerprint yields no acceptable origin, so a
+ * deployment that has not published an asset-links document cannot complete
+ * an Android ceremony either. That is the intended order: the document is
+ * what makes the platform willing to run one at all (issue #647).
+ */
+export function nativePasskeyCeremonyOrigins(
+  platform: 'ios' | 'android',
+  relyingPartyId: string,
+  environment: Environment = process.env,
+): readonly string[] {
+  if (platform === 'ios') {
+    // Apple states the relying party itself, with no port and no path, so it
+    // is derived from the one relying-party id rather than from the origin a
+    // second time.
+    return Object.freeze([`https://${relyingPartyId}`]);
+  }
+  return Object.freeze(
+    androidSigningFingerprints(environment).map(
+      (fingerprint) =>
+        `android:apk-key-hash:${Buffer.from(
+          fingerprint.replace(/:/gu, ''),
+          'hex',
+        ).toString('base64url')}`,
+    ),
+  );
+}
+
+/**
  * Reads the client data the authenticator signed over.
  *
  * This is the one part of a WebAuthn response the server reads for itself.
  * Everything else is opaque bytes only the pool can check, but client data
  * states which ceremony was performed and which origin asked for it, and both
  * must match what this deployment asked for. Returns null for anything that
- * is not the expected ceremony on this origin, and the caller then refuses.
+ * is not the expected ceremony on one of those origins, and the caller then
+ * refuses.
+ *
+ * More than one acceptable origin exists only because a Play signing-key
+ * rotation has two live certificates at once; a browser ceremony is given the
+ * single origin its page was served from.
  */
 export function readPasskeyClientData(
   clientDataJSON: string,
   expected: Readonly<{
     type: 'webauthn.create' | 'webauthn.get';
-    origin: string;
+    origins: readonly string[];
   }>,
 ): PartnerPasskeyClientData | null {
   let decoded: string;
@@ -163,13 +207,16 @@ export function readPasskeyClientData(
     return null;
   }
   const value = clientData.data;
+  const { origins } = expected;
   // A ceremony performed inside a frame on another site is refused: the
-  // partner must be looking at this deployment's own page.
+  // partner must be looking at this deployment's own page, or holding this
+  // deployment's own app.
   if (
     value.type !== expected.type ||
     value.crossOrigin === true ||
-    (value.topOrigin !== undefined && value.topOrigin !== expected.origin) ||
-    !constantTimeEqual(value.origin, expected.origin)
+    (value.topOrigin !== undefined &&
+      !origins.some((origin) => origin === value.topOrigin)) ||
+    !origins.some((origin) => constantTimeEqual(value.origin, origin))
   ) {
     return null;
   }

@@ -288,7 +288,7 @@ export async function signInFinish(
   if (
     readPasskeyClientData(input.credential.response.clientDataJSON, {
       type: 'webauthn.get',
-      origin: input.origin,
+      origins: [input.origin],
     }) === null
   ) {
     return refused();
@@ -440,7 +440,7 @@ export async function registerFinish(
   if (
     readPasskeyClientData(input.credential.response.clientDataJSON, {
       type: 'webauthn.create',
-      origin: input.origin,
+      origins: [input.origin],
     }) === null
   ) {
     return refused();

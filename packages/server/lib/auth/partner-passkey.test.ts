@@ -15,6 +15,7 @@ import {
 import { syntheticPartnerAccessToken } from './partner-otp';
 import {
   CognitoPartnerPasskeyProvider,
+  nativePasskeyCeremonyOrigins,
   partnerRelyingPartyIdForRequest,
   partnerRelyingPartyIdFromOrigin,
   readPasskeyClientData,
@@ -149,12 +150,72 @@ describe('the partner passkey relying party', () => {
   });
 });
 
+describe("the ceremony origins this deployment's own app may report", () => {
+  // Issue #647. A platform authenticator does not name a page, because a
+  // native app is not one.
+  const FINGERPRINT = `${'AB:'.repeat(31)}CD`;
+
+  test('iOS reports the relying party itself, with no port or path', () => {
+    expect(nativePasskeyCeremonyOrigins('ios', RELYING_PARTY, {})).toEqual([
+      `https://${RELYING_PARTY}`,
+    ]);
+  });
+
+  test('Android reports the hash of the certificate Play signed with', () => {
+    // The same fingerprint the asset-links document is built from, so the
+    // document and this check cannot disagree.
+    expect(
+      nativePasskeyCeremonyOrigins('android', RELYING_PARTY, {
+        PSD_EOC_ANDROID_SIGNING_FINGERPRINTS: FINGERPRINT,
+      }),
+    ).toEqual([
+      `android:apk-key-hash:${Buffer.from(
+        FINGERPRINT.replace(/:/gu, ''),
+        'hex',
+      ).toString('base64url')}`,
+    ]);
+  });
+
+  test('an unconfigured fingerprint accepts no Android ceremony at all', () => {
+    // Which is the right order: the asset-links document is what makes the
+    // platform willing to run one.
+    expect(nativePasskeyCeremonyOrigins('android', RELYING_PARTY, {})).toEqual(
+      [],
+    );
+  });
+
+  test('client data is accepted on any one of the stated origins', () => {
+    // More than one exists only for a Play signing-key rotation, which has
+    // two live certificates at once.
+    const other = 'https://second.example.invalid';
+    expect(
+      readPasskeyClientData(clientData(), {
+        type: 'webauthn.get',
+        origins: [other, ORIGIN],
+      }),
+    ).not.toBeNull();
+    expect(
+      readPasskeyClientData(clientData(), {
+        type: 'webauthn.get',
+        origins: [other],
+      }),
+    ).toBeNull();
+    // And no origin at all accepts nothing, rather than everything.
+    expect(
+      readPasskeyClientData(clientData(), {
+        type: 'webauthn.get',
+        origins: [],
+      }),
+    ).toBeNull();
+  });
+});
+
 describe('reading WebAuthn client data', () => {
   test('accepts the expected ceremony on this origin', () => {
     expect(
       readPasskeyClientData(clientData(), {
         type: 'webauthn.get',
-        origin: ORIGIN,
+        origins: [ORIGIN],
       }),
     ).toMatchObject({ type: 'webauthn.get', origin: ORIGIN });
   });
@@ -170,7 +231,7 @@ describe('reading WebAuthn client data', () => {
       expect(
         readPasskeyClientData(value, {
           type: 'webauthn.get',
-          origin: ORIGIN,
+          origins: [ORIGIN],
         }),
       ).toBeNull();
     }
@@ -187,7 +248,7 @@ describe('reading WebAuthn client data', () => {
       expect(
         readPasskeyClientData(value, {
           type: 'webauthn.get',
-          origin: ORIGIN,
+          origins: [ORIGIN],
         }),
       ).toBeNull();
     }
@@ -198,7 +259,7 @@ describe('reading WebAuthn client data', () => {
     expect(
       readPasskeyClientData(clientData({ somethingNew: 'value' }), {
         type: 'webauthn.get',
-        origin: ORIGIN,
+        origins: [ORIGIN],
       }),
     ).not.toBeNull();
   });
