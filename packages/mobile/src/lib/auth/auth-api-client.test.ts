@@ -204,10 +204,13 @@ describe('mobile auth API client', () => {
       code: '123456',
     });
 
-    expect(payload.session.user.roles).toEqual(['partner']);
-    expect(payload.session.session.authorization.kind).toBe(
+    expect(payload.session.session.user.roles).toEqual(['partner']);
+    expect(payload.session.session.session.authorization.kind).toBe(
       'partner-admission',
     );
+    // No header, no offer: a build talking to a server that makes none signs
+    // in exactly as it did before (issue #647).
+    expect(payload.passkeyEnrollmentToken).toBeNull();
     expect(requests[0]?.input).toBe(
       'https://eoc.example.invalid/api/auth/mobile/partner/verify',
     );
@@ -217,6 +220,117 @@ describe('mobile auth API client', () => {
       flowToken: PARTNER_FLOW_TOKEN,
       code: '123456',
     });
+  });
+
+  test('a completed partner code sign-in picks up the passkey offer', async () => {
+    // Issue #647. The offer is a response header, never a field: the session
+    // payload stays the shape every installed build parses strictly.
+    const enrollment = `e1.${'a'.repeat(16)}.${'b'.repeat(64)}.${'c'.repeat(22)}`;
+    const clientFor = (offered: string | null) =>
+      new AuthApiClient(
+        () => 'https://eoc.example.invalid',
+        async () =>
+          Response.json(
+            {
+              session: partnerSessionFixture(),
+              tokenType: 'Bearer',
+              refreshToken: TEST_TOKEN,
+            },
+            {
+              headers:
+                offered === null
+                  ? {}
+                  : { 'X-PSD-EOC-Partner-Passkey-Enrollment': offered },
+            },
+          ),
+      );
+
+    expect(
+      (
+        await clientFor(enrollment).partnerSignInVerify({
+          flowToken: PARTNER_FLOW_TOKEN,
+          code: '123456',
+        })
+      ).passkeyEnrollmentToken,
+    ).toBe(enrollment);
+    // A header this build cannot make sense of is no offer, never a failed
+    // sign-in: the session has already been issued.
+    expect(
+      (
+        await clientFor('not-a-sealed-hand-off').partnerSignInVerify({
+          flowToken: PARTNER_FLOW_TOKEN,
+          code: '123456',
+        })
+      ).passkeyEnrollmentToken,
+    ).toBeNull();
+  });
+
+  test('all four passkey steps are one path with a step field', async () => {
+    const requests: Array<Readonly<{ input: string; init: RequestInit }>> = [];
+    const client = new AuthApiClient(
+      () => 'https://eoc.example.invalid',
+      async (input, init) => {
+        requests.push({ input, init });
+        const step = (
+          JSON.parse(String(init.body)) as Readonly<{ step: string }>
+        ).step;
+        if (step === 'sign-in-start') {
+          return Response.json({ method: 'code' });
+        }
+        if (step === 'register-start') {
+          return Response.json({
+            options: {
+              rp: { id: 'eoc.example.invalid', name: 'PSD EOC' },
+              user: {
+                id: 'dXNlcg',
+                name: 'responder@agency.example.invalid',
+                displayName: 'Responder',
+              },
+              challenge: 'Y2hhbGxlbmdl',
+              pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+              // A field a newer server added, which an installed build must
+              // tolerate rather than refuse (issue #470).
+              somethingNew: 'ignored',
+            },
+          });
+        }
+        return Response.json({ status: 'registered' });
+      },
+    );
+
+    expect(
+      await client.partnerPasskeySignInStart({
+        email: 'responder@agency.example.invalid',
+        platform: 'android',
+        installationId: 'synthetic-installation-0003',
+      }),
+    ).toEqual({ method: 'code' });
+    const started = await client.partnerPasskeyRegisterStart({
+      enrollmentToken: `e1.${'a'.repeat(16)}.${'b'.repeat(64)}.${'c'.repeat(22)}`,
+    });
+    expect(started.options.rp.id).toBe('eoc.example.invalid');
+    await client.partnerPasskeyRegisterFinish({
+      enrollmentToken: `e1.${'a'.repeat(16)}.${'b'.repeat(64)}.${'c'.repeat(22)}`,
+      credential: {
+        id: 'Y3JlZGVudGlhbA',
+        rawId: 'Y3JlZGVudGlhbA',
+        type: 'public-key',
+        response: {
+          clientDataJSON: 'Y2xpZW50RGF0YQ',
+          attestationObject: 'YXR0ZXN0YXRpb24',
+        },
+      },
+    });
+    expect(new Set(requests.map((request) => request.input))).toEqual(
+      new Set(['https://eoc.example.invalid/api/auth/mobile/partner/passkey']),
+    );
+    expect(
+      requests.map(
+        (request) =>
+          (JSON.parse(String(request.init.body)) as Readonly<{ step: string }>)
+            .step,
+      ),
+    ).toEqual(['sign-in-start', 'register-start', 'register-finish']);
   });
 
   test('a refused partner code is rejected with the server’s one message', async () => {

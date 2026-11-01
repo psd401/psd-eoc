@@ -4,7 +4,12 @@ import { resolve } from 'node:path';
 import type { ExpoConfig } from 'expo/config';
 
 import appConfig from '../app.json';
-import { withPushProviderConfig } from '../app.config';
+import {
+  androidAssetStatements,
+  partnerPasskeyRelyingPartyHost,
+  withPartnerPasskeyAssociation,
+  withPushProviderConfig,
+} from '../app.config';
 import easConfig from '../eas.json';
 import packageManifest from '../package.json';
 
@@ -65,6 +70,50 @@ describe('mobile distribution configuration', () => {
         GOOGLE_SERVICES_JSON: '/protected/google-services.json',
       }).android?.googleServicesFile,
     ).toBe('/protected/google-services.json');
+  });
+
+  test('declares the partner passkey association from the configured origin', () => {
+    // Issue #647. A passkey is bound to a hostname, and both platforms will
+    // only let this app ask for one on a hostname whose own document names
+    // this app. The hostname is the deployment this build already talks to,
+    // never a second configured copy that could drift from it.
+    const baseConfig = appConfig.expo as ExpoConfig;
+    const environment = {
+      EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'https://eoc.example.invalid',
+    };
+
+    expect(partnerPasskeyRelyingPartyHost(environment)).toBe(
+      'eoc.example.invalid',
+    );
+    expect(
+      withPartnerPasskeyAssociation(baseConfig, environment).ios
+        ?.associatedDomains,
+    ).toEqual(['webcredentials:eoc.example.invalid']);
+    // The Android statement points at the served document rather than
+    // restating it, so the Play signing fingerprint stays in the district's
+    // own tenant configuration and never reaches this repository or the app.
+    expect(androidAssetStatements(environment)).toBe(
+      JSON.stringify([
+        { include: 'https://eoc.example.invalid/.well-known/assetlinks.json' },
+      ]),
+    );
+
+    // A build with no origin, or one pointed at the end-to-end harness's own
+    // loopback server, declares nothing: Apple and Google validate these
+    // documents only over HTTPS, so such an entitlement could never be
+    // satisfied.
+    for (const unusable of [
+      {},
+      { EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'http://127.0.0.1:4000' },
+      { EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'https://localhost' },
+      { EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'not-a-url' },
+    ]) {
+      expect(partnerPasskeyRelyingPartyHost(unusable)).toBeNull();
+      expect(androidAssetStatements(unusable)).toBeNull();
+      expect(withPartnerPasskeyAssociation(baseConfig, unusable)).toEqual(
+        baseConfig,
+      );
+    }
   });
 
   test('uses remote, monotonically increasing store build numbers', () => {

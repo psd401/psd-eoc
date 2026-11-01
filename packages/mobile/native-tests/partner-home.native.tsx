@@ -121,6 +121,11 @@ jest.mock('../src/lib/auth', () => ({
   OFFLINE_ACTION_MESSAGE: 'Offline.',
   useMobileAuth: () => ({
     isPartnerSession: mockIsPartnerSession,
+    // No passkey hand-off and no offer: this screen's own tests are about
+    // what a partner may do, not about how they signed in (issue #647).
+    partnerPasskeyOffer: { offered: false, busy: false, error: null },
+    enrollPartnerPasskey: jest.fn(async () => false),
+    dismissPartnerPasskeyOffer: jest.fn(() => {}),
     requestAuthenticated: mockRequestAuthenticated,
     retryConnection: mockRetryConnection,
     state: mockAuthState,

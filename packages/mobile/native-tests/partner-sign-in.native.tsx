@@ -13,9 +13,9 @@ import {
  * Play has rejected sign-in changes three times.
  */
 
-const mockRequestPartnerCode = jest.fn<(email: string) => Promise<boolean>>(
-  async () => true,
-);
+const mockBeginPartnerSignIn = jest.fn<
+  (email: string) => Promise<'signed-in' | 'code-requested' | 'failed'>
+>(async () => 'code-requested');
 const mockCompletePartnerSignIn = jest.fn<(code: string) => Promise<void>>(
   async () => {},
 );
@@ -30,10 +30,10 @@ jest.mock('../src/lib/auth', () => ({
   useMobileAuth: () => ({
     beginAppReviewSignIn: mockBeginAppReviewSignIn,
     beginGoogleSignIn: mockBeginGoogleSignIn,
+    beginPartnerSignIn: mockBeginPartnerSignIn,
     completePartnerSignIn: mockCompletePartnerSignIn,
     isSigningIn: mockIsSigningIn,
     partnerCodeRequested: mockPartnerCodeRequested,
-    requestPartnerCode: mockRequestPartnerCode,
     resetPartnerSignIn: mockResetPartnerSignIn,
     signInError: mockSignInError,
     signOut: jest.fn(async () => {}),
@@ -48,7 +48,7 @@ import SignInScreen, {
 
 beforeEach(() => {
   process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL = 'https://eoc.example.invalid';
-  mockRequestPartnerCode.mockClear();
+  mockBeginPartnerSignIn.mockClear();
   mockCompletePartnerSignIn.mockClear();
   mockResetPartnerSignIn.mockClear();
   mockBeginGoogleSignIn.mockClear();
@@ -79,14 +79,17 @@ describe('partner agency sign-in', () => {
     expect(screen.queryByTestId(PARTNER_SIGN_IN_TEST_IDS.code)).toBeNull();
   });
 
-  test('asks the pool for a code, and never through Google or app review', async () => {
+  test('one action starts the sign-in, and never through Google or app review', async () => {
+    // Issue #647. The passkey and the emailed code are deliberately not two
+    // buttons: a partner should not have to know which they have, and the
+    // fallback must look the same as never having had a passkey.
     render(<SignInScreen />);
     openPartner();
 
     const request = screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.requestCode);
     // An empty address sends nothing.
     fireEvent.press(request);
-    expect(mockRequestPartnerCode).not.toHaveBeenCalled();
+    expect(mockBeginPartnerSignIn).not.toHaveBeenCalled();
 
     fireEvent.changeText(
       screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.email),
@@ -95,10 +98,12 @@ describe('partner agency sign-in', () => {
     fireEvent.press(request);
 
     await waitFor(() => {
-      expect(mockRequestPartnerCode).toHaveBeenCalledWith(
+      expect(mockBeginPartnerSignIn).toHaveBeenCalledWith(
         'responder@agency.example.invalid',
       );
     });
+    // The screen never asks for a code by itself: whether one is sent is the
+    // provider's decision, after the device has been asked about a passkey.
     expect(mockBeginGoogleSignIn).not.toHaveBeenCalled();
     expect(mockBeginAppReviewSignIn).not.toHaveBeenCalled();
   });

@@ -32,6 +32,7 @@ import {
   UnresolvedOutcomeNotice,
   SyntheticModeBanner,
 } from '../components/start';
+import { PartnerPasskeyOffer } from '../components/partner-passkey-offer';
 import { OFFLINE_ACTION_MESSAGE, useMobileAuth } from '../lib/auth';
 import {
   deliverClaimedStartMutationSuccessFeedback,
@@ -356,6 +357,9 @@ export default function HomeScreen() {
         </View>
 
         {SYNTHETIC_FIXTURE_ENABLED ? <SyntheticModeBanner /> : null}
+        {/* Shown only to a partner who just signed in with a code and whose
+            device can run a ceremony; it renders nothing otherwise. */}
+        <PartnerPasskeyOffer />
         <Call911Affordance />
         {mutationSnapshot.phase === 'unresolved' ||
         mutationSnapshot.phase === 'unresolved-other-session' ? (
