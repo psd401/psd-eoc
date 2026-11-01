@@ -2,7 +2,7 @@
 
 import { PartnerPasskeyRegisterStartResponseSchema } from '@psd-eoc/contracts';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { createPartnerPasskey, passkeysAvailable } from '../passkey-ceremony';
 import { PARTNER_PASSKEY_ACTION } from '../status';
@@ -27,6 +27,22 @@ type Outcome = 'offered' | 'working' | 'registered' | 'unavailable';
 
 export function PartnerPasskeyEnrollment() {
   const [outcome, setOutcome] = useState<Outcome>('offered');
+  /**
+   * Whether this browser can run the ceremony, decided after mounting.
+   *
+   * It cannot be decided while rendering: the answer comes from `window`,
+   * which the server does not have, so asking during render would make the
+   * server and the browser render different things and React would report a
+   * hydration mismatch. Starting at `false` means the server and the first
+   * client render agree, and a browser that can store a passkey reveals the
+   * offer a moment later — which is also exactly what a browser with no
+   * script at all should be left looking at.
+   */
+  const [available, setAvailable] = useState(false);
+
+  useEffect(() => {
+    setAvailable(passkeysAvailable());
+  }, []);
 
   async function enroll(): Promise<void> {
     setOutcome('working');
@@ -70,7 +86,7 @@ export function PartnerPasskeyEnrollment() {
     }
   }
 
-  if (!passkeysAvailable()) {
+  if (!available) {
     return (
       <>
         <p className="supporting-text" data-testid="passkey-outcome">
