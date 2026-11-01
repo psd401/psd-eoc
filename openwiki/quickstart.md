@@ -81,7 +81,7 @@ Typecheck one workspace with `bun run --cwd packages/server typecheck` (or `pack
 - No district literals in `.ts` source; tenant values live in git-ignored `infra/cdk.local.json` ([configuration and readiness](operations/configuration-and-readiness.md)).
 - Deployment follows psd-dev-standards 08: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval; that pipeline is built and the readiness register records its production applies, including a partial one (2026-10-24) and a 2026-11-01 apply that created the partner user pool after an earlier failure. The one local Terraform apply is the product owner's one-time `state-bootstrap` run ([infrastructure](operations/infrastructure.md#deploy-model-and-ordering), [Terraform state bootstrap and CI](operations/terraform-ci-pipeline.md)).
 - GitHub Actions `uses:` references are pinned to full commit SHAs with a version comment; keep new or bumped actions pinned the same way ([verification and testing](testing/verification-and-testing.md#ci-githubworkflowsciyml)).
-- Mobile changes must land and be verified on both iOS and Android ([mobile app](integrations/mobile-app.md)).
+- Mobile changes must land and be verified on both iOS and Android; platform-conditional code needs a stated reason (committed agent rule `.claude/rules/mobile.md`; see [mobile app](integrations/mobile-app.md#change-guidance)).
 - Do not hand-edit this wiki's generated pages; the OpenWiki workflow (`.github/workflows/openwiki-update.yml`) regenerates them.
 
 ## Backlog

@@ -3,7 +3,7 @@ type: Operations Guide
 title: Tenant configuration, readiness register, and runbooks
 description: Where district-specific configuration lives (CDK context manifest, git-ignored cdk.local.json, runtime environment variables, mobile identifiers), how provider activation is gated, where current deployment and provider readiness is recorded, and how the runbook set is organized.
 tags: [configuration, tenant, readiness, runbooks, open-source]
-timestamp: 2026-11-01T10:45:46-08:00
+timestamp: 2026-11-01T23:50:21Z
 openwiki:
   roles: [operations, delivery]
   change_kinds: [configuration, documentation-contract]
@@ -128,6 +128,4 @@ Guides for people rather than responders: `docs/guides/first-administrator.md` (
 ## Known documentation drift (prefer source)
 
 - `packages/mobile/README.md` still describes a protected per-build allowlist for push registration. It was removed and `docs/CONFIGURATION.md` says it is deliberately absent; see [mobile app](../integrations/mobile-app.md).
-ONFIGURATION.md` says it is deliberately absent; see [mobile app](../integrations/mobile-app.md).
-llowlist for push registration. It was removed and `docs/CONFIGURATION.md` says it is deliberately absent; see [mobile app](../integrations/mobile-app.md).
-ONFIGURATION.md` says it is deliberately absent; see [mobile app](../integrations/mobile-app.md).
+- `docs/INTEGRATIONS.md` contradicts itself on the partner pool. Its partner first-responder paragraph still says the `PartnerUserPool*` parameters are `UNCONFIGURED` in production, while its 2026-11-01 entry records a `cdk deploy` that supplied them. Prefer the later dated entry, and confirm the current value against the register before relying on either sentence. The partner pages link to this register rather than restating it ([partner web sign-in](../domain/partner-sign-in.md)).
