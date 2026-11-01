@@ -3,7 +3,7 @@ type: Operations Guide
 title: Terraform state bootstrap and CI apply pipeline
 description: The one-time local state-bootstrap root, the GitHub Terraform workflow that plans on main and applies a saved plan from the production environment, and the first-apply procedure for the partner stateful root.
 tags: [terraform, github-actions, aws, iam, state, operations, ci]
-timestamp: 2026-11-01T10:19:46-08:00
+timestamp: 2026-11-01T10:45:46-08:00
 openwiki:
   roles: [operations, delivery]
   change_kinds: [terraform, ci, iam, state]
@@ -31,7 +31,7 @@ Read this before changing `infra/terraform/state-bootstrap`, `.github/workflows/
 
 ## What is built and what is not applied
 
-The pipeline is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md). Its code exists and the readiness register records two live steps: a product-owner `state-bootstrap` apply, a 2026-10-24 `production` run of the workflow that partly applied the stateful root and then failed, and a 2026-11-01 approved apply that failed at `CreateUserPool` because the pool's first-factor list lacked `PASSWORD` (see [infrastructure](infrastructure.md#partner-first-responder-directory-terraform-stateful-root)). The stateful README and the state-bootstrap README still describe the roles, state bucket and `production` environment as not yet created, and the register's older "never run" sentences conflict with the dated run, so treat the live state as unconfirmed until the owner checks it.
+The pipeline is phase 1 of the [migration plan](../../docs/terraform-migration-plan.md). Its code exists and the readiness register records these live runs: a product-owner `state-bootstrap` apply; a 2026-10-24 `production` run of the workflow that partly applied the stateful root and then failed; a 2026-11-01 approved apply that failed at `CreateUserPool` because the pool's first-factor list lacked `PASSWORD`; and a later approved apply on 2026-11-01 that created the pool (see [infrastructure](infrastructure.md#partner-first-responder-directory-terraform-stateful-root)). The register's older "never run" sentences conflict with these dated runs. The two READMEs ([state-bootstrap](../../infra/terraform/state-bootstrap/README.md), [stateful](../../infra/terraform/stateful/README.md)) are setup procedures and do not record live state, so the register is the place to check it.
 
 ## State bootstrap root (`infra/terraform/state-bootstrap`)
 
