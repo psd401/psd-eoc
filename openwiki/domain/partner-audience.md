@@ -114,7 +114,7 @@ Partner alerts are sent under the partner SES set (`SES_PARTNER_CONFIGURATION_SE
 
 - **Settings are read at planning** and decide the pinned set; the confirmed send, all-clear and reactivation reach exactly that set.
 - **More than 1,200 admitted partners** pins the first 1,200 in admission order and logs the overflow; it never blocks the staff activation.
-- **Partner STOP is not recorded locally.** Opt-out records key on staff roster numbers; AWS refuses an opted-out number and the attempt records as failed.
+- **Partner STOP is recorded locally (#637).** A partner's STOP is written against their partner endpoint as a disabled `SMS_OPTED_OUT` lifecycle fact, when the provider refuses a send to the number or when the scheduled reconciliation finds it on the provider's opt-out list. Opt-outs are read by number across staff and partner facts (`loadSmsPhoneOptOuts` with `includePartnerEndpoints`), so the next partner text batch leaves the partner out without a provider call, and a provider-verified START restores them. Two partners sharing one number opt out together. The partner access page shows this as the Text alerts column ([partner access](partner-access.md#provider-state-on-the-access-page)).
 - **Summary PDF** labels a partner intent `(partners)` in its notification-intent heading (`packages/server/lib/capabilities/records/pdf.ts`); partner push and text attempts are left out of the plan comparison, like late-enrolled staff devices ([media, records and audit](media-records-and-audit.md)).
 
 ## Change navigation
@@ -168,18 +168,4 @@ Schema or migration changes add `bun test packages/server/drizzle/migration-chai
 ## Related
 
 [Partner access](partner-access.md) (who is admitted), [partner alert settings](partner-alert-settings.md) (which real events alert partners), [event lifecycle and activation](event-lifecycle-and-activation.md) (the preview, confirm, and lifecycle paths that carry the slice), [notification pipeline](notification-pipeline.md) (dispatch and the refusals), [roster and audience](roster-and-audience.md) (the staff population that partners are kept out of), and [data model](data-model.md) (the tables and append-only rules).
-ents.test.ts packages/server/lib/notify/email-runtime-store.test.ts
-```
 
-Database-backed checks need the synthetic database (`bun run test:db:start`, see [verification and testing](../testing/verification-and-testing.md)):
-
-```bash
-bun test packages/server/lib/partners/audience.database.test.ts
-bun test packages/server/drizzle/migration-0063.integration.test.ts
-```
-
-Schema or migration changes add `bun test packages/server/drizzle/migration-chain.test.ts` and `bun scripts/check-applied-migrations.ts origin/main HEAD` ([data model](data-model.md)). Run the browser flow only when the confirmation screen changes; it is conditional and needs Chromium through `packages/server/e2e/run.ts`.
-
-## Related
-
-[Partner access](partner-access.md) (who is admitted), [partner alert settings](partner-alert-settings.md) (which real events alert partners), [event lifecycle and activation](event-lifecycle-and-activation.md) (the preview, confirm, and lifecycle paths that carry the slice), [notification pipeline](notification-pipeline.md) (dispatch and the refusals), [roster and audience](roster-and-audience.md) (the staff population that partners are kept out of), and [data model](data-model.md) (the tables and append-only rules).

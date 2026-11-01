@@ -80,7 +80,7 @@ Invariants (see `engine.ts` confirmation checks and tests `rejects missing, mism
 
 ## Partner sessions and the allowlist
 
-A partner session is a human principal whose server-resolved scope carries `partner: true`; partner sign-in sets it ([partner web sign-in](../domain/partner-sign-in.md)). `assertInvocationAllowed` in `packages/server/lib/capabilities/engine.ts` refuses such an invocation unless the actor is human and the capability ID is in `PARTNER_CAPABILITY_IDS` (`packages/contracts/src/partner-capabilities.ts`). It runs in `preflightCapabilityInvocation` and in the audited paths, before the mutation envelope and the role and facility checks.
+A partner session is a human principal whose server-resolved scope carries `partner: true`; partner sign-in sets it, whether the partner signed in on the web or in the native app and by code or passkey ([partner web sign-in](../domain/partner-sign-in.md)). `assertInvocationAllowed` in `packages/server/lib/capabilities/engine.ts` refuses such an invocation unless the actor is human and the capability ID is in `PARTNER_CAPABILITY_IDS` (`packages/contracts/src/partner-capabilities.ts`). It runs in `preflightCapabilityInvocation` and in the audited paths, before the mutation envelope and the role and facility checks.
 
 ```mermaid
 flowchart TD
