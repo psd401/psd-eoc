@@ -11,6 +11,8 @@ import {
   type PartnerPasskeyRequestOptions,
 } from '@psd-eoc/contracts';
 
+import { MobileAuthError } from './auth-errors';
+
 /**
  * Partner passkey sign-in and enrollment, as decisions rather than devices.
  *
@@ -143,6 +145,30 @@ function registrationFor(
 }
 
 /**
+ * The passkey enrollment hand-off this sign-in leaves behind, or null when
+ * there is no offer to make.
+ *
+ * All three conditions are read from the attempt that just happened, which is
+ * what keeps an offer from outliving it. The session has to have taken effect
+ * — a device that refused to store it is a sign-in that did not happen, and
+ * an offer left over from one would be answered later with a hand-off that
+ * belongs to nothing. The server has to have made the offer, since only it
+ * holds the pool's token. And the device has to be able to run a ceremony, so
+ * the offer is never one that cannot be accepted.
+ */
+export function partnerPasskeyOfferFrom(
+  input: Readonly<{
+    sessionEnrolled: boolean;
+    enrollmentToken: string | null;
+    supported: boolean;
+  }>,
+): string | null {
+  return input.sessionEnrolled && input.supported
+    ? input.enrollmentToken
+    : null;
+}
+
+/**
  * Tries to sign one partner in with a passkey.
  *
  * The device is asked first, so a build or a phone with no passkey support
@@ -150,6 +176,15 @@ function registrationFor(
  * that cannot answer, or answers `code`, is the emailed code's case too: the
  * only failure raised to the caller is the server refusing an assertion the
  * authenticator did produce, which is a refusal worth showing.
+ *
+ * Every other failure of that last step — an unreachable server, a spent
+ * passkey budget, a flow that expired while the sheet was open — also ends at
+ * the emailed code, and that matters more here than anywhere else in this
+ * module. The server gives the passkey its own budget precisely so a partner
+ * locked out of it can still ask for a code, and the screen has one action:
+ * if a transient failure were raised instead, a partner with a passkey would
+ * be left pressing a button that can only fail, during the incident this
+ * application exists for.
  */
 export async function signInPartnerWithPasskey(
   input: Readonly<{
@@ -193,13 +228,20 @@ export async function signInPartnerWithPasskey(
   if (credential === null) {
     return { kind: 'use-code' };
   }
-  return {
-    kind: 'signed-in',
-    session: await input.api.partnerPasskeySignInFinish({
-      flowToken: offered.flowToken,
-      credential,
-    }),
-  };
+  try {
+    return {
+      kind: 'signed-in',
+      session: await input.api.partnerPasskeySignInFinish({
+        flowToken: offered.flowToken,
+        credential,
+      }),
+    };
+  } catch (error) {
+    if (error instanceof MobileAuthError && error.kind === 'rejected') {
+      throw error;
+    }
+    return { kind: 'use-code' };
+  }
 }
 
 /**
@@ -209,6 +251,13 @@ export async function signInPartnerWithPasskey(
  * passkey support, or a ceremony the partner declined. A server that refuses
  * the hand-off raises, because an offer that silently did nothing would leave
  * a partner believing their next sign-in needs no inbox.
+ *
+ * The authenticator creates the credential on the device before the pool is
+ * told about it, so a failure of the last step leaves a passkey the pool
+ * never learned. Nothing here can remove it: WebAuthn has no cancel. It is
+ * harmless — the pool refuses an assertion for a credential it does not hold,
+ * which this app reads as "use a code" — and the partner may enroll again
+ * from the next code sign-in.
  */
 export async function enrollPartnerPasskey(
   input: Readonly<{

@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 
 import { NextRequest } from 'next/server';
 
-import { openPartnerSignInFlow } from '../../../../../../lib/auth/partner-flow-cookie';
+import {
+  openPartnerSignInFlow,
+  sealPartnerSignInFlow,
+} from '../../../../../../lib/auth/partner-flow-cookie';
 import { syntheticPartnerAccessToken } from '../../../../../../lib/auth/partner-otp';
 import { sealPartnerPasskeyEnrollment } from '../../../../../../lib/auth/partner-passkey-enrollment';
 import {
@@ -407,16 +410,37 @@ describe('the native partner passkey endpoint', () => {
     await enrollPasskey();
     // A flow the code path sealed carries no passkey factor, and the pool's
     // continuation belongs to one challenge, so refusing it here spends no
-    // provider call and no verify budget.
-    const codeFlow = await post({
-      step: 'sign-in-finish',
-      flowToken: `n1.${'a'.repeat(16)}.${'b'.repeat(40)}.${'c'.repeat(22)}`,
-      credential: assertionCredential(),
-    });
-    expect(codeFlow.status).toBe(401);
-    expect(((await codeFlow.json()) as { message: string }).message).toContain(
-      'expired',
+    // provider call and no verify budget. It is refused in the same words as
+    // a flow that expired or was never sealed here: two messages would be
+    // two answers about a value only this deployment can produce.
+    const codeFlow = sealPartnerSignInFlow(
+      {
+        email: EMAIL,
+        flowSession: 'synthetic-partner-otp:unused',
+        installationId: INSTALLATION_ID,
+        platform: 'ios',
+        factor: 'email-otp',
+        expiresAt: Date.now() + 5 * 60 * 1_000,
+      },
+      process.env,
+      'native',
     );
+    const answers = await Promise.all(
+      [
+        codeFlow,
+        `n1.${'a'.repeat(16)}.${'b'.repeat(40)}.${'c'.repeat(22)}`,
+      ].map(async (flowToken) => {
+        const response = await post({
+          step: 'sign-in-finish',
+          flowToken,
+          credential: assertionCredential(),
+        });
+        expect(response.status).toBe(401);
+        return ((await response.json()) as { message: string }).message;
+      }),
+    );
+    expect(answers[0]).toBe(answers[1]);
+    expect(answers[0]).toContain('expired');
   });
 
   test('a refused request says the one thing every refusal says', async () => {

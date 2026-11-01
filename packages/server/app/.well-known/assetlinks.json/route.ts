@@ -34,6 +34,9 @@ export function GET(): Response {
     status: 200,
     headers: {
       'Content-Type': 'application/json',
+      // As on the Apple document beside this one: an hour bounds how often
+      // this service is asked, not how long a platform holds what it
+      // fetched.
       'Cache-Control': 'public, max-age=3600',
     },
   });

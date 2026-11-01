@@ -231,18 +231,25 @@ export async function signInFinish(
     process.env,
     'native',
   );
-  // A flow opened for an emailed code is not answered with an assertion. The
-  // pool would refuse it anyway, since its continuation belongs to one
-  // challenge; refusing here spends no verify budget and no provider call.
-  if (flow === null || flow.platform === undefined) {
+  // One answer for every unusable flow. A flow opened for an emailed code is
+  // not answered with an assertion — the pool would refuse it anyway, since
+  // its continuation belongs to one challenge, and refusing here spends no
+  // verify budget and no provider call — but it is refused in the same words
+  // as a flow that expired or was never sealed here, because two messages
+  // would be two answers about a value only this deployment can produce.
+  // Saying that the request expired reveals nothing about the address, and
+  // without it the app could only retry a ceremony that can no longer
+  // complete.
+  if (
+    flow === null ||
+    flow.platform === undefined ||
+    flow.factor !== 'passkey'
+  ) {
     return partnerFailure(
       'UNAUTHENTICATED',
       'This sign-in request expired. Start again.',
       requestId,
     );
-  }
-  if (flow.factor !== 'passkey') {
-    return refused(requestId);
   }
   // The passkey budget, never the code's: anyone who knows an address can
   // spend a budget keyed to it, and a partner locked out of their passkey

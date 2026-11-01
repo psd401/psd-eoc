@@ -5,8 +5,10 @@ import type {
   MobileSessionResponse,
 } from '@psd-eoc/contracts';
 
+import { MobileAuthError } from './auth-errors';
 import {
   enrollPartnerPasskey,
+  partnerPasskeyOfferFrom,
   signInPartnerWithPasskey,
   type PartnerPasskeyApi,
   type PartnerPasskeyPort,
@@ -227,12 +229,36 @@ describe('signing a partner in with a passkey', () => {
   });
 
   test('a refused assertion is raised, because that is worth showing', async () => {
-    const refusal = new Error('The sign-in details were not accepted.');
+    const refusal = new MobileAuthError(
+      'rejected',
+      'The sign-in details were not accepted.',
+    );
     await expect(
       signIn({
         api: api({ partnerPasskeySignInFinish: () => Promise.reject(refusal) }),
       }),
     ).rejects.toBe(refusal);
+  });
+
+  test('a transient failure of the last step still ends at the code', async () => {
+    // The server gives the passkey its own budget so that a partner locked
+    // out of it can still ask for a code, and the screen has one action. If
+    // an unreachable server or a spent budget were raised instead, a partner
+    // with a passkey would be left pressing a button that can only fail,
+    // during the incident this application exists for.
+    for (const failure of [
+      new MobileAuthError('offline', 'PSD EOC cannot reach the server.'),
+      new MobileAuthError('invalid-response', 'Unreadable.'),
+      new Error('socket closed'),
+    ]) {
+      expect(
+        await signIn({
+          api: api({
+            partnerPasskeySignInFinish: () => Promise.reject(failure),
+          }),
+        }),
+      ).toEqual({ kind: 'use-code' });
+    }
   });
 });
 
@@ -312,5 +338,59 @@ describe('enrolling a partner passkey', () => {
         enrollmentToken: ENROLLMENT_TOKEN,
       }),
     ).rejects.toBe(refusal);
+  });
+});
+
+describe('the offer an emailed-code sign-in leaves behind', () => {
+  const token = ENROLLMENT_TOKEN;
+
+  test('is made only when the session took effect on a capable device', () => {
+    expect(
+      partnerPasskeyOfferFrom({
+        sessionEnrolled: true,
+        enrollmentToken: token,
+        supported: true,
+      }),
+    ).toBe(token);
+  });
+
+  test('a session the device refused to store leaves no offer', () => {
+    // The hand-off belongs to a sign-in that did not happen. Keeping it would
+    // offer a passkey on the next sign-in against a token from an attempt
+    // that was abandoned, which the server then refuses for reasons the
+    // partner cannot see.
+    expect(
+      partnerPasskeyOfferFrom({
+        sessionEnrolled: false,
+        enrollmentToken: token,
+        supported: true,
+      }),
+    ).toBeNull();
+  });
+
+  test('no hand-off and no passkey support each mean no offer', () => {
+    expect(
+      partnerPasskeyOfferFrom({
+        sessionEnrolled: true,
+        enrollmentToken: null,
+        supported: true,
+      }),
+    ).toBeNull();
+    expect(
+      partnerPasskeyOfferFrom({
+        sessionEnrolled: true,
+        enrollmentToken: token,
+        supported: false,
+      }),
+    ).toBeNull();
+    // And a sign-in that answers with no hand-off ends an offer an earlier
+    // attempt made, because the answer is resolved from this sign-in alone.
+    expect(
+      partnerPasskeyOfferFrom({
+        sessionEnrolled: true,
+        enrollmentToken: null,
+        supported: false,
+      }),
+    ).toBeNull();
   });
 });

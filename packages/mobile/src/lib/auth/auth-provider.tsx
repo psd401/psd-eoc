@@ -45,6 +45,7 @@ import { MobileOidcClient } from './oidc-client';
 import { nativePasskeyPort } from './native-passkey-port';
 import {
   enrollPartnerPasskey as enrollPasskeyWith,
+  partnerPasskeyOfferFrom,
   signInPartnerWithPasskey,
   type PartnerPasskeyPort,
 } from './partner-passkey-client';
@@ -351,6 +352,7 @@ export function AuthProvider({
   // hand-off that has already expired.
   const partnerEnrollmentRef = useRef<string | null>(null);
   const [partnerPasskeyOffered, setPartnerPasskeyOffered] = useState(false);
+  const enrollingPasskeyRef = useRef(false);
   const [partnerPasskeyBusy, setPartnerPasskeyBusy] = useState(false);
   const [partnerPasskeyError, setPartnerPasskeyError] = useState<string | null>(
     null,
@@ -522,37 +524,48 @@ export function AuthProvider({
 
   const completePartnerSignIn = useCallback(
     (code: string) =>
-      runSignIn(PARTNER_SURFACE, async (live) => {
-        const flowToken = partnerFlowRef.current;
-        if (flowToken === null) {
-          throw new MobileAuthError(
-            'rejected',
-            'This sign-in request expired. Request a new code.',
-          );
-        }
-        const verified = await live.signInApi.partnerSignInVerify({
-          flowToken,
-          code: code.trim(),
-        });
-        // The server has spent this flow. Whatever happens to the session
-        // from here, the screen must come back on its first step rather than
-        // ask again for a code that can no longer be answered. A refused code
-        // throws above instead, leaving the flow to be retyped.
-        partnerFlowRef.current = null;
-        setPartnerCodeRequested(false);
-        // A passkey is offered only where it could be accepted: this server
-        // handed one over and this device can run a ceremony.
-        if (
-          verified.passkeyEnrollmentToken !== null &&
-          passkeyPort.isSupported()
-        ) {
-          partnerEnrollmentRef.current = verified.passkeyEnrollmentToken;
-          setPartnerPasskeyOffered(true);
+      runAttempt(
+        PARTNER_SURFACE,
+        async (live) => {
+          const flowToken = partnerFlowRef.current;
+          if (flowToken === null) {
+            throw new MobileAuthError(
+              'rejected',
+              'This sign-in request expired. Request a new code.',
+            );
+          }
+          const verified = await live.signInApi.partnerSignInVerify({
+            flowToken,
+            code: code.trim(),
+          });
+          // The server has spent this flow. Whatever happens to the session
+          // from here, the screen must come back on its first step rather
+          // than ask again for a code that can no longer be answered. A
+          // refused code throws above instead, leaving the flow to be
+          // retyped.
+          partnerFlowRef.current = null;
+          setPartnerCodeRequested(false);
+          return verified;
+        },
+        async (verified) => {
+          const enrolled = await runtime.controller.enroll(verified.session);
+          if (!enrolled) {
+            setSignInError(runtime.controller.getSnapshot().message);
+          }
+          // The offer is resolved here, after the session has either taken
+          // effect or not, and from this sign-in's own answer alone — which
+          // is also what ends an offer the previous attempt left behind.
+          const offer = partnerPasskeyOfferFrom({
+            sessionEnrolled: enrolled,
+            enrollmentToken: verified.passkeyEnrollmentToken,
+            supported: passkeyPort.isSupported(),
+          });
+          partnerEnrollmentRef.current = offer;
+          setPartnerPasskeyOffered(offer !== null);
           setPartnerPasskeyError(null);
-        }
-        return verified.session;
-      }),
-    [passkeyPort, runSignIn],
+        },
+      ),
+    [passkeyPort, runAttempt, runtime],
   );
 
   const resetPartnerSignIn = useCallback(() => {
@@ -568,12 +581,19 @@ export function AuthProvider({
   }, []);
 
   const enrollPartnerPasskey = useCallback(async (): Promise<boolean> => {
+    // A ref, not the busy flag: React state settles after the render, and two
+    // presses before that render would both read the one hand-off and start
+    // two ceremonies. This is the same guard one sign-in attempt uses.
+    if (enrollingPasskeyRef.current) {
+      return false;
+    }
     const enrollmentToken = partnerEnrollmentRef.current;
     const signInApi = runtime.signInApi;
     if (enrollmentToken === null || signInApi === null) {
       dismissPartnerPasskeyOffer();
       return false;
     }
+    enrollingPasskeyRef.current = true;
     setPartnerPasskeyBusy(true);
     setPartnerPasskeyError(null);
     try {
@@ -589,10 +609,20 @@ export function AuthProvider({
       return enrolled;
     } catch (error) {
       // A failed enrollment is only a slower sign-in next time, so it is
-      // reported where it happened and nowhere near the session.
+      // reported where it happened and nowhere near the session. A refusal
+      // also ends the offer, exactly as the browser clears its enrollment
+      // cookie on one: the pool has decided about this hand-off, and leaving
+      // a button that can only be refused again is worse than saying so
+      // once. Anything else — an unreachable server, a pool that did not
+      // answer — leaves the offer up to be tried again.
       setPartnerPasskeyError(publicSignInError(PARTNER_PASSKEY_SURFACE, error));
+      if (error instanceof MobileAuthError && error.kind === 'rejected') {
+        partnerEnrollmentRef.current = null;
+        setPartnerPasskeyOffered(false);
+      }
       return false;
     } finally {
+      enrollingPasskeyRef.current = false;
       setPartnerPasskeyBusy(false);
     }
   }, [dismissPartnerPasskeyOffer, passkeyPort, runtime]);

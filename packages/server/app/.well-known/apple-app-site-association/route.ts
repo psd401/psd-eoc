@@ -31,9 +31,11 @@ export function GET(): Response {
     status: 200,
     headers: {
       'Content-Type': 'application/json',
-      // Apple's CDN caches this itself; an hour is short enough that a
-      // corrected document reaches it the same day and long enough that the
-      // service is not fetched on every install.
+      // An hour bounds how often this service is asked for a document that
+      // changes about never. It does not bound how long a platform holds the
+      // last one it fetched: Apple and Google schedule their own refreshes,
+      // so a corrected document reaches installed apps on their timetable,
+      // not on this header's.
       'Cache-Control': 'public, max-age=3600',
     },
   });
