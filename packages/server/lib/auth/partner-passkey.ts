@@ -181,6 +181,32 @@ export interface PartnerPasskeyChallenge extends PartnerOtpChallenge {
   readonly options: PartnerPasskeyRequestOptions;
 }
 
+/**
+ * What asking the pool about one address produced.
+ *
+ * `code-sent` exists because the caller has to be able to tell the two ways
+ * of ending up at the emailed code apart. Asking the pool what a partner
+ * could use sends nothing, but if a pool ever answers by issuing a
+ * mail-sending challenge instead of a selection, a code has already gone to
+ * that inbox — and the budget that bounds how much mail an inbox can be made
+ * to receive has to be charged for it, or the probe becomes a way around it.
+ * Saying so here rather than asserting in a comment that it cannot happen is
+ * what makes that a property of the code instead of a belief about Amazon.
+ */
+export type PartnerPasskeyStart =
+  | Readonly<{ kind: 'passkey'; challenge: PartnerPasskeyChallenge }>
+  | Readonly<{ kind: 'code' }>
+  | Readonly<{ kind: 'code-sent' }>;
+
+const USE_A_CODE: PartnerPasskeyStart = Object.freeze({ kind: 'code' });
+const CODE_WAS_SENT: PartnerPasskeyStart = Object.freeze({ kind: 'code-sent' });
+
+/** The pool challenges that put a message in front of a person. */
+const MESSAGE_SENDING_CHALLENGES: ReadonlySet<string> = new Set([
+  'EMAIL_OTP',
+  'SMS_OTP',
+]);
+
 export interface PartnerPasskeyProvider {
   readonly issuer: string;
   readonly audience: string;
@@ -195,7 +221,7 @@ export interface PartnerPasskeyProvider {
   startSignIn(
     email: string,
     relyingPartyId: string,
-  ): Promise<PartnerPasskeyChallenge | null>;
+  ): Promise<PartnerPasskeyStart>;
   /** Answers one passkey challenge and returns the pool's verified identity. */
   verifySignIn(
     input: Readonly<{
@@ -325,7 +351,7 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
   public async startSignIn(
     email: string,
     relyingPartyId: string,
-  ): Promise<PartnerPasskeyChallenge | null> {
+  ): Promise<PartnerPasskeyStart> {
     const clientSecret = await this.readClientSecret();
     let session: string | undefined;
     let challenge: string | undefined;
@@ -371,38 +397,48 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
       // existence, so this branch is normally a provider problem, and a
       // provider problem must still not stop the code path from working.
       if (error instanceof Error && error.name === 'UserNotFoundException') {
-        return null;
+        return USE_A_CODE;
       }
       throw new PartnerOtpError(
         'PARTNER_PROVIDER_UNAVAILABLE',
         'The partner identity provider did not answer.',
       );
     }
-    // Everything below answers null, which the page reads as "ask for a
-    // code". Nothing here is an error worth showing: a partner with no
-    // passkey, a pool that answered something other than a selection, and a
-    // pool that offered the passkey choice without the options to run it all
-    // mean the same thing to the person signing in.
+    // The documented answer to a request with no preferred challenge is a
+    // selection, which sends nothing. A pool that issued a mail-sending
+    // challenge anyway has already mailed a code, so say so and let the
+    // caller charge the send budget for it.
+    if (challenge !== undefined && MESSAGE_SENDING_CHALLENGES.has(challenge)) {
+      return CODE_WAS_SENT;
+    }
+    // Everything below is the emailed code with nothing sent yet. None of it
+    // is an error worth showing: a partner with no passkey, a pool that
+    // answered with neither a selection nor a challenge, and a pool that
+    // offered the passkey choice without the options to run it all mean the
+    // same thing to the person signing in.
     if (
       challenge !== 'SELECT_CHALLENGE' ||
       session === undefined ||
       !(available ?? []).includes('WEB_AUTHN')
     ) {
-      return null;
+      return USE_A_CODE;
     }
     const document = parameters?.[CREDENTIAL_REQUEST_OPTIONS];
     if (document === undefined) {
-      return null;
+      return USE_A_CODE;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(boundedChallengeDocument(document)) as unknown;
     } catch {
-      return null;
+      return USE_A_CODE;
     }
     return Object.freeze({
-      flowSession: session,
-      options: requestOptionsFor(parsed, relyingPartyId),
+      kind: 'passkey' as const,
+      challenge: Object.freeze({
+        flowSession: session,
+        options: requestOptionsFor(parsed, relyingPartyId),
+      }),
     });
   }
 
@@ -620,7 +656,8 @@ export function syntheticPartnerPasskeyProvider(
       const address = email.trim().toLowerCase();
       const registered = syntheticState().credentials.get(address);
       if (registered === undefined || registered.size === 0) {
-        return Promise.resolve(null);
+        // The stand-in sends no mail at all, so it never reports one.
+        return Promise.resolve(USE_A_CODE);
       }
       const challenge = syntheticChallenge();
       const flowSession = `${SYNTHETIC_PASSKEY_FLOW_PREFIX}${randomBytes(
@@ -632,15 +669,18 @@ export function syntheticPartnerPasskeyProvider(
       );
       return Promise.resolve(
         Object.freeze({
-          flowSession,
-          options: PartnerPasskeyRequestOptionsSchema.parse({
-            rpId: relyingPartyId,
-            challenge,
-            userVerification: 'required',
-            allowCredentials: [...registered].map((id) => ({
-              type: 'public-key' as const,
-              id,
-            })),
+          kind: 'passkey' as const,
+          challenge: Object.freeze({
+            flowSession,
+            options: PartnerPasskeyRequestOptionsSchema.parse({
+              rpId: relyingPartyId,
+              challenge,
+              userVerification: 'required',
+              allowCredentials: [...registered].map((id) => ({
+                type: 'public-key' as const,
+                id,
+              })),
+            }),
           }),
         }),
       );

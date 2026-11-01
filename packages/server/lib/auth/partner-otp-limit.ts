@@ -43,10 +43,12 @@ export const PARTNER_OTP_VERIFIES_PER_CLIENT = 40;
  * allowance: burning the passkey budget costs a partner their passkey for a
  * quarter of an hour and nothing else.
  *
- * Starting a passkey sign-in also sends no mail, so it must not spend the
- * budget that bounds how much a partner's inbox can be made to receive
- * either: a passkey attempt that fell back to a code would otherwise cost
- * two sends and halve the real budget.
+ * Starting a passkey sign-in normally sends no mail, so it must not spend
+ * the budget that bounds how much a partner's inbox can be made to receive:
+ * a passkey attempt that fell back to a code would otherwise cost two sends
+ * and halve the real budget. Normally, not always — the provider reports
+ * whether the pool mailed a code anyway, and the send budget is charged for
+ * it when it did, so the exception cannot become a way around that budget.
  *
  * Enrolling needs a budget for a different reason. It is already behind the
  * sealed hand-off from a completed sign-in, so it is not anonymous, but each

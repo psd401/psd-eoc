@@ -22,6 +22,7 @@ import {
   resolvePartnerPasskeyProvider,
   syntheticPartnerHasPasskey,
   syntheticPartnerPasskeyProvider,
+  type PartnerPasskeyChallenge,
   type PartnerPasskeyProvider,
 } from './partner-passkey';
 
@@ -203,6 +204,17 @@ describe('reading WebAuthn client data', () => {
   });
 });
 
+/** The challenge from a start that offered a passkey; fails if it did not. */
+async function offered(
+  start: Promise<Awaited<ReturnType<PartnerPasskeyProvider['startSignIn']>>>,
+): Promise<PartnerPasskeyChallenge> {
+  const result = await start;
+  if (result.kind !== 'passkey') {
+    throw new Error(`Expected a passkey challenge, got ${result.kind}.`);
+  }
+  return result.challenge;
+}
+
 describe('the synthetic partner passkey stand-in', () => {
   let provider: PartnerPasskeyProvider;
 
@@ -238,16 +250,17 @@ describe('the synthetic partner passkey stand-in', () => {
   test('an address with no passkey signs in with a code instead', async () => {
     // Null is the answer for every address that cannot use a passkey, which
     // is what keeps the first step from answering who is enrolled.
-    expect(await provider.startSignIn(EMAIL, RELYING_PARTY)).toBeNull();
+    expect(await provider.startSignIn(EMAIL, RELYING_PARTY)).toEqual({
+      kind: 'code',
+    });
     expect(syntheticPartnerHasPasskey(EMAIL)).toBe(false);
   });
 
   test('an enrolled address is offered its own credential', async () => {
     await enroll();
     expect(syntheticPartnerHasPasskey(EMAIL)).toBe(true);
-    const challenge = await provider.startSignIn(EMAIL, RELYING_PARTY);
-    expect(challenge).not.toBeNull();
-    expect(challenge?.options).toMatchObject({
+    const challenge = await offered(provider.startSignIn(EMAIL, RELYING_PARTY));
+    expect(challenge.options).toMatchObject({
       rpId: RELYING_PARTY,
       userVerification: 'required',
       allowCredentials: [{ type: 'public-key', id: 'Y3JlZGVudGlhbC1pZA' }],
@@ -256,12 +269,12 @@ describe('the synthetic partner passkey stand-in', () => {
 
   test('an enrolled partner signs in with its passkey', async () => {
     await enroll();
-    const challenge = await provider.startSignIn(EMAIL, RELYING_PARTY);
+    const challenge = await offered(provider.startSignIn(EMAIL, RELYING_PARTY));
     const verified = await provider.verifySignIn({
       email: EMAIL,
-      flowSession: challenge?.flowSession ?? '',
+      flowSession: challenge.flowSession,
       credential: assertion(
-        clientData({ challenge: challenge?.options.challenge }),
+        clientData({ challenge: challenge.options.challenge }),
       ),
     });
     expect(verified.claims).toMatchObject({
@@ -275,12 +288,14 @@ describe('the synthetic partner passkey stand-in', () => {
     await enroll();
     const digests = new Set<string>();
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const challenge = await provider.startSignIn(EMAIL, RELYING_PARTY);
+      const challenge = await offered(
+        provider.startSignIn(EMAIL, RELYING_PARTY),
+      );
       const verified = await provider.verifySignIn({
         email: EMAIL,
-        flowSession: challenge?.flowSession ?? '',
+        flowSession: challenge.flowSession,
         credential: assertion(
-          clientData({ challenge: challenge?.options.challenge }),
+          clientData({ challenge: challenge.options.challenge }),
         ),
       });
       digests.add(verified.claims.claimsDigest);
@@ -290,8 +305,8 @@ describe('the synthetic partner passkey stand-in', () => {
 
   test('a challenge is spent whether or not the assertion is accepted', async () => {
     await enroll();
-    const challenge = await provider.startSignIn(EMAIL, RELYING_PARTY);
-    const flowSession = challenge?.flowSession ?? '';
+    const challenge = await offered(provider.startSignIn(EMAIL, RELYING_PARTY));
+    const flowSession = challenge.flowSession;
     // Wrong challenge: refused, and the session is gone with it.
     await expect(
       provider.verifySignIn({
@@ -305,7 +320,7 @@ describe('the synthetic partner passkey stand-in', () => {
         email: EMAIL,
         flowSession,
         credential: assertion(
-          clientData({ challenge: challenge?.options.challenge }),
+          clientData({ challenge: challenge.options.challenge }),
         ),
       }),
     ).rejects.toMatchObject({ code: 'PARTNER_SIGN_IN_REFUSED' });
@@ -314,13 +329,13 @@ describe('the synthetic partner passkey stand-in', () => {
   test('a credential registered to another address is refused', async () => {
     await enroll(EMAIL, 'Zmlyc3Q');
     await enroll('other@agency.example.invalid', 'c2Vjb25k');
-    const challenge = await provider.startSignIn(EMAIL, RELYING_PARTY);
+    const challenge = await offered(provider.startSignIn(EMAIL, RELYING_PARTY));
     await expect(
       provider.verifySignIn({
         email: EMAIL,
-        flowSession: challenge?.flowSession ?? '',
+        flowSession: challenge.flowSession,
         credential: assertion(
-          clientData({ challenge: challenge?.options.challenge }),
+          clientData({ challenge: challenge.options.challenge }),
           'c2Vjb25k',
         ),
       }),
@@ -430,11 +445,9 @@ describe('the Cognito partner passkey provider', () => {
           }
         : new Error('unexpected command'),
     );
-    const challenge = await provider.startSignIn(EMAIL, RELYING_PARTY);
-    expect(challenge).toMatchObject({
-      flowSession: 'pool-session',
-      options: requestOptions,
-    });
+    expect(
+      await offered(provider.startSignIn(EMAIL, RELYING_PARTY)),
+    ).toMatchObject({ flowSession: 'pool-session', options: requestOptions });
     const initiated = sent[0] as AdminInitiateAuthCommand;
     expect(initiated.input.AuthFlow).toBe('USER_AUTH');
     // No preference, so the pool lists what the partner could use instead of
@@ -468,8 +481,7 @@ describe('the Cognito partner passkey provider', () => {
         AvailableChallenges: ['WEB_AUTHN'],
         ChallengeParameters: { CREDENTIAL_REQUEST_OPTIONS: 'not json' },
       },
-      // A pool that issued a challenge rather than a selection.
-      { Session: 'pool-session', ChallengeName: 'EMAIL_OTP' },
+      // A pool that answered with neither a selection nor a challenge.
       { ChallengeName: 'SELECT_CHALLENGE', AvailableChallenges: ['WEB_AUTHN'] },
       Object.assign(new Error('no such user'), {
         name: 'UserNotFoundException',
@@ -477,7 +489,27 @@ describe('the Cognito partner passkey provider', () => {
     ];
     for (const answer of answers) {
       const { provider } = cognito(() => answer);
-      expect(await provider.startSignIn(EMAIL, RELYING_PARTY)).toBeNull();
+      expect(await provider.startSignIn(EMAIL, RELYING_PARTY)).toEqual({
+        kind: 'code',
+      });
+    }
+  });
+
+  test('a pool that mailed a code anyway says so, so it can be charged', async () => {
+    // Asking what a partner could use is documented to answer a selection,
+    // which sends nothing. If a pool issues a mail-sending challenge
+    // instead, a code has reached that inbox: the caller has to be told, or
+    // the probe becomes a way around the budget that bounds how much mail an
+    // inbox can be made to receive. Asserted rather than assumed, because
+    // this has never run against a real pool.
+    for (const name of ['EMAIL_OTP', 'SMS_OTP']) {
+      const { provider } = cognito(() => ({
+        Session: 'pool-session',
+        ChallengeName: name,
+      }));
+      expect(await provider.startSignIn(EMAIL, RELYING_PARTY)).toEqual({
+        kind: 'code-sent',
+      });
     }
   });
 

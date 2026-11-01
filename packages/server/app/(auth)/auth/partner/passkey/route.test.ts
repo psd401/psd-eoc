@@ -8,6 +8,7 @@ import {
 import { syntheticPartnerAccessToken } from '../../../../../lib/auth/partner-otp';
 import {
   getPartnerOtpLimiter,
+  PARTNER_OTP_SENDS_PER_EMAIL,
   PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL,
 } from '../../../../../lib/auth/partner-otp-limit';
 import {
@@ -19,6 +20,38 @@ import {
   syntheticPartnerHasPasskey,
 } from '../../../../../lib/auth/partner-passkey';
 import { POST } from './route';
+import { signInStart } from './steps';
+
+/** A same-origin probe request from one caller. */
+function probeRequest(client: string): Request {
+  return new Request(ACTION, {
+    method: 'POST',
+    headers: new Headers({
+      'content-type': 'application/json',
+      origin: ORIGIN,
+      'x-forwarded-for': client,
+    }),
+    body: JSON.stringify({ step: 'sign-in-start', email: 'unused@x.invalid' }),
+  });
+}
+
+/**
+ * How much of this address's send budget is left, by spending it.
+ *
+ * The limiter counts rather than reports, so the only honest way to ask what
+ * it holds is to use it up. Every caller passes a throwaway address, so
+ * spending it costs nothing.
+ */
+function remainingSends(email: string, client: string): number {
+  const limiter = getPartnerOtpLimiter();
+  const now = new Date();
+  let remaining = 0;
+  while (limiter.admit({ kind: 'send', email, client }, now).admitted) {
+    remaining += 1;
+    if (remaining > 100) break;
+  }
+  return remaining;
+}
 
 /**
  * Issue #599. The partner passkey endpoint: what it accepts, what it
@@ -398,6 +431,58 @@ describe('the partner passkey route', () => {
       new Date(),
     );
     expect(decision.admitted).toBe(true);
+  });
+
+  test('a probe that made the pool mail a code spends the send budget', async () => {
+    // The stand-in never mails, so the pool is a stub here. What is being
+    // proved is the route's half of the contract: when the provider reports
+    // that a code reached the inbox, the budget that bounds how much mail an
+    // inbox can be made to receive is charged for it, counted on the limiter
+    // rather than inferred from the answer the page gets.
+    const mailed = 'mailed-anyway@agency.example.invalid';
+    const client = '198.51.100.9';
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => Promise.resolve({ kind: 'code-sent' as const }),
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+
+    const response = await signInStart(probeRequest(client), {
+      provider,
+      relyingPartyId: 'localhost',
+      email: mailed,
+      now: new Date(),
+    });
+    // The page is told the same thing either way: ask for a code.
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ method: 'code' });
+    // One send is gone from this address's budget, counted on the limiter.
+    expect(remainingSends(mailed, client)).toBe(
+      PARTNER_OTP_SENDS_PER_EMAIL - 1,
+    );
+  });
+
+  test('a probe that mailed nothing leaves the send budget alone', async () => {
+    const quiet = 'nothing-mailed@agency.example.invalid';
+    const client = '198.51.100.10';
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => Promise.resolve({ kind: 'code' as const }),
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+    await signInStart(probeRequest(client), {
+      provider,
+      relyingPartyId: 'localhost',
+      email: quiet,
+      now: new Date(),
+    });
+    expect(remainingSends(quiet, client)).toBe(PARTNER_OTP_SENDS_PER_EMAIL);
   });
 
   test('an assertion with no flow at all is refused', async () => {
