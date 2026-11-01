@@ -164,9 +164,12 @@ export async function signInStart(
     );
   }
 
-  // One question per address at a time. A burst would otherwise all read the
-  // observation above before the first of them answered, so all of them
-  // would reach a pool that mails and all of them would mail.
+  // One question per address at a time, per instance. A burst would
+  // otherwise all read the observation above before the first of them
+  // answered, so all of them would reach a pool that mails and all of them
+  // would mail. A partner who double-submits with a passkey enrolled is sent
+  // a code they did not need; that is the cost, and it is the right way
+  // round. Their passkey works on the next attempt.
   if (!beginPartnerPasskeyProbe(input.email)) {
     return noStore(
       NextResponse.json(

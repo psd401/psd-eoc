@@ -210,9 +210,18 @@ export type PartnerPasskeyStart =
  * directory that mails on a question is not something to re-test against a
  * partner's inbox.
  *
- * Per process, like the limiter beside it, and held off `globalThis` for the
- * same reason — the development server re-evaluates a route's modules
- * between requests. Losing it costs at most one more discarded mail.
+ * Per process, exactly like the send budget it defends — the limiter is a
+ * process-local map, so every budget in this module is per instance and the
+ * service runs more than one. Each instance therefore learns this for
+ * itself, paying one mailing probe to do so, and the fleet-wide bound is the
+ * per-instance one times the instance count. That is the same property the
+ * emailed-code budgets have always had; it is written down here rather than
+ * fixed here, because moving rate limiting into shared storage is a new
+ * datastore on the sign-in path and a decision for the product owner, not a
+ * detail of this change.
+ *
+ * Held off `globalThis` because the development server re-evaluates a
+ * route's modules between requests. Losing it costs one more discarded mail.
  */
 const POOL_MAILED_ON_PROBE = Symbol.for('psd-eoc.partner-pool-mails-on-probe');
 
@@ -241,13 +250,20 @@ export function resetPoolMailsOnProbe(): void {
  *
  * One question per address at a time. Without this, a burst of probes for
  * one address all read the observation above before the first of them comes
- * back, so all of them reach a pool that mails and all of them mail. The
- * second and later probes of a burst are answered "use a code" instead,
- * which is what they would have been answered anyway — the first probe's
- * answer is the same for all of them, and nothing is lost by not asking
- * again while it is outstanding.
+ * back, so all of them reach a pool that mails and all of them mail.
  *
- * Per process and held off `globalThis`, like the observation itself.
+ * The second and later probes of a burst are answered "use a code". For a
+ * partner with no passkey that is the answer they were going to get anyway.
+ * For a partner who does have one it is not: a double-submitted form sends
+ * that partner a code they did not need, charged to their send budget. That
+ * is the cost of the bound, and it is the right way round — a needless code
+ * is a nuisance, and the thing being prevented is a pool mailing an inbox
+ * without limit. The partner's passkey still works on the next attempt.
+ *
+ * Per process, like everything else here, so a burst the load balancer
+ * spreads across instances reaches the pool once per instance rather than
+ * once. Addresses are held as digests, as the limiter holds them, because
+ * this map lives for the life of the process and an address is personal data.
  */
 const PROBES_IN_FLIGHT = Symbol.for('psd-eoc.partner-passkey-probes');
 
@@ -264,18 +280,22 @@ function probesInFlight(): Set<string> {
 
 /** Claims the one outstanding probe for an address, or false if it is taken. */
 export function beginPartnerPasskeyProbe(email: string): boolean {
-  const address = email.trim().toLowerCase();
+  const key = probeKey(email);
   const inFlight = probesInFlight();
-  if (inFlight.has(address)) {
+  if (inFlight.has(key)) {
     return false;
   }
-  inFlight.add(address);
+  inFlight.add(key);
   return true;
 }
 
 /** Releases it. Always called, whatever the probe did. */
 export function endPartnerPasskeyProbe(email: string): void {
-  probesInFlight().delete(email.trim().toLowerCase());
+  probesInFlight().delete(probeKey(email));
+}
+
+function probeKey(email: string): string {
+  return sha256Hex(email.trim().toLowerCase());
 }
 
 const USE_A_CODE: PartnerPasskeyStart = Object.freeze({ kind: 'code' });
