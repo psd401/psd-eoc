@@ -306,6 +306,61 @@ describe('deployment boundary', () => {
     ).toThrow(/protected hosted domain/u);
   });
 
+  it('serves the mobile app association documents only when configured', () => {
+    // Issue #647. Apple and Google each decide whether this district's app
+    // may use the application origin as a passkey relying party by fetching a
+    // document from it, so the identities those documents are built from are
+    // tenant configuration. A district with no store build configures none of
+    // them, and the runtime then carries no empty claim about which app may
+    // ask this origin for a credential.
+    const identityFor = (overrides: Readonly<Record<string, unknown>>) =>
+      readDeploymentIdentity({
+        tryGetContext(key) {
+          return {
+            'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+            'psdEoc:hostedDomain': 'example.invalid',
+            'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
+            'psdEoc:iosBundleId': 'invalid.example.eoc',
+            'psdEoc:organizationName': 'Example School District',
+            'psdEoc:privacyContactUrl': 'https://www.example.invalid/contact',
+            'psdEoc:smsSupportEmail': 'servicecentral@example.invalid',
+            'psdEoc:smsSupportPhone': '+12535550123',
+            'psdEoc:displayTimeZone': 'America/New_York',
+            ...overrides,
+          }[key];
+        },
+      });
+
+    const unconfigured = identityFor({});
+    expect(unconfigured.appleAppTeamId).toBeNull();
+    expect(unconfigured.androidApplicationId).toBeNull();
+    expect(unconfigured.androidSigningFingerprints).toEqual([]);
+
+    const fingerprint = `${'AB:'.repeat(31)}CD`;
+    const configured = identityFor({
+      'psdEoc:appleAppTeamId': 'ABCDE12345',
+      'psdEoc:androidApplicationId': 'invalid.example.eoc',
+      'psdEoc:androidSigningFingerprints': [fingerprint.toLowerCase()],
+    });
+    expect(configured.appleAppTeamId).toBe('ABCDE12345');
+    expect(configured.androidApplicationId).toBe('invalid.example.eoc');
+    expect(configured.androidSigningFingerprints).toEqual([fingerprint]);
+
+    // A present but malformed value is an error rather than a document the
+    // platform silently refuses, which would read as a passkey that never
+    // works and look like a bug in the app.
+    for (const invalid of [
+      { 'psdEoc:appleAppTeamId': 'abcde12345' },
+      { 'psdEoc:appleAppTeamId': 'ABCDE1234' },
+      { 'psdEoc:androidApplicationId': 'Invalid.Example.Eoc' },
+      { 'psdEoc:androidSigningFingerprints': [] },
+      { 'psdEoc:androidSigningFingerprints': ['AB:CD'] },
+      { 'psdEoc:androidSigningFingerprints': [fingerprint, fingerprint] },
+    ]) {
+      expect(() => identityFor(invalid)).toThrow(/psdEoc:(?:apple|android)/u);
+    }
+  });
+
   it('treats the email sender display name as optional, header-safe config', () => {
     const targetWith = (displayName: unknown) =>
       readDeploymentTarget({
