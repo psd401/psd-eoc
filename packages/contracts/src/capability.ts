@@ -268,12 +268,43 @@ export type PartnerOtpCompletionTransport = z.infer<
   typeof PartnerOtpCompletionTransportSchema
 >;
 
+/**
+ * Trusted evidence for one completed partner passkey sign-in.
+ *
+ * The partner's authenticator signed the pool's own challenge, and the pool
+ * checked that signature against the credential it holds for this account
+ * before issuing an identity token. There is no code to have proven, so
+ * `otpVerified` is absent rather than false: a passkey sign-in must not be
+ * able to parse as the one-time-password transport, or the audit record would
+ * claim a code was read from an inbox that never received one.
+ *
+ * `userVerified` is the pool's `user_verification = "required"` setting:
+ * a passkey on a device whose biometric or PIN was not satisfied is not a
+ * credential, so there is no `false` to record either.
+ */
+export const PartnerPasskeyCompletionTransportSchema = z
+  .object({
+    kind: z.literal('partner-passkey'),
+    method: z.literal('POST'),
+    passkeyVerified: z.literal(true),
+    userVerified: z.literal(true),
+    signatureVerified: z.literal(true),
+  })
+  .strict()
+  .readonly();
+
+/** Trusted partner passkey transport inferred from its schema. */
+export type PartnerPasskeyCompletionTransport = z.infer<
+  typeof PartnerPasskeyCompletionTransportSchema
+>;
+
 /** Complete set of trusted transports that may establish an OIDC session. */
 export const OidcCompletionTransportSchema = z
   .union([
     OidcCallbackTransportSchema,
     MobileOidcCodeExchangeTransportSchema,
     PartnerOtpCompletionTransportSchema,
+    PartnerPasskeyCompletionTransportSchema,
   ])
   .readonly();
 
@@ -1133,7 +1164,7 @@ export const AuthenticationCapabilityEnvelopeSchema = z
     // presented as a partner one-time password, is refused here before any
     // handler, authorizer, or store sees it.
     const allowedTransports = partner
-      ? (['partner-email-otp'] as const)
+      ? (['partner-email-otp', 'partner-passkey'] as const)
       : envelope.source === 'web'
         ? (['oidc-code-callback'] as const)
         : (['mobile-oidc-code-exchange'] as const);
@@ -1146,10 +1177,13 @@ export const AuthenticationCapabilityEnvelopeSchema = z
       });
     }
     // A partner signs in from the browser or from the native app (#598).
-    // Both invocation sources carry the same `partner-email-otp` transport,
-    // because the evidence is the same: the pool proved the code and signed
-    // an identity token. The source decides only how the issued credential
-    // is delivered, which the session issuer binds to the device platform.
+    // Both invocation sources carry the same partner transport, because the
+    // evidence is the same: the pool proved the first factor — an emailed
+    // code, or a passkey assertion (#599) — and signed an identity token.
+    // The source decides only how the issued credential is delivered, which
+    // the session issuer binds to the device platform. Which first factor was
+    // used is recorded, never a gate: the admission decides access either
+    // way, so a passkey is a convenience and never a wider grant.
   })
   .readonly();
 
