@@ -121,16 +121,22 @@ describe('the partner passkey enrollment hand-off', () => {
   test("the two surfaces cannot open each other's hand-off", () => {
     // Issue #647. The app is handed the identical sealed value as an opaque
     // token, under its own label, so neither surface can finish the other's
-    // enrollment even though both derive the same key.
+    // enrollment even though both derive the same key. A native hand-off also
+    // names the platform it enrolls, which decides the ceremony origin the
+    // server will accept, so the two shapes are not interchangeable either.
+    const nativeEnrollment = Object.freeze({
+      ...enrollment,
+      platform: 'ios' as const,
+    });
     const native = sealPartnerPasskeyEnrollment(
-      enrollment,
+      nativeEnrollment,
       environment,
       'native',
     );
     expect(native.startsWith('e1.')).toBe(true);
     expect(
       openPartnerPasskeyEnrollment(native, now, environment, 'native'),
-    ).toEqual(enrollment);
+    ).toEqual(nativeEnrollment);
     expect(openPartnerPasskeyEnrollment(native, now, environment)).toBeNull();
     const web = sealPartnerPasskeyEnrollment(enrollment, environment);
     expect(
@@ -143,6 +149,23 @@ describe('the partner passkey enrollment hand-off', () => {
         now,
         environment,
         'native',
+      ),
+    ).toBeNull();
+    // A browser hand-off never names a platform and a native one always
+    // does, so each surface refuses the other's shape as well as its label.
+    expect(
+      openPartnerPasskeyEnrollment(
+        sealPartnerPasskeyEnrollment(enrollment, environment, 'native'),
+        now,
+        environment,
+        'native',
+      ),
+    ).toBeNull();
+    expect(
+      openPartnerPasskeyEnrollment(
+        sealPartnerPasskeyEnrollment(nativeEnrollment, environment),
+        now,
+        environment,
       ),
     ).toBeNull();
   });
