@@ -21,8 +21,11 @@ Instead they get their own pool, with:
 
 - the Essentials feature plan, which is what makes passwordless sign-in
   available at all;
-- email one-time passwords and WebAuthn passkeys as the only first factors,
-  with every password flow left out of the app client;
+- email one-time passwords and WebAuthn passkeys as the sign-in methods.
+  `PASSWORD` is also in the pool's first-factor list because `CreateUserPool`
+  refuses a list without it, but no partner can use it: partners are created
+  with no password, none is ever set, recovery is admin-only, and every
+  password flow is left out of the app client;
 - administrator invitation only — no self sign-up and no self-service
   recovery;
 - no federation to any agency identity provider, and no hosted-UI domain.

@@ -203,12 +203,15 @@ resource "aws_cognito_user_pool" "partner" {
     allow_admin_create_user_only = true
   }
 
-  # The two sign-in methods the product owner decided on (2026-10-23). Password
-  # is deliberately absent; the app client below also refuses every
-  # password-bearing auth flow, so password sign-in stays impossible even if
-  # Cognito keeps PASSWORD in a pool's own factor list.
+  # The two sign-in methods the product owner decided on (2026-10-23) are
+  # EMAIL_OTP and WEB_AUTHN. CreateUserPool refuses a list without PASSWORD
+  # ("Password should be configured as one of the allowed first auth factors",
+  # production apply 2026-11-01), so it is listed, but no partner can use it:
+  # the app creates every partner with AdminCreateUser and no password, never
+  # sets one, and recovery is admin-only, so no partner holds a password; and
+  # the app client below refuses every password-bearing auth flow.
   sign_in_policy {
-    allowed_first_auth_factors = ["EMAIL_OTP", "WEB_AUTHN"]
+    allowed_first_auth_factors = ["PASSWORD", "EMAIL_OTP", "WEB_AUTHN"]
   }
 
   # A passkey is bound to this relying-party id and to user verification, so a
