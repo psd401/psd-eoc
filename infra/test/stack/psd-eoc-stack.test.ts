@@ -3870,6 +3870,29 @@ describe('configured-unverified provider readiness boundary', () => {
       }),
     );
 
+    // SES test-publishes when it creates a destination, so the partner set's
+    // destination on the encrypted alert topic must wait for the topic policy
+    // and the key policy that admit the partner set.
+    const partnerAlertDestinationResource = resourceEntries(
+      'AWS::SES::ConfigurationSetEventDestination',
+    ).find(([logicalId]) =>
+      logicalId.startsWith('PartnerAlertEmailConfigurationSetEventDestination'),
+    )?.[1];
+    if (partnerAlertDestinationResource === undefined) {
+      throw new Error(
+        'Missing the partner alert configuration set destination.',
+      );
+    }
+    const partnerAlertDependencies = asArray(
+      asRecord(partnerAlertDestinationResource).DependsOn,
+    );
+    expect(partnerAlertDependencies).toContainEqual(
+      expect.stringMatching(/^EmailEventsTopicPolicy/),
+    );
+    expect(partnerAlertDependencies).toContainEqual(
+      expect.stringMatching(/^EmailEventsKey/),
+    );
+
     const queueSubscriptionResource = resourceEntries(
       'AWS::SNS::Subscription',
     ).find(([, resource]) => properties(resource).Protocol === 'sqs')?.[1];
