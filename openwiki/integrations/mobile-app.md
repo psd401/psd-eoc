@@ -1,13 +1,15 @@
 ---
 type: Application
 title: Mobile app (Expo, iOS and Android)
-description: The packages/mobile native client, covering Expo Router structure, OIDC and secure-session handling, the start/activation flow, event room sync and photos, fail-closed push registration, and the dual-platform e2e and release rules.
+description: The packages/mobile native client, covering Expo Router structure, OIDC and secure-session handling, partner agency emailed-code sign-in, the start/activation flow, event room sync and photos, fail-closed push registration, and the dual-platform e2e and release rules.
 tags: [mobile, expo, ios, android, push, oidc, e2e]
 openwiki:
   roles: [integration, architecture]
-  change_kinds: [mobile, push, auth, release]
+  change_kinds: [mobile, push, auth, release, partner-access]
   source_paths:
     - packages/mobile/app.config.ts
+    - packages/mobile/src/lib/auth/partner-session.ts
+    - packages/mobile/e2e/partner-run.ts
     - packages/mobile/app.json
     - packages/mobile/eas.json
     - packages/mobile/src/app
@@ -18,9 +20,11 @@ openwiki:
     - packages/mobile/src/features/event-room
     - packages/mobile/src/features/sms-consent
     - packages/mobile/e2e/run.ts
-  symbols: [AuthController, EventRoomSyncController, registration-controller, response-controller, start-mutation-coordinator]
+  symbols: [AuthController, EventRoomSyncController, registration-controller, response-controller, start-mutation-coordinator, requestPartnerCode, completePartnerSignIn, isPartnerSession]
   test_paths:
     - packages/mobile/native-tests
+    - packages/mobile/src/lib/auth/partner-session.test.ts
+    - packages/mobile/src/lib/auth/auth-api-client.test.ts
     - packages/mobile/src/lib/auth/auth-controller.test.ts
     - packages/mobile/src/features/event-room/sync-controller.test.ts
     - packages/mobile/src/lib/push/registration-controller.test.ts
@@ -44,7 +48,7 @@ One Expo SDK 57 managed app for both stores (README: `packages/mobile/README.md`
 | Area | Where | Notes |
 | --- | --- | --- |
 | Navigation | `src/app` (Expo Router): `(auth)/sign-in`, `(auth)/unlock`, `auth/callback`, `(app)/events/*`, `(app)/text-alerts`, `start`, `preview/real`, `preview/drill` | Real and drill previews are separate routes so classification never blurs. |
-| Auth | `src/lib/auth` (`AuthController`, `oidc-client`, `secure-session-store`, `local-authenticator`, `pending-oidc-flow`) | Server-driven native OIDC (`/api/auth/mobile/oidc/start` and `/exchange`, see [identity](../domain/identity-and-access.md)), authorization-code + PKCE via the `psdeoc` scheme. Session in SecureStore with device authentication (Face ID/passcode via OS; no custom PIN). Sign-out is online-only. |
+| Auth | `src/lib/auth` (`AuthController`, `oidc-client`, `secure-session-store`, `local-authenticator`, `pending-oidc-flow`) | Server-driven native OIDC (`/api/auth/mobile/oidc/start` and `/exchange`, see [identity](../domain/identity-and-access.md)), authorization-code + PKCE via the `psdeoc` scheme. Session in SecureStore with device authentication (Face ID/passcode via OS; no custom PIN). Sign-out is online-only. Partner agency responders sign in with an emailed code through `/api/auth/mobile/partner/{start,verify}` ([partner agency sign-in](#partner-agency-sign-in)). |
 | API | `src/lib/api` | `authenticated-request`, `forward-compatible-parse`, `client-diagnostics` (reports to `POST /api/diagnostics`; shipped connected from 1.0.10 per the readiness register). |
 | Start flow | `src/lib/start`, `src/components/start` | Preview binding (`activation-preview-binding`), mutation coordinator/store, navigation and hardware-back guards that protect an in-flight activation. Calls `/api/mobile/start/{facilities,threats,preview,activate}` ([lifecycle](../domain/event-lifecycle-and-activation.md)). |
 | Event room | `src/features/event-room` (`EventRoomSyncController`, `api.ts`, `model.ts`, `native-photo.ts`, `photo-draft.ts`) | Polls `sync-event-room`, posts journal entries and photos (EXIF stripping is server-side; see [media](../domain/media-records-and-audit.md)). |
@@ -61,10 +65,39 @@ One Expo SDK 57 managed app for both stores (README: `packages/mobile/README.md`
 - Notification taps (running/background/terminated) are de-duplicated and routed only by canonical event ID (`response-controller.ts`); foreground display needs matching real/drill markers. Android channel `eoc-alerts`; iOS time-sensitive entitlement. Disabled permission/channel appends unregistration truth.
 - Failed registration retries on its own (recent history); iOS adopts the UIScene life cycle.
 
+## Partner agency sign-in
+
+Invited partner agency responders (non-district first responders, issue #598) sign in inside the app, from a "Partner agency sign-in" disclosure below the Google button on `src/app/(auth)/sign-in.tsx`. The server rules are in [partner web sign-in](../domain/partner-sign-in.md#native-app-sign-in-issue-598); this section covers what the app holds and how it behaves.
+
+```mermaid
+sequenceDiagram
+  participant S as Sign-in screen
+  participant P as AuthProvider
+  participant Start as POST /api/auth/mobile/partner/start
+  participant Verify as POST /api/auth/mobile/partner/verify
+  S->>P: requestPartnerCode(email)
+  P->>Start: email, platform, installationId
+  Start-->>P: sealed flowToken, expiresAt
+  S->>P: completePartnerSignIn(code)
+  P->>Verify: flowToken, code
+  Verify-->>P: session and bearer
+  P-->>S: signed in, flow token cleared
+```
+
+Caption: the flow token lives only in `AuthProvider`'s ref (`partnerFlowRef`) and is never persisted. The screen returns to its first step after success, after "Use a different address", and after sign-out (`resetPartnerSignIn`). A refused code throws and leaves the flow in place so the partner can retype it.
+
+- **Session identity.** `isPartnerSession` (`src/lib/auth/partner-session.ts`) reads the `partner` role the server issued in the stored session, not the sign-in surface, so a partner restored from SecureStore on the next launch is still a partner. The home header then reads "PARTNER AGENCY OPERATIONS" (`src/app/index.tsx`). The app only hides controls; the server still refuses every capability outside the partner allowlist.
+- **Session deadline.** A partner session's cached authorization ends at its own one-day deadline, not at the admission's, as `auth-controller.test.ts` pins (`a partner session ends at its own one-day expiry`).
+- **Contract compatibility.** Native partner sign-in adds endpoints and never adds fields to an existing response; `packages/contracts/src/mobile-partner-compatibility.test.ts` holds installed builds to that.
+- **No passkey in the app.** Native passkeys need association files on the application origin and a store build, so the app offers the emailed code only.
+- **Synthetic stand-in.** `src/lib/auth/synthetic-simulator-authenticator.ts` stands in for this journey only on loopback, and never for a release build (its own tests pin both).
+
 ## Verification
 
 - Bun unit tests colocated in `src`; native Jest tests in `native-tests/*.native.tsx` (run through `bun scripts/test-mobile-native.ts` at the repo root and in the full gate; see [verification](../testing/verification-and-testing.md)).
 - Config guards: `native-config:check` (event-room and push native config), `expo:check`, `react:check`.
+- **Partner journey e2e** (conditional): `bun packages/mobile/e2e/partner-run.ts ios` or `android` drives the partner sign-in and join-and-post Maestro flows (`e2e/flows/partner-sign-in.yaml`, `partner-join-and-post.yaml`) against a loopback development server and a disposable database from `packages/server/e2e/mobile-partner-fixture.ts`. Run it only for changes to the partner screen, the partner endpoints, or the partner session.
+- **Native tests for the partner screens:** `native-tests/partner-sign-in.native.tsx` and `native-tests/partner-home.native.tsx`, run with `bun run --cwd packages/mobile test:native -- --testPathPattern partner`.
 - **Dual-platform e2e** (Maestro, synthetic only): `bun packages/mobile/e2e/run.ts ios` and `... android`, requires `PSD_EOC_E2E_SYNTHETIC_ONLY=true` plus synthetic fixture variables; mock push never gets a token. Run both for any behavior, copy, or flow change (AGENTS.md rule). CI: `.github/workflows/mobile-e2e.yml`. These are conditional/expensive checks.
 - Release procedure: `docs/runbooks/release.md`, `appstore-setup.md`, `app-store-review.md`; install guides in `docs/guides/install-{ios,android}.md`. The bundle identifier and keychain service names are deliberate literals (renaming signs out installed devices).
 
@@ -74,3 +107,8 @@ One Expo SDK 57 managed app for both stores (README: `packages/mobile/README.md`
 - Do not add platform-conditional behavior without a stated reason (keyboard insets/system fonts qualify).
 - Accessibility for activation, timeline and all-clear is required in the same PR.
 - Narrow checks: `bun run --cwd packages/mobile typecheck`, `bun test packages/mobile/src/<feature>`, and `bun run --cwd packages/mobile test:native -- --testPathPattern <name>`.
+dd the contract in `packages/contracts` first, parse with the shared schema (forward-compatible parsing for lists), then client in `src/lib/api` or a feature `api.ts`.
+- Do not add platform-conditional behavior without a stated reason (keyboard insets/system fonts qualify).
+- Accessibility for activation, timeline and all-clear is required in the same PR.
+- Narrow checks: `bun run --cwd packages/mobile typecheck`, `bun test packages/mobile/src/<feature>`, and `bun run --cwd packages/mobile test:native -- --testPathPattern <name>`.
+ges/mobile typecheck`, `bun test packages/mobile/src/<feature>`, and `bun run --cwd packages/mobile test:native -- --testPathPattern <name>`.

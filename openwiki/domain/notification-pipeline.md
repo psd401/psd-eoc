@@ -65,7 +65,7 @@ Caption: authorization happens once in the engine; everything downstream is untr
 5. **Router** (`infra/lambda/delivery-router/index.mjs`): one delivery queue → per-channel queues so one outcome covers the whole fan-out; body ≤ 256 KiB, forwarded verbatim, per-message `batchItemFailures`. Reads `<CHANNEL>_QUEUE_URL` per invocation so a missing variable retries into the DLQ.
 6. **Workers** process and write back: see [channel workers](../integrations/channel-workers.md). The writeback route `app/api/internal/delivery-state/route.ts` composes `ChannelAttempt` + `RecordDeliveryEvidenceInput` contracts and exposes no event mutation; sibling internal routes: `attempt-execution`, `email-runtime`, `aws-eum-sms-runtime`, `expo-push-runtime`, `devices/internal/push-*`.
 7. **Reconcile** (`lib/notify/reconcile.ts`, capability `reconcile-delivery-attempts`): turns stale/ambiguous attempts into truthful `expired`/`unknown` evidence; never resends.
-8. **SMS policy** (`lib/notify/sms-policy.ts`, `sms-runtime-store.ts`): opt-out records, provider-verified opt-in, `record-sms-opt-out`; consent UI is in [mobile](../integrations/mobile-app.md) and web `/text-alerts`.
+8. **SMS policy** (`lib/notify/sms-policy.ts`, `sms-runtime-store.ts`): opt-out records, provider-verified opt-in, `record-sms-opt-out`; consent UI is in [mobile](../integrations/mobile-app.md) and web `/text-alerts`. The same number-keyed opt-out list also applies to a partner's own endpoint when a partner replies STOP ([partner audience](partner-audience.md#status-and-known-gaps)). The same number-keyed opt-out list also applies to a partner's own endpoint when a partner replies STOP ([partner audience](partner-audience.md#status-and-known-gaps)).
 
 ## Delivery truth model
 

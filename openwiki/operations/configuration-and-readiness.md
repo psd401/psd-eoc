@@ -63,6 +63,17 @@ Literals that deliberately remain: the mobile bundle identifier and keychain ser
 
 When adding a key to the manifest or env, update the marked list in `docs/CONFIGURATION.md` in the same change; `bun run verify:config` (`scripts/verify-example-config.ts`) checks `.env.example` parses into a valid synthetic deployment.
 
+## Partner passkey relying party
+
+A partner passkey is bound to one hostname, its relying-party id, and that hostname is configured in two places that must agree:
+
+- **Server:** derived from `psdEoc:applicationOrigin` (runtime `GOOGLE_OIDC_APPLICATION_ORIGIN`) by `partnerRelyingPartyIdFromOrigin` in `packages/server/lib/auth/partner-passkey.ts`. An origin with a port, a path, or an address literal is refused, not used.
+- **Pool:** the Terraform variable `passkey_relying_party_id` in `infra/terraform/stateful/variables.tf`, which feeds the pool's `web_authn_configuration` in `main.tf`. Its validation accepts only a public hostname.
+
+Supply the host part of `psdEoc:applicationOrigin` (for `https://eoc.example.invalid`, `eoc.example.invalid`). A mismatch makes the server refuse every ceremony the pool offers (`requestOptionsFor`, `creationOptionsFor`), so passkey sign-in and enrollment become unavailable while the emailed code is unaffected. Changing the origin after partners have enrolled therefore invalidates their passkeys; they re-enroll on the next emailed-code sign-in, and no partner loses access. The full rule is in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) (section "The partner passkey relying party"); the sign-in behavior is in [partner web sign-in](../domain/partner-sign-in.md#passkey-sign-in-and-enrollment-issue-599).
+
+Narrow checks: `bun test packages/server/lib/auth/partner-passkey.test.ts` (the test `is the application origin’s own hostname` and `production uses the configured origin and development the request’s`), and `bun run verify:terraform` for the variable and the mocked `web_authn_configuration` assertion in `infra/terraform/stateful/tests/partner_user_pool.tftest.hcl`.
+
 ## Provider activation gates (dark by default)
 
 Live notification providers are separate, fail-closed activation boundaries documented in `docs/CONFIGURATION.md` and recorded in the register:

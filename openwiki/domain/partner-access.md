@@ -107,6 +107,7 @@ Re-inviting an ended partner calls `invitePartner` with no replacement id. That 
 - `status`: `invited` (active admission, no sign-in since it was granted), `active`, `disabled`, `expired`, or `superseded`.
 - `providerPendingStep`: `enable` when an active admission has no confirmed `enabled` sync; `disable` when an ended admission has no confirmed `disabled` sync and no other active admission uses the same address; null when the provider matches.
 - `invitationSentAt` and `lastSignInAt`. A sign-in is the newest server session for that non-Google identity.
+- `textAlerts`: `not-signed-up`, `signed-up`, or `opted-out` (the partner replied STOP). It reads the partner account's live SMS consent for the admitted address (`staffSmsConsents`, withdrawn consents excluded) and the number's newest STOP or START fact through `loadSmsPhoneOptOuts` with partner endpoints included (#637). The Partners table shows it as the Text alerts column. Opt-out applies to the number, so partners who share one number opt out together; the delivery mechanics are in [partner audience](partner-audience.md#status-and-known-gaps).
 
 The provider stub used in tests is `syntheticPartnerProviders`, selected only by the synthetic pool id `SYNTHETIC`, which a deployed stack cannot carry (`resolvePartnerProviders` in `packages/server/lib/partners/providers.ts`). With the pool unconfigured (`UNCONFIGURED` or absent), `resolvePartnerProviders` returns null, the Access page omits partner controls, and the invite route refuses before writing. A real pool with no `PSD_EOC_SES_FROM_ADDRESS` or no `PSD_EOC_SES_CONFIGURATION_SET_NAME` also returns null, so partner access stays off rather than sending mail whose bounces no one sees.
 
@@ -151,7 +152,8 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 
 ## Known gaps
 
-- **Partner sign-in is built but unverified against a real pool.** The emailed-code route at `/partner-sign-in` and its admission check are described in [partner web sign-in](partner-sign-in.md). The browser flows prove it only against the synthetic stand-in, and `lib/testing/partner-session.ts` remains a test helper that writes the same rows directly. The stack grants `AdminInitiateAuth` and `AdminRespondToAuthChallenge` to the web task, and `lib/auth/partner-otp.ts` now calls them. The readiness state is recorded in `docs/INTEGRATIONS.md` only.
+- **Partner sign-in is built but unverified against a real pool.** The emailed-code route at `/partner-sign-in`, the optional passkey (#599), and the native app's partner screen (#598) are described in [partner web sign-in](partner-sign-in.md). The browser flows prove them only against the synthetic stand-in and Chromium's virtual authenticator, and `lib/testing/partner-session.ts` remains a test helper that writes the same rows directly. The stack grants `AdminInitiateAuth`, `AdminRespondToAuthChallenge`, `StartWebAuthnRegistration` and `CompleteWebAuthnRegistration` to the web task, and `lib/auth/partner-otp.ts` and `lib/auth/partner-passkey.ts` call them. The readiness state is recorded in `docs/INTEGRATIONS.md` only.
+- **Rollout and administration procedure** (order of deployment, invitations, disables, expiry and renewal, text opt-out, rollback) is the [partner access runbook](../../docs/runbooks/partner-access.md). It is a procedure, not a description of current state, and it records no evidence of a live step yet.
 - **Live state is not recorded here.** Whether partner access is configured or verified on a deployment is a readiness claim owned by `docs/INTEGRATIONS.md`; see [configuration and readiness](../operations/configuration-and-readiness.md).
 
 ## Change navigation
@@ -180,7 +182,8 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 | Access page controls match state | `packages/server/app/(admin)/access/access-admin-view.test.tsx` | `offers no partner controls when partner access is not configured`, `offers resend, disable and correction only for current admissions` |
 | Infrastructure grants and schedule | `infra/test/stack/psd-eoc-stack.test.ts` | `gives the partner-access sweep only disable, sign-out, and partner mail, gated on the condition`, `confines an unconfigured deployment to the gated grants, the service env, and the disabled sweep` |
 | A partner session reaching an administrator page gets the admin refusal, not a server error | `packages/server/app/(admin)/access/partner-capabilities.database.test.ts` | `a partner session gets the admin refusal its page renders, not a server error` |
-| Browser flow (synthetic IdP and mailer) | `packages/server/e2e/partner-access.flow.ts` | Playwright test names `admin invites partner`, `admin disables partner`, `expired partner is refused`, `admin renews partner` |
+| Browser flow (synthetic IdP and mailer) | `packages/server/e2e/partner-access.flow.ts` | Playwright test names `admin invites partner → partner listed as invited`, `a partner who replied STOP shows as opted out of texts`, `admin disables partner → partner session refused`, `expired partner is refused`, `admin renews partner` |
+| Text alerts column: not signed up, signed up, opted out by STOP, shared number | `packages/server/lib/partners/access.ts` (`projectPartnerAccess`) with `packages/server/lib/partners/delivery.database.test.ts` | the browser test above is the page-level check; delivery-side STOP behavior is in `delivery.database.test.ts` (text reaches a partner until they withdraw) |
 | Browser flow: a signed-in partner joins and posts to a live drill, and sees no staff-only controls | `packages/server/e2e/partner-event-participation.flow.ts` | `partner joins a live drill and posts`, `partner has no start/end/admin controls` (conditional; needs the Playwright run) |
 
 ## Validation
@@ -206,7 +209,4 @@ Escalate when a change crosses a boundary: stack or IAM changes add `bun test in
 - Provider readiness and live verification belong in `docs/INTEGRATIONS.md`, not in this page.
 
 Related: [partner alert settings](partner-alert-settings.md) (which real events alert partners, configured by administrators), [partner audience](partner-audience.md) (how current admissions are pinned to a live incident and sent as a partner slice), [identity and access](identity-and-access.md) (staff sign-in and sessions), [infrastructure](../operations/infrastructure.md#how-the-stack-gates-it) (pool, sweep task, and grants), [data model](data-model.md) (partner tables and append-only triggers), [channel workers](../integrations/channel-workers.md) (the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
- alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
-(the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
-ert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
-(the alert email shell the partner mailer reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
+iler reuses), [mobile app](../integrations/mobile-app.md) (cached session deadline).
