@@ -6,6 +6,10 @@ import {
   PARTNER_OTP_SENDS_PER_EMAIL,
   PARTNER_OTP_VERIFIES_PER_EMAIL,
   PARTNER_OTP_WINDOW_MS,
+  PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL,
+  PARTNER_PASSKEY_STARTS_PER_EMAIL,
+  PARTNER_PASSKEY_VERIFIES_PER_EMAIL,
+  type PartnerOtpAttemptKind,
 } from './partner-otp-limit';
 
 /**
@@ -73,6 +77,65 @@ describe('the partner sign-in limiter', () => {
     // code they already received.
     expect(
       limiter.admit({ kind: 'verify', email, client: null }, at(100)).admitted,
+    ).toBe(true);
+  });
+
+  /**
+   * Issue #599. A budget keyed to an address is something anyone who knows
+   * that address can spend, because an attempt is charged before it is known
+   * to be genuine. So the passkey budgets must be the passkey's alone: an
+   * emergency tool's emailed-code fallback cannot be taken away from a
+   * partner by a stranger burning rejected assertions at their address.
+   */
+  test('exhausting a passkey budget never spends the code’s', () => {
+    const limiter = createPartnerOtpLimiter();
+    const email = 'responder@agency.example.invalid';
+    const spend = (kind: PartnerOtpAttemptKind, times: number): void => {
+      for (let index = 0; index < times; index += 1) {
+        expect(
+          limiter.admit({ kind, email, client: null }, at(index)).admitted,
+        ).toBe(true);
+      }
+      expect(
+        limiter.admit({ kind, email, client: null }, at(99)).admitted,
+      ).toBe(false);
+    };
+
+    spend('passkey-start', PARTNER_PASSKEY_STARTS_PER_EMAIL);
+    spend('passkey-verify', PARTNER_PASSKEY_VERIFIES_PER_EMAIL);
+    spend('passkey-register', PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL);
+
+    // Every passkey budget for this address is gone, and the emailed code is
+    // untouched: the partner asks for a code and answers it as always.
+    expect(
+      limiter.admit({ kind: 'send', email, client: null }, at(100)).admitted,
+    ).toBe(true);
+    expect(
+      limiter.admit({ kind: 'verify', email, client: null }, at(101)).admitted,
+    ).toBe(true);
+  });
+
+  test('exhausting the code’s budget leaves a passkey usable', () => {
+    // And the other way round, so neither factor can be used to deny the
+    // other. A partner who cannot reach their inbox still has their device.
+    const limiter = createPartnerOtpLimiter();
+    const email = 'responder@agency.example.invalid';
+    for (let index = 0; index < PARTNER_OTP_VERIFIES_PER_EMAIL; index += 1) {
+      expect(
+        limiter.admit({ kind: 'verify', email, client: null }, at(index))
+          .admitted,
+      ).toBe(true);
+    }
+    expect(
+      limiter.admit({ kind: 'verify', email, client: null }, at(99)).admitted,
+    ).toBe(false);
+    expect(
+      limiter.admit({ kind: 'passkey-start', email, client: null }, at(100))
+        .admitted,
+    ).toBe(true);
+    expect(
+      limiter.admit({ kind: 'passkey-verify', email, client: null }, at(101))
+        .admitted,
     ).toBe(true);
   });
 

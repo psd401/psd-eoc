@@ -276,12 +276,17 @@ function providerCredentialDocument(
   ) as CompleteWebAuthnRegistrationCommandInput['Credential'];
 }
 
-/** Refuses a provider document too large to be a ceremony. */
-function boundedDocument(value: unknown): unknown {
-  if (
-    typeof value === 'string' &&
-    Buffer.byteLength(value, 'utf8') > MAX_PROVIDER_DOCUMENT_BYTES
-  ) {
+/**
+ * Refuses a serialized ceremony document too large to be parsed.
+ *
+ * This guards the one place the pool hands back a document as text: the
+ * challenge parameters of a sign-in challenge, which Cognito types as a
+ * string map. The registration options arrive already parsed, so there is no
+ * string to measure there and no call to make here; what bounds those is the
+ * schema, every field of which is length- and count-capped.
+ */
+function boundedChallengeDocument(value: string): string {
+  if (Buffer.byteLength(value, 'utf8') > MAX_PROVIDER_DOCUMENT_BYTES) {
     throw new PartnerOtpError(
       'PARTNER_PROVIDER_UNAVAILABLE',
       'The partner pool answered with an unusable passkey document.',
@@ -373,7 +378,7 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
     }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(String(boundedDocument(document))) as unknown;
+      parsed = JSON.parse(boundedChallengeDocument(document)) as unknown;
     } catch {
       throw new PartnerOtpError(
         'PARTNER_PROVIDER_UNAVAILABLE',
@@ -454,7 +459,7 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
         'The partner pool would not begin a passkey enrollment.',
       );
     }
-    return creationOptionsFor(boundedDocument(document), input.relyingPartyId);
+    return creationOptionsFor(document, input.relyingPartyId);
   }
 
   public async completeRegistration(

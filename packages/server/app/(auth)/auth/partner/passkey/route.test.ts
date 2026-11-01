@@ -7,6 +7,10 @@ import {
 } from '../../../../../lib/auth/partner-flow-cookie';
 import { syntheticPartnerAccessToken } from '../../../../../lib/auth/partner-otp';
 import {
+  getPartnerOtpLimiter,
+  PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL,
+} from '../../../../../lib/auth/partner-otp-limit';
+import {
   PARTNER_PASSKEY_COOKIE_NAME,
   partnerPasskeyCookieHeader,
 } from '../../../../../lib/auth/partner-passkey-enrollment';
@@ -90,9 +94,13 @@ function post(
     origin?: string | null;
     cookie?: string;
     contentType?: string | null;
+    client?: string;
   }> = {},
 ): Promise<Response> {
   const headers = new Headers();
+  if (options.client !== undefined) {
+    headers.set('x-forwarded-for', options.client);
+  }
   const contentType =
     options.contentType === undefined
       ? 'application/json'
@@ -354,6 +362,42 @@ describe('the partner passkey route', () => {
       },
     );
     expect(response.status).toBe(401);
+  });
+
+  test('enrolling is bounded, and never spends the code’s budget', async () => {
+    // Behind the sealed hand-off, so not anonymous — but each attempt is a
+    // call to the pool, and nothing else bounds how many a script could make
+    // inside the hand-off's ten minutes.
+    // Its own address and its own caller: the limiter is one per process, so
+    // spending a budget here would otherwise spend it for every test after
+    // this one.
+    const bounded = 'enrolment-budget@agency.example.invalid';
+    const client = '198.51.100.7';
+    let limited = false;
+    for (
+      let attempt = 0;
+      attempt < PARTNER_PASSKEY_REGISTRATIONS_PER_EMAIL + 1;
+      attempt += 1
+    ) {
+      const response = await post(
+        { step: 'register-start' },
+        { cookie: enrollmentCookie(bounded), client },
+      );
+      if (response.status === 429) {
+        limited = true;
+        break;
+      }
+      expect(response.status).toBe(200);
+    }
+    expect(limited).toBe(true);
+
+    // The emailed code is untouched: a partner whose enrolment budget is
+    // spent can still ask for a code and answer it.
+    const decision = getPartnerOtpLimiter().admit(
+      { kind: 'send', email: bounded, client },
+      new Date(),
+    );
+    expect(decision.admitted).toBe(true);
   });
 
   test('an assertion with no flow at all is refused', async () => {

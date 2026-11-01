@@ -89,6 +89,13 @@ function refused(status = 401): NextResponse {
   return noStore(response);
 }
 
+/**
+ * A failure that is the provider's, not the partner's.
+ *
+ * Unlike a refusal this leaves the enrollment hand-off in place: the pool
+ * being briefly unreachable is not a reason to make the partner sign in again
+ * before they can try enrolling, and the hand-off expires on its own.
+ */
 function unavailable(): NextResponse {
   const response = NextResponse.json(
     { status: 'unavailable' },
@@ -316,9 +323,12 @@ async function signInFinish(
   if (flow === null || flow.factor !== 'passkey') {
     return refused();
   }
+  // The passkey budget, never the code's: anyone who knows an address can
+  // spend a budget keyed to it, and a partner locked out of their passkey
+  // must still be able to ask for an emailed code.
   const decision = getPartnerOtpLimiter().admit(
     {
-      kind: 'verify',
+      kind: 'passkey-verify',
       email: flow.email,
       client: forwardedClientAddress(request),
     },
@@ -422,6 +432,17 @@ async function registerStart(
   if (enrollment === null) {
     return refused();
   }
+  const decision = getPartnerOtpLimiter().admit(
+    {
+      kind: 'passkey-register',
+      email: enrollment.email,
+      client: forwardedClientAddress(request),
+    },
+    input.now,
+  );
+  if (!decision.admitted) {
+    return rateLimited(decision.retryAfterSeconds);
+  }
   let options;
   try {
     options = await input.provider.startRegistration({
@@ -458,6 +479,17 @@ async function registerFinish(
   );
   if (enrollment === null) {
     return refused();
+  }
+  const decision = getPartnerOtpLimiter().admit(
+    {
+      kind: 'passkey-register',
+      email: enrollment.email,
+      client: forwardedClientAddress(request),
+    },
+    input.now,
+  );
+  if (!decision.admitted) {
+    return rateLimited(decision.retryAfterSeconds);
   }
   if (
     readPasskeyClientData(input.credential.response.clientDataJSON, {
