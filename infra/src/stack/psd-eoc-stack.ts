@@ -1903,6 +1903,14 @@ export class PsdEocStack extends Stack {
     partnerAlertEventDestination.addResourceDependency(
       partnerEmailConfigurationSet,
     );
+    // SES test-publishes to the topic when it creates a destination, and the
+    // topic is encrypted. Until the topic policy and the key policy name this
+    // set, SES is refused and the destination fails to create; nothing else
+    // orders them, so CloudFormation raced them on the first deploy.
+    partnerAlertEventDestination.node.addDependency(
+      emailEventsTopic,
+      emailEventsKey,
+    );
 
     const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
