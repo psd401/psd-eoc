@@ -20,6 +20,7 @@ openwiki:
     - packages/mobile/src/features/event-room
     - packages/mobile/src/features/sms-consent
     - packages/mobile/e2e/run.ts
+    - .claude/rules/mobile.md
   symbols: [AuthController, EventRoomSyncController, registration-controller, response-controller, start-mutation-coordinator, beginPartnerSignIn, completePartnerSignIn, isPartnerSession, signInPartnerWithPasskey, enrollPartnerPasskey, partnerPasskeyOfferFrom, nativePasskeyPort, withPartnerPasskeyAssociation]
   test_paths:
     - packages/mobile/native-tests
@@ -118,7 +119,7 @@ Caption: the passkey is tried first and the emailed code is the fallback (see [n
 ## Change guidance
 
 - New server-facing call: add the contract in `packages/contracts` first, parse with the shared schema (forward-compatible parsing for lists), then client in `src/lib/api` or a feature `api.ts`.
-- Do not add platform-conditional behavior without a stated reason (keyboard insets/system fonts qualify).
+- Do not add platform-conditional behavior without a stated reason (keyboard insets/system fonts qualify); the path-scoped agent rule `.claude/rules/mobile.md` (committed, applies to `packages/mobile/**`) requires that reason in the PR body. Running one platform's e2e and calling it done is the drift it guards against, so verify both platforms.
 - Accessibility for activation, timeline and all-clear is required in the same PR.
 - Narrow checks: `bun run --cwd packages/mobile typecheck`, `bun test packages/mobile/src/<feature>`, and `bun run --cwd packages/mobile test:native -- --testPathPattern <name>`.
 - Native passkey changes span this app, the server endpoint and the association documents. The platform authenticator is reached only through `native-passkey-port.ts`; keep the client's decisions in `partner-passkey-client.ts` testable without a device. Check the server contract with `bun test packages/contracts/src/mobile-partner-passkey.test.ts`, the Android and iOS ceremony origins with `bun test packages/server/lib/auth/partner-passkey.test.ts`, and the association documents with `bun test packages/server/lib/config/app-association.test.ts`. A change to the app's associated domain also needs `bun test packages/mobile/scripts/distribution-config.test.ts`.

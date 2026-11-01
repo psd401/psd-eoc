@@ -3,7 +3,7 @@ type: Operations Guide
 title: Terraform state bootstrap and CI apply pipeline
 description: The one-time local state-bootstrap root, the GitHub Terraform workflow that plans on main and applies a saved plan from the production environment, and the first-apply procedure for the partner stateful root.
 tags: [terraform, github-actions, aws, iam, state, operations, ci]
-timestamp: 2026-11-01T10:45:46-08:00
+timestamp: 2026-11-01T23:50:21Z
 openwiki:
   roles: [operations, delivery]
   change_kinds: [terraform, ci, iam, state]
@@ -97,6 +97,6 @@ Repository secrets: `AWS_TERRAFORM_PLAN_ROLE_ARN` (`plan_role_arn` output), `AWS
 - **Invariants to keep:** plan trusts only `main`; apply trusts only `production`; only apply and break-glass write state; the boundary still covers both CI roles and the state key; the workflow never prints values; the saved plan is encrypted before upload.
 - **Growing the stateful root:** when the migration imports more resources into `infra/terraform/stateful`, `permissions.tf` grows in the same pull request, and the `psd-eoc-*` name or tag scopes must still cover them.
 - **Focused checks:** `bun run verify:terraform` (runs `fmt`, `validate` and `terraform test` for both roots with mocked providers; the bootstrap runs are listed in [verification and testing](../testing/verification-and-testing.md#repository-level-contracts)). Test runs in `infra/terraform/state-bootstrap/tests/bootstrap.tftest.hcl`: `apply_role_trusts_only_the_production_environment`, `plan_role_trusts_main_only`, `both_roles_carry_the_boundary_and_short_sessions`, `plan_role_only_reads`, `boundary_denies_what_no_ci_role_may_do`, `apply_role_may_create_only_the_cognito_email_service_role`, `state_bucket_is_versioned_encrypted_private_and_retained`, and `only_ci_apply_and_break_glass_write_state`.
-- **Scope boundary:** agents never run `apply`, `import`, or `terraform init` against a real backend, and never apply `state-bootstrap` (AGENTS.md §5). No unit test exercises the workflow's job logic or the two helper scripts. Its guards are actionlint, which the CI `workflows` job runs when workflow files change, and the `forbids workflows that deploy the CDK stack or its images` test in `scripts/verify-documentation.test.ts`, which the file must pass.
+- **Scope boundary:** agents never run `apply`, `import`, or `terraform init` against a real backend, and never apply `state-bootstrap` (AGENTS.md, "Production"). No unit test exercises the workflow's job logic or the two helper scripts. Its guards are actionlint, which the CI `workflows` job runs when workflow files change, and the `forbids workflows that deploy the CDK stack or its images` test in `scripts/verify-documentation.test.ts`, which the file must pass.
 - **Watch out:** `ci.yml`'s `changes` filter lists `.github/*` as non-code, so a pull request that touches only `.github/scripts/terraform-*.sh` skips the code gate, including `verify:terraform`. Check such a change by running the script's logic by hand, or add a path to the filter in the same change.
 - **Expensive or conditional:** a real `plan` or `apply` needs AWS credentials, GitHub secrets and the `production` environment, so it is never a local validation step.
