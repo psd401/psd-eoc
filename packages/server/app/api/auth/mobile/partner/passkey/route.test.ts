@@ -475,6 +475,33 @@ describe('the native partner passkey endpoint', () => {
     expect(answers[0]).toContain('expired');
   });
 
+  test("a malformed store identity is this deployment's fault, not a refusal", async () => {
+    // A fingerprint the synth would have refused can still reach a running
+    // instance through a hand-edited environment. There is then no origin to
+    // compare a ceremony against, which is not an answer about the partner:
+    // the app is told to try again later and the emailed code is unaffected.
+    Reflect.set(
+      process.env,
+      'PSD_EOC_ANDROID_SIGNING_FINGERPRINTS',
+      'AB:CD:EF',
+    );
+    const token = enrollmentToken({ email: address(), platform: 'android' });
+    const response = await post({
+      step: 'register-finish',
+      enrollmentToken: token,
+      credential: registrationCredential(
+        clientData({
+          type: 'webauthn.create',
+          origin: ANDROID_CEREMONY_ORIGIN,
+        }),
+      ),
+    });
+    expect(response.status).toBe(500);
+    expect((await response.json()) as { retryable: boolean }).toMatchObject({
+      retryable: true,
+    });
+  });
+
   test('a refused request says the one thing every refusal says', async () => {
     const response = await post({
       step: 'register-start',

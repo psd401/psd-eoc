@@ -131,7 +131,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     process.env,
     'native',
   );
-  if (flow === null || flow.platform === undefined) {
+  if (
+    flow === null ||
+    flow.platform === undefined ||
+    // A flow opened for a passkey is not answered with a code. The pool
+    // would refuse it anyway, since its continuation belongs to one
+    // challenge, but refusing it here is what makes the factor in the seal
+    // worth sealing: no provider call, and no verify budget spent (#647).
+    flow.factor === 'passkey'
+  ) {
     // Saying that the request itself expired reveals nothing about the
     // address, and without it the app could only tell the partner to retype
     // a code that can no longer work.

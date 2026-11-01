@@ -268,14 +268,22 @@ export async function signInFinish(
   // The one part of the authenticator's answer this deployment reads: the
   // ceremony it performed, and which of this app's own ceremony origins asked
   // for it. The platform comes from the seal, so an Android assertion cannot
-  // be presented as an iOS one.
+  // be presented as an iOS one. A deployment whose store identities are
+  // malformed has no origin to compare against, which is this deployment's
+  // fault rather than the partner's and is answered as one.
+  let ceremonyOrigins: readonly string[];
+  try {
+    ceremonyOrigins = nativePasskeyCeremonyOrigins(
+      flow.platform,
+      input.relyingPartyId,
+    );
+  } catch {
+    return unavailable(requestId);
+  }
   if (
     readPasskeyClientData(input.credential.response.clientDataJSON, {
       type: 'webauthn.get',
-      origins: nativePasskeyCeremonyOrigins(
-        flow.platform,
-        input.relyingPartyId,
-      ),
+      origins: ceremonyOrigins,
     }) === null
   ) {
     return refused(requestId);
@@ -436,13 +444,19 @@ export async function registerFinish(
   if (!decision.admitted) {
     return rateLimited(decision.retryAfterSeconds, requestId);
   }
+  let ceremonyOrigins: readonly string[];
+  try {
+    ceremonyOrigins = nativePasskeyCeremonyOrigins(
+      enrollment.platform,
+      input.relyingPartyId,
+    );
+  } catch {
+    return unavailable(requestId);
+  }
   if (
     readPasskeyClientData(input.credential.response.clientDataJSON, {
       type: 'webauthn.create',
-      origins: nativePasskeyCeremonyOrigins(
-        enrollment.platform,
-        input.relyingPartyId,
-      ),
+      origins: ceremonyOrigins,
     }) === null
   ) {
     return refused(requestId);
