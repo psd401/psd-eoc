@@ -226,9 +226,37 @@ email one-time password the server asks the pool for. Without them that
 option is absent and the partner sign-in form answers every submission with
 "temporarily unavailable", so removing the parameters returns the deploy to
 staff-only behavior with nothing else to undo. Partner sign-in also uses the
-deployment's existing transient-cookie secret for the cookie that carries one
-sign-in between its two steps, derived with its own label; there is no
-additional secret to supply.
+deployment's existing transient-cookie secret for the cookies that carry one
+sign-in between its two steps and one passkey enrollment between its two
+round trips, each derived with its own label; there is no additional secret
+to supply.
+
+### The partner passkey relying party
+
+A partner may optionally add a passkey after an emailed-code sign-in, and a
+passkey is bound to one relying-party id for its whole life. That id is the
+application's own hostname, and this deployment never configures it twice:
+
+- The **server** derives it from `psdEoc:applicationOrigin`, which reaches the
+  runtime as `GOOGLE_OIDC_APPLICATION_ORIGIN`. An origin with a port, a path,
+  or an address literal is refused rather than used, because a passkey bound
+  to one of those is a passkey no browser ever offers back.
+- The **pool** is told the same hostname through the Terraform variable
+  `passkey_relying_party_id`, because Cognito's `web_authn_configuration`
+  takes the value directly.
+
+Those two must name the same hostname. Supply
+`passkey_relying_party_id` as the host part of `psdEoc:applicationOrigin` —
+for `https://eoc.example.invalid` that is `eoc.example.invalid`. The server
+refuses any ceremony the pool offers for a different relying party, so a
+mismatch shows up as partner passkey sign-in and enrollment being
+unavailable, with the emailed code unaffected; it is never a passkey that
+quietly belongs to the wrong site.
+
+Changing `psdEoc:applicationOrigin` after partners have enrolled therefore
+also means changing `passkey_relying_party_id`, and every enrolled passkey
+stops working and is enrolled again on the next emailed-code sign-in. No
+partner loses access: the emailed code is unchanged throughout.
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
 parameter and has a default. Push and SMS workers, direct-provider enablement,
