@@ -80,9 +80,27 @@ installed apps first broke every app's start flow once before (#470).
    - a drill at a non-isolated facility is visible and the partner can post;
    - an isolated facility is not visible.
 
-   Mobile partner sign-in is issue #598. Until it ships, verify only the web.
+   Then, once a store build from a commit containing #598 serves both
+   platforms, verify the same on one phone of each platform.
 
-10. **Alerts.** In a controlled test agreed with the partner's agency, start a
+10. **Passkeys, if the app is in the stores.** Native passkeys need the
+    association documents and a store build, so confirm this after step 7 and
+    only on a build that contains #647:
+    - `curl -s https://<application origin>/.well-known/apple-app-site-association`
+      answers the `webcredentials` document, and
+      `curl -s https://<application origin>/.well-known/assetlinks.json`
+      answers one `get_login_creds` statement. A 404 from either means the
+      tenant keys in [CONFIGURATION.md](../CONFIGURATION.md#mobile-app-association-documents)
+      are not configured; the emailed code is unaffected.
+    - On one phone of each platform, sign the test partner in with the
+      emailed code, accept the offer to add a passkey, sign out, and sign in
+      again from the same address. The second sign-in should use the passkey
+      and send no mail. Record both platforms in the readiness register.
+    - If either platform's ceremony is refused, the partner signs in with the
+      emailed code exactly as before. Nothing needs rolling back; record what
+      the platform reported.
+
+11. **Alerts.** In a controlled test agreed with the partner's agency, start a
     real Lockdown-response event that the alert settings select and confirm
     the partner receives it. Separately, run a Lockdown drill and confirm the
     partner receives nothing. Record both in the readiness register.
@@ -148,6 +166,11 @@ two partners sharing one number opt out together.
 Deploy again with the three `PartnerUserPool*` parameters back at
 `UNCONFIGURED`. Partner sign-in then refuses cleanly, the sweep skips, and
 staff behavior is unchanged; nothing else needs undoing. To stop partner
-alerts only, save the partner alert settings with no responses. The mobile
-build is backward-compatible and stays in the stores. The partner pool and its
+alerts only, save the partner alert settings with no responses. To stop
+native passkeys only, remove `psdEoc:appleAppTeamId`,
+`psdEoc:androidApplicationId` and `psdEoc:androidSigningFingerprints` from the
+tenant manifest and deploy: the association documents stop being served, every
+partner falls back to the emailed code on their next sign-in, and no partner
+loses access. The mobile build is backward-compatible and stays in the
+stores. The partner pool and its
 Terraform state stay in place; deleting them is a separate, reviewed change.

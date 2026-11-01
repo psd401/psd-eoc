@@ -19,6 +19,9 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 
 <!-- docs-contract:cdk-context:start -->
 
+- `psdEoc:androidApplicationId`
+- `psdEoc:androidSigningFingerprints`
+- `psdEoc:appleAppTeamId`
 - `psdEoc:applicationOrigin`
 - `psdEoc:awsAccount`
 - `psdEoc:awsAccountAlias`
@@ -257,6 +260,40 @@ Changing `psdEoc:applicationOrigin` after partners have enrolled therefore
 also means changing `passkey_relying_party_id`, and every enrolled passkey
 stops working and is enrolled again on the next emailed-code sign-in. No
 partner loses access: the emailed code is unchanged throughout.
+
+### Mobile app association documents
+
+A passkey is bound to a hostname, and a native app is not a page on that
+hostname, so each platform resolves the question the same way: it fetches a
+document from the hostname and checks that the document names the app in
+front of it. The deployment serves both documents from
+`psdEoc:applicationOrigin` — the same origin the relying-party id is derived
+from, so the pool's configuration, the web ceremony and these documents
+cannot name different hostnames:
+
+- `/.well-known/apple-app-site-association` carries `webcredentials` for
+  `psdEoc:appleAppTeamId` and `psdEoc:iosBundleId`. The team identifier is the
+  ten-character Apple Developer team the iOS app is signed with.
+- `/.well-known/assetlinks.json` carries
+  `delegate_permission/common.get_login_creds` for
+  `psdEoc:androidApplicationId` and `psdEoc:androidSigningFingerprints`. The
+  fingerprints are the colon-separated SHA-256 values Play shows under App
+  integrity, as a list so that a signing-key rotation can name both live
+  certificates at once; up to four are accepted.
+
+All three keys are optional. A district that ships no store build serves
+neither document, native passkeys are unavailable there, and the emailed code
+— which needs none of this — is unaffected. A present but malformed value
+fails the synth instead, because the failure it would otherwise produce is a
+document Apple or Google silently refuses, which reads as a passkey that never
+works and looks like a defect in the app.
+
+Neither document grants access. Each states which app may ask this hostname
+for a credential; the partner admission still decides who is let in. Both are
+public by design, and neither carries a secret: the app itself declares only
+the hostname, through the iOS associated domain and an Android asset
+statement that points at the served document rather than restating the
+fingerprint.
 
 `BootstrapVersion` is the CDK-generated bootstrap-stack compatibility
 parameter and has a default. Push and SMS workers, direct-provider enablement,
