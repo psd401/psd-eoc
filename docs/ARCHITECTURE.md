@@ -366,7 +366,7 @@ Portable tenant configuration lives in the manifest and environment surfaces
 indexed by [CONFIGURATION.md](CONFIGURATION.md). Protected production authority
 for the CDK stack is a human operator's short-lived AWS session; for Terraform
 roots it is the GitHub `production` environment and its OIDC role
-([AGENTS.md](../AGENTS.md) section 5). A portable manifest is not permission to
+([AGENTS.md](../AGENTS.md), "Production"). A portable manifest is not permission to
 deploy, and every deploy must independently verify the configured account,
 region, and origin.
 
