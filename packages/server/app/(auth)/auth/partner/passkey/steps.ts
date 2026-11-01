@@ -29,6 +29,8 @@ import {
   readPartnerPasskeyCookie,
 } from '../../../../../lib/auth/partner-passkey-enrollment';
 import {
+  beginPartnerPasskeyProbe,
+  endPartnerPasskeyProbe,
   poolMailsOnProbe,
   readPasskeyClientData,
   recordPoolMailedOnProbe,
@@ -162,6 +164,16 @@ export async function signInStart(
     );
   }
 
+  // One question per address at a time. A burst would otherwise all read the
+  // observation above before the first of them answered, so all of them
+  // would reach a pool that mails and all of them would mail.
+  if (!beginPartnerPasskeyProbe(input.email)) {
+    return noStore(
+      NextResponse.json(
+        PartnerPasskeySignInStartResponseSchema.parse({ method: 'code' }),
+      ),
+    );
+  }
   let started: PartnerPasskeyStart;
   try {
     started = await input.provider.startSignIn(
@@ -173,6 +185,8 @@ export async function signInStart(
     // page to ask for a code, which is the same answer an unenrolled address
     // receives.
     started = { kind: 'code' };
+  } finally {
+    endPartnerPasskeyProbe(input.email);
   }
   if (started.kind !== 'passkey') {
     if (started.kind === 'code-sent') {

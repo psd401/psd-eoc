@@ -540,6 +540,95 @@ describe('the partner passkey route', () => {
     expect(await response.json()).toEqual({ method: 'code' });
   });
 
+  test('a spent send budget never gates a pool that has not mailed', async () => {
+    // The invariant the gate exists to preserve: gating every probe on the
+    // mail budget would let anyone who knows an address deny that partner
+    // their passkey with five posts to the email form. A pool that behaves
+    // as documented must never reach the gate, however spent the budget.
+    const quiet = 'budget-spent-quiet@agency.example.invalid';
+    const client = '198.51.100.12';
+    let asked = 0;
+    const options = {
+      rpId: 'localhost',
+      challenge: 'Y2hhbGxlbmdl',
+      userVerification: 'required' as const,
+    };
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: () => {
+        asked += 1;
+        return Promise.resolve({
+          kind: 'passkey' as const,
+          challenge: { flowSession: 'stub-session', options },
+        });
+      },
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+
+    // Spend every send this address has.
+    while (
+      getPartnerOtpLimiter().admit(
+        { kind: 'send', email: quiet, client },
+        new Date(),
+      ).admitted
+    ) {
+      /* spend it */
+    }
+    expect(poolMailsOnProbe()).toBe(false);
+
+    const response = await signInStart(probeRequest(client), {
+      provider,
+      relyingPartyId: 'localhost',
+      email: quiet,
+      now: new Date(),
+    });
+    expect(asked).toBe(1);
+    expect(await response.json()).toMatchObject({ method: 'passkey' });
+  });
+
+  test('a burst of probes for one address asks the pool once', async () => {
+    // Without this the whole burst reads the observation before the first
+    // answer arrives, so a mailing pool mails for every one of them.
+    const burst = 'burst@agency.example.invalid';
+    const client = '198.51.100.13';
+    let asked = 0;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provider = {
+      issuer: 'https://cognito-idp.example.invalid/synthetic-partner-pool',
+      audience: 'SYNTHETIC',
+      startSignIn: async () => {
+        asked += 1;
+        await held;
+        return { kind: 'code-sent' as const };
+      },
+      verifySignIn: () => Promise.reject(new Error('not used')),
+      startRegistration: () => Promise.reject(new Error('not used')),
+      completeRegistration: () => Promise.reject(new Error('not used')),
+    };
+    const start = () =>
+      signInStart(probeRequest(client), {
+        provider,
+        relyingPartyId: 'localhost',
+        email: burst,
+        now: new Date(),
+      });
+
+    const all = [start(), start(), start(), start(), start()];
+    release?.();
+    const answers = await Promise.all(all);
+    // One question reached the pool, so one code at most reached the inbox.
+    expect(asked).toBe(1);
+    for (const answer of answers) {
+      expect(await answer.json()).toEqual({ method: 'code' });
+    }
+  });
+
   test('an assertion with no flow at all is refused', async () => {
     expect(
       (

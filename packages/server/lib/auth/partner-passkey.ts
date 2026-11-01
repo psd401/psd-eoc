@@ -236,6 +236,48 @@ export function resetPoolMailsOnProbe(): void {
   );
 }
 
+/**
+ * The addresses with a probe at the pool right now.
+ *
+ * One question per address at a time. Without this, a burst of probes for
+ * one address all read the observation above before the first of them comes
+ * back, so all of them reach a pool that mails and all of them mail. The
+ * second and later probes of a burst are answered "use a code" instead,
+ * which is what they would have been answered anyway — the first probe's
+ * answer is the same for all of them, and nothing is lost by not asking
+ * again while it is outstanding.
+ *
+ * Per process and held off `globalThis`, like the observation itself.
+ */
+const PROBES_IN_FLIGHT = Symbol.for('psd-eoc.partner-passkey-probes');
+
+function probesInFlight(): Set<string> {
+  const holder = globalThis as unknown as Record<symbol, unknown>;
+  const existing = holder[PROBES_IN_FLIGHT] as Set<string> | undefined;
+  if (existing !== undefined) {
+    return existing;
+  }
+  const created = new Set<string>();
+  holder[PROBES_IN_FLIGHT] = created;
+  return created;
+}
+
+/** Claims the one outstanding probe for an address, or false if it is taken. */
+export function beginPartnerPasskeyProbe(email: string): boolean {
+  const address = email.trim().toLowerCase();
+  const inFlight = probesInFlight();
+  if (inFlight.has(address)) {
+    return false;
+  }
+  inFlight.add(address);
+  return true;
+}
+
+/** Releases it. Always called, whatever the probe did. */
+export function endPartnerPasskeyProbe(email: string): void {
+  probesInFlight().delete(email.trim().toLowerCase());
+}
+
 const USE_A_CODE: PartnerPasskeyStart = Object.freeze({ kind: 'code' });
 const CODE_WAS_SENT: PartnerPasskeyStart = Object.freeze({ kind: 'code-sent' });
 
