@@ -18,6 +18,7 @@ export * from './integration';
 export * from './journal';
 export * from './media';
 export * from './mcp';
+export * from './mobile-partner-passkey';
 export * from './notification';
 export * from './partner-admission';
 export * from './partner-alert-settings';

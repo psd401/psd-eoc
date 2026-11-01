@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test';
 
 import './index';
 import {
+  MOBILE_PARTNER_PASSKEY_ENROLLMENT_HEADER,
   MobileAppReviewSignInRequestSchema,
   MobileOidcExchangeRequestSchema,
   MobileOidcStartRequestSchema,
   MobileOidcStartResponseSchema,
+  MobilePartnerPasskeySignInStartRequestSchema,
   MobilePartnerSignInStartRequestSchema,
   MobilePartnerSignInVerifyRequestSchema,
   MobileSessionResponseSchema,
@@ -273,6 +275,39 @@ describe('installed mobile builds against the partner-capable server', () => {
         code: '123456',
       }),
     ).toMatchObject({ code: '123456' });
+  });
+
+  test('native partner passkeys add endpoints, never fields', () => {
+    // Issue #647. An installed build has no passkey code at all, so the only
+    // thing that could break it is a change to what it already sends or
+    // parses. The passkey ceremony lives on its own path, and the enrollment
+    // hand-off the code sign-in now offers travels in a response header, so
+    // the session envelope that build parses strictly is untouched.
+    const verified = MobileSessionResponseSchema.parse(
+      PARTNER_SESSION_RESPONSE,
+    );
+    expect(keysOf(verified)).toEqual(['refreshToken', 'session', 'tokenType']);
+    expect(MOBILE_PARTNER_PASSKEY_ENROLLMENT_HEADER.startsWith('X-')).toBe(
+      true,
+    );
+    // The passkey request schemas are new names on a new path, so no
+    // installed build sends or receives them.
+    expect(
+      MobilePartnerPasskeySignInStartRequestSchema.parse({
+        step: 'sign-in-start',
+        email: 'responder@agency.example.invalid',
+        platform: 'android',
+        installationId: INSTALLED_BUILD_INSTALLATION_ID,
+      }).step,
+    ).toBe('sign-in-start');
+    // And the emailed code remains answerable exactly as it was, which is
+    // the path an installed build and a device with no passkey both take.
+    expect(
+      MobilePartnerSignInVerifyRequestSchema.parse({
+        flowToken: `n1.${'a'.repeat(16)}.${'b'.repeat(40)}.${'c'.repeat(22)}`,
+        code: '654321',
+      }),
+    ).toMatchObject({ code: '654321' });
   });
 
   test('each session kind reports its own usable deadline', () => {
