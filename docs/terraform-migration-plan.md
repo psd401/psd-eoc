@@ -183,7 +183,8 @@ infra/
   GitHub OIDC provider and the plan and apply roles that CI uses (phase 1).
   The apply role needs `iam:CreateServiceLinkedRole` limited by
   `iam:AWSServiceName = email.cognito-idp.amazonaws.com`, so the stateful root
-  can create Cognito's email service-linked role (product owner, 2026-10-23).
+  can have Cognito create its email service-linked role (product owner,
+  2026-10-23).
   Its local state holds no secret and is kept outside the repository. This
   differs from 13-aws-accounts phase 1, which puts state buckets in the
   org-infrastructure repository; that repository can adopt the bucket later

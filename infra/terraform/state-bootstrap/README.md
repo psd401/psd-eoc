@@ -25,8 +25,8 @@ uses GitHub's immutable subject (`repo:<owner>@<id>/<repo>@<id>`), as
 psd-dev-standards 08 PR flow 4 requires.
 
 What the apply role may change is exactly what `infra/terraform/stateful`
-creates: the partner user pool and its client, Cognito's email service-linked
-role, `psd-eoc-*` configuration sets and topics, `psd-eoc`-tagged KMS keys,
+creates: the partner user pool and its client (whose creation has Cognito
+create its email service-linked role), `psd-eoc-*` configuration sets and topics, `psd-eoc`-tagged KMS keys,
 and the `/psd-eoc/partner-user-pool-client` secret. When the migration imports
 more into that root, `permissions.tf` grows in the same pull request.
 
