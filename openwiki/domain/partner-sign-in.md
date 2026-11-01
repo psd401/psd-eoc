@@ -3,7 +3,7 @@ type: Domain Concept
 title: Partner web sign-in
 description: Partner (first-responder) sign-in on the web and in the native app, with an emailed one-time code or an optional passkey, admission-gated sessions of at most one day, the native bearer sign-in endpoints, and the partner capability allowlist.
 tags: [partner-access, identity, sign-in, sessions, cognito, passkey, webauthn, mobile]
-timestamp: 2026-10-31T22:45:27-07:00
+timestamp: 2026-11-01T07:36:12-08:00
 openwiki:
   roles: [domain, integration]
   change_kinds: [identity, sign-in, sessions, rate-limit, passkey, mobile]
@@ -25,10 +25,16 @@ openwiki:
     - packages/server/app/(auth)/partner-sign-in/status.ts
     - packages/server/app/api/auth/mobile/partner/start/route.ts
     - packages/server/app/api/auth/mobile/partner/verify/route.ts
+    - packages/server/app/api/auth/mobile/partner/passkey/route.ts
+    - packages/server/app/api/auth/mobile/partner/passkey/steps.ts
+    - packages/server/lib/config/app-association.ts
     - packages/contracts/src/partner-capabilities.ts
     - packages/contracts/src/partner-passkey.ts
+    - packages/contracts/src/mobile-partner-passkey.ts
     - packages/contracts/src/capability.ts
-  symbols: [completePartnerSignIn, completeNativePartnerSignIn, authorizePartnerSignIn, CognitoPartnerOtpProvider, syntheticPartnerOtpProvider, resolvePartnerOtpProvider, createPartnerOtpLimiter, sealPartnerSignInFlow, createPartnerSignInHandler, PARTNER_SESSION_LIFETIME_SECONDS, PARTNER_CAPABILITY_IDS, partnerAllowlistPermits, CognitoPartnerPasskeyProvider, resolvePartnerPasskeyProvider, partnerRelyingPartyIdFromOrigin, signInStart, signInFinish, registerStart, registerFinish, PartnerPasskeyStart, PartnerPasskeyEnrollmentError, PartnerPasskeyRequestSchema]
+    - packages/mobile/src/lib/auth/partner-passkey-client.ts
+    - packages/mobile/src/lib/auth/native-passkey-port.ts
+  symbols: [completePartnerSignIn, completeNativePartnerSignIn, authorizePartnerSignIn, CognitoPartnerOtpProvider, syntheticPartnerOtpProvider, resolvePartnerOtpProvider, createPartnerOtpLimiter, sealPartnerSignInFlow, createPartnerSignInHandler, PARTNER_SESSION_LIFETIME_SECONDS, PARTNER_CAPABILITY_IDS, partnerAllowlistPermits, CognitoPartnerPasskeyProvider, resolvePartnerPasskeyProvider, partnerRelyingPartyIdFromOrigin, nativePasskeyCeremonyOrigins, signInStart, signInFinish, registerStart, registerFinish, PartnerPasskeyStart, PartnerPasskeyEnrollmentError, PartnerPasskeyRequestSchema, MobilePartnerPasskeyRequestSchema, MOBILE_PARTNER_PASSKEY_ENROLLMENT_HEADER, signInPartnerWithPasskey, enrollPartnerPasskey]
   test_paths:
     - packages/server/lib/auth/partner-sign-in.database.test.ts
     - packages/server/lib/auth/partner-otp.test.ts
@@ -44,6 +50,12 @@ openwiki:
     - packages/contracts/src/partner-passkey.test.ts
     - packages/contracts/src/partner-capabilities.test.ts
     - packages/contracts/src/mobile-partner-compatibility.test.ts
+    - packages/contracts/src/mobile-partner-passkey.test.ts
+    - packages/server/app/api/auth/mobile/partner/passkey/route.test.ts
+    - packages/server/app/api/auth/mobile/partner/verify/route.database.test.ts
+    - packages/server/lib/config/app-association.test.ts
+    - packages/mobile/src/lib/auth/partner-passkey-client.test.ts
+    - packages/mobile/native-tests/partner-passkey-offer.native.tsx
     - packages/server/e2e/partner-sign-in.flow.ts
     - packages/server/e2e/partner-passkey.flow.ts
   invariants:
@@ -53,7 +65,9 @@ openwiki:
     - A passkey is a first factor the pool proves, never a wider grant; the same admission and authorizer decide it, and the passkey budget is separate from the code budget.
     - A partner session may run only the PARTNER_CAPABILITY_IDS allowlist.
     - The passkey relying-party id is the host of the application origin; the server refuses ceremony options for any other relying party.
-  validation_commands: [bun test packages/server/lib/auth/partner-otp.test.ts packages/server/lib/auth/partner-session.test.ts packages/server/lib/auth/partner-passkey.test.ts packages/contracts/src/partner-sign-in.test.ts packages/contracts/src/partner-passkey.test.ts packages/contracts/src/partner-capabilities.test.ts]
+    - A native passkey ceremony is accepted only from the origin its platform reports (an https relying party on iOS, the configured Android signing certificate on Android); an unconfigured Android certificate completes no Android ceremony.
+    - A native passkey sign-in and enrollment never widen access: each goes through completeNativePartnerSignIn or the same enrollment check, and refusals are one message.
+  validation_commands: [bun test packages/server/lib/auth/partner-otp.test.ts packages/server/lib/auth/partner-session.test.ts packages/server/lib/auth/partner-passkey.test.ts packages/contracts/src/partner-sign-in.test.ts packages/contracts/src/partner-passkey.test.ts packages/contracts/src/mobile-partner-passkey.test.ts packages/contracts/src/partner-capabilities.test.ts]
 ---
 
 # Partner web sign-in
@@ -179,7 +193,7 @@ Caption: the probe never names a preferred challenge, because asking the pool to
 - **Mail-on-probe guard.** A pool observed mailing a code during the probe sets a per-process flag. Once set, a probe for an address with no send budget left is not sent to the pool, and at most one probe per address is in flight. These bounds are per instance, like every limiter here; `docs/INTEGRATIONS.md` records the consequence.
 - **Refusals.** Every passkey refusal (no passkey, rejected assertion, ended or expired admission, disabled account) returns the same `{ status: 'refused' }` with HTTP 401, and the exact reason is written to the access-gate audit. Budgets return 429 `rate-limited`; a missing pool or relying party returns 503 `unavailable` and the page falls back to the code.
 - **Synthetic stand-in.** `syntheticPartnerPasskeyProvider` checks the ceremony type, origin and issued challenge but not an authenticator signature, which only the pool verifies. `forgetSyntheticPartnerPasskeys` runs when a synthetic partner is disabled, matching `AdminDisableUser`, so a disabled partner's stand-in passkey stops working.
-- **Not in the native app.** Native passkeys need the app association files served from the application origin and a store build; the native app signs in with the emailed code only.
+- **Native app.** The native app has its own passkey path, with platform-specific origins and a header-carried hand-off; see [native passkey sign-in and enrollment](#native-passkey-sign-in-and-enrollment-issue-647).
 
 ## Native app sign-in (issue #598)
 
@@ -188,6 +202,54 @@ The native app uses two JSON endpoints that mirror the code steps: `POST /api/au
 - The start step never consults the admission. It returns only a sealed flow token, bound to the `platform` and `installationId` the app named (`sealPartnerSignInFlow(..., 'native')`), and the address is never returned.
 - The verify step reads the address from the sealed flow, never from the request, and calls `completeNativePartnerSignIn`. Success returns a bearer session (`MobileSessionResponseSchema`) with `Cache-Control` private headers; every refusal is the same `UNAUTHENTICATED` message after a fixed delay (`PARTNER_REJECTION_DELAY_MS`), and the exact reason is recorded as `source: 'mobile'`.
 - The contract admits a partner from both the web and the native sources with the same transport, because the evidence is the same and the source only decides how the credential is delivered (`AuthenticationCapabilityEnvelopeSchema` in `packages/contracts/src/capability.ts`). The app-side session rules are in [mobile app](../integrations/mobile-app.md#partner-agency-sign-in).
+
+## Native passkey sign-in and enrollment (issue #647)
+
+The native app has its own passkey path. It is one endpoint, `POST /api/auth/mobile/partner/passkey`, with four `step` values that mirror the browser's ([passkey section](#passkey-sign-in-and-enrollment-issue-599)). Only the transport differs: the sealed flow and enrollment values are returned to the app as opaque tokens, not held in cookies. Sign-in probes and assertions take this shape:
+
+```mermaid
+sequenceDiagram
+  participant App as Mobile AuthProvider
+  participant Ep as Native passkey endpoint
+  participant Pool as Partner Cognito pool
+  participant Dev as Platform authenticator
+  App->>Ep: sign-in-start with email, platform, installation id
+  Ep->>Pool: ask for passkey options, no preferred challenge
+  Pool-->>Ep: passkey options, or anything else
+  Ep-->>App: method passkey with flow token, or method code
+  App->>Dev: get passkey options
+  Dev-->>App: assertion, or dismissed
+  App->>Ep: sign-in-finish with flow token and assertion
+  Ep->>Ep: check ceremony origin for the sealed platform
+  Ep->>Pool: verify assertion
+  Ep->>Ep: completeNativePartnerSignIn admission and one-day session
+  Ep-->>App: bearer session
+```
+
+Caption: the device is asked before the server, and any outcome short of a refused assertion ends at the emailed code. Enrollment is offered only after an emailed-code sign-in and runs as a separate exchange:
+
+```mermaid
+sequenceDiagram
+  participant Verify as Verify route
+  participant App as Mobile AuthProvider
+  participant Ep as Native passkey endpoint
+  participant Dev as Platform authenticator
+  Verify-->>App: session and sealed enrollment header
+  App->>Ep: register-start with enrollment token
+  Ep-->>App: creation options
+  App->>Dev: create passkey
+  Dev-->>App: new credential
+  App->>Ep: register-finish with enrollment token and credential
+  Ep-->>App: registered
+```
+
+- **Device first.** `signInPartnerWithPasskey` in `packages/mobile/src/lib/auth/partner-passkey-client.ts` checks `isSupported()` through `nativePasskeyPort` (`native-passkey-port.ts`) before any server call, so a build or phone without passkeys never probes the server. A dismissed sheet, a device with no credential, an unreachable server, a spent passkey budget, and an expired flow all end at `use-code`. `beginPartnerSignIn` in `auth-provider.tsx` then requests the emailed code. Only a server refusing a produced assertion is raised to the partner.
+- **Platform-specific ceremony origin.** `nativePasskeyCeremonyOrigins(platform, relyingPartyId)` in `packages/server/lib/auth/partner-passkey.ts` names the origins this deployment accepts: `https://<relying party id>` on iOS, and `android:apk-key-hash:` plus the base64url SHA-256 of each configured Android signing fingerprint on Android (up to four, to cover a signing-key rotation). `readPasskeyClientData` checks the client data against that list and keeps the framed-ceremony refusal. With no Android fingerprint configured, no Android ceremony can complete ([configuration and readiness](../operations/configuration-and-readiness.md#mobile-app-association-documents)).
+- **Endpoint.** `app/api/auth/mobile/partner/passkey/route.ts` parses `MobilePartnerPasskeyRequestSchema` (`packages/contracts/src/mobile-partner-passkey.ts`) and dispatches to handlers in `steps.ts`. The first step answers `passkey` or `code` and nothing else. `signInFinish` hands the verified identity to `completeNativePartnerSignIn`, so admission, the one-day ceiling and the audit are the code path's.
+- **Enrollment hand-off in a header.** After an emailed-code sign-in, `passkeyEnrollmentOffer` in `app/api/auth/mobile/partner/verify/route.ts` seals the pool's access token with the native `e1` label and returns it in the `X-PSD-EOC-Partner-Passkey-Enrollment` header (`MOBILE_PARTNER_PASSKEY_ENROLLMENT_HEADER`), not in the session body. Installed builds parse the session envelope strictly, so a new body field would break them. The seal records the platform (`PartnerPasskeyEnrollment.platform`), which decides the origin check at registration. `register-finish` spends the hand-off, and a second passkey needs a new code sign-in.
+- **Same refusals and budgets.** Every refusal is the one `UNAUTHENTICATED` message, rate limits return `RATE_LIMITED` with `Retry-After`, and passkey budgets are separate from code budgets, as on the web.
+- **Probe consequence.** A pool that mails a code on the probe still answers `code`, so the app asks for one and that partner can receive two mails. This costs an inbox, not access ([readiness register](../operations/configuration-and-readiness.md#readiness-register)).
+- **Readiness.** Association documents are served only where the tenant configures them, and no native passkey has run against Cognito or the platform validators. The first live proof follows a store build and a human deploy (psd-dev-standards 08). `docs/INTEGRATIONS.md` holds the current status.
 
 ## What a partner session may do
 
@@ -199,7 +261,7 @@ With all three `PSD_EOC_PARTNER_USER_POOL_*` values set to a real pool, the serv
 
 The `passkey_relying_party_id` Terraform variable and the server's derivation from `psdEoc:applicationOrigin` must name one hostname; if they differ, passkey sign-in and enrollment are unavailable while the emailed code still works. The rule and the change procedure are in [configuration and readiness](../operations/configuration-and-readiness.md#partner-passkey-relying-party).
 
-The pool, the code flow, the passkey flow and the native flow have never been exercised against a real Cognito pool. `docs/INTEGRATIONS.md` records the readiness: the code and passkey paths are proven only against the synthetic stand-in and Chromium's virtual authenticator, and on the live deployment the parameters are still `UNCONFIGURED`, so no partner account exists and no partner sign-in is offered. Whether the real pool returns `CREDENTIAL_REQUEST_OPTIONS` alongside its selection is the open question the first real pool must answer; without it every partner keeps using the emailed code.
+The pool, the code flow, the passkey flow and the native flow (including native passkeys) have never been exercised against a real Cognito pool or a platform's association validator. `docs/INTEGRATIONS.md` records the readiness: the code and passkey paths are proven only against the synthetic stand-in and Chromium's virtual authenticator, and on the live deployment the parameters are still `UNCONFIGURED`, so no partner account exists and no partner sign-in is offered. Whether the real pool returns `CREDENTIAL_REQUEST_OPTIONS` alongside its selection is the open question the first real pool must answer; without it every partner keeps using the emailed code.
 
 ## Change navigation
 
@@ -209,6 +271,7 @@ The pool, the code flow, the passkey flow and the native flow have never been ex
 - **Changing a provider call:** `CognitoPartnerOtpProvider` calls (and, for passkeys, `CognitoPartnerPasskeyProvider` in `lib/auth/partner-passkey.ts`), the web task's IAM grant in `infra/src/stack/psd-eoc-stack.ts`, and the pool settings in `infra/terraform/stateful/main.tf` change together. The passkey grants are `StartWebAuthnRegistration` and `CompleteWebAuthnRegistration` beside the sign-in actions.
 - **Changing the passkey probe:** keep the probe free of a preferred challenge and keep the mail-on-probe accounting. A change that lets a probe issue a message-sending challenge without charging the send budget reopens the bypass the tests in `partner-passkey.test.ts` pin.
 - **Changing the native flow:** the flow token is the only state; the native verify step must keep reading the address from the sealed flow, and the native start response must not gain the address or the pool's continuation.
+- **Changing native passkeys:** the native label (`e1`) and the browser label are separate on both the flow and the enrollment seal, so keep them separate. Platform origins come from `nativePasskeyCeremonyOrigins`, built from the same configured fingerprint and hostname that the association documents in `lib/config/app-association.ts` are built from; change both together ([configuration and readiness](../operations/configuration-and-readiness.md#mobile-app-association-documents)). The native contract must add endpoints and never fields to an existing response, which `mobile-partner-compatibility.test.ts` pins.
 - **Changing what a partner may run:** edit `PARTNER_CAPABILITY_IDS` and its test, not the navigation. The engine, the navigation, and the event room all read the same list.
 
 ## Focused tests
@@ -233,13 +296,19 @@ The pool, the code flow, the passkey flow and the native flow have never been ex
 | Native sign-in: start never consults the admission, verify reads the address from the flow, refusals are one message | `packages/server/app/api/auth/mobile/partner/route.test.ts` | `the first step says the same thing for every address`, `the sealed flow carries the device the first step named`, `a stale or foreign flow has expired, before the pool is asked`, `one address gets a fixed number of codes in the window` |
 | Native contract: a native partner completes, a native Google exchange cannot carry a partner, the native flow token is labelled native | `packages/contracts/src/partner-sign-in.test.ts`, `packages/contracts/src/mobile-partner-compatibility.test.ts` | `a partner signs in from the native application`, `a native partner still cannot arrive as a native Google exchange`, `native partner sign-in adds endpoints, never fields` |
 | Browser flow: passkey enrollment, then sign-in with it; code fallback without a passkey | `packages/server/e2e/partner-passkey.flow.ts` | `a partner enrolls a passkey, then signs in with it`, `an address with no passkey is asked for a code, never refused`, `a partner signs in with a code and is told no passkey is possible` |
+| Native passkey endpoint: four steps on one path, flow opened for a code never answered with an assertion, enrollment needs the hand-off, Android assertion never presented as iOS | `packages/server/app/api/auth/mobile/partner/passkey/route.test.ts` | `a partner enrolls a passkey from the app and then signs in with it`, `an Android ceremony is checked against the signing certificate`, `a ceremony performed for another origin is refused`, `a deployment with no asset-links document completes no Android ceremony`, `registration needs the hand-off, never a session` |
+| Native enrollment hand-off: offered after a code sign-in only, a hand-off for another address enrolls nothing | `packages/server/app/api/auth/mobile/partner/verify/route.database.test.ts` | `offers a passkey hand-off for the device that just signed in`, `a refused sign-in offers nothing to enroll against`, `a wrong code offers nothing either` |
+| Native passkey sealed labels, platform recorded in the enrollment seal | `packages/server/lib/auth/partner-passkey-enrollment.test.ts`, `packages/server/lib/auth/partner-flow-cookie.test.ts` | `a sealed enrollment opens again unchanged` (native `e1` case), `a native flow names the platform it enrolls` |
+| Native passkey contract: the `e1` seal only, the header carries the hand-off, the four steps, the first answer is passkey or code | `packages/contracts/src/mobile-partner-passkey.test.ts`, `packages/contracts/src/mobile-partner-compatibility.test.ts` | `accepts the native seal and refuses every other surface`, `travels under a header name, never a body field`, `the answer is the ceremony or an emailed code, and nothing else`, `native partner passkeys add endpoints, never fields` |
+| Association documents: which app is named, configured or absent, malformed values refused | `packages/server/lib/config/app-association.test.ts`, `packages/server/app/.well-known/**/route.test.ts`, `packages/server/lib/config/deployment.test.ts` | `names the signed app once, and only the webcredentials service`, `a deployment with no team identifier serves no document`, `carries the login-credentials relation and nothing else`, `a signing-key rotation may name both certificates` |
+| Native passkey client: device asked first, every failure ends at the code, a created passkey handed over in contract shape, offer only when the session took effect | `packages/mobile/src/lib/auth/partner-passkey-client.test.ts`, `packages/mobile/native-tests/partner-passkey-offer.native.tsx` | `a build or device with no passkey support never asks the server`, `a dismissed sheet is not an error, it is the code`, `a session the device refused to store leaves no offer`, `declining it enrolls nothing` |
 
 ## Validation
 
 Narrow, no database:
 
 ```bash
-bun test packages/server/lib/auth/partner-otp.test.ts packages/server/lib/auth/partner-otp-limit.test.ts packages/server/lib/auth/partner-flow-cookie.test.ts packages/server/lib/auth/partner-session.test.ts packages/server/lib/auth/partner-passkey.test.ts packages/server/lib/auth/partner-passkey-enrollment.test.ts packages/contracts/src/partner-sign-in.test.ts packages/contracts/src/partner-passkey.test.ts packages/contracts/src/partner-capabilities.test.ts "packages/server/app/(auth)/auth/partner/route.test.ts" "packages/server/app/(auth)/auth/partner/passkey/route.test.ts" packages/server/app/api/auth/mobile/partner/route.test.ts
+bun test packages/server/lib/auth/partner-otp.test.ts packages/server/lib/auth/partner-otp-limit.test.ts packages/server/lib/auth/partner-flow-cookie.test.ts packages/server/lib/auth/partner-session.test.ts packages/server/lib/auth/partner-passkey.test.ts packages/server/lib/auth/partner-passkey-enrollment.test.ts packages/contracts/src/partner-sign-in.test.ts packages/contracts/src/partner-passkey.test.ts packages/contracts/src/partner-capabilities.test.ts "packages/server/app/(auth)/auth/partner/route.test.ts" "packages/server/app/(auth)/auth/partner/passkey/route.test.ts" packages/server/app/api/auth/mobile/partner/route.test.ts packages/server/app/api/auth/mobile/partner/passkey/route.test.ts packages/contracts/src/mobile-partner-passkey.test.ts packages/server/lib/config/app-association.test.ts
 ```
 
 The database-backed sign-in needs the synthetic database (`bun run test:db:start`, see [verification and testing](../testing/verification-and-testing.md)):

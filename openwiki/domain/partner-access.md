@@ -3,7 +3,7 @@ type: Domain Concept
 title: "Partner access: admissions, provider sync, and expiry sweep"
 description: "How non-district first responders are admitted, refused, renewed, disabled, and expired through append-only partner admissions, a separate partner identity provider, the Access page, and the daily partner-access sweep."
 tags: [partner-access, identity, admissions, expiry, cognito, ses]
-timestamp: 2026-10-26T15:24:18-07:00
+timestamp: 2026-11-01T07:36:12-08:00
 openwiki:
   roles: [domain, operations]
   change_kinds: [identity, lifecycle, persistence, scheduled-job]
@@ -152,7 +152,7 @@ Cognito's own email, the one-time-password codes it sends to a partner's address
 
 ## Known gaps
 
-- **Partner sign-in is built but unverified against a real pool.** The emailed-code route at `/partner-sign-in`, the optional passkey (#599), and the native app's partner screen (#598) are described in [partner web sign-in](partner-sign-in.md). The browser flows prove them only against the synthetic stand-in and Chromium's virtual authenticator, and `lib/testing/partner-session.ts` remains a test helper that writes the same rows directly. The stack grants `AdminInitiateAuth`, `AdminRespondToAuthChallenge`, `StartWebAuthnRegistration` and `CompleteWebAuthnRegistration` to the web task, and `lib/auth/partner-otp.ts` and `lib/auth/partner-passkey.ts` call them. The readiness state is recorded in `docs/INTEGRATIONS.md` only.
+- **Partner sign-in is built but unverified against a real pool.** The emailed-code route at `/partner-sign-in`, the optional passkey (#599), and the native app's partner screen with its device passkey (#598, #647) are described in [partner web sign-in](partner-sign-in.md). The browser flows prove them only against the synthetic stand-in and Chromium's virtual authenticator, and `lib/testing/partner-session.ts` remains a test helper that writes the same rows directly. The stack grants `AdminInitiateAuth`, `AdminRespondToAuthChallenge`, `StartWebAuthnRegistration` and `CompleteWebAuthnRegistration` to the web task, and `lib/auth/partner-otp.ts` and `lib/auth/partner-passkey.ts` call them. The readiness state is recorded in `docs/INTEGRATIONS.md` only.
 - **Rollout and administration procedure** (order of deployment, invitations, disables, expiry and renewal, text opt-out, rollback) is the [partner access runbook](../../docs/runbooks/partner-access.md). It is a procedure, not a description of current state, and it records no evidence of a live step yet.
 - **Live state is not recorded here.** Whether partner access is configured or verified on a deployment is a readiness claim owned by `docs/INTEGRATIONS.md`; see [configuration and readiness](../operations/configuration-and-readiness.md).
 
