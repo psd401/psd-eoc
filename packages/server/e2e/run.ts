@@ -570,6 +570,17 @@ async function main(): Promise<void> {
       invitedByUserId: districtAdministrator.userId,
       admittedAt: now,
     });
+    // One address per code sign-in: the stand-in's claims digest is derived
+    // from the address, so a second code sign-in by the same address is
+    // refused as a replay of the first. The no-script flow therefore needs
+    // its own admitted address rather than reusing the one above.
+    await opened.db.insert(partnerAdmissions).values({
+      email: 'passkey-no-script@agency.example.invalid',
+      displayName: 'Synthetic Scriptless Responder',
+      agency: 'Synthetic Fire District',
+      invitedByUserId: districtAdministrator.userId,
+      admittedAt: now,
+    });
     const eventId = await createSyntheticDrill(opened, districtAdministrator);
     const issue344EventId = await createSyntheticDrill(
       opened,
@@ -650,6 +661,11 @@ async function main(): Promise<void> {
           PSD_EOC_E2E_ISSUE_597_EVIDENCE_DIR: issue597EvidenceDirectory,
           PSD_EOC_E2E_ISSUE_599_EVIDENCE_DIR: issue599EvidenceDirectory,
           PSD_EOC_E2E_SERVER_MODE: serverMode,
+          // Narrows a local run to one flow while it is being written or
+          // diagnosed. Absent in CI, which always runs every flow.
+          ...(process.env.PSD_EOC_E2E_GREP === undefined
+            ? {}
+            : { PSD_EOC_E2E_GREP: process.env.PSD_EOC_E2E_GREP }),
           PSD_EOC_ORGANIZATION_NAME: 'Synthetic Example School District',
           PSD_EOC_PRIVACY_CONTACT_URL:
             'https://www.example.invalid/privacy-contact',

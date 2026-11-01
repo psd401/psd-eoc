@@ -502,17 +502,41 @@ interface SyntheticPasskeyState {
   readonly registrations: Map<string, string>;
 }
 
-const syntheticPasskeyState: SyntheticPasskeyState = {
-  credentials: new Map(),
-  sessions: new Map(),
-  registrations: new Map(),
-};
+/**
+ * Held on `globalThis`, not in this module's scope.
+ *
+ * The development server re-evaluates a route's modules between requests, so
+ * module-scope state does not survive from one request of a ceremony to the
+ * next: a passkey enrolled by one request would be unknown to the sign-in
+ * that followed it, and the stand-in would silently answer "use a code"
+ * forever. Nothing in a deployment reaches the stand-in at all, so this is
+ * only about keeping local development and the browser flows honest.
+ */
+const SYNTHETIC_PASSKEY_STATE = Symbol.for(
+  'psd-eoc.synthetic-partner-passkeys',
+);
+
+function syntheticState(): SyntheticPasskeyState {
+  const holder = globalThis as unknown as Record<symbol, unknown>;
+  const existing = holder[SYNTHETIC_PASSKEY_STATE] as
+    SyntheticPasskeyState | undefined;
+  if (existing !== undefined) {
+    return existing;
+  }
+  const created: SyntheticPasskeyState = {
+    credentials: new Map(),
+    sessions: new Map(),
+    registrations: new Map(),
+  };
+  holder[SYNTHETIC_PASSKEY_STATE] = created;
+  return created;
+}
 
 /** Forgets every stand-in passkey. For tests that need a clean pool. */
 export function resetSyntheticPartnerPasskeys(): void {
-  syntheticPasskeyState.credentials.clear();
-  syntheticPasskeyState.sessions.clear();
-  syntheticPasskeyState.registrations.clear();
+  syntheticState().credentials.clear();
+  syntheticState().sessions.clear();
+  syntheticState().registrations.clear();
 }
 
 /**
@@ -527,11 +551,11 @@ export function resetSyntheticPartnerPasskeys(): void {
  */
 export function forgetSyntheticPartnerPasskeys(email: string): void {
   const address = email.trim().toLowerCase();
-  syntheticPasskeyState.credentials.delete(address);
-  syntheticPasskeyState.registrations.delete(address);
-  for (const [session, open] of syntheticPasskeyState.sessions) {
+  syntheticState().credentials.delete(address);
+  syntheticState().registrations.delete(address);
+  for (const [session, open] of syntheticState().sessions) {
     if (open.email === address) {
-      syntheticPasskeyState.sessions.delete(session);
+      syntheticState().sessions.delete(session);
     }
   }
 }
@@ -539,8 +563,8 @@ export function forgetSyntheticPartnerPasskeys(email: string): void {
 /** True when the stand-in holds a passkey for the address. */
 export function syntheticPartnerHasPasskey(email: string): boolean {
   return (
-    (syntheticPasskeyState.credentials.get(email.trim().toLowerCase())?.size ??
-      0) > 0
+    (syntheticState().credentials.get(email.trim().toLowerCase())?.size ?? 0) >
+    0
   );
 }
 
@@ -569,7 +593,7 @@ export function syntheticPartnerPasskeyProvider(
     audience: configuration.clientId,
     startSignIn: (email: string, relyingPartyId: string) => {
       const address = email.trim().toLowerCase();
-      const registered = syntheticPasskeyState.credentials.get(address);
+      const registered = syntheticState().credentials.get(address);
       if (registered === undefined || registered.size === 0) {
         return Promise.resolve(null);
       }
@@ -577,7 +601,7 @@ export function syntheticPartnerPasskeyProvider(
       const flowSession = `${SYNTHETIC_PASSKEY_FLOW_PREFIX}${randomBytes(
         24,
       ).toString('base64url')}`;
-      syntheticPasskeyState.sessions.set(
+      syntheticState().sessions.set(
         flowSession,
         Object.freeze({ email: address, challenge }),
       );
@@ -603,13 +627,13 @@ export function syntheticPartnerPasskeyProvider(
         credential: PartnerPasskeyAssertionCredential;
       }>,
     ) => {
-      const open = syntheticPasskeyState.sessions.get(input.flowSession);
+      const open = syntheticState().sessions.get(input.flowSession);
       // One challenge, one answer: the session is spent whether or not the
       // assertion is accepted, so a rejected credential cannot be retried
       // against the same challenge.
-      syntheticPasskeyState.sessions.delete(input.flowSession);
+      syntheticState().sessions.delete(input.flowSession);
       const address = input.email.trim().toLowerCase();
-      const registered = syntheticPasskeyState.credentials.get(address);
+      const registered = syntheticState().credentials.get(address);
       if (
         open === undefined ||
         open.email !== address ||
@@ -669,7 +693,7 @@ export function syntheticPartnerPasskeyProvider(
         );
       }
       const challenge = syntheticChallenge();
-      syntheticPasskeyState.registrations.set(address, challenge);
+      syntheticState().registrations.set(address, challenge);
       return Promise.resolve(
         PartnerPasskeyCreationOptionsSchema.parse({
           rp: { id: input.relyingPartyId, name: 'PSD EOC' },
@@ -715,10 +739,10 @@ export function syntheticPartnerPasskeyProvider(
           ),
         );
       }
-      const issued = syntheticPasskeyState.registrations.get(address);
+      const issued = syntheticState().registrations.get(address);
       // One ceremony, one credential: the challenge is spent whether or not
       // the credential is accepted.
-      syntheticPasskeyState.registrations.delete(address);
+      syntheticState().registrations.delete(address);
       const clientData = readSyntheticClientData(
         input.credential.response.clientDataJSON,
       );
@@ -736,9 +760,9 @@ export function syntheticPartnerPasskeyProvider(
         );
       }
       const registered =
-        syntheticPasskeyState.credentials.get(address) ?? new Set<string>();
+        syntheticState().credentials.get(address) ?? new Set<string>();
       registered.add(input.credential.id);
-      syntheticPasskeyState.credentials.set(address, registered);
+      syntheticState().credentials.set(address, registered);
       return Promise.resolve();
     },
   });

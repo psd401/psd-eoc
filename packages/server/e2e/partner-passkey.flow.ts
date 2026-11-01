@@ -23,6 +23,12 @@ import { expectAxeClean, issue599EvidencePath } from './support';
  */
 
 const PARTNER_EMAIL = 'passkey-me@agency.example.invalid';
+/**
+ * The no-script flow signs in with a code too, and the stand-in derives its
+ * claims digest from the address, so a second code sign-in by one address is
+ * refused as a replay. Each code sign-in therefore needs its own address.
+ */
+const NO_SCRIPT_EMAIL = 'passkey-no-script@agency.example.invalid';
 
 /**
  * Adds a platform authenticator that is always present and always verified,
@@ -43,12 +49,15 @@ async function addVirtualAuthenticator(page: Page): Promise<void> {
   });
 }
 
-async function signInWithCode(page: Page): Promise<void> {
+async function signInWithCode(
+  page: Page,
+  email = PARTNER_EMAIL,
+): Promise<void> {
   await page.goto('/partner-sign-in');
   await expect(
     page.getByRole('heading', { level: 1, name: 'Partner agency sign-in' }),
   ).toBeVisible({ timeout: 30_000 });
-  await page.getByLabel('Your agency email address').fill(PARTNER_EMAIL);
+  await page.getByLabel('Your agency email address').fill(email);
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.locator('p.form-message[role="alert"]')).toContainText(
     'a sign-in code is on its way',
@@ -56,7 +65,7 @@ async function signInWithCode(page: Page): Promise<void> {
   );
   await page
     .getByLabel('Sign-in code from your email')
-    .fill(syntheticPartnerOtpCode(PARTNER_EMAIL));
+    .fill(syntheticPartnerOtpCode(email));
   await page.getByRole('button', { name: 'Sign in' }).click();
 }
 
@@ -185,7 +194,7 @@ test.describe('partner-passkey', () => {
     test('a partner signs in with a code and is told no passkey is possible', async ({
       page,
     }) => {
-      await signInWithCode(page);
+      await signInWithCode(page, NO_SCRIPT_EMAIL);
       await expect(
         page.getByRole('heading', { level: 1, name: 'Set up a passkey' }),
       ).toBeVisible({ timeout: 30_000 });

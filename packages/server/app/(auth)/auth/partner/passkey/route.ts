@@ -244,7 +244,7 @@ async function signInStart(
   }
   const decision = getPartnerOtpLimiter().admit(
     {
-      kind: 'send',
+      kind: 'passkey-start',
       email: input.email,
       client: forwardedClientAddress(request),
     },

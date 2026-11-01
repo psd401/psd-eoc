@@ -21,9 +21,13 @@ if (serverMode !== 'development' && serverMode !== 'production') {
   throw new Error('PSD_EOC_E2E_SERVER_MODE must be development or production.');
 }
 
+/** Narrows a local run to one flow while it is being written or diagnosed. */
+const grep = process.env.PSD_EOC_E2E_GREP;
+
 export default defineConfig({
   testDir: E2E_ROOT,
   testMatch: /\.flow\.ts$/u,
+  ...(grep === undefined ? {} : { grep: new RegExp(grep, 'u') }),
   fullyParallel: false,
   workers: 1,
   timeout: 120_000,
