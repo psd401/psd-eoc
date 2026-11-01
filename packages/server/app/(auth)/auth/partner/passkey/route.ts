@@ -146,7 +146,10 @@ async function readJsonBody(request: Request): Promise<unknown> {
     }
   }
   const body = await request.text();
-  if (body.length === 0 || body.length > MAX_BODY_BYTES) {
+  // Bytes, because the cap is in bytes: a body of multi-byte characters is
+  // longer than its length in UTF-16 code units suggests.
+  const size = Buffer.byteLength(body, 'utf8');
+  if (size === 0 || size > MAX_BODY_BYTES) {
     return null;
   }
   try {

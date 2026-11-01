@@ -56,6 +56,7 @@ export function PartnerPasskeySignInForm({
     if (credential === null) {
       return false;
     }
+    let destination = '/';
     try {
       const finished = await fetch(PARTNER_PASSKEY_ACTION, {
         method: 'POST',
@@ -66,11 +67,23 @@ export function PartnerPasskeySignInForm({
       if (!finished.ok) {
         return false;
       }
+      // Where the server says to go, so the two cannot drift apart. Only a
+      // same-origin path is followed: the answer is this deployment's own,
+      // but a redirect target is not something to take on trust.
+      const answer: unknown = await finished.json();
+      const location =
+        answer !== null &&
+        typeof answer === 'object' &&
+        typeof (answer as { location?: unknown }).location === 'string'
+          ? (answer as { location: string }).location
+          : '/';
+      destination =
+        location.startsWith('/') && !location.startsWith('//') ? location : '/';
     } catch {
       return false;
     }
     // The session cookie is set; a full navigation is what picks it up.
-    window.location.assign('/');
+    window.location.assign(destination);
     return true;
   }
 

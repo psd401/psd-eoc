@@ -329,6 +329,7 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
     const clientSecret = await this.readClientSecret();
     let session: string | undefined;
     let challenge: string | undefined;
+    let available: readonly string[] | undefined;
     let parameters: Readonly<Record<string, string>> | undefined;
     try {
       const response = await this.client.send(
@@ -338,7 +339,20 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
           AuthFlow: 'USER_AUTH',
           AuthParameters: {
             USERNAME: email,
-            PREFERRED_CHALLENGE: 'WEB_AUTHN',
+            // Deliberately no PREFERRED_CHALLENGE.
+            //
+            // Naming a preference asks the pool to *issue* that challenge,
+            // and issuing the email challenge is exactly what sends the code
+            // ("respond with the username and answer. Your user pool will
+            // send a code", AdminRespondToAuthChallenge). So a preference the
+            // partner cannot satisfy risks the pool falling back to the email
+            // challenge and mailing a code nobody asked for — a second code
+            // beside the one the form sends a moment later, charged to no
+            // budget, for a session this probe then throws away.
+            //
+            // Without a preference the pool answers SELECT_CHALLENGE and
+            // lists what this partner could use. Listing is not issuing, so
+            // this call cannot send anything, whatever the pool holds.
             SECRET_HASH: partnerSecretHash(
               clientSecret,
               email,
@@ -349,6 +363,7 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
       );
       session = response.Session;
       challenge = response.ChallengeName;
+      available = response.AvailableChallenges;
       parameters = response.ChallengeParameters;
     } catch (error) {
       // An address the pool does not hold answers exactly as one that holds
@@ -363,27 +378,27 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
         'The partner identity provider did not answer.',
       );
     }
-    // The pool answers the preferred challenge when it can and some other
-    // challenge when it cannot — a partner with no passkey yet gets the code
-    // challenge here. Either way the answer is the same: use a code.
-    if (challenge !== 'WEB_AUTHN' || session === undefined) {
+    // Everything below answers null, which the page reads as "ask for a
+    // code". Nothing here is an error worth showing: a partner with no
+    // passkey, a pool that answered something other than a selection, and a
+    // pool that offered the passkey choice without the options to run it all
+    // mean the same thing to the person signing in.
+    if (
+      challenge !== 'SELECT_CHALLENGE' ||
+      session === undefined ||
+      !(available ?? []).includes('WEB_AUTHN')
+    ) {
       return null;
     }
     const document = parameters?.[CREDENTIAL_REQUEST_OPTIONS];
     if (document === undefined) {
-      throw new PartnerOtpError(
-        'PARTNER_PROVIDER_UNAVAILABLE',
-        'The partner pool offered a passkey challenge with no options.',
-      );
+      return null;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(boundedChallengeDocument(document)) as unknown;
     } catch {
-      throw new PartnerOtpError(
-        'PARTNER_PROVIDER_UNAVAILABLE',
-        'The partner pool answered with an unusable passkey document.',
-      );
+      return null;
     }
     return Object.freeze({
       flowSession: session,
@@ -406,10 +421,15 @@ export class CognitoPartnerPasskeyProvider implements PartnerPasskeyProvider {
         new AdminRespondToAuthChallengeCommand({
           UserPoolId: this.configuration.userPoolId,
           ClientId: this.configuration.clientId,
-          ChallengeName: 'WEB_AUTHN',
+          // The challenge being answered is the selection the probe was
+          // given, so the answer names the choice as well as the credential.
+          // A passkey completes authentication inside the selection; there is
+          // no second challenge to come back for.
+          ChallengeName: 'SELECT_CHALLENGE',
           Session: input.flowSession,
           ChallengeResponses: {
             USERNAME: input.email,
+            ANSWER: 'WEB_AUTHN',
             // Cognito takes the W3C `AuthenticationResponseJSON` document.
             CREDENTIAL: JSON.stringify(input.credential),
             SECRET_HASH: partnerSecretHash(

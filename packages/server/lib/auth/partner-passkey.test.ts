@@ -412,7 +412,7 @@ function cognito(handler: (command: unknown) => unknown): Readonly<{
 }
 
 describe('the Cognito partner passkey provider', () => {
-  test('asks the pool for the passkey challenge by preference', async () => {
+  test('asks the pool what this partner could use, never for a challenge', async () => {
     const requestOptions = {
       rpId: RELYING_PARTY,
       challenge: 'Y2hhbGxlbmdl',
@@ -422,7 +422,8 @@ describe('the Cognito partner passkey provider', () => {
       command instanceof AdminInitiateAuthCommand
         ? {
             Session: 'pool-session',
-            ChallengeName: 'WEB_AUTHN',
+            ChallengeName: 'SELECT_CHALLENGE',
+            AvailableChallenges: ['WEB_AUTHN', 'EMAIL_OTP'],
             ChallengeParameters: {
               CREDENTIAL_REQUEST_OPTIONS: JSON.stringify(requestOptions),
             },
@@ -436,18 +437,40 @@ describe('the Cognito partner passkey provider', () => {
     });
     const initiated = sent[0] as AdminInitiateAuthCommand;
     expect(initiated.input.AuthFlow).toBe('USER_AUTH');
-    expect(initiated.input.AuthParameters?.PREFERRED_CHALLENGE).toBe(
-      'WEB_AUTHN',
-    );
+    // No preference, so the pool lists what the partner could use instead of
+    // issuing a challenge. Issuing the email challenge is what sends a code,
+    // so naming a preference the partner cannot satisfy would risk mailing
+    // one for a session this probe throws away.
+    expect(initiated.input.AuthParameters?.PREFERRED_CHALLENGE).toBeUndefined();
     // Every call on a partner's behalf is attributable to the confidential
     // client, so the secret hash is never omitted.
     expect(initiated.input.AuthParameters?.SECRET_HASH).toBeString();
   });
 
-  test('every answer that is not a passkey challenge means use a code', async () => {
+  test('anything but an offered passkey means use a code', async () => {
     const answers: readonly unknown[] = [
+      // A partner who could sign in, but not with a passkey.
+      {
+        Session: 'pool-session',
+        ChallengeName: 'SELECT_CHALLENGE',
+        AvailableChallenges: ['EMAIL_OTP'],
+      },
+      // The passkey choice offered without the options to run it.
+      {
+        Session: 'pool-session',
+        ChallengeName: 'SELECT_CHALLENGE',
+        AvailableChallenges: ['WEB_AUTHN'],
+      },
+      // Options that are not a document at all.
+      {
+        Session: 'pool-session',
+        ChallengeName: 'SELECT_CHALLENGE',
+        AvailableChallenges: ['WEB_AUTHN'],
+        ChallengeParameters: { CREDENTIAL_REQUEST_OPTIONS: 'not json' },
+      },
+      // A pool that issued a challenge rather than a selection.
       { Session: 'pool-session', ChallengeName: 'EMAIL_OTP' },
-      { ChallengeName: 'WEB_AUTHN' },
+      { ChallengeName: 'SELECT_CHALLENGE', AvailableChallenges: ['WEB_AUTHN'] },
       Object.assign(new Error('no such user'), {
         name: 'UserNotFoundException',
       }),
@@ -464,7 +487,8 @@ describe('the Cognito partner passkey provider', () => {
     // configuration failure, not a ceremony.
     const { provider } = cognito(() => ({
       Session: 'pool-session',
-      ChallengeName: 'WEB_AUTHN',
+      ChallengeName: 'SELECT_CHALLENGE',
+      AvailableChallenges: ['WEB_AUTHN'],
       ChallengeParameters: {
         CREDENTIAL_REQUEST_OPTIONS: JSON.stringify({
           rpId: 'elsewhere.example.invalid',
@@ -509,7 +533,10 @@ describe('the Cognito partner passkey provider', () => {
       }),
     ).rejects.toMatchObject({ code: 'PARTNER_SIGN_IN_REFUSED' });
     const responded = sent[0] as AdminRespondToAuthChallengeCommand;
-    expect(responded.input.ChallengeName).toBe('WEB_AUTHN');
+    // The selection is what was offered, so the selection is what is
+    // answered, naming the choice beside the credential.
+    expect(responded.input.ChallengeName).toBe('SELECT_CHALLENGE');
+    expect(responded.input.ChallengeResponses?.ANSWER).toBe('WEB_AUTHN');
     expect(responded.input.Session).toBe('pool-session');
     expect(responded.input.ChallengeResponses?.USERNAME).toBe(EMAIL);
     expect(
