@@ -36,7 +36,24 @@ const ANDROID_CEREMONY_ORIGIN = `android:apk-key-hash:${Buffer.from(
   'hex',
 ).toString('base64url')}`;
 const COOKIE_SECRET = Buffer.alloc(32, 61).toString('base64url');
-const EMAIL = 'responder@agency.example.invalid';
+/**
+ * One address per test, and one caller per request.
+ *
+ * The limiter's budgets are per address and per client and live for the life
+ * of the process, so a shard that runs this file beside the browser passkey
+ * route's tests would have each of them spending the other's. Every test here
+ * therefore names an address only it uses, and every request a caller only it
+ * uses, which is the same rule the native emailed-code route's tests keep.
+ */
+let addressCounter = 0;
+function address(): string {
+  addressCounter += 1;
+  return `native-passkey-${String(addressCounter)}@agency.example.invalid`;
+}
+
+function caller(): string {
+  return `198.51.100.${String(Math.floor(Math.random() * 254) + 1)}`;
+}
 const INSTALLATION_ID = 'native-partner-installation';
 
 const names = [
@@ -96,7 +113,10 @@ function post(body: unknown): Promise<Response> {
   return POST(
     new NextRequest(ACTION, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': caller(),
+      },
       body: JSON.stringify(body),
     }),
   ) as Promise<Response>;
@@ -105,12 +125,12 @@ function post(body: unknown): Promise<Response> {
 /** The hand-off the emailed-code sign-in would have handed this device. */
 function enrollmentToken(
   options: Readonly<{
-    email?: string;
+    email: string;
     platform?: 'ios' | 'android';
     accessToken?: string;
-  }> = {},
+  }>,
 ): string {
-  const email = options.email ?? EMAIL;
+  const { email } = options;
   return sealPartnerPasskeyEnrollment(
     {
       email,
@@ -124,9 +144,10 @@ function enrollmentToken(
 }
 
 async function enrollPasskey(
+  email: string,
   platform: 'ios' | 'android' = 'ios',
 ): Promise<void> {
-  const token = enrollmentToken({ platform });
+  const token = enrollmentToken({ email, platform });
   const started = await post({
     step: 'register-start',
     enrollmentToken: token,
@@ -184,11 +205,12 @@ afterEach(() => {
 
 describe('the native partner passkey endpoint', () => {
   test('refuses anything that is not one of the four steps', async () => {
+    const email = address();
     for (const body of [
       { step: 'list-credentials' },
       { step: 'sign-in-start' },
       { step: 'sign-in-start', email: 'not-an-address', platform: 'ios' },
-      { step: 'sign-in-start', email: EMAIL, platform: 'web' },
+      { step: 'sign-in-start', email, platform: 'web' },
       { step: 'register-start' },
       { step: 'register-start', enrollmentToken: 'k1.a.b.c' },
       {},
@@ -198,9 +220,10 @@ describe('the native partner passkey endpoint', () => {
   });
 
   test('an address with no passkey is told to use a code', async () => {
+    const email = address();
     const response = await post({
       step: 'sign-in-start',
-      email: EMAIL,
+      email,
       platform: 'ios',
       installationId: INSTALLATION_ID,
     });
@@ -211,9 +234,10 @@ describe('the native partner passkey endpoint', () => {
   });
 
   test('every response forbids caching and referrers', async () => {
+    const email = address();
     const response = await post({
       step: 'sign-in-start',
-      email: EMAIL,
+      email,
       platform: 'android',
       installationId: INSTALLATION_ID,
     });
@@ -223,10 +247,11 @@ describe('the native partner passkey endpoint', () => {
   });
 
   test('a deployment with no partner pool has no native passkey path', async () => {
+    const email = address();
     Reflect.set(process.env, 'PSD_EOC_PARTNER_USER_POOL_ID', 'UNCONFIGURED');
     const response = await post({
       step: 'sign-in-start',
-      email: EMAIL,
+      email,
       platform: 'ios',
       installationId: INSTALLATION_ID,
     });
@@ -237,10 +262,11 @@ describe('the native partner passkey endpoint', () => {
     // A session is this application's own credential and cannot authorize a
     // change inside the pool, so a hand-off this deployment did not seal is
     // refused.
+    const email = address();
     const foreign = sealPartnerPasskeyEnrollment(
       {
-        email: EMAIL,
-        accessToken: syntheticPartnerAccessToken(EMAIL),
+        email,
+        accessToken: syntheticPartnerAccessToken(email),
         platform: 'ios',
         expiresAt: Date.now() + 10 * 60 * 1_000,
       },
@@ -253,8 +279,8 @@ describe('the native partner passkey endpoint', () => {
     // An expired hand-off is refused the same way.
     const expired = sealPartnerPasskeyEnrollment(
       {
-        email: EMAIL,
-        accessToken: syntheticPartnerAccessToken(EMAIL),
+        email,
+        accessToken: syntheticPartnerAccessToken(email),
         platform: 'ios',
         expiresAt: Date.now() - 1_000,
       },
@@ -269,24 +295,27 @@ describe('the native partner passkey endpoint', () => {
   test('a hand-off for another address enrolls nothing', async () => {
     // The stand-in derives the pool's token from the address, so a hand-off
     // whose token belongs to somebody else is the pool refusing it.
+    const email = address();
     const response = await post({
       step: 'register-start',
       enrollmentToken: enrollmentToken({
+        email,
         accessToken: syntheticPartnerAccessToken('someone.else@x.invalid'),
       }),
     });
     expect(response.status).toBe(401);
-    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(false);
+    expect(syntheticPartnerHasPasskey(email)).toBe(false);
   });
 
   test('a partner enrolls a passkey from the app and then signs in with it', async () => {
-    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(false);
-    await enrollPasskey();
-    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(true);
+    const email = address();
+    expect(syntheticPartnerHasPasskey(email)).toBe(false);
+    await enrollPasskey(email);
+    expect(syntheticPartnerHasPasskey(email)).toBe(true);
 
     const offered = await post({
       step: 'sign-in-start',
-      email: EMAIL,
+      email,
       platform: 'ios',
       installationId: INSTALLATION_ID,
     });
@@ -309,7 +338,7 @@ describe('the native partner passkey endpoint', () => {
       'native',
     );
     expect(flow).toMatchObject({
-      email: EMAIL,
+      email,
       factor: 'passkey',
       platform: 'ios',
       installationId: INSTALLATION_ID,
@@ -320,10 +349,11 @@ describe('the native partner passkey endpoint', () => {
   });
 
   test('a ceremony performed for another origin is refused', async () => {
-    await enrollPasskey();
+    const email = address();
+    await enrollPasskey(email);
     const offered = await post({
       step: 'sign-in-start',
-      email: EMAIL,
+      email,
       platform: 'ios',
       installationId: INSTALLATION_ID,
     });
@@ -352,11 +382,12 @@ describe('the native partner passkey endpoint', () => {
   test('an Android ceremony is checked against the signing certificate', async () => {
     // The same fingerprint `/.well-known/assetlinks.json` is built from, so
     // the document and this check cannot disagree.
-    await enrollPasskey('android');
-    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(true);
+    const email = address();
+    await enrollPasskey(email, 'android');
+    expect(syntheticPartnerHasPasskey(email)).toBe(true);
     // And an Android enrollment that reports an https origin is refused.
     resetSyntheticPartnerPasskeys();
-    const token = enrollmentToken({ platform: 'android' });
+    const token = enrollmentToken({ email, platform: 'android' });
     const started = await post({
       step: 'register-start',
       enrollmentToken: token,
@@ -376,7 +407,7 @@ describe('the native partner passkey endpoint', () => {
       ),
     });
     expect(response.status).toBe(401);
-    expect(syntheticPartnerHasPasskey(EMAIL)).toBe(false);
+    expect(syntheticPartnerHasPasskey(email)).toBe(false);
   });
 
   test('a deployment with no asset-links document completes no Android ceremony', async () => {
@@ -384,7 +415,7 @@ describe('the native partner passkey endpoint', () => {
     // which is the right order: the document is what makes the platform
     // willing to run one at all.
     Reflect.deleteProperty(process.env, 'PSD_EOC_ANDROID_SIGNING_FINGERPRINTS');
-    const token = enrollmentToken({ platform: 'android' });
+    const token = enrollmentToken({ email: address(), platform: 'android' });
     const started = await post({
       step: 'register-start',
       enrollmentToken: token,
@@ -407,7 +438,8 @@ describe('the native partner passkey endpoint', () => {
   });
 
   test('an emailed-code flow cannot be answered with an assertion', async () => {
-    await enrollPasskey();
+    const email = address();
+    await enrollPasskey(email);
     // A flow the code path sealed carries no passkey factor, and the pool's
     // continuation belongs to one challenge, so refusing it here spends no
     // provider call and no verify budget. It is refused in the same words as
@@ -415,7 +447,7 @@ describe('the native partner passkey endpoint', () => {
     // two answers about a value only this deployment can produce.
     const codeFlow = sealPartnerSignInFlow(
       {
-        email: EMAIL,
+        email,
         flowSession: 'synthetic-partner-otp:unused',
         installationId: INSTALLATION_ID,
         platform: 'ios',
@@ -447,6 +479,7 @@ describe('the native partner passkey endpoint', () => {
     const response = await post({
       step: 'register-start',
       enrollmentToken: enrollmentToken({
+        email: address(),
         accessToken: syntheticPartnerAccessToken('nobody@x.invalid'),
       }),
     });
