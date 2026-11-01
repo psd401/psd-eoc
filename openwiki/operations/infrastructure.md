@@ -3,7 +3,7 @@ type: Operations Guide
 title: AWS CDK infrastructure, deployment, and monitoring
 description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the psd-dev-standards 08 deployment split (local direct cdk deploy, CI-only Terraform apply behind the production environment), bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
 tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda, cognito, partner-access]
-timestamp: 2026-11-01T08:08:25-08:00
+timestamp: 2026-11-01T10:19:46-08:00
 openwiki:
   roles: [operations, architecture, delivery]
   change_kinds: [infrastructure, deployment, monitoring, identity]
@@ -127,7 +127,7 @@ Non-district first responders (fire districts, police departments) are not in th
 
 What the root declares (`main.tf`):
 
-- `aws_cognito_user_pool.partner`: Essentials tier, email as the only identity, `EMAIL_OTP` and `WEB_AUTHN` as the only first factors, `mfa_configuration = "OFF"`, admin-invite only, passkeys bound to a relying-party id with `user_verification = "required"`, admin-only recovery, `DEVELOPER` mail through the district SES identity (see [email delivery](#email-delivery-developer-ses-identity)), and no hosted-UI domain or federation. Deletion protection and `prevent_destroy` are set.
+- `aws_cognito_user_pool.partner`: Essentials tier, email as the only identity, `EMAIL_OTP` and `WEB_AUTHN` as the only first factors, `mfa_configuration = "OFF"`, admin-invite only, passkeys bound to a relying-party id with `user_verification = "required"`, admin-only recovery, `DEVELOPER` mail through the district SES identity (see [email delivery](#email-delivery-developer-ses-identity)), and no hosted-UI domain or federation. Deletion protection and `prevent_destroy` are set. `PASSWORD` is listed only because `CreateUserPool` refuses a first-factor list without it. It is not a usable sign-in method: the app creates every partner with `AdminCreateUser` and no password, never sets one, recovery is admin-only, and the app client omits every password-bearing flow. Email OTP and passkeys are the sign-in methods.
 - `aws_cognito_user_pool_client.server`: one confidential client (`generate_secret = true`), `ALLOW_USER_AUTH` and `ALLOW_REFRESH_TOKEN_AUTH` only, so no password flow exists.
 - `aws_secretsmanager_secret.partner_client` at the fixed path `/psd-eoc/partner-user-pool-client`, and `aws_secretsmanager_secret_version.partner_client`, which stores the client id, the client secret, and the pool id as JSON.
 - The Cognito email service-linked role, `AWSServiceRoleForAmazonCognitoIdpEmailService` (`email.cognito-idp.amazonaws.com`), is no longer a managed resource. Cognito uses it to send through SES, and deleting it would stop every SES-backed user pool in the account, so this root must never destroy it. The first apply created it but could not tag it (the apply role lacks `iam:TagRole`), and the tainted resource under `prevent_destroy` blocked every later plan. A `removed` block in `main.tf` with `destroy = false` now forgets it without deleting it, and Cognito creates or reuses the role when the pool is configured to send through SES.

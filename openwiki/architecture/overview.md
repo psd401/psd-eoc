@@ -61,7 +61,7 @@ Source of truth is `AGENTS.md` (the product owner's session instruction outranks
 - **Deny by default**, server-side, scoped by role (`staff`/`admin`) and facility.
 - **Provider acceptance ≠ delivery ≠ human receipt**; ambiguity stays `unknown`.
 - **Contracts first, one capability layer, no side-door mutation path.**
-- **Deployment follows psd-dev-standards 08**: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval; that pipeline is built and has partly run once against production (2026-10-24, per the readiness register), with the partner user pool still uncreated ([infrastructure](../operations/infrastructure.md#deploy-model-and-ordering), [Terraform state bootstrap and CI](../operations/terraform-ci-pipeline.md)).
+- **Deployment follows psd-dev-standards 08**: the CDK stack deploys only by a human's local `cdk deploy`, and no workflow deploys it. Terraform applies only from CI behind the GitHub `production` environment approval; that pipeline is built and has run against production twice (2026-10-24 partly, and 2026-11-01 failing at pool creation, per the readiness register), with the partner user pool still uncreated ([infrastructure](../operations/infrastructure.md#deploy-model-and-ordering), [Terraform state bootstrap and CI](../operations/terraform-ci-pipeline.md)).
 - **iOS and Android stay in sync**; verify both (`bun packages/mobile/e2e/run.ts ios|android`).
 - Bun only (`bun install/run/test`), never npm/npx/node.
 
