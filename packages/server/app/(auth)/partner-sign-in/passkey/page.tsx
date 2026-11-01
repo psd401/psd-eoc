@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import { partnerSignInConfigured } from '../../../../lib/auth/identity-providers';
 import { organizationName } from '../../../../lib/config/deployment';
 import { PartnerPasskeyEnrollment } from './passkey-enrollment';
@@ -27,9 +29,9 @@ export default function PartnerPasskeyPage() {
             {organization} has not enabled partner agency accounts on this
             deployment.
           </p>
-          <a className="button-link" href="/">
+          <Link className="button-link" href="/">
             Continue
-          </a>
+          </Link>
         </section>
       </main>
     );

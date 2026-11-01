@@ -47,9 +47,7 @@ function base64url(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64url');
 }
 
-function clientData(
-  overrides: Readonly<Record<string, unknown>> = {},
-): string {
+function clientData(overrides: Readonly<Record<string, unknown>> = {}): string {
   return base64url(
     JSON.stringify({
       type: 'webauthn.get',
@@ -96,13 +94,19 @@ function post(
 ): Promise<Response> {
   const headers = new Headers();
   const contentType =
-    options.contentType === undefined ? 'application/json' : options.contentType;
+    options.contentType === undefined
+      ? 'application/json'
+      : options.contentType;
   if (contentType !== null) headers.set('content-type', contentType);
   const origin = options.origin === undefined ? ORIGIN : options.origin;
   if (origin !== null) headers.set('origin', origin);
   if (options.cookie !== undefined) headers.set('cookie', options.cookie);
   return POST(
-    new Request(ACTION, { method: 'POST', headers, body: JSON.stringify(body) }),
+    new Request(ACTION, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    }),
   ) as Promise<Response>;
 }
 
@@ -124,9 +128,12 @@ function enrollmentCookie(email = EMAIL): string {
 }
 
 async function enrollPasskey(): Promise<void> {
-  const started = await post({ step: 'register-start' }, {
-    cookie: enrollmentCookie(),
-  });
+  const started = await post(
+    { step: 'register-start' },
+    {
+      cookie: enrollmentCookie(),
+    },
+  );
   const { options } = (await started.json()) as {
     options: { challenge: string };
   };
@@ -239,9 +246,12 @@ describe('the partner passkey route', () => {
     await enrollPasskey();
     expect(syntheticPartnerHasPasskey(EMAIL)).toBe(true);
     // One enrollment per code sign-in: the finish clears the cookie.
-    const started = await post({ step: 'register-start' }, {
-      cookie: enrollmentCookie(),
-    });
+    const started = await post(
+      { step: 'register-start' },
+      {
+        cookie: enrollmentCookie(),
+      },
+    );
     const { options } = (await started.json()) as {
       options: { challenge: string };
     };
@@ -260,9 +270,12 @@ describe('the partner passkey route', () => {
   });
 
   test('a ceremony performed for another origin is refused', async () => {
-    const started = await post({ step: 'register-start' }, {
-      cookie: enrollmentCookie(),
-    });
+    const started = await post(
+      { step: 'register-start' },
+      {
+        cookie: enrollmentCookie(),
+      },
+    );
     const { options } = (await started.json()) as {
       options: { challenge: string };
     };
@@ -345,8 +358,12 @@ describe('the partner passkey route', () => {
 
   test('an assertion with no flow at all is refused', async () => {
     expect(
-      (await post({ step: 'sign-in-finish', credential: assertionCredential() }))
-        .status,
+      (
+        await post({
+          step: 'sign-in-finish',
+          credential: assertionCredential(),
+        })
+      ).status,
     ).toBe(401);
   });
 });

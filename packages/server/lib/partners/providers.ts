@@ -16,6 +16,7 @@ import {
   type EmailBranding,
 } from '../../../../workers/email/email-message';
 import { SYNTHETIC_PARTNER_USER_POOL_ID } from '../auth/identity-providers';
+import { forgetSyntheticPartnerPasskeys } from '../auth/partner-passkey';
 import { applicationOrigin, organizationName } from '../config/deployment';
 
 /**
@@ -281,7 +282,14 @@ export function syntheticPartnerProviders(): PartnerProviders {
             subject: `synthetic-${createHash('sha256').update(email).digest('hex').slice(0, 32)}`,
           }),
         ),
-      ensureDisabled: () => Promise.resolve(),
+      // The real pool's AdminDisableUser makes every credential the account
+      // holds unusable, passkeys included (#599). The stand-in forgets them
+      // for the same reason, so a disabled partner is refused by the
+      // stand-in pool and not only by the admission check above it.
+      ensureDisabled: (email: string) => {
+        forgetSyntheticPartnerPasskeys(email);
+        return Promise.resolve();
+      },
     }),
     mailer: Object.freeze({ send: () => Promise.resolve() }),
   });

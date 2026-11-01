@@ -6,10 +6,7 @@ import {
 } from '@psd-eoc/contracts';
 import { useState, type FormEvent } from 'react';
 
-import {
-  assertPartnerPasskey,
-  passkeysAvailable,
-} from './passkey-ceremony';
+import { assertPartnerPasskey, passkeysAvailable } from './passkey-ceremony';
 import { PARTNER_PASSKEY_ACTION, PARTNER_SIGN_IN_ACTION } from './status';
 
 /**

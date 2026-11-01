@@ -65,9 +65,7 @@ function base64url(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64url');
 }
 
-function clientData(
-  overrides: Readonly<Record<string, unknown>> = {},
-): string {
+function clientData(overrides: Readonly<Record<string, unknown>> = {}): string {
   return base64url(
     JSON.stringify({
       type: 'webauthn.get',
@@ -335,12 +333,16 @@ describe('the synthetic partner passkey stand-in', () => {
     for (const call of [
       provider.startRegistration({
         email: EMAIL,
-        accessToken: syntheticPartnerAccessToken('someone-else@example.invalid'),
+        accessToken: syntheticPartnerAccessToken(
+          'someone-else@example.invalid',
+        ),
         relyingPartyId: RELYING_PARTY,
       }),
       provider.completeRegistration({
         email: EMAIL,
-        accessToken: syntheticPartnerAccessToken('someone-else@example.invalid'),
+        accessToken: syntheticPartnerAccessToken(
+          'someone-else@example.invalid',
+        ),
         credential: registration(clientData({ type: 'webauthn.create' })),
       }),
     ]) {
@@ -396,18 +398,14 @@ function stubClient(
   };
 }
 
-function cognito(
-  handler: (command: unknown) => unknown,
-): Readonly<{
+function cognito(handler: (command: unknown) => unknown): Readonly<{
   provider: CognitoPartnerPasskeyProvider;
   sent: unknown[];
 }> {
   const client = stubClient(handler);
   return {
-    provider: new CognitoPartnerPasskeyProvider(
-      pool,
-      client as never,
-      () => Promise.resolve('client-secret'),
+    provider: new CognitoPartnerPasskeyProvider(pool, client as never, () =>
+      Promise.resolve('client-secret'),
     ),
     sent: client.sent,
   };
@@ -475,9 +473,9 @@ describe('the Cognito partner passkey provider', () => {
         }),
       },
     }));
-    await expect(provider.startSignIn(EMAIL, RELYING_PARTY)).rejects.toMatchObject(
-      { code: 'PARTNER_PROVIDER_UNAVAILABLE' },
-    );
+    await expect(
+      provider.startSignIn(EMAIL, RELYING_PARTY),
+    ).rejects.toMatchObject({ code: 'PARTNER_PROVIDER_UNAVAILABLE' });
   });
 
   test('a rejected assertion is the one refusal', async () => {

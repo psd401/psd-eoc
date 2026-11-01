@@ -1,12 +1,10 @@
 'use client';
 
 import { PartnerPasskeyRegisterStartResponseSchema } from '@psd-eoc/contracts';
+import Link from 'next/link';
 import { useState } from 'react';
 
-import {
-  createPartnerPasskey,
-  passkeysAvailable,
-} from '../passkey-ceremony';
+import { createPartnerPasskey, passkeysAvailable } from '../passkey-ceremony';
 import { PARTNER_PASSKEY_ACTION } from '../status';
 
 /**
@@ -79,9 +77,9 @@ export function PartnerPasskeyEnrollment() {
           This browser cannot store a passkey. You will keep signing in with an
           emailed code.
         </p>
-        <a className="button-link" href="/">
+        <Link className="button-link" href="/">
           Continue
-        </a>
+        </Link>
       </>
     );
   }
@@ -93,9 +91,9 @@ export function PartnerPasskeyEnrollment() {
           Passkey saved. Next time, signing in will ask for your device instead
           of an emailed code.
         </p>
-        <a className="button-link" href="/">
+        <Link className="button-link" href="/">
           Continue
-        </a>
+        </Link>
       </>
     );
   }
@@ -114,10 +112,12 @@ export function PartnerPasskeyEnrollment() {
         disabled={outcome === 'working'}
         onClick={() => void enroll()}
       >
-        {outcome === 'working' ? 'Waiting for your device…' : 'Set up a passkey'}
+        {outcome === 'working'
+          ? 'Waiting for your device…'
+          : 'Set up a passkey'}
       </button>
       <p className="supporting-text">
-        <a href="/">Not now</a>
+        <Link href="/">Not now</Link>
       </p>
     </>
   );

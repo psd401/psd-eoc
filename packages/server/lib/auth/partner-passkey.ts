@@ -494,7 +494,10 @@ interface SyntheticPasskeyState {
   /** Registered credential ids, by lower-cased address. */
   readonly credentials: Map<string, Set<string>>;
   /** The challenge issued for one open sign-in session. */
-  readonly sessions: Map<string, Readonly<{ email: string; challenge: string }>>;
+  readonly sessions: Map<
+    string,
+    Readonly<{ email: string; challenge: string }>
+  >;
   /** The challenge issued for one open registration, by address. */
   readonly registrations: Map<string, string>;
 }
@@ -510,6 +513,27 @@ export function resetSyntheticPartnerPasskeys(): void {
   syntheticPasskeyState.credentials.clear();
   syntheticPasskeyState.sessions.clear();
   syntheticPasskeyState.registrations.clear();
+}
+
+/**
+ * Forgets one address's stand-in passkeys.
+ *
+ * The stand-in for the directory calls this when a partner is disabled,
+ * because that is what the real pool does: `AdminDisableUser` makes every
+ * credential the account holds unusable, passkeys included. Without this the
+ * stand-in would let a disabled partner's passkey keep proving a first factor
+ * — the admission would still refuse the sign-in, but the browser flows could
+ * not show the pool layer refusing it too.
+ */
+export function forgetSyntheticPartnerPasskeys(email: string): void {
+  const address = email.trim().toLowerCase();
+  syntheticPasskeyState.credentials.delete(address);
+  syntheticPasskeyState.registrations.delete(address);
+  for (const [session, open] of syntheticPasskeyState.sessions) {
+    if (open.email === address) {
+      syntheticPasskeyState.sessions.delete(session);
+    }
+  }
 }
 
 /** True when the stand-in holds a passkey for the address. */
@@ -736,7 +760,10 @@ function readSyntheticClientData(
   return clientData.success ? clientData.data : null;
 }
 
-const cognitoPartnerPasskeyProviders = new Map<string, PartnerPasskeyProvider>();
+const cognitoPartnerPasskeyProviders = new Map<
+  string,
+  PartnerPasskeyProvider
+>();
 
 /**
  * The partner passkey provider this deployment is configured for, or null

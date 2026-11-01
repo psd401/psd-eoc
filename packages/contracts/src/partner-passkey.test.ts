@@ -56,10 +56,8 @@ const PASSKEY_TRANSPORT = Object.freeze({
 
 function envelope(
   overrides: Readonly<Record<string, unknown>> = {},
+  claimOverrides: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown> {
-  const claimOverrides =
-    (overrides.claimOverrides as Readonly<Record<string, unknown>>) ?? {};
-  const { claimOverrides: _ignored, ...rest } = overrides;
   return {
     capabilityId: 'complete-oidc-sign-in',
     operation: 'mutation',
@@ -81,7 +79,7 @@ function envelope(
     },
     idempotencyKey: `oidc:${DIGEST}`,
     transport: PASSKEY_TRANSPORT,
-    ...rest,
+    ...overrides,
   };
 }
 
@@ -150,7 +148,7 @@ describe('the partner passkey transport', () => {
   test('a Google identity cannot arrive as a partner passkey', () => {
     expect(() =>
       AuthenticationCapabilityEnvelopeSchema.parse(
-        envelope({ claimOverrides: { issuer: GOOGLE_IDENTITY_ISSUER } }),
+        envelope({}, { issuer: GOOGLE_IDENTITY_ISSUER }),
       ),
     ).toThrow();
   });

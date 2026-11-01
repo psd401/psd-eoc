@@ -130,7 +130,11 @@ async function readJsonBody(request: Request): Promise<unknown> {
   const declared = request.headers.get('content-length');
   if (declared !== null) {
     const length = Number(declared);
-    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_BODY_BYTES) {
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_BODY_BYTES
+    ) {
       return null;
     }
   }
