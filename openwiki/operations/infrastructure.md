@@ -3,7 +3,7 @@ type: Operations Guide
 title: AWS CDK infrastructure, deployment, and monitoring
 description: The single PsdEoc CDK stack (App Runner web, Aurora, SQS queues, ECS channel workers, Lambdas, media and records storage), the psd-dev-standards 08 deployment split (local direct cdk deploy, CI-only Terraform apply behind the production environment), bootstrap-before-promotion ordering, CloudWatch monitoring, and the Google Cloud identity project.
 tags: [aws, cdk, deployment, monitoring, cloudwatch, terraform, lambda, cognito, partner-access]
-timestamp: 2026-10-26T15:24:18-07:00
+timestamp: 2026-11-01T07:36:12-08:00
 openwiki:
   roles: [operations, architecture, delivery]
   change_kinds: [infrastructure, deployment, monitoring, identity]
@@ -62,7 +62,7 @@ Read this before changing `infra/`, queue/worker wiring, alarms, or deploy behav
 
 ## Stack contents (`infra/src/stack/psd-eoc-stack.ts`, one `PsdEocStack`, ~3,900 lines)
 
-- **Web:** AWS App Runner service from a content-addressed CDK image asset (resolved to an immutable ECR digest) through a VPC connector; two warm instances (min 2, max 4), per-key agent limits therefore multiply ×4 at most ([agent API](../integrations/agent-api-and-mcp.md)). Next.js is served on Node.
+- **Web:** AWS App Runner service from a content-addressed CDK image asset (resolved to an immutable ECR digest) through a VPC connector; two warm instances (min 2, max 4), per-key agent limits therefore multiply ×4 at most ([agent API](../integrations/agent-api-and-mcp.md)). Next.js is served on Node. When the tenant configures mobile store identities, the web service also receives `PSD_EOC_APPLE_APP_TEAM_ID`, `PSD_EOC_ANDROID_APPLICATION_ID` and `PSD_EOC_ANDROID_SIGNING_FINGERPRINTS`, each only when set, and serves the [mobile association documents](configuration-and-readiness.md#mobile-app-association-documents) from them.
 - **Data:** Aurora PostgreSQL (private, DB and application secrets in Secrets Manager); security groups for the app connector, database and workers.
 - **Queues:** a single delivery queue + DLQ, per-channel queues (email, push, SMS) with DLQs, a health queue, and a separate SES callback queue + DLQ. The `delivery-router` Lambda fans the delivery queue to channel queues ([pipeline](../domain/notification-pipeline.md)).
 - **Workers (ECS):** push worker service, SMS worker service, email worker service, email callback worker service, plus a scheduled access-membership-sync ECS task (`accessSyncSchedule`) and a bootstrap task. Per-worker secrets (`deliveryStateWorkerSecret`, `attemptExecutionWorkerSecret`, `pushEndpointWorkerSecret`, `expoPushRuntimeWorkerSecret`, `emailRuntimeWorkerSecret`, `smsRuntimeWorkerSecret`) are the scoped credentials for the internal routes. Provider-live behavior is gated by CloudFormation parameters/conditions (protected activation boundaries in `docs/CONFIGURATION.md`).
