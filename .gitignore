@@ -16,8 +16,10 @@ cdk.out/
 # create while working. Never part of a build or an image. Untracked, it also
 # made every protected deployment fail: readSourceRevision runs `git status
 # --untracked-files=normal` and refuses to deploy on any output, so a fresh
-# clone could not deploy at all until this was ignored.
-.claude/
+# clone could not deploy at all until this was ignored. Path-scoped agent rules
+# in .claude/rules/ are shared and committed.
+.claude/*
+!.claude/rules/
 
 # Maestro writes per-run debug output and device logs next to the retained
 # evidence. Only the JUnit results and screenshots are evidence.

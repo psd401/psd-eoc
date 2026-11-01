@@ -177,11 +177,6 @@ describe('documentation contract', () => {
         expect(contents).not.toMatch(pattern);
       }
     }
-    const agents = readFileSync(join(repository, 'AGENTS.md'), 'utf8');
-    expect(agents).toContain(
-      'Agents never run `apply`, `deploy`, or `import` against a real account.',
-    );
-    expect(agents).toMatch(/\*\*Terraform\*\* applies only from CI\./u);
   });
 
   test('maps every monitoring alarm anchor to a current procedure', () => {

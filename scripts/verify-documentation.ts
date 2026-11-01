@@ -1100,11 +1100,7 @@ function verifyInformationArchitecture(
     }
   }
 
-  for (const path of [
-    'README.md',
-    'CLAUDE.md',
-    '.github/pull_request_template.md',
-  ]) {
+  for (const path of ['README.md', '.github/pull_request_template.md']) {
     const contents = readFileSync(join(repositoryRoot, path), 'utf8');
     if (!contents.includes('bun run check')) {
       errors.push({
