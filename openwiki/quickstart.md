@@ -90,6 +90,19 @@ Typecheck one workspace with `bun run --cwd packages/server typecheck` (or `pack
 Areas identified but not yet documented in depth:
 
 - Administration web UI pages (`packages/server/app/(admin)/{access,facilities,integrations,devices,agents,audit}`): covered only where they touch identity, agents and templates; a per-page guide is missing.
+- Operator tooling in `scripts/ops` (`appstore/`, `sms-registration/`, `groups-inventory*.ts`) and `packages/server/scripts/operations/bootstrap.ts`: referenced but not walked through.
+- Google Cloud Terraform and Firebase under `infra/gcp`: summarized in infrastructure only.
+- Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
+
+
+
+(`.github/workflows/openwiki-update.yml`) regenerates them.
+
+## Backlog
+
+Areas identified but not yet documented in depth:
+
+- Administration web UI pages (`packages/server/app/(admin)/{access,facilities,integrations,devices,agents,audit}`): covered only where they touch identity, agents and templates; a per-page guide is missing.
 - SMS consent flow (`packages/server/lib/capabilities/sms-consent.ts`, `packages/server/app/api/sms-consent`, `app/(app)/text-alerts`): only summarized in the notification pipeline and mobile pages.
 - Operator tooling in `scripts/ops` (`appstore/`, `sms-registration/`, `groups-inventory*.ts`) and `packages/server/scripts/operations/bootstrap.ts`: referenced but not walked through.
 - Google Cloud Terraform and Firebase under `infra/gcp`: summarized in infrastructure only.

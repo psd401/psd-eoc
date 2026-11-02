@@ -3,7 +3,7 @@ type: Operations Guide
 title: Tenant configuration, readiness register, and runbooks
 description: Where district-specific configuration lives (CDK context manifest, git-ignored cdk.local.json, runtime environment variables, mobile identifiers), how provider activation is gated, where current deployment and provider readiness is recorded, and how the runbook set is organized.
 tags: [configuration, tenant, readiness, runbooks, open-source]
-timestamp: 2026-11-01T23:50:21Z
+timestamp: 2026-11-02T11:52:19-08:00
 openwiki:
   roles: [operations, delivery]
   change_kinds: [configuration, documentation-contract]
@@ -18,18 +18,22 @@ openwiki:
     - infra/terraform/stateful/outputs.tf
     - packages/server/lib/config/deployment.ts
     - packages/server/lib/config/app-association.ts
+    - packages/server/lib/config/store-listings.ts
     - packages/server/app/.well-known/apple-app-site-association/route.ts
     - packages/server/app/.well-known/assetlinks.json/route.ts
+    - packages/server/app/nav/store-links-footer.tsx
     - packages/mobile/app.config.ts
     - infra/src/stack/config.ts
     - scripts/verify-documentation.ts
     - scripts/verify-example-config.ts
-  symbols: [readTenantContext, applicationOrigin, organizationName, staffHostedDomain, iosBundleId, displayTimeZone, readDeploymentIdentity, appleAppTeamId, androidApplicationId, androidSigningFingerprints, appleAppSiteAssociation, androidAssetLinks]
+  symbols: [readTenantContext, applicationOrigin, organizationName, staffHostedDomain, iosBundleId, displayTimeZone, readDeploymentIdentity, appleAppTeamId, appleAppStoreId, androidApplicationId, androidSigningFingerprints, appleAppSiteAssociation, androidAssetLinks, mobileStoreListings, StoreLinksFooter]
   test_paths:
     - infra/test/tenant-context.test.ts
     - infra/test/stack/psd-eoc-stack.test.ts
     - packages/server/lib/config/deployment.test.ts
     - packages/server/lib/config/app-association.test.ts
+    - packages/server/lib/config/store-listings.test.ts
+    - packages/server/app/nav/store-links-footer.test.tsx
     - packages/mobile/scripts/distribution-config.test.ts
     - scripts/verify-documentation.test.ts
     - scripts/verify-example-config.test.ts
@@ -37,10 +41,11 @@ openwiki:
     - No district name, domain, account ID, region, bundle ID or hostname is a literal in source; all are configuration.
     - Current deployment and provider state is written only in docs/INTEGRATIONS.md.
     - An unconfigured store identity serves no association document; a malformed one is a configuration error, never a document a platform silently refuses.
+    - A store link is shown only for a store whose identifier is configured; with neither configured the web footer renders nothing.
   validation_commands:
     - bun run verify:config
     - bun run verify:docs
-    - bun test packages/server/lib/config/app-association.test.ts packages/server/lib/config/deployment.test.ts
+    - bun test packages/server/lib/config/app-association.test.ts packages/server/lib/config/deployment.test.ts packages/server/lib/config/store-listings.test.ts
 ---
 
 # Tenant configuration, readiness register, and runbooks
@@ -56,7 +61,8 @@ PSD EOC is open source and built so any district can run it on its own AWS accou
 | Shared CDK context | `infra/cdk.json` | Committed. Feature flags, the threat list, synthetic test groups only. |
 | Tenant manifest | git-ignored `infra/cdk.local.json`, shape in `infra/cdk.local.example.json` | Every `psdEoc:*` key (organization name, hosted domain, application origin, facilities, neighborhoods, SES sender, SMS support contact, GCP project values, iOS bundle ID, optional Apple team ID and Android application ID and signing fingerprints behind the [association documents](#mobile-app-association-documents), monitoring runbook base URL, etc.). Read by `infra/src/tenant-context.ts` (`readTenantContext`). The AWS account ID, SMS support phone and GCP billing account never enter the repository. |
 | CloudFormation parameters | passed to `cdk deploy --parameters` | Enable flags such as `EnableExpoPushWorker`, direct-push enablement, protected secrets paths; indexed in `docs/CONFIGURATION.md`. The three `PartnerUserPool*` parameters default to `UNCONFIGURED` and take their values from `terraform output stack_parameters` of the stateful root, whose tfvars inputs `ses_identity_domain`, `ses_region` (the region that holds that identity, which may differ from the pool's) and `partner_email_from_address` set the SES sender for partner email (see [partner email delivery](infrastructure.md#email-delivery-developer-ses-identity)); they are all-or-nothing and gated as described in [partner first-responder directory](infrastructure.md#partner-first-responder-directory-terraform-stateful-root). The proposed migration would turn these into typed Terraform variables with no defaults, fed from git-ignored tfvars and a GitHub `production` environment. Its phase 1 (the bootstrap root and the Terraform workflow) is built and has run against production per the readiness register; see [Terraform migration plan](infrastructure.md#terraform-migration-plan-phase-1-built-not-applied) and [Terraform state bootstrap and CI](terraform-ci-pipeline.md). |
-| Server runtime environment | env vars read in `packages/server/lib/config/deployment.ts` | `GOOGLE_OIDC_APPLICATION_ORIGIN`, `GOOGLE_OIDC_HOSTED_DOMAIN`, `PSD_EOC_DISPLAY_TIME_ZONE`, `PSD_EOC_IOS_BUNDLE_ID`, `PSD_EOC_ORGANIZATION_NAME`, privacy/SMS contact values, `DATABASE_*`, and the optional `PSD_EOC_APPLE_APP_TEAM_ID`, `PSD_EOC_ANDROID_APPLICATION_ID` and `PSD_EOC_ANDROID_SIGNING_FINGERPRINTS` read by `appleAppTeamId`, `androidApplicationId` and `androidSigningFingerprints` for the [association documents](#mobile-app-association-documents). Readers accept an injected environment so tests can assert fail-closed behavior. Partner account mail reads `PSD_EOC_SES_FROM_ADDRESS` and `PSD_EOC_SES_CONFIGURATION_SET_NAME` in `packages/server/lib/partners/providers.ts`; the stack sets the set name to its partner set, and partner access stays off when either is missing ([partner mail](../domain/partner-access.md#partner-mail)). Partner web sign-in reads `PSD_EOC_PARTNER_USER_POOL_ID`, `PSD_EOC_PARTNER_USER_POOL_CLIENT_ID`, and `PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN` in `packages/server/lib/auth/identity-providers.ts`; with the pool id absent or `UNCONFIGURED` the sign-in page says the deployment has not enabled partner accounts ([partner web sign-in](../domain/partner-sign-in.md#configuration-and-readiness)). |
+<!-- openwiki: broken internal link [#store-links-in-the-web-footer] heading anchor "store-links-in-the-web-footer" does not exist in /openwiki/operations/configuration-and-readiness.md. Fix the href or restore the target, then delete this comment. -->
+| Server runtime environment | env vars read in `packages/server/lib/config/deployment.ts` | `GOOGLE_OIDC_APPLICATION_ORIGIN`, `GOOGLE_OIDC_HOSTED_DOMAIN`, `PSD_EOC_DISPLAY_TIME_ZONE`, `PSD_EOC_IOS_BUNDLE_ID`, `PSD_EOC_ORGANIZATION_NAME`, privacy/SMS contact values, `DATABASE_*`, and the optional `PSD_EOC_APPLE_APP_TEAM_ID`, `PSD_EOC_ANDROID_APPLICATION_ID` and `PSD_EOC_ANDROID_SIGNING_FINGERPRINTS` read by `appleAppTeamId`, `androidApplicationId` and `androidSigningFingerprints` for the [association documents](#mobile-app-association-documents), plus the optional `PSD_EOC_APPLE_APP_STORE_ID` read by `appleAppStoreId` for the [web footer's store links](#store-links-in-the-web-footer). Readers accept an injected environment so tests can assert fail-closed behavior. Partner account mail reads `PSD_EOC_SES_FROM_ADDRESS` and `PSD_EOC_SES_CONFIGURATION_SET_NAME` in `packages/server/lib/partners/providers.ts`; the stack sets the set name to its partner set, and partner access stays off when either is missing ([partner mail](../domain/partner-access.md#partner-mail)). Partner web sign-in reads `PSD_EOC_PARTNER_USER_POOL_ID`, `PSD_EOC_PARTNER_USER_POOL_CLIENT_ID`, and `PSD_EOC_PARTNER_USER_POOL_CLIENT_SECRET_ARN` in `packages/server/lib/auth/identity-providers.ts`; with the pool id absent or `UNCONFIGURED` the sign-in page says the deployment has not enabled partner accounts ([partner web sign-in](../domain/partner-sign-in.md#configuration-and-readiness)). |
 | Mobile build config | `packages/mobile/app.json`, `eas.json`, `EXPO_PUBLIC_*` | Replaced per district fork; bundle ID must match `psdEoc:iosBundleId`. `app.config.ts` derives the passkey associated domain and Android asset statement from `EXPO_PUBLIC_PSD_EOC_API_BASE_URL`, so no separate hostname is configured for the app. See [mobile app](../integrations/mobile-app.md). |
 | Database rows | facilities, group sources, event types, channel configuration | Seeded by the deployment bootstrap ([infrastructure](infrastructure.md)); see [data model](../domain/data-model.md). |
 
@@ -115,6 +121,21 @@ These behaviors are implemented in [channel workers](../integrations/channel-wor
 ## Runbooks
 
 `docs/runbooks/README.md` is the index (about 40 procedures): stop conditions, first-run and go-live, rollback and emergency notification stop, backup/restore, release, one runbook per CloudWatch alarm family (anchors referenced from alarm descriptions via `psdEoc:monitoringRunbookBaseUrl`; preserve the `### Runbook:` headings in `infra/README.md`), provider setup/rotation (Expo, SES, SMS, direct push, Google OAuth, API keys) and roster sync. The verifier requires each runbook to link the readiness register (`../INTEGRATIONS.md`) and forbids dated readiness claims inside runbooks. Operational stop conditions mirror the safety rules: real/drill confusion, a real notification bypassing human confirmation, student data, secrets in unsafe places, provider acceptance presented as delivery, rewritten append-only history.
+
+Guides for people rather than responders: `docs/guides/first-administrator.md` (getting the first admin admitted — see [identity and access](../domain/identity-and-access.md)) and the iOS/Android install guides. `docs/learnings/` holds dated failure-pattern notes (database, security, test failures, UI, workflow).
+
+## Change recipes and checks
+
+- **Add a tenant value**: add to `infra/cdk.local.example.json` (and `cdk.json` only if shareable), read it via `tenant-context.ts` or `lib/config/deployment.ts`, update the marked list in `docs/CONFIGURATION.md`. Checks: `bun run verify:config`, `bun run verify:docs`, `bun test infra/test/tenant-context.test.ts`.
+- **Add an env var read by the server**: put the reader in `lib/config/deployment.ts` (injectable env), add it to `.env.example` if required for local runs, list it in `docs/CONFIGURATION.md`.
+- **Record a new provider or deployment observation**: edit only `docs/INTEGRATIONS.md`, with dated evidence; leave runbooks status-free.
+- **Escalate** to a full `bun run check` only when a change spans formatting, lint, docs contract and typecheck together; for docs-only edits `bun run verify:docs` is the narrow check.
+
+## Known documentation drift (prefer source)
+
+- `packages/mobile/README.md` still describes a protected per-build allowlist for push registration. It was removed and `docs/CONFIGURATION.md` says it is deliberately absent; see [mobile app](../integrations/mobile-app.md).
+- `docs/INTEGRATIONS.md` contradicts itself on the partner pool. Its partner first-responder paragraph still says the `PartnerUserPool*` parameters are `UNCONFIGURED` in production, while its 2026-11-01 entry records a `cdk deploy` that supplied them. Prefer the later dated entry, and confirm the current value against the register before relying on either sentence. The partner pages link to this register rather than restating it ([partner web sign-in](../domain/partner-sign-in.md)).
+elivery, rewritten append-only history.
 
 Guides for people rather than responders: `docs/guides/first-administrator.md` (getting the first admin admitted — see [identity and access](../domain/identity-and-access.md)) and the iOS/Android install guides. `docs/learnings/` holds dated failure-pattern notes (database, security, test failures, UI, workflow).
 
