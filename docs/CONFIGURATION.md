@@ -21,6 +21,7 @@ changing a key in code without updating this index fails `bun run verify:docs`.
 
 - `psdEoc:androidApplicationId`
 - `psdEoc:androidSigningFingerprints`
+- `psdEoc:appleAppStoreId`
 - `psdEoc:appleAppTeamId`
 - `psdEoc:applicationOrigin`
 - `psdEoc:awsAccount`
@@ -287,6 +288,14 @@ neither document, native passkeys are unavailable there, and the emailed code
 fails the synth instead, because the failure it would otherwise produce is a
 document Apple or Google silently refuses, which reads as a passkey that never
 works and looks like a defect in the app.
+
+The web footer links to the app's store listings from the same configuration,
+so staff can always find the app. The Google Play link is built from
+`psdEoc:androidApplicationId`. The App Store link needs
+`psdEoc:appleAppStoreId`, the numeric Apple ID App Store Connect shows for the
+app (the `id` in its App Store link), because it cannot be derived from the
+bundle identifier. Each link is left out when its key is absent, and the
+footer is left out when both are.
 
 Neither document grants access. Each states which app may ask this hostname
 for a credential; the partner admission still decides who is let in. Both are

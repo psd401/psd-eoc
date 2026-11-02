@@ -184,6 +184,11 @@ export interface DeploymentIdentity {
    * are unavailable, and the emailed code is unaffected.
    */
   readonly appleAppTeamId: string | null;
+  /**
+   * The numeric App Store identifier, for the web footer's App Store link.
+   * Optional: the link is left out when it is absent.
+   */
+  readonly appleAppStoreId: string | null;
   readonly androidApplicationId: string | null;
   /** More than one accommodates a Play signing-key rotation, and no more. */
   readonly androidSigningFingerprints: readonly string[];
@@ -459,6 +464,10 @@ export function readDeploymentIdentity(node: {
       /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
     ),
     appleAppTeamId: readOptional('psdEoc:appleAppTeamId', /^[A-Z0-9]{10}$/u),
+    appleAppStoreId: readOptional(
+      'psdEoc:appleAppStoreId',
+      /^[1-9][0-9]{5,11}$/u,
+    ),
     androidApplicationId: readOptional(
       'psdEoc:androidApplicationId',
       /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/u,

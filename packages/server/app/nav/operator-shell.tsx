@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
 
 import { PrimaryNav } from './primary-nav';
+import { StoreLinksFooter } from './store-links-footer';
 
-/** The shared document, skip target, navigation, and content order. */
+/** The shared document, skip target, navigation, content, and footer order. */
 export function OperatorShell({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="en">
@@ -12,6 +13,7 @@ export function OperatorShell({ children }: Readonly<{ children: ReactNode }>) {
         </a>
         <PrimaryNav />
         <div className="operator-shell__content">{children}</div>
+        <StoreLinksFooter />
       </body>
     </html>
   );

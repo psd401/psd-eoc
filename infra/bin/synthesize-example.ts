@@ -50,6 +50,7 @@ const exampleConfiguration = Object.freeze({
   // The mobile app association documents (issue #647). Reserved placeholders:
   // the example synthesis never reaches Apple or Google.
   appleAppTeamId: 'ABCDE12345',
+  appleAppStoreId: '1234567890',
   androidApplicationId: 'invalid.example.eoc',
   androidSigningFingerprints: [`${'AB:'.repeat(31)}CD`],
   monitoringRunbookBaseUrl: `https://operations.${exampleHostedDomain}/runbooks`,
@@ -96,6 +97,7 @@ const app = new App({
     'psdEoc:hostedZoneId': 'Z0EXAMPLEZONEID',
     'psdEoc:iosBundleId': exampleConfiguration.iosBundleId,
     'psdEoc:appleAppTeamId': exampleConfiguration.appleAppTeamId,
+    'psdEoc:appleAppStoreId': exampleConfiguration.appleAppStoreId,
     'psdEoc:androidApplicationId': exampleConfiguration.androidApplicationId,
     'psdEoc:androidSigningFingerprints':
       exampleConfiguration.androidSigningFingerprints,
@@ -157,6 +159,10 @@ template.hasResourceProperties('AWS::AppRunner::Service', {
           {
             Name: 'PSD_EOC_APPLE_APP_TEAM_ID',
             Value: exampleConfiguration.appleAppTeamId,
+          },
+          {
+            Name: 'PSD_EOC_APPLE_APP_STORE_ID',
+            Value: exampleConfiguration.appleAppStoreId,
           },
           {
             Name: 'PSD_EOC_ANDROID_APPLICATION_ID',

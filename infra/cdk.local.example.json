@@ -3,6 +3,7 @@
   "psdEoc:androidSigningFingerprints": [
     "AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:CD"
   ],
+  "psdEoc:appleAppStoreId": "1234567890",
   "psdEoc:appleAppTeamId": "ABCDE12345",
   "psdEoc:applicationOrigin": "https://eoc.example.invalid",
   "psdEoc:awsAccount": "123456789012",

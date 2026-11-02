@@ -3774,6 +3774,16 @@ export class PsdEocStack extends Stack {
                         value: deploymentIdentity.appleAppTeamId,
                       },
                     ]),
+                // The web footer's App Store link; the Play link is derived
+                // from the Android application id above.
+                ...(deploymentIdentity.appleAppStoreId === null
+                  ? []
+                  : [
+                      {
+                        name: 'PSD_EOC_APPLE_APP_STORE_ID',
+                        value: deploymentIdentity.appleAppStoreId,
+                      },
+                    ]),
                 ...(deploymentIdentity.androidApplicationId === null
                   ? []
                   : [
