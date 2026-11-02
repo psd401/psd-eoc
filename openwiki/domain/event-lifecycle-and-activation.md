@@ -15,9 +15,13 @@ openwiki:
     - packages/server/lib/capabilities/journal.ts
     - packages/server/lib/partners/audience.ts
     - packages/contracts/src/event.ts
-  symbols: [EVENT_STATUS_TRANSITIONS, transitionEventStatus, startEventRegistration, createActivationPreviewRegistration, buildActivationPreview, createEventCapabilityRuntime, OutboxDispatchHook, EVENT_CLASSIFICATION_PRESENTATIONS]
+    - packages/contracts/src/journal.ts
+    - packages/server/lib/map/geometry.ts
+    - packages/server/lib/map/location-map.tsx
+  symbols: [EVENT_STATUS_TRANSITIONS, transitionEventStatus, startEventRegistration, createActivationPreviewRegistration, buildActivationPreview, createEventCapabilityRuntime, OutboxDispatchHook, EVENT_CLASSIFICATION_PRESENTATIONS, LocationPayloadSchema, formatLocationTextEquivalent, LocationMap]
   test_paths:
     - packages/server/lib/capabilities/events.test.ts
+    - packages/server/lib/map/geometry.test.ts
     - packages/server/lib/capabilities/event-room.database.test.ts
     - packages/server/app/(app)/events/[id]/journal.database.test.ts
     - packages/server/e2e/synthetic-drill-lifecycle.flow.ts
@@ -82,6 +86,8 @@ Caption: preview is a persisted, digest-bound artifact; the committed transactio
 ## Event room and journal
 
 `event-room.ts` (`sync-event-room`) returns the header plus an ordered, cursor-paged projection of journal entries; clients (web `app/(app)/events/[id]/event-room-*.ts[x]`, mobile `features/event-room`) sync by cursor. The journal is append-only: `appendJournalEntryRegistration` rejects entries with `supersedes`; `correctJournalEntryRegistration` and `redactJournalEntryRegistration` create superseding entries that keep earlier history (`projectJournalEntryForRead` presents redactions without destroying the source). Entry kinds: text, location, photo, system. Photos go through the [media pipeline](media-records-and-audit.md). A partner session ([partner web sign-in](partner-sign-in.md)) may follow the room, join it, and post, but not end it: `sync-event-room` returns `viewerManagesLifecycle: false` for a partner, the page omits the PDF summary link, and the engine refuses every lifecycle capability for that session ([capability engine](../architecture/capability-engine.md#partner-sessions-and-the-allowlist)). Author display names are resolved at read time (`journal-author-names.ts`), including agent labels.
+
+**Location entries** are journal entries of kind `location` whose `LocationPayloadSchema` (`packages/contracts/src/journal.ts`) has three explicit states: `known` (latitude, longitude, an accuracy radius in metres and an optional label), `ambiguous` (a label and reason, no coordinates) and `unknown` (a reason). Coordinates are never inferred from photo EXIF, and an ambiguous or unknown location stays a first-class fact. The web room's editor (`app/(app)/events/[id]/event-room-location.tsx`) builds a draft with `locationPayloadFromDraft`, which validates it against the same schema before submission. The map is an enhancement over a permanent text equivalent: `formatLocationTextEquivalent` (`packages/server/lib/map/geometry.ts`) always states the coordinates and accuracy and that browser GPS does not establish room-level location (`GPS_PRECISION_DISCLAIMER`). `packages/server/lib/map/location-map.tsx` (`LocationMap`) renders a `known` location on an OpenStreetMap raster style that is vendored in code (`createOsmRasterStyle`, no remote style fetch). `createLocationMapGeometry` draws the accuracy circle as a 64-segment polygon around the point. If the map fails, `LocationMapBoundary` shows "Map unavailable. The complete location text remains available." In edit mode a dragged marker reports new coordinates through `onCoordinatesChange`. Focused tests: `packages/server/lib/map/geometry.test.ts` (accuracy ring, vendored style, text equivalents for all three states), `packages/server/app/(app)/events/[id]/event-room.test.tsx`, and `packages/server/lib/capabilities/event-room.database.test.ts` (redacted location payloads are omitted from pages).
 
 ## Change guidance
 

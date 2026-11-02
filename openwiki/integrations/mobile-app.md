@@ -56,7 +56,7 @@ One Expo SDK 57 managed app for both stores (README: `packages/mobile/README.md`
 | API | `src/lib/api` | `authenticated-request`, `forward-compatible-parse`, `client-diagnostics` (reports to `POST /api/diagnostics`; shipped connected from 1.0.10 per the readiness register). |
 | Start flow | `src/lib/start`, `src/components/start` | Preview binding (`activation-preview-binding`), mutation coordinator/store, navigation and hardware-back guards that protect an in-flight activation. Calls `/api/mobile/start/{facilities,threats,preview,activate}` ([lifecycle](../domain/event-lifecycle-and-activation.md)). |
 | Event room | `src/features/event-room` (`EventRoomSyncController`, `api.ts`, `model.ts`, `native-photo.ts`, `photo-draft.ts`) | Polls `sync-event-room`, posts journal entries and photos (EXIF stripping is server-side; see [media](../domain/media-records-and-audit.md)). |
-| SMS consent | `src/features/sms-consent`, `src/app/(app)/text-alerts.tsx` | Calls `/api/sms-consent*`; see [notifications](../domain/notification-pipeline.md). |
+| SMS consent | `src/features/sms-consent`, `src/app/(app)/text-alerts.tsx` | Calls `/api/sms-consent*`; the consent rules and disclosure are owned by [staff SMS consent](../domain/sms-consent.md), delivery by [notifications](../domain/notification-pipeline.md). |
 | Push | `src/lib/push`, `src/notifications/alert-channel.ts` | See below. |
 | Release diagnostics | `src/lib/release/update-diagnostic.ts`, `src/app/release-diagnostic.tsx` | EAS Update is `blocked` in the readiness register; builds ship embedded-only. |
 
