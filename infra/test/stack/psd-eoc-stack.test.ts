@@ -333,16 +333,19 @@ describe('deployment boundary', () => {
 
     const unconfigured = identityFor({});
     expect(unconfigured.appleAppTeamId).toBeNull();
+    expect(unconfigured.appleAppStoreId).toBeNull();
     expect(unconfigured.androidApplicationId).toBeNull();
     expect(unconfigured.androidSigningFingerprints).toEqual([]);
 
     const fingerprint = `${'AB:'.repeat(31)}CD`;
     const configured = identityFor({
       'psdEoc:appleAppTeamId': 'ABCDE12345',
+      'psdEoc:appleAppStoreId': '1234567890',
       'psdEoc:androidApplicationId': 'invalid.example.eoc',
       'psdEoc:androidSigningFingerprints': [fingerprint.toLowerCase()],
     });
     expect(configured.appleAppTeamId).toBe('ABCDE12345');
+    expect(configured.appleAppStoreId).toBe('1234567890');
     expect(configured.androidApplicationId).toBe('invalid.example.eoc');
     expect(configured.androidSigningFingerprints).toEqual([fingerprint]);
 
@@ -352,6 +355,7 @@ describe('deployment boundary', () => {
     for (const invalid of [
       { 'psdEoc:appleAppTeamId': 'abcde12345' },
       { 'psdEoc:appleAppTeamId': 'ABCDE1234' },
+      { 'psdEoc:appleAppStoreId': 'id1234567890' },
       { 'psdEoc:androidApplicationId': 'Invalid.Example.Eoc' },
       { 'psdEoc:androidSigningFingerprints': [] },
       { 'psdEoc:androidSigningFingerprints': ['AB:CD'] },

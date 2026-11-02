@@ -234,6 +234,29 @@ export function appleAppTeamId(
   return teamId;
 }
 
+const APPLE_APP_STORE_ID_PATTERN = /^[1-9][0-9]{5,11}$/u;
+
+/**
+ * The numeric App Store identifier of this district's iOS app — the `id` in
+ * its App Store link, which App Store Connect shows as the Apple ID. Unlike
+ * the Play link, it cannot be derived from the bundle identifier, so the
+ * footer's App Store link needs it configured.
+ */
+export function appleAppStoreId(
+  environment: DeploymentEnvironment = process.env,
+): string | null {
+  const storeId = optional(environment, 'PSD_EOC_APPLE_APP_STORE_ID');
+  if (storeId === null) {
+    return null;
+  }
+  if (!APPLE_APP_STORE_ID_PATTERN.test(storeId)) {
+    throw new DeploymentConfigurationError(
+      'PSD_EOC_APPLE_APP_STORE_ID must be the numeric App Store app identifier.',
+    );
+  }
+  return storeId;
+}
+
 /** The Android application id this district ships, as Play holds it. */
 export function androidApplicationId(
   environment: DeploymentEnvironment = process.env,

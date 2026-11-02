@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
+import { StoreLinksFooter } from '../nav/store-links-footer';
+
 export const metadata: Metadata = {
   title: 'Sign in | PSD EOC',
   description: 'Secure staff access to PSD EOC.',
@@ -18,6 +20,7 @@ export default function AuthLayout({
           Skip to main content
         </a>
         {children}
+        <StoreLinksFooter />
         <style>{`
           :root {
             color-scheme: light;
