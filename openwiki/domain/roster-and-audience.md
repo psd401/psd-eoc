@@ -58,7 +58,7 @@ Caption: scheduled and administrator-triggered sync share `syncRoster`; promotio
 
 - `app/api/jobs/roster-sync/runtime.ts` accepts an EventBridge event (`ROSTER_SYNC_EVENT_SOURCE`, 16 KiB cap) with a token (`PSD_EOC_ROSTER_SYNC_JOB_TOKEN`, `verifyRosterSyncJobToken`) and runs the `sync-roster` handler through `invokeAuthorizedCapabilityHandler` (an allowlisted lower-tier boundary, see [capability engine](../architecture/capability-engine.md)).
 - `groups-sync.ts` also owns the push-provider cutover awareness (`lib/push-provider-cutover.ts`) when composing endpoints, alert sinks (`createStructuredRosterSyncAlertSink`) and per-group count diffs (`diffRosterGroupCounts`).
-- `scheduled-publish.ts` (`publishScheduledRosterSnapshot`, idempotency prefix `roster-publish:scheduled:`) publishes on a 2-hour cadence matching the access-membership schedule; SMS consent changes trigger their own publish key (`smsConsentRosterPublishIdempotencyKey`).
+- `scheduled-publish.ts` (`publishScheduledRosterSnapshot`, idempotency prefix `roster-publish:scheduled:`) publishes on a 2-hour cadence matching the access-membership schedule; SMS consent changes trigger their own publish key (`smsConsentRosterPublishIdempotencyKey`), which [staff SMS consent](sms-consent.md) explains: a committed opt-in or withdrawal publishes after commit, and only live consents are copied into a snapshot.
 - Membership for sign-in comes from a separate sync: [identity and access](identity-and-access.md).
 
 ## Audience resolution
