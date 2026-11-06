@@ -26,11 +26,12 @@ Two rules shape every change (details in [architecture overview](architecture/ov
 | Domain | [Partner alert settings](domain/partner-alert-settings.md) | Which response families alert partners and which threats never do; append-only admin versions, defaults, Partner alerts page, read at preview planning |
 | Domain | [Partner audience](domain/partner-audience.md) | Admitted partners pinned to a live incident's preview, the partner notification slice, population rules, delivery refusals |
 | Domain | [Event types and templates](domain/event-types-and-templates.md) | Response types, versioned wording, drafts, rendering |
+| Domain | [Staff SMS consent](domain/sms-consent.md) | Staff text-alert consent, the disclosure, the `/text-alerts` page and `/api/sms-consent` routes |
 | Domain | [Media, records and audit](domain/media-records-and-audit.md) | Photo pipeline, CSV and PDF exports, hash-chained security audit |
 | Domain | [Data model](domain/data-model.md) | Schema groups, append-only rules, migrations |
 | Integrations | [Channel workers](integrations/channel-workers.md) | Email, SMS and push workers, retries, provider adapters |
 | Integrations | [Agent API and MCP](integrations/agent-api-and-mcp.md) | Agent keys, REST gateway, rate limits, MCP server |
-| Integrations | [Mobile app](integrations/mobile-app.md) | Expo app, secure session, partner agency sign-in with its device passkey, push registration, E2E |
+| Integrations | [Mobile app](integrations/mobile-app.md) | Expo app, secure session, partner agency sign-in with its device passkey, event room title, push registration, E2E |
 | Operations | [Infrastructure](operations/infrastructure.md) | CDK stack, Lambdas, monitoring, GCP, deploy rules, partner responder Cognito pool (Terraform), Terraform migration plan |
 | Operations | [Terraform state bootstrap and CI](operations/terraform-ci-pipeline.md) | `state-bootstrap` root (state bucket, plan and apply OIDC roles, permissions boundary), the `terraform.yml` plan-on-main and production-approved apply workflow |
 | Operations | [Configuration and readiness](operations/configuration-and-readiness.md) | Tenant manifest, env, readiness register, runbooks, doc drift |
@@ -64,7 +65,7 @@ Run commands from the repository root with Bun. Tests ending in `.database.test.
 | Agent API keys, grants, rate limits, MCP tools | [Agent API and MCP](integrations/agent-api-and-mcp.md) | `packages/contracts/src/agent-key-grants.ts`, `packages/server/lib/agents/gateway.ts`, `packages/mcp/src/manifest.ts` | `AGENT_KEY_GRANTABLE_CAPABILITY_IDS`, `AgentRestGateway`, `MCP_TOOLS` | `packages/contracts/src/agent-key-grants.test.ts`, `packages/server/lib/agents/gateway-rate-limit.test.ts`, `packages/mcp/src/protocol.test.ts` | `bun test packages/contracts/src/agent-key-grants.test.ts packages/mcp` |
 | Photo upload, exports, security audit chain | [Media, records and audit](domain/media-records-and-audit.md) | `packages/server/lib/media/`, `packages/server/lib/capabilities/records.ts`, `packages/server/lib/audit/` | `sanitizeUploadedImage`, `createRecordsArtifactStore`, `SecurityAuditService` | `packages/server/lib/media/image.test.ts`, `packages/server/lib/audit/hash-chain.test.ts` | `bun test packages/server/lib/audit/hash-chain.test.ts packages/server/lib/media/image.test.ts` |
 | Database schema or migration | [Data model](domain/data-model.md) | `packages/server/db/schema/*.ts`, `packages/server/drizzle/migrations/` | `bun run --cwd packages/server db:generate` | `packages/server/drizzle/migration-chain.test.ts`, `packages/server/db/schema-enums.test.ts` | `bun test packages/server/drizzle/migration-chain.test.ts` then `bun scripts/check-applied-migrations.ts origin/main HEAD` |
-| Mobile screens, auth, push registration | [Mobile app](integrations/mobile-app.md) | `packages/mobile/src/app`, `src/lib/auth`, `src/lib/push`, `src/features/event-room` | `EventRoomSyncController`, `AuthPhase`, registration controller | colocated `*.test.ts`, `packages/mobile/native-tests/*.native.tsx` | `bun run --cwd packages/mobile test:bun`; both platforms via `bun packages/mobile/e2e/run.ts ios` and `android` |
+| Mobile screens, auth, push registration, event room header (title clamp, full-details toggle) | [Mobile app](integrations/mobile-app.md) | `packages/mobile/src/app`, `src/lib/auth`, `src/lib/push`, `src/features/event-room`, `src/features/event-room/event-room-screen.tsx` | `EventRoomSyncController`, `EventRoomTitle`, `AuthPhase`, registration controller | colocated `*.test.ts`, `packages/mobile/native-tests/*.native.tsx` (event room header: `event-room-screen.native.tsx`) | `bun run --cwd packages/mobile test:bun`; native header `bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen`; both platforms via `bun packages/mobile/e2e/run.ts ios` and `android` |
 | AWS stack, queues, Lambdas, alarms, GCP | [Infrastructure](operations/infrastructure.md) | `infra/src/stack/psd-eoc-stack.ts`, `infra/src/monitoring.ts`, `infra/lambda/*` | `PsdEocStack`, `configureInfrastructureMonitoring` | `infra/test/stack/psd-eoc-stack.test.ts`, `infra/test/monitoring-runtime.test.ts` | `bun run --cwd infra synth:example` (credential-free) |
 | Terraform CI roles, permissions boundary, state bucket or key, plan or apply workflow | [Terraform state bootstrap and CI](operations/terraform-ci-pipeline.md) | `infra/terraform/state-bootstrap/roles.tf`, `permissions.tf`, `boundary.tf`, `state.tf`, `.github/workflows/terraform.yml`, `.github/scripts/terraform-tenant.sh` | `aws_iam_role.plan`, `aws_iam_role.apply`, `aws_iam_policy.boundary`, `aws_s3_bucket_policy.state`, `terraform-stateful` concurrency group | `infra/terraform/state-bootstrap/tests/bootstrap.tftest.hcl` (runs `apply_role_trusts_only_the_production_environment`, `plan_role_trusts_main_only`, `only_ci_apply_and_break_glass_write_state`) | `bun run verify:terraform` (credential-free; never run the workflow or a real plan to validate) |
 | Partner responder user pool (Terraform stateful root) and its three `PartnerUserPool*` stack parameters | [Infrastructure](operations/infrastructure.md#partner-first-responder-directory-terraform-stateful-root) | `infra/terraform/stateful/main.tf`, `infra/terraform/stateful/outputs.tf`, `infra/src/stack/psd-eoc-stack.ts` | `aws_cognito_user_pool.partner` (DEVELOPER SES `email_configuration`), `aws_sesv2_configuration_set.cognito`, `aws_cognito_user_pool_client.server`, `ses_identity_domain`, `ses_region`, `partner_email_from_address`, `stack_parameters`, `ShouldUsePartnerUserPool` | `infra/terraform/stateful/tests/partner_user_pool.tftest.hcl` (runs `partner_pool_plan`, `unverified_ses_identity_is_refused`, `from_address_outside_identity_is_refused`, `owner_requires_a_dotted_domain`), `infra/test/stack/psd-eoc-stack.test.ts` (`partner user pool boundary`) | `bun run verify:terraform` (credential-free; plus the stack test above) |
@@ -94,19 +95,11 @@ Areas identified but not yet documented in depth:
 - Google Cloud Terraform and Firebase under `infra/gcp`: summarized in infrastructure only.
 - Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
 
-
-
-(`.github/workflows/openwiki-update.yml`) regenerates them.
-
 ## Backlog
 
 Areas identified but not yet documented in depth:
 
 - Administration web UI pages (`packages/server/app/(admin)/{access,facilities,integrations,devices,agents,audit}`): covered only where they touch identity, agents and templates; a per-page guide is missing.
-- SMS consent flow (`packages/server/lib/capabilities/sms-consent.ts`, `packages/server/app/api/sms-consent`, `app/(app)/text-alerts`): only summarized in the notification pipeline and mobile pages.
 - Operator tooling in `scripts/ops` (`appstore/`, `sms-registration/`, `groups-inventory*.ts`) and `packages/server/scripts/operations/bootstrap.ts`: referenced but not walked through.
 - Google Cloud Terraform and Firebase under `infra/gcp`: summarized in infrastructure only.
 - Individual alarm runbooks in `docs/runbooks/` and dated notes in `docs/learnings/`: indexed, not summarized.
-
-
-

@@ -1,7 +1,7 @@
 ---
 type: Application
 title: Mobile app (Expo, iOS and Android)
-description: The packages/mobile native client, covering Expo Router structure, OIDC and secure-session handling, partner agency sign-in with an optional device passkey and its enrollment offer, the start/activation flow, event room sync and photos, fail-closed push registration, and the dual-platform e2e and release rules.
+description: The packages/mobile native client, covering Expo Router structure, OIDC and secure-session handling, partner agency sign-in with an optional device passkey and its enrollment offer, the start/activation flow, event room sync, header and photos, fail-closed push registration, and the dual-platform e2e and release rules.
 tags: [mobile, expo, ios, android, push, oidc, e2e]
 openwiki:
   roles: [integration, architecture]
@@ -21,9 +21,10 @@ openwiki:
     - packages/mobile/src/features/sms-consent
     - packages/mobile/e2e/run.ts
     - .claude/rules/mobile.md
-  symbols: [AuthController, EventRoomSyncController, registration-controller, response-controller, start-mutation-coordinator, beginPartnerSignIn, completePartnerSignIn, isPartnerSession, signInPartnerWithPasskey, enrollPartnerPasskey, partnerPasskeyOfferFrom, nativePasskeyPort, withPartnerPasskeyAssociation]
+  symbols: [AuthController, EventRoomSyncController, EventRoomTitle, registration-controller, response-controller, start-mutation-coordinator, beginPartnerSignIn, completePartnerSignIn, isPartnerSession, signInPartnerWithPasskey, enrollPartnerPasskey, partnerPasskeyOfferFrom, nativePasskeyPort, withPartnerPasskeyAssociation]
   test_paths:
     - packages/mobile/native-tests
+    - packages/mobile/native-tests/event-room-screen.native.tsx
     - packages/mobile/src/lib/auth/partner-session.test.ts
     - packages/mobile/src/lib/auth/partner-passkey-client.test.ts
     - packages/mobile/src/lib/auth/auth-api-client.test.ts
@@ -38,6 +39,7 @@ openwiki:
     - Mobile never forks business rules or performs real actions offline.
     - Sign-out requires successful server revocation and push cleanup before local SecureStore state is cleared.
     - A partner passkey is asked of the device first and is never a wider way in; every way it does not happen ends at the emailed code.
+    - The event room header clamps long response and threat text visually only; its accessibility label always carries the full response, threat and facility text, and the Maestro flows assert that label.
   validation_commands:
     - bun run --cwd packages/mobile typecheck
     - bun test packages/mobile/src
@@ -55,7 +57,7 @@ One Expo SDK 57 managed app for both stores (README: `packages/mobile/README.md`
 | Auth | `src/lib/auth` (`AuthController`, `oidc-client`, `secure-session-store`, `local-authenticator`, `pending-oidc-flow`) | Server-driven native OIDC (`/api/auth/mobile/oidc/start` and `/exchange`, see [identity](../domain/identity-and-access.md)), authorization-code + PKCE via the `psdeoc` scheme. Session in SecureStore with device authentication (Face ID/passcode via OS; no custom PIN). Sign-out is online-only. Partner agency responders sign in with an emailed code through `/api/auth/mobile/partner/{start,verify}` ([partner agency sign-in](#partner-agency-sign-in)). |
 | API | `src/lib/api` | `authenticated-request`, `forward-compatible-parse`, `client-diagnostics` (reports to `POST /api/diagnostics`; shipped connected from 1.0.10 per the readiness register). |
 | Start flow | `src/lib/start`, `src/components/start` | Preview binding (`activation-preview-binding`), mutation coordinator/store, navigation and hardware-back guards that protect an in-flight activation. Calls `/api/mobile/start/{facilities,threats,preview,activate}` ([lifecycle](../domain/event-lifecycle-and-activation.md)). |
-| Event room | `src/features/event-room` (`EventRoomSyncController`, `api.ts`, `model.ts`, `native-photo.ts`, `photo-draft.ts`) | Polls `sync-event-room`, posts journal entries and photos (EXIF stripping is server-side; see [media](../domain/media-records-and-audit.md)). |
+| Event room | `src/features/event-room` (`EventRoomSyncController`, `api.ts`, `model.ts`, `native-photo.ts`, `photo-draft.ts`, `event-room-screen.tsx`) | Polls `sync-event-room`, posts journal entries and photos (EXIF stripping is server-side; see [media](../domain/media-records-and-audit.md)). The header is described in [event room title](#event-room-title). |
 | SMS consent | `src/features/sms-consent`, `src/app/(app)/text-alerts.tsx` | Calls `/api/sms-consent*`; the consent rules and disclosure are owned by [staff SMS consent](../domain/sms-consent.md), delivery by [notifications](../domain/notification-pipeline.md). |
 | Push | `src/lib/push`, `src/notifications/alert-channel.ts` | See below. |
 | Release diagnostics | `src/lib/release/update-diagnostic.ts`, `src/app/release-diagnostic.tsx` | EAS Update is `blocked` in the readiness register; builds ship embedded-only. |
@@ -107,9 +109,24 @@ Caption: the passkey is tried first and the emailed code is the fallback (see [n
 - **Association declared at build time.** `app.config.ts` (`withPartnerPasskeyAssociation`) adds a `webcredentials:<host>` associated domain on iOS and an Android asset statement that points at the deployment's `assetlinks.json`. Both derive from `EXPO_PUBLIC_PSD_EOC_API_BASE_URL`, so the app names the same hostname the server derives its relying-party id from. A build pointed at a non-HTTPS or loopback host declares neither. The documents themselves are served by the deployment ([configuration and readiness](../operations/configuration-and-readiness.md#mobile-app-association-documents)).
 - **Synthetic stand-in.** `src/lib/auth/synthetic-simulator-authenticator.ts` stands in for this journey only on loopback, and never for a release build (its own tests pin both).
 
+## Event room title
+
+The event room header is the exported `EventRoomTitle` component in `src/features/event-room/event-room-screen.tsx`, rendered by `AuthenticatedEventRoomScreen`. It shows the response name, a `Threat:` line and the facility line above the classification banner and timeline. Its purpose is to keep the conversation on screen: a long "Other" response or threat detail once pushed the timeline into a sliver, cutting off the first update card and drawing the empty state over the participant chips.
+
+- **Clamp.** The response name uses `numberOfLines` 2 and the threat line 1 unless expanded. The header therefore has a bounded height.
+- **Toggle.** A "Show full details" / "Hide full details" button (`accessibilityState.expanded`, 44pt minimum height, primary text color for every theme) appears only when the response exceeds `TITLE_CLAMP_CHARACTERS` (44) or `Threat: <threat>` exceeds `THREAT_CLAMP_CHARACTERS` (36). Short labels render exactly as before.
+- **Keyboard.** While the keyboard is open, the threat and facility lines and the toggle are hidden, so the composer stays visible.
+- **Accessibility.** The header container's label (`<response>. Threat: <threat>. <facility name>, <code>.`) is unchanged and always carries the full text, so the clamp is visual only. The Maestro flows `e2e/flows/event-room-lifecycle.yaml` and `push-opened-event-room.yaml` assert that combined label string; changing the header copy or label requires updating them.
+- **Timeline clipping.** `timelineRegion` sets `overflow: 'hidden'`, so a short timeline region cannot paint its empty state or cards over the header.
+
+Invariant to keep: the clamp lengths are heuristics for a narrow phone, not a measured layout. If the label composition changes, update both the constants and the native test.
+
+Change navigation: the clamp is a presentation concern only. Server data, the journal projection ([event room and journal](../domain/event-lifecycle-and-activation.md#event-room-and-journal)) and the sync cursor are unchanged by it. Narrow check: `bun run --cwd packages/mobile test:native -- --testPathPattern event-room-screen`. Because the change is platform-neutral, verify both iOS and Android e2e per the rule in [change guidance](#change-guidance) when the header copy or flow changes.
+
 ## Verification
 
 - Bun unit tests colocated in `src`; native Jest tests in `native-tests/*.native.tsx` (run through `bun scripts/test-mobile-native.ts` at the repo root and in the full gate; see [verification](../testing/verification-and-testing.md)).
+- Native event room tests: `native-tests/event-room-screen.native.tsx` covers the title clamp, toggle, full accessibility label and the no-toggle short case (`mobile event-room title`). The clamp test was verified to fail when `numberOfLines` is removed.
 - Config guards: `native-config:check` (event-room and push native config), `expo:check`, `react:check`.
 - **Partner journey e2e** (conditional): `bun packages/mobile/e2e/partner-run.ts ios` or `android` drives the partner sign-in, passkey offer and decline, and join-and-post Maestro flows (`e2e/flows/partner-sign-in.yaml`, `partner-passkey-offer.yaml`, `partner-passkey-decline.yaml`, `partner-join-and-post.yaml`) against a loopback development server and a disposable database from `packages/server/e2e/mobile-partner-fixture.ts`. Run it only for changes to the partner screen, the partner endpoints, or the partner session.
 - **Native tests for the partner screens:** `native-tests/partner-sign-in.native.tsx`, `native-tests/partner-passkey-offer.native.tsx` and `native-tests/partner-home.native.tsx`, run with `bun run --cwd packages/mobile test:native -- --testPathPattern partner`.
@@ -121,5 +138,5 @@ Caption: the passkey is tried first and the emailed code is the fallback (see [n
 - New server-facing call: add the contract in `packages/contracts` first, parse with the shared schema (forward-compatible parsing for lists), then client in `src/lib/api` or a feature `api.ts`.
 - Do not add platform-conditional behavior without a stated reason (keyboard insets/system fonts qualify); the path-scoped agent rule `.claude/rules/mobile.md` (committed, applies to `packages/mobile/**`) requires that reason in the PR body. Running one platform's e2e and calling it done is the drift it guards against, so verify both platforms.
 - Accessibility for activation, timeline and all-clear is required in the same PR.
-- Narrow checks: `bun run --cwd packages/mobile typecheck`, `bun test packages/mobile/src/<feature>`, and `bun run --cwd packages/mobile test:native -- --testPathPattern <name>`.
+- Narrow checks: `bun run --cwd packages/mobile typecheck`, `bun test packages/mobile/src/<feature>`, and `bun run --cwd packages/mobile test:native -- --testPathPattern <name>` (for the event room header, `--testPathPattern event-room-screen`).
 - Native passkey changes span this app, the server endpoint and the association documents. The platform authenticator is reached only through `native-passkey-port.ts`; keep the client's decisions in `partner-passkey-client.ts` testable without a device. Check the server contract with `bun test packages/contracts/src/mobile-partner-passkey.test.ts`, the Android and iOS ceremony origins with `bun test packages/server/lib/auth/partner-passkey.test.ts`, and the association documents with `bun test packages/server/lib/config/app-association.test.ts`. A change to the app's associated domain also needs `bun test packages/mobile/scripts/distribution-config.test.ts`.
