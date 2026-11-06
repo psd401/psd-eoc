@@ -80,6 +80,10 @@ const LOCATION_LABEL_LIMIT = 200;
 const LOCATION_REASON_LIMIT = 500;
 const PIN_ADJUSTMENT_METRES = 5;
 const LOCATION_CAPTURE_TIMEOUT_MS = 10_000;
+// About what the clamped event title (two lines) and threat line (one line)
+// hold on a narrow phone; longer text offers the full-details toggle.
+const TITLE_CLAMP_CHARACTERS = 44;
+const THREAT_CLAMP_CHARACTERS = 36;
 const JOURNAL_ACTION_REASON_LIMIT = 1_000;
 
 export const EVENT_ROOM_MUTED_TEXT_COLOR = '#486581';
@@ -503,6 +507,89 @@ interface JournalActionDialogProps {
   readonly onDismiss: () => void;
   readonly onSubmit: (submission: JournalActionSubmission) => void;
   readonly target: JournalEntryReadProjection;
+}
+
+/**
+ * The event's name, threat, and facility above the timeline. During an event
+ * the conversation matters more than the title, so a long "Other" response
+ * or threat detail is clamped and a toggle shows it in full. The header's
+ * accessibility label always carries all of it.
+ */
+export function EventRoomTitle({
+  facilityCode,
+  facilityName,
+  keyboardOpen,
+  responseLabel,
+  textMuted,
+  textPrimary,
+  threatLabel,
+}: Readonly<{
+  facilityCode: string;
+  facilityName: string;
+  keyboardOpen: boolean;
+  responseLabel: string;
+  textMuted: string;
+  textPrimary: string;
+  threatLabel: string;
+}>) {
+  const [headerExpanded, setHeaderExpanded] = useState(false);
+  const canTruncate =
+    responseLabel.length > TITLE_CLAMP_CHARACTERS ||
+    `Threat: ${threatLabel}`.length > THREAT_CLAMP_CHARACTERS;
+  return (
+    <>
+      <View
+        accessibilityLabel={`${responseLabel}. Threat: ${threatLabel}. ${facilityName}, ${facilityCode}.`}
+        accessibilityRole="header"
+        accessible
+        style={styles.trustedHeader}
+      >
+        <Text
+          numberOfLines={headerExpanded ? undefined : 2}
+          style={[styles.eventTypeName, { color: textPrimary }]}
+        >
+          {responseLabel}
+        </Text>
+        {/*
+          While typing, the keyboard takes about half a phone screen, and
+          these lines would push the composer below it. The header's
+          accessibility label still carries them, and the event name and
+          the classification banner below stay visible.
+        */}
+        {keyboardOpen ? null : (
+          <>
+            <Text
+              numberOfLines={headerExpanded ? undefined : 1}
+              style={[styles.facilityName, { color: textPrimary }]}
+            >
+              Threat: {threatLabel}
+            </Text>
+            <Text style={[styles.facilityName, { color: textMuted }]}>
+              {facilityName} · {facilityCode}
+            </Text>
+          </>
+        )}
+      </View>
+      {keyboardOpen || !canTruncate ? null : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: headerExpanded }}
+          hitSlop={8}
+          onPress={() => {
+            setHeaderExpanded((expanded) => !expanded);
+          }}
+          style={({ pressed }) => [
+            styles.headerToggle,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Text style={[styles.headerToggleText, { color: textPrimary }]}>
+            {headerExpanded ? 'Hide full details' : 'Show full details'}
+          </Text>
+        </Pressable>
+      )}
+    </>
+  );
 }
 
 /** Explicit append-only correction/redaction editor for one retained entry. */
@@ -2170,41 +2257,15 @@ function AuthenticatedEventRoomScreen({
       style={[styles.page, { backgroundColor: theme.colors.pageBackground }]}
     >
       <View style={styles.roomHeader}>
-        <View
-          accessibilityLabel={`${responseLabel}. Threat: ${threatLabel}. ${header.facility.name}, ${header.facility.code}.`}
-          accessibilityRole="header"
-          accessible
-          style={styles.trustedHeader}
-        >
-          <Text
-            style={[styles.eventTypeName, { color: theme.colors.textPrimary }]}
-          >
-            {responseLabel}
-          </Text>
-          {/*
-            While typing, the keyboard takes about half a phone screen, and
-            these lines would push the composer below it. The header's
-            accessibility label still carries them, and the event name and
-            the classification banner below stay visible.
-          */}
-          {keyboardOpen ? null : (
-            <>
-              <Text
-                style={[
-                  styles.facilityName,
-                  { color: theme.colors.textPrimary },
-                ]}
-              >
-                Threat: {threatLabel}
-              </Text>
-              <Text
-                style={[styles.facilityName, { color: theme.colors.textMuted }]}
-              >
-                {header.facility.name} · {header.facility.code}
-              </Text>
-            </>
-          )}
-        </View>
+        <EventRoomTitle
+          facilityCode={header.facility.code}
+          facilityName={header.facility.name}
+          keyboardOpen={keyboardOpen}
+          responseLabel={responseLabel}
+          textMuted={theme.colors.textMuted}
+          textPrimary={theme.colors.textPrimary}
+          threatLabel={threatLabel}
+        />
         <ClassificationBanner
           compact
           kind={event.kind}
@@ -2599,6 +2660,16 @@ const styles = StyleSheet.create({
     minWidth: 30,
     textAlign: 'center',
   },
+  headerToggle: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  headerToggleText: {
+    fontSize: 15,
+    fontWeight: '800',
+    textDecorationLine: 'underline',
+  },
   statusText: { flex: 1, fontSize: 15, fontWeight: '800', lineHeight: 21 },
   actionButton: {
     alignItems: 'center',
@@ -2637,7 +2708,8 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   syncErrorText: { color: '#5D3D00', flex: 1, fontSize: 14, lineHeight: 20 },
-  timelineRegion: { flex: 1, position: 'relative' },
+  // Clipped so a short region never draws its content over the header.
+  timelineRegion: { flex: 1, overflow: 'hidden', position: 'relative' },
   timelineContent: { gap: 10, padding: 16, paddingBottom: 24 },
   emptyTimelineContent: { flexGrow: 1, padding: 16 },
   emptyTimeline: {
