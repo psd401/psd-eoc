@@ -21,6 +21,7 @@ import { AppState, Text } from 'react-native';
 
 import {
   EVENT_ROOM_MUTED_TEXT_COLOR,
+  EventRoomTitle,
   JournalActionDialog,
   LifecycleConfirmationDialog,
   LocationComposerDialog,
@@ -916,6 +917,64 @@ describe('mobile event-room mutation reliability', () => {
     expect(
       contrastRatio(EVENT_ROOM_MUTED_TEXT_COLOR, '#F4F7FA'),
     ).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe('mobile event-room title', () => {
+  const longDetail =
+    'Synthetic caller reports a person feeling faint near the gym. Synthetic responders are on the way with campus staff present.';
+
+  function renderTitle(responseLabel: string, threatLabel: string) {
+    return render(
+      <EventRoomTitle
+        facilityCode="SYN"
+        facilityName="Synthetic School"
+        keyboardOpen={false}
+        responseLabel={responseLabel}
+        textMuted="#486581"
+        textPrimary="#102A43"
+        threatLabel={threatLabel}
+      />,
+    );
+  }
+
+  test('clamps a long response and threat so the timeline keeps the screen, and expands on request', () => {
+    renderTitle(`Other — ${longDetail}`, `Other — ${longDetail}`);
+    const title = screen.getByText(`Other — ${longDetail}`);
+    const threat = screen.getByText(`Threat: Other — ${longDetail}`);
+    expect(title.props.numberOfLines).toBe(2);
+    expect(threat.props.numberOfLines).toBe(1);
+    // The clamp is visual only: a screen reader still hears every word.
+    expect(
+      screen.getByLabelText(
+        `Other — ${longDetail}. Threat: Other — ${longDetail}. Synthetic School, SYN.`,
+      ),
+    ).toBeTruthy();
+
+    fireEvent.press(screen.getByRole('button', { name: 'Show full details' }));
+    expect(
+      screen.getByText(`Other — ${longDetail}`).props.numberOfLines,
+    ).toBeUndefined();
+    expect(
+      screen.getByText(`Threat: Other — ${longDetail}`).props.numberOfLines,
+    ).toBeUndefined();
+    expect(
+      screen.getByRole('button', {
+        expanded: true,
+        name: 'Hide full details',
+      }),
+    ).toBeTruthy();
+
+    fireEvent.press(screen.getByRole('button', { name: 'Hide full details' }));
+    expect(screen.getByText(`Other — ${longDetail}`).props.numberOfLines).toBe(
+      2,
+    );
+  });
+
+  test('offers no toggle when the title already fits', () => {
+    renderTitle('Synthetic lockdown', 'Synthetic wildlife');
+    expect(screen.getByText('Synthetic lockdown')).toBeTruthy();
+    expect(screen.queryByRole('button')).toBeNull();
   });
 });
 
