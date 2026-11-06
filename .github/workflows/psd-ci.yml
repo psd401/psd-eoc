@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   psd-ci:
-    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@85ef062e6ec4492a075c731211c9fe405fa4c6cc # v1.2.0
     with:
       # pdftotext (Poppler) is required: the unit gate fails on any runtime
       # skip, and pdf.test.ts skips its 6 rendering tests without it. Same
