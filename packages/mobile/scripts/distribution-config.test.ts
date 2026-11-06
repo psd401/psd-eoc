@@ -225,7 +225,7 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain('The current app/runtime is 1.0.20');
     // The store record names the exact last submitted build, which trails the
     // current app/runtime whenever a bump has not yet been built.
-    expect(release).toContain('1.0.17/build 32 on iOS');
+    expect(release).toContain('1.0.20/build 38 on iOS');
     expect(compactRollback).toContain(
       'The current mobile profiles are embedded-only',
     );
