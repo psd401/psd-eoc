@@ -24,7 +24,7 @@ Bun workspaces (`package.json`: `packages/*`, `workers`, `infra`, `infra/gcp`, `
 | Workspace | Owns | Must not own | Wiki page |
 | --- | --- | --- | --- |
 | `packages/contracts` | Zod schemas, capability catalog, human-only registry, agent-key grant allowlist, worker batch/attempt contracts | DB or provider code | [capability engine](capability-engine.md) |
-| `packages/server` | Next.js 15 web (`app/`), REST, capability engine and repositories (`lib/`), Drizzle schema and migrations (`db/`, `drizzle/`), outbox | Parallel domain types; provider sends from UI routes | [event lifecycle](../domain/event-lifecycle-and-activation.md), [data model](../domain/data-model.md) |
+| `packages/server` | Next.js 16 web (`app/`), REST, capability engine and repositories (`lib/`), Drizzle schema and migrations (`db/`, `drizzle/`), outbox | Parallel domain types; provider sends from UI routes | [event lifecycle](../domain/event-lifecycle-and-activation.md), [data model](../domain/data-model.md) |
 | `packages/mobile` | Expo SDK 57 app for iOS and Android | Business-rule forks, offline real actions | [mobile app](../integrations/mobile-app.md) |
 | `packages/mcp` | MCP adapter (stdio and Streamable HTTP) over the agent REST API | DB/provider access, human-only actions | [agent API and MCP](../integrations/agent-api-and-mcp.md) |
 | `workers` | Email, SMS and push channel workers plus shared at-least-once processing | Activation authority, recipient reconstruction | [channel workers](../integrations/channel-workers.md) |

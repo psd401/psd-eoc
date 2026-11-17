@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -144,106 +144,37 @@ export const NO_BUILT_IN_DEFAULT_FONT = Object.freeze({
 }) as unknown as Readonly<{ font?: string }>;
 
 const FONT_NAME = 'NotoSans';
+const FONT_FILE_NAME = 'NotoSans-Regular.ttf';
 const FONT_SHA256 =
   'b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5';
 
-/** Resolves a Next-emitted asset from any nested server route chunk. */
-export function resolveBundledFontFilePath(
-  serverChunkDirectory: string,
-  bundledAssetPath: string,
-  fileExists: (path: string) => boolean = existsSync,
-): string {
-  const bundledAssetPrefix = '/_next/static/media/';
-  if (
-    !bundledAssetPath.startsWith(bundledAssetPrefix) ||
-    bundledAssetPath.includes('..')
-  ) {
-    throw new Error('The embedded Noto Sans PDF font path is invalid.');
-  }
-  const relativeAssetPath = bundledAssetPath.slice('/_next/'.length);
-  let candidateDirectory = serverChunkDirectory;
-  while (true) {
-    const candidate = join(candidateDirectory, relativeAssetPath);
-    if (fileExists(candidate)) return candidate;
-    if (
-      basename(candidateDirectory) === 'server' ||
-      dirname(candidateDirectory) === candidateDirectory
-    ) {
-      break;
-    }
-    candidateDirectory = dirname(candidateDirectory);
-  }
-  throw new Error('The emitted Noto Sans PDF font is unavailable.');
-}
-
 /**
- * Finds the font Next actually emitted, when it is not where it said it was.
+ * Reads the embedded font from beside this module's source.
  *
- * Next traces `./assets/NotoSans-Regular.ttf` as a relative dependency of every
- * route chunk that reaches this module, but it emits the bytes once, into the
- * server output's content-hashed media directory. Nothing is written beside the
- * route chunk, so reading the traced path raises `ENOENT` at module load and
- * every PDF export fails -- which is exactly what production was doing.
+ * The font is deliberately not handed to the bundler as an asset
+ * (`new URL('./assets/...', import.meta.url)`). Each bundler resolves that
+ * differently per layer: webpack emitted it under `.next/server/`, and
+ * Turbopack (Next 16's default builder) emits a `/_next/static/media/` client
+ * URL for server-rendered pages but a `file:` URL for route handlers. Chasing
+ * those layouts is what failed the Next 16 build while collecting `/records`.
  *
- * The search is bounded to the media directories of each ancestor up to the
- * server root, and the caller verifies the bytes against `FONT_SHA256`, so a
- * wrong file cannot be accepted quietly.
+ * Both bundlers and Bun's test runner keep `import.meta.url` pointing at this
+ * source file, and the deployed image ships the server package's source tree
+ * beside its build output, so the source path is the one location that holds
+ * everywhere. The caller still verifies the bytes against `FONT_SHA256`.
  */
-export function findEmittedFontFilePath(
-  startDirectory: string,
-  directoryEntries: (path: string) => readonly string[] = (path) =>
-    existsSync(path) ? readdirSync(path) : [],
-): string | null {
-  let candidateDirectory = startDirectory;
-  for (;;) {
-    for (const mediaDirectory of [
-      join(candidateDirectory, 'static', 'media'),
-      join(candidateDirectory, 'chunks', 'static', 'media'),
-    ]) {
-      const match = directoryEntries(mediaDirectory)
-        .filter(
-          (entry) =>
-            entry.startsWith(`${FONT_NAME}-Regular`) && entry.endsWith('.ttf'),
-        )
-        .sort()
-        .at(0);
-      if (match !== undefined) return join(mediaDirectory, match);
-    }
-    if (
-      basename(candidateDirectory) === 'server' ||
-      dirname(candidateDirectory) === candidateDirectory
-    ) {
-      return null;
-    }
-    candidateDirectory = dirname(candidateDirectory);
-  }
+export function bundledFontFilePath(
+  moduleUrl: string = import.meta.url,
+): string {
+  return join(dirname(fileURLToPath(moduleUrl)), 'assets', FONT_FILE_NAME);
 }
 
 function readFontBytes(): Uint8Array {
-  const fontAssetUrl = new URL(
-    './assets/NotoSans-Regular.ttf',
-    import.meta.url,
-  );
-  if (fontAssetUrl.protocol === 'file:') {
-    const tracedPath = fileURLToPath(fontAssetUrl);
-    if (existsSync(tracedPath)) return readFileSync(tracedPath);
-    const emittedPath = findEmittedFontFilePath(dirname(tracedPath));
-    if (emittedPath !== null) return readFileSync(emittedPath);
-    throw new Error('The emitted Noto Sans PDF font is unavailable.');
+  const fontFilePath = bundledFontFilePath();
+  if (!existsSync(fontFilePath)) {
+    throw new Error('The embedded Noto Sans PDF font is unavailable.');
   }
-
-  // Next's server compiler emits a URL-compatible asset object whose path is
-  // rooted at /_next/. Convert that narrowly validated path to the colocated
-  // server chunk asset; Node's fs API intentionally rejects the foreign URL.
-  if (
-    fontAssetUrl.protocol !== '' ||
-    !fontAssetUrl.pathname.startsWith('/_next/static/media/')
-  ) {
-    throw new Error('The embedded Noto Sans PDF font path is invalid.');
-  }
-  return readFileSync(
-    resolveBundledFontFilePath(__dirname, fontAssetUrl.pathname),
-  );
+  return readFileSync(fontFilePath);
 }
 
 const FONT_BYTES = readFontBytes();

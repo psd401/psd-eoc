@@ -6,6 +6,9 @@ node_modules/
 dist/
 build/
 .next/
+# Next.js regenerates this on every dev, build, and typegen run, pointing at
+# .next/types or .next/dev/types; its docs say not to track it.
+next-env.d.ts
 .expo/
 coverage/
 *.log
