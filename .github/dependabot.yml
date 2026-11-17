@@ -31,3 +31,10 @@ updates:
       - dependency-name: '@react-native/*'
       - dependency-name: '@types/react'
       - dependency-name: '@types/react-dom'
+      # postgres runs with patches/postgres@3.4.9.patch, which fixes the
+      # close and cancel lifecycle (issue #130). Bun ties the patch to that
+      # exact version, so any bump drops it unless the patch is carried
+      # forward by hand, and version 4 rewrote the pool so it cannot apply
+      # at all; without it the issue #130 close and reconnect probes fail
+      # (tried 2026-11-17, #693). postgres moves only by hand.
+      - dependency-name: 'postgres'
