@@ -13,5 +13,8 @@ packages/mobile/expo-env.d.ts
 # Next.js creates this production-build output during the root verification gate.
 **/.next/**
 
+# Next.js generates this type stub on every dev, build, and typegen run.
+packages/server/next-env.d.ts
+
 # OpenTofu/Terraform provider caches are generated binaries and vendored docs.
 **/.terraform/**
