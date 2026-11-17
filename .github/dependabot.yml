@@ -15,3 +15,19 @@ updates:
         update-types:
           - 'minor'
           - 'patch'
+    # The Expo SDK pins these to the versions its native modules are built
+    # against, and `bunx expo install --fix` in packages/mobile moves them
+    # together. A Dependabot bump of any one of them fails `expo:check` and
+    # breaks the mobile build, so they move only with an SDK upgrade.
+    ignore:
+      - dependency-name: 'expo'
+      - dependency-name: 'expo-*'
+      - dependency-name: '@expo/*'
+      - dependency-name: 'jest-expo'
+      - dependency-name: 'react'
+      - dependency-name: 'react-dom'
+      - dependency-name: 'react-native'
+      - dependency-name: 'react-native-*'
+      - dependency-name: '@react-native/*'
+      - dependency-name: '@types/react'
+      - dependency-name: '@types/react-dom'
