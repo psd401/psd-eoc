@@ -32,41 +32,41 @@ beforeEach(() => {
   mockSignInError = null;
 });
 
-function openReview(): void {
-  fireEvent.press(
+async function openReview(): Promise<void> {
+  await fireEvent.press(
     screen.getByRole('button', { name: 'App store review sign-in' }),
   );
 }
 
 describe('app store review sign-in', () => {
-  test('is hidden until asked for, so staff see only Google sign-in', () => {
-    render(<SignInScreen />);
+  test('is hidden until asked for, so staff see only Google sign-in', async () => {
+    await render(<SignInScreen />);
     expect(screen.queryByTestId('app-review-email')).toBeNull();
-    openReview();
+    await openReview();
     expect(screen.getByTestId('app-review-email')).toBeTruthy();
     expect(screen.getByTestId('app-review-code')).toBeTruthy();
   });
 
   test('signs in with the review account and code, never through Google', async () => {
-    render(<SignInScreen />);
-    openReview();
+    await render(<SignInScreen />);
+    await openReview();
 
     const submit = screen.getByRole('button', {
       name: 'Sign in for app review',
     });
     // Nothing to send until both fields are filled.
-    fireEvent.press(submit);
+    await fireEvent.press(submit);
     expect(mockBeginAppReviewSignIn).not.toHaveBeenCalled();
 
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByTestId('app-review-email'),
       'review@example.invalid',
     );
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByTestId('app-review-code'),
       'synthetic-review-code-0123',
     );
-    fireEvent.press(submit);
+    await fireEvent.press(submit);
 
     await waitFor(() => {
       expect(mockBeginAppReviewSignIn).toHaveBeenCalledWith(
@@ -79,14 +79,17 @@ describe('app store review sign-in', () => {
 
   test('says why a refused review sign-in failed, next to the form', async () => {
     mockSignInError = 'The review sign-in details were not accepted.';
-    render(<SignInScreen />);
-    openReview();
-    fireEvent.changeText(
+    await render(<SignInScreen />);
+    await openReview();
+    await fireEvent.changeText(
       screen.getByTestId('app-review-email'),
       'review@example.invalid',
     );
-    fireEvent.changeText(screen.getByTestId('app-review-code'), 'wrong-code');
-    fireEvent.press(
+    await fireEvent.changeText(
+      screen.getByTestId('app-review-code'),
+      'wrong-code',
+    );
+    await fireEvent.press(
       screen.getByRole('button', { name: 'Sign in for app review' }),
     );
 

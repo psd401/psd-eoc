@@ -29,9 +29,9 @@ beforeEach(() => {
 
 describe('mobile privacy-policy access', () => {
   test('opens the configured application privacy route before sign-in', async () => {
-    render(<SignInScreen />);
+    await render(<SignInScreen />);
 
-    fireEvent.press(screen.getByRole('link', { name: 'Privacy policy' }));
+    await fireEvent.press(screen.getByRole('link', { name: 'Privacy policy' }));
 
     await waitFor(() => {
       expect(Linking.openURL).toHaveBeenCalledWith(
@@ -49,9 +49,9 @@ describe('mobile privacy-policy access', () => {
     jest
       .spyOn(Linking, 'openURL')
       .mockRejectedValueOnce(new Error('synthetic browser failure'));
-    render(<SignInScreen />);
+    await render(<SignInScreen />);
 
-    fireEvent.press(screen.getByRole('link', { name: 'Privacy policy' }));
+    await fireEvent.press(screen.getByRole('link', { name: 'Privacy policy' }));
 
     await waitFor(() => {
       expect(

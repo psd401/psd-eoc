@@ -4,9 +4,9 @@ import { fireEvent, render, screen } from '@testing-library/react-native';
 import { PushNotificationNotice } from '../src/lib/push/permission-notice';
 
 describe('push permission accessibility', () => {
-  test('explains real and drill lock-screen alerts before the OS prompt', () => {
+  test('explains real and drill lock-screen alerts before the OS prompt', async () => {
     const requestPermission = jest.fn();
-    render(
+    await render(
       <PushNotificationNotice
         onOpenSettings={jest.fn()}
         onRequestPermission={requestPermission}
@@ -24,7 +24,7 @@ describe('push permission accessibility', () => {
       screen.getByText(/both real incidents.*marked drills/iu),
     ).toBeTruthy();
     expect(requestPermission).not.toHaveBeenCalled();
-    fireEvent.press(
+    await fireEvent.press(
       screen.getByRole('button', {
         name: 'Continue to notification permission',
       }),
@@ -32,8 +32,8 @@ describe('push permission accessibility', () => {
     expect(requestPermission).toHaveBeenCalledTimes(1);
   });
 
-  test('says nothing once registration is confirmed and audible', () => {
-    render(
+  test('says nothing once registration is confirmed and audible', async () => {
+    await render(
       <PushNotificationNotice
         onOpenSettings={jest.fn()}
         onRequestPermission={jest.fn()}
@@ -50,12 +50,12 @@ describe('push permission accessibility', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  test('warns that a silenced channel still delivers, without blocking it', () => {
+  test('warns that a silenced channel still delivers, without blocking it', async () => {
     // Android locks a channel against the app once someone edits it, so the
     // app cannot restore the sound. Refusing to register would have been a
     // permanent loss of push; saying so is the most it can honestly do.
     const openSettings = jest.fn();
-    render(
+    await render(
       <PushNotificationNotice
         onOpenSettings={openSettings}
         onRequestPermission={jest.fn()}
@@ -70,7 +70,7 @@ describe('push permission accessibility', () => {
     );
 
     expect(screen.getByText(/still receives PSD EOC alerts/iu)).toBeTruthy();
-    fireEvent.press(
+    await fireEvent.press(
       screen.getByRole('button', { name: 'Open device notification settings' }),
     );
     expect(openSettings).toHaveBeenCalledTimes(1);
@@ -81,10 +81,10 @@ describe('push permission accessibility', () => {
     ['android' as const, /Android Settings.*alerts channel/iu],
   ])(
     'gives %s denial instructions and accessible recovery controls',
-    (platform, instructions) => {
+    async (platform, instructions) => {
       const openSettings = jest.fn();
       const retry = jest.fn();
-      render(
+      await render(
         <PushNotificationNotice
           onOpenSettings={openSettings}
           onRequestPermission={jest.fn()}
@@ -98,16 +98,14 @@ describe('push permission accessibility', () => {
         />,
       );
 
-      expect(
-        screen.UNSAFE_getByProps({ accessibilityRole: 'alert' }),
-      ).toBeTruthy();
+      expect(screen.root?.props.accessibilityRole).toBe('alert');
       expect(screen.getByText(instructions)).toBeTruthy();
-      fireEvent.press(
+      await fireEvent.press(
         screen.getByRole('button', {
           name: 'Open device notification settings',
         }),
       );
-      fireEvent.press(
+      await fireEvent.press(
         screen.getByRole('button', {
           name: 'Check push permission again',
         }),
@@ -117,10 +115,10 @@ describe('push permission accessibility', () => {
     },
   );
 
-  test('surfaces cleanup uncertainty without losing Settings recovery', () => {
+  test('surfaces cleanup uncertainty without losing Settings recovery', async () => {
     const message =
       'Notifications are disabled, and PSD EOC could not confirm push cleanup.';
-    render(
+    await render(
       <PushNotificationNotice
         onOpenSettings={jest.fn()}
         onRequestPermission={jest.fn()}
@@ -149,9 +147,9 @@ describe('push permission accessibility', () => {
   });
   test.each(['ios' as const, 'android' as const])(
     'says a timed-out registration is retrying and keeps Retry on %s',
-    (platform) => {
+    async (platform) => {
       const retry = jest.fn();
-      render(
+      await render(
         <PushNotificationNotice
           onOpenSettings={jest.fn()}
           onRequestPermission={jest.fn()}
@@ -167,7 +165,7 @@ describe('push permission accessibility', () => {
       );
 
       expect(screen.getByText(/Retrying automatically\./u)).toBeTruthy();
-      fireEvent.press(
+      await fireEvent.press(
         screen.getByRole('button', { name: 'Retry push registration' }),
       );
       expect(retry).toHaveBeenCalledTimes(1);

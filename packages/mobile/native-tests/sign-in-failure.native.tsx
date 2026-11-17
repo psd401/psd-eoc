@@ -30,12 +30,12 @@ beforeEach(() => {
 
 describe('sign-in failure feedback', () => {
   test('a sign-in that cannot start says so at the button and offers a retry', async () => {
-    render(<SignInScreen />);
+    await render(<SignInScreen />);
 
     // Nothing claims a failure before anyone presses anything.
     expect(screen.queryByText(/Sign-in did not start/iu)).toBeNull();
 
-    fireEvent.press(
+    await fireEvent.press(
       screen.getByRole('button', { name: 'Sign in with Google' }),
     );
 
@@ -49,7 +49,7 @@ describe('sign-in failure feedback', () => {
     const retry = screen.getByRole('button', {
       name: 'Try signing in again',
     });
-    fireEvent.press(retry);
+    await fireEvent.press(retry);
 
     await waitFor(() => {
       expect(mockBeginGoogleSignIn).toHaveBeenCalledTimes(2);

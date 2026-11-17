@@ -151,7 +151,7 @@ beforeEach(() => {
 
 describe('the home screen for a partner', () => {
   test('staff keep the start section and its per-site modes', async () => {
-    render(<HomeScreen />);
+    await render(<HomeScreen />);
     await waitFor(() => {
       expect(screen.getByText('Start an event')).toBeTruthy();
     });
@@ -161,7 +161,7 @@ describe('the home screen for a partner', () => {
 
   test('a partner is never offered a way to start an event', async () => {
     mockIsPartnerSession = true;
-    render(<HomeScreen />);
+    await render(<HomeScreen />);
 
     // Active events still load and are still joinable.
     await waitFor(() => {
@@ -181,7 +181,7 @@ describe('the home screen for a partner', () => {
 
   test('a partner is told whose job starting and ending an event is', async () => {
     mockIsPartnerSession = true;
-    render(<HomeScreen />);
+    await render(<HomeScreen />);
 
     await waitFor(() => {
       expect(screen.getByText('PARTNER AGENCY OPERATIONS')).toBeTruthy();

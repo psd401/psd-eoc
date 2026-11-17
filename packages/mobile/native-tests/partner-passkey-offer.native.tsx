@@ -46,11 +46,11 @@ beforeEach(() => {
 });
 
 describe('the partner passkey offer', () => {
-  test('is absent unless the server and the device both allow one', () => {
+  test('is absent unless the server and the device both allow one', async () => {
     // The provider makes the offer only when it holds a hand-off and the
     // device can run a ceremony, so an absent offer is the common case and
     // must render nothing at all.
-    render(<PartnerPasskeyOffer />);
+    await render(<PartnerPasskeyOffer />);
     expect(
       screen.queryByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.offer),
     ).toBeNull();
@@ -58,7 +58,7 @@ describe('the partner passkey offer', () => {
 
   test('adds a passkey on one press', async () => {
     mockOffer = { offered: true, busy: false, error: null };
-    render(<PartnerPasskeyOffer />);
+    await render(<PartnerPasskeyOffer />);
     expect(
       screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.offer),
     ).toBeTruthy();
@@ -68,38 +68,46 @@ describe('the partner passkey offer', () => {
       screen.getByText(/Your emailed code keeps working either way\./u),
     ).toBeTruthy();
 
-    fireEvent.press(screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.add));
+    await fireEvent.press(
+      screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.add),
+    );
     await waitFor(() => {
       expect(mockEnrollPartnerPasskey).toHaveBeenCalledTimes(1);
     });
   });
 
-  test('declining it enrolls nothing', () => {
+  test('declining it enrolls nothing', async () => {
     mockOffer = { offered: true, busy: false, error: null };
-    render(<PartnerPasskeyOffer />);
-    fireEvent.press(screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.dismiss));
+    await render(<PartnerPasskeyOffer />);
+    await fireEvent.press(
+      screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.dismiss),
+    );
     expect(mockDismissPartnerPasskeyOffer).toHaveBeenCalledTimes(1);
     expect(mockEnrollPartnerPasskey).not.toHaveBeenCalled();
   });
 
-  test('nothing is pressable while a ceremony is running', () => {
+  test('nothing is pressable while a ceremony is running', async () => {
     mockOffer = { offered: true, busy: true, error: null };
-    render(<PartnerPasskeyOffer />);
-    fireEvent.press(screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.add));
-    fireEvent.press(screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.dismiss));
+    await render(<PartnerPasskeyOffer />);
+    await fireEvent.press(
+      screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.add),
+    );
+    await fireEvent.press(
+      screen.getByTestId(PARTNER_PASSKEY_OFFER_TEST_IDS.dismiss),
+    );
     expect(mockEnrollPartnerPasskey).not.toHaveBeenCalled();
     expect(mockDismissPartnerPasskeyOffer).not.toHaveBeenCalled();
     expect(screen.getByText('Adding a passkey')).toBeTruthy();
   });
 
-  test('a failed enrollment is reported here, beside the offer', () => {
+  test('a failed enrollment is reported here, beside the offer', async () => {
     mockOffer = {
       offered: true,
       busy: false,
       error:
         'PSD EOC could not add a passkey to this device. Your emailed code still works.',
     };
-    render(<PartnerPasskeyOffer />);
+    await render(<PartnerPasskeyOffer />);
     expect(
       screen.getByText(
         'PSD EOC could not add a passkey to this device. Your emailed code still works.',
