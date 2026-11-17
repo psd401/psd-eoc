@@ -8,6 +8,6 @@
     "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {
-    "postgres": "3.4.9"
+    "postgres": "4.1.1"
   }
 }

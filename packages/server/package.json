@@ -29,7 +29,7 @@
     "maplibre-gl": "6.18.0",
     "next": "16.4.6",
     "pdfkit": "0.20.2",
-    "postgres": "3.4.9",
+    "postgres": "4.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "sharp": "0.35.5",
