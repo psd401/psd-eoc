@@ -29,21 +29,21 @@ describe('leaving the event room', () => {
     mockCanGoBack.mockReset();
   });
 
-  test('returns to the event list when the room is its own root', () => {
+  test('returns to the event list when the room is its own root', async () => {
     // A room opened from a push notification is the first screen in this
     // stack, so the navigator renders no back control. Without this the
     // operator who ended an event had no way out and had to force-quit.
     mockCanGoBack.mockReturnValue(false);
-    render(<LeaveEventRoomButton />);
-    fireEvent.press(screen.getByRole('button', { name: 'Events' }));
+    await render(<LeaveEventRoomButton />);
+    await fireEvent.press(screen.getByRole('button', { name: 'Events' }));
     expect(mockReplace).toHaveBeenCalledWith('/');
     expect(mockBack).not.toHaveBeenCalled();
   });
 
-  test('goes back when there is somewhere to go back to', () => {
+  test('goes back when there is somewhere to go back to', async () => {
     mockCanGoBack.mockReturnValue(true);
-    render(<LeaveEventRoomButton />);
-    fireEvent.press(screen.getByRole('button', { name: 'Events' }));
+    await render(<LeaveEventRoomButton />);
+    await fireEvent.press(screen.getByRole('button', { name: 'Events' }));
     expect(mockBack).toHaveBeenCalledTimes(1);
     expect(mockReplace).not.toHaveBeenCalled();
   });

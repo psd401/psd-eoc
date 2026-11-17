@@ -58,22 +58,22 @@ beforeEach(() => {
   mockIsSigningIn = false;
 });
 
-function openPartner(): void {
-  fireEvent.press(
+async function openPartner(): Promise<void> {
+  await fireEvent.press(
     screen.getByRole('button', { name: 'Partner agency sign-in' }),
   );
 }
 
 describe('partner agency sign-in', () => {
-  test('is hidden until asked for, so staff see only Google sign-in', () => {
-    render(<SignInScreen />);
+  test('is hidden until asked for, so staff see only Google sign-in', async () => {
+    await render(<SignInScreen />);
     expect(screen.queryByTestId(PARTNER_SIGN_IN_TEST_IDS.email)).toBeNull();
     // Google is still the one thing on the card.
     expect(
       screen.getByRole('button', { name: 'Sign in with Google' }),
     ).toBeTruthy();
 
-    openPartner();
+    await openPartner();
     expect(screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.email)).toBeTruthy();
     // The code step belongs to the second step only.
     expect(screen.queryByTestId(PARTNER_SIGN_IN_TEST_IDS.code)).toBeNull();
@@ -83,19 +83,19 @@ describe('partner agency sign-in', () => {
     // Issue #647. The passkey and the emailed code are deliberately not two
     // buttons: a partner should not have to know which they have, and the
     // fallback must look the same as never having had a passkey.
-    render(<SignInScreen />);
-    openPartner();
+    await render(<SignInScreen />);
+    await openPartner();
 
     const request = screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.requestCode);
     // An empty address sends nothing.
-    fireEvent.press(request);
+    await fireEvent.press(request);
     expect(mockBeginPartnerSignIn).not.toHaveBeenCalled();
 
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.email),
       'responder@agency.example.invalid',
     );
-    fireEvent.press(request);
+    await fireEvent.press(request);
 
     await waitFor(() => {
       expect(mockBeginPartnerSignIn).toHaveBeenCalledWith(
@@ -108,10 +108,10 @@ describe('partner agency sign-in', () => {
     expect(mockBeginAppReviewSignIn).not.toHaveBeenCalled();
   });
 
-  test('the code field offers the OS one-time-code autofill on both platforms', () => {
+  test('the code field offers the OS one-time-code autofill on both platforms', async () => {
     mockPartnerCodeRequested = true;
-    render(<SignInScreen />);
-    openPartner();
+    await render(<SignInScreen />);
+    await openPartner();
 
     const code = screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.code);
     // `one-time-code` is the cross-platform value: iOS reads it as the
@@ -135,18 +135,18 @@ describe('partner agency sign-in', () => {
 
   test('answers the outstanding flow with the code once it is long enough', async () => {
     mockPartnerCodeRequested = true;
-    render(<SignInScreen />);
-    openPartner();
+    await render(<SignInScreen />);
+    await openPartner();
 
     const verify = screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.verify);
     const code = screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.code);
 
-    fireEvent.changeText(code, '123');
-    fireEvent.press(verify);
+    await fireEvent.changeText(code, '123');
+    await fireEvent.press(verify);
     expect(mockCompletePartnerSignIn).not.toHaveBeenCalled();
 
-    fireEvent.changeText(code, '1 2 3 4 5 6');
-    fireEvent.press(verify);
+    await fireEvent.changeText(code, '1 2 3 4 5 6');
+    await fireEvent.press(verify);
 
     await waitFor(() => {
       expect(mockCompletePartnerSignIn).toHaveBeenCalledWith('123456');
@@ -156,14 +156,14 @@ describe('partner agency sign-in', () => {
   test('a refused code says so beside the form and offers another address', async () => {
     mockPartnerCodeRequested = true;
     mockSignInError = 'The sign-in details were not accepted.';
-    render(<SignInScreen />);
-    openPartner();
+    await render(<SignInScreen />);
+    await openPartner();
 
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.code),
       '999999',
     );
-    fireEvent.press(screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.verify));
+    await fireEvent.press(screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.verify));
 
     await waitFor(() => {
       expect(screen.getByText('Partner sign-in did not complete')).toBeTruthy();
@@ -174,21 +174,23 @@ describe('partner agency sign-in', () => {
       screen.getByText('The sign-in details were not accepted.'),
     ).toBeTruthy();
 
-    fireEvent.press(screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.startOver));
+    await fireEvent.press(
+      screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.startOver),
+    );
     expect(mockResetPartnerSignIn).toHaveBeenCalled();
   });
 
-  test('nothing is submittable while a request is already in flight', () => {
+  test('nothing is submittable while a request is already in flight', async () => {
     mockPartnerCodeRequested = true;
     mockIsSigningIn = true;
-    render(<SignInScreen />);
-    openPartner();
+    await render(<SignInScreen />);
+    await openPartner();
 
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.code),
       '123456',
     );
-    fireEvent.press(screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.verify));
+    await fireEvent.press(screen.getByTestId(PARTNER_SIGN_IN_TEST_IDS.verify));
     expect(mockCompletePartnerSignIn).not.toHaveBeenCalled();
   });
 });

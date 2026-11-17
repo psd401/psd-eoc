@@ -460,7 +460,15 @@ describe('mobile event-room mutation reliability', () => {
     const originalLoadPending =
       NativePhotoDraftStorage.prototype.loadPendingSelection;
     const originalSave = NativePhotoDraftStorage.prototype.save;
+    const originalAppState = AppState.currentState;
     let blockFirstTransition = true;
+    // Hold the first durable transition open. Async act flushes every pending
+    // update before it returns, so submit must stay in flight here for the
+    // test to see the busy window and try the late edits inside it.
+    let releaseFirstTransition: (() => void) | undefined;
+    const firstTransitionGate = new Promise<void>((resolve) => {
+      releaseFirstTransition = resolve;
+    });
     NativePhotoDraftStorage.prototype.load = jest.fn(async () => manifest);
     NativePhotoDraftStorage.prototype.loadPendingSelection = jest.fn(
       async () => null,
@@ -471,13 +479,16 @@ describe('mobile event-room mutation reliability', () => {
         if (blockFirstTransition) {
           expect(next.stage).toBe('creating-intent');
           blockFirstTransition = false;
-          await Promise.resolve();
+          await firstTransitionGate;
         }
       },
     );
     let workflow: EventPhotoDraftWorkflow | null = null;
     try {
-      render(
+      // Foreground, so submit reaches its first durable transition and stays
+      // in flight there instead of returning before any storage write.
+      AppState.currentState = 'active';
+      await render(
         <PhotoWorkflowHarness
           api={rejectingPhotoApi()}
           eventId={ids.event}
@@ -494,14 +505,14 @@ describe('mobile event-room mutation reliability', () => {
       );
 
       let submit: Promise<void> | undefined;
-      act(() => {
+      await act(() => {
         submit = workflow!.submit();
       });
       expect(
         screen.getByTestId('photo-workflow-state').props.children.join(''),
       ).toContain('busy:ready');
 
-      act(() => {
+      await act(() => {
         workflow!.setAltText('Late description that must be ignored');
         workflow!.setCaption('Late caption that must be ignored');
       });
@@ -509,7 +520,13 @@ describe('mobile event-room mutation reliability', () => {
         screen.getByTestId('photo-workflow-state').props.children.join(''),
       ).toContain(manifest.altText);
 
-      await act(async () => submit);
+      await act(async () => {
+        releaseFirstTransition!();
+        await submit;
+      });
+      // The save mock clears this only after checking the expected manifest and
+      // the creating-intent stage, so submit really reached that transition.
+      expect(blockFirstTransition).toBe(false);
       expect(manifest.altText).toBe('Canonical synthetic entrance photo');
       expect(manifest.caption).toBe('Canonical synthetic caption');
     } finally {
@@ -517,6 +534,7 @@ describe('mobile event-room mutation reliability', () => {
       NativePhotoDraftStorage.prototype.loadPendingSelection =
         originalLoadPending;
       NativePhotoDraftStorage.prototype.save = originalSave;
+      AppState.currentState = originalAppState;
     }
   });
 
@@ -549,7 +567,7 @@ describe('mobile event-room mutation reliability', () => {
     );
     let workflow: EventPhotoDraftWorkflow | null = null;
     try {
-      render(
+      await render(
         <PhotoWorkflowHarness
           api={rejectingPhotoApi()}
           eventId={ids.event}
@@ -649,7 +667,7 @@ describe('mobile event-room mutation reliability', () => {
     let submit: Promise<void> | undefined;
     try {
       AppState.currentState = 'active';
-      render(
+      await render(
         <MutablePhotoWorkflowHarness
           api={api}
           onWorkflow={(next) => {
@@ -663,14 +681,14 @@ describe('mobile event-room mutation reliability', () => {
         ).toContain('idle:ready'),
       );
       const initialLoadCount = load.mock.calls.length;
-      act(() => {
+      await act(() => {
         submit = workflow!.submit();
       });
       await creatingDidStart;
 
-      fireEvent.press(screen.getByTestId('set-photo-posting-blocked'));
-      fireEvent.press(screen.getByTestId('set-photo-posting-allowed'));
-      fireEvent.press(screen.getByTestId('set-photo-posting-blocked'));
+      await fireEvent.press(screen.getByTestId('set-photo-posting-blocked'));
+      await fireEvent.press(screen.getByTestId('set-photo-posting-allowed'));
+      await fireEvent.press(screen.getByTestId('set-photo-posting-blocked'));
       await act(async () => Promise.resolve());
       expect(load).toHaveBeenCalledTimes(initialLoadCount);
       expect(createMediaUploadIntent).toHaveBeenCalledTimes(0);
@@ -748,7 +766,7 @@ describe('mobile event-room mutation reliability', () => {
     let workflow: EventPhotoDraftWorkflow | null = null;
     let discard: Promise<void> | undefined;
     try {
-      render(
+      await render(
         <MutablePhotoWorkflowHarness
           api={rejectingPhotoApi()}
           onWorkflow={(next) => {
@@ -762,11 +780,11 @@ describe('mobile event-room mutation reliability', () => {
         ).toContain('idle:describe'),
       );
 
-      act(() => {
+      await act(() => {
         discard = workflow!.discard();
       });
       await cleanupDidStart;
-      fireEvent.press(screen.getByTestId('set-photo-event-other'));
+      await fireEvent.press(screen.getByTestId('set-photo-event-other'));
       await act(async () => Promise.resolve());
       expect(load).toHaveBeenCalledTimes(1);
       expect(load).not.toHaveBeenCalledWith(ids.otherEvent);
@@ -830,7 +848,7 @@ describe('mobile event-room mutation reliability', () => {
     });
     let workflow: EventPhotoDraftWorkflow | null = null;
     try {
-      render(
+      await render(
         <PhotoWorkflowHarness
           api={rejectingPhotoApi()}
           eventId={ids.event}
@@ -885,7 +903,7 @@ describe('mobile event-room mutation reliability', () => {
     );
     let workflow: EventPhotoDraftWorkflow | null = null;
     try {
-      render(
+      await render(
         <PhotoWorkflowHarness
           api={rejectingPhotoApi()}
           eventId={ids.event}
@@ -924,8 +942,8 @@ describe('mobile event-room title', () => {
   const longDetail =
     'Synthetic caller reports a person feeling faint near the gym. Synthetic responders are on the way with campus staff present.';
 
-  function renderTitle(responseLabel: string, threatLabel: string) {
-    return render(
+  async function renderTitle(responseLabel: string, threatLabel: string) {
+    return await render(
       <EventRoomTitle
         facilityCode="SYN"
         facilityName="Synthetic School"
@@ -938,8 +956,8 @@ describe('mobile event-room title', () => {
     );
   }
 
-  test('clamps a long response and threat so the timeline keeps the screen, and expands on request', () => {
-    renderTitle(`Other — ${longDetail}`, `Other — ${longDetail}`);
+  test('clamps a long response and threat so the timeline keeps the screen, and expands on request', async () => {
+    await renderTitle(`Other — ${longDetail}`, `Other — ${longDetail}`);
     const title = screen.getByText(`Other — ${longDetail}`);
     const threat = screen.getByText(`Threat: Other — ${longDetail}`);
     expect(title.props.numberOfLines).toBe(2);
@@ -951,7 +969,9 @@ describe('mobile event-room title', () => {
       ),
     ).toBeTruthy();
 
-    fireEvent.press(screen.getByRole('button', { name: 'Show full details' }));
+    await fireEvent.press(
+      screen.getByRole('button', { name: 'Show full details' }),
+    );
     expect(
       screen.getByText(`Other — ${longDetail}`).props.numberOfLines,
     ).toBeUndefined();
@@ -965,21 +985,23 @@ describe('mobile event-room title', () => {
       }),
     ).toBeTruthy();
 
-    fireEvent.press(screen.getByRole('button', { name: 'Hide full details' }));
+    await fireEvent.press(
+      screen.getByRole('button', { name: 'Hide full details' }),
+    );
     expect(screen.getByText(`Other — ${longDetail}`).props.numberOfLines).toBe(
       2,
     );
   });
 
-  test('offers no toggle when the title already fits', () => {
-    renderTitle('Synthetic lockdown', 'Synthetic wildlife');
+  test('offers no toggle when the title already fits', async () => {
+    await renderTitle('Synthetic lockdown', 'Synthetic wildlife');
     expect(screen.getByText('Synthetic lockdown')).toBeTruthy();
     expect(screen.queryByRole('button')).toBeNull();
   });
 });
 
 describe('mobile event-room timeline accessibility', () => {
-  test('groups each entry into one accessible timeline fact and omits every redacted photo payload field', () => {
+  test('groups each entry into one accessible timeline fact and omits every redacted photo payload field', async () => {
     const visible = JournalEntryReadProjectionSchema.parse({
       visibility: 'visible',
       entry: {
@@ -1026,7 +1048,7 @@ describe('mobile event-room timeline accessibility', () => {
       Promise.reject(new Error('A redacted photo must never request media.')),
     );
 
-    const rendered = render(
+    const rendered = await render(
       <>
         <TimelineEntryCard projection={visible} />
         <TimelineEntryCard api={{ getMediaReadGrant }} projection={redacted} />
@@ -1099,19 +1121,19 @@ describe('mobile event-room timeline accessibility', () => {
         expiresAt,
       });
 
-    render(
+    await render(
       <TimelineEntryCard api={{ getMediaReadGrant }} projection={photo} />,
     );
 
     await screen.findByRole('button', { name: 'Retry loading photo' });
-    fireEvent.press(
+    await fireEvent.press(
       screen.getByRole('button', { name: 'Retry loading photo' }),
     );
     await waitFor(() => expect(getMediaReadGrant).toHaveBeenCalledTimes(2));
     expect(screen.queryByText('Photo temporarily unavailable')).toBeNull();
   });
 
-  test('offers explicit append-only correction and redaction controls with retained-history copy', () => {
+  test('offers explicit append-only correction and redaction controls with retained-history copy', async () => {
     const visible = JournalEntryReadProjectionSchema.parse({
       visibility: 'visible',
       entry: {
@@ -1134,13 +1156,13 @@ describe('mobile event-room timeline accessibility', () => {
     });
     // Timeline entries carry no correct or redact controls on the phone; that
     // work happens in the web room.
-    const card = render(<TimelineEntryCard projection={visible} />);
+    const card = await render(<TimelineEntryCard projection={visible} />);
     expect(screen.queryByRole('button', { name: 'Correct…' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Redact…' })).toBeNull();
-    card.unmount();
+    await card.unmount();
 
     const onSubmit = jest.fn();
-    const correction = render(
+    const correction = await render(
       <JournalActionDialog
         action="correction"
         busy={false}
@@ -1152,23 +1174,25 @@ describe('mobile event-room timeline accessibility', () => {
     );
     expect(screen.getByText('Original entry retained')).toBeTruthy();
     expect(screen.getByText(/Nothing is rewritten or deleted/)).toBeTruthy();
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByLabelText('Corrected timeline text'),
       'Corrected synthetic wording',
     );
-    fireEvent.changeText(
+    await fireEvent.changeText(
       screen.getByLabelText('Reason for correction'),
       'Fixed the synthetic wording',
     );
-    fireEvent.press(screen.getByRole('button', { name: 'Append correction' }));
+    await fireEvent.press(
+      screen.getByRole('button', { name: 'Append correction' }),
+    );
     expect(onSubmit).toHaveBeenCalledWith({
       action: 'correction',
       reason: 'Fixed the synthetic wording',
       replacement: { kind: 'text', text: 'Corrected synthetic wording' },
     });
-    correction.unmount();
+    await correction.unmount();
 
-    render(
+    await render(
       <JournalActionDialog
         action="redaction"
         busy={false}
@@ -1183,8 +1207,8 @@ describe('mobile event-room timeline accessibility', () => {
     ).toBeTruthy();
   });
 
-  test('keeps immutable classification and event target visible in both full-screen composers', () => {
-    const location = render(
+  test('keeps immutable classification and event target visible in both full-screen composers', async () => {
+    const location = await render(
       <LocationComposerDialog
         ambiguousLabel=""
         ambiguousReason=""
@@ -1222,9 +1246,9 @@ describe('mobile event-room timeline accessibility', () => {
     expect(
       screen.getByText(/Do not include student data\. Post only the precision/),
     ).toBeTruthy();
-    location.unmount();
+    await location.unmount();
 
-    const photo = render(
+    const photo = await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1265,9 +1289,9 @@ describe('mobile event-room timeline accessibility', () => {
     expect(
       screen.getByText(/No student data\. EXIF and GPS are stripped\./),
     ).toBeTruthy();
-    photo.unmount();
+    await photo.unmount();
 
-    render(
+    await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1303,8 +1327,8 @@ describe('mobile event-room timeline accessibility', () => {
     expect(screen.queryByText('DRILL — TRAINING ONLY')).toBeNull();
   });
 
-  test('labels capture and picker work without claiming a journal post is underway', () => {
-    const location = render(
+  test('labels capture and picker work without claiming a journal post is underway', async () => {
+    const location = await render(
       <LocationComposerDialog
         ambiguousLabel=""
         ambiguousReason=""
@@ -1333,9 +1357,9 @@ describe('mobile event-room timeline accessibility', () => {
     );
     expect(screen.getByText('Capturing GPS…')).toBeTruthy();
     expect(screen.queryByText('Posting…')).toBeNull();
-    location.unmount();
+    await location.unmount();
 
-    render(
+    await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1367,7 +1391,7 @@ describe('mobile event-room timeline accessibility', () => {
     expect(screen.queryByText('Posting…')).toBeNull();
   });
 
-  test('posts from both native photo sources in one action and retains retry', () => {
+  test('posts from both native photo sources in one action and retains retry', async () => {
     const takePhoto = jest
       .fn<() => Promise<void>>()
       .mockResolvedValue(undefined);
@@ -1376,7 +1400,7 @@ describe('mobile event-room timeline accessibility', () => {
       .mockResolvedValue(undefined);
     const submit = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
     const retry = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-    const sourceSelection = render(
+    const sourceSelection = await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1405,8 +1429,8 @@ describe('mobile event-room timeline accessibility', () => {
       />,
     );
 
-    fireEvent.press(screen.getByRole('button', { name: 'Take Photo' }));
-    fireEvent.press(screen.getByRole('button', { name: 'Choose Photo' }));
+    await fireEvent.press(screen.getByRole('button', { name: 'Take Photo' }));
+    await fireEvent.press(screen.getByRole('button', { name: 'Choose Photo' }));
     expect(takePhoto).toHaveBeenCalledTimes(1);
     expect(choosePhoto).toHaveBeenCalledTimes(1);
     // Capturing posts. There is no second confirmation to press, and no
@@ -1416,9 +1440,9 @@ describe('mobile event-room timeline accessibility', () => {
     ).toBeNull();
     expect(screen.queryByText('Alternative text (required)')).toBeNull();
     expect(screen.queryByText('Optional caption')).toBeNull();
-    sourceSelection.unmount();
+    await sourceSelection.unmount();
 
-    render(
+    await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1446,7 +1470,7 @@ describe('mobile event-room timeline accessibility', () => {
         visible
       />,
     );
-    fireEvent.press(
+    await fireEvent.press(
       screen.getByRole('button', { name: 'Retry retained draft' }),
     );
     expect(retry).toHaveBeenCalledTimes(1);
@@ -1530,7 +1554,7 @@ describe('mobile event-room timeline accessibility', () => {
         const createMediaUploadIntent = jest.fn(async () => {
           throw new Error('synthetic interrupted intent request');
         });
-        const rendered = render(
+        const rendered = await render(
           <ConnectedPhotoComposerHarness
             api={{ createMediaUploadIntent } as unknown as EventRoomApi}
             onAppended={jest.fn()}
@@ -1547,13 +1571,13 @@ describe('mobile event-room timeline accessibility', () => {
         );
         // Pressing the source both selects and posts. There is nothing to
         // describe first and nothing to confirm afterwards.
-        fireEvent.press(sourceButton);
+        await fireEvent.press(sourceButton);
         await screen.findByRole('button', {
           name: 'Retry retained draft',
         });
         expect(selectedSources.at(-1)).toBe(source);
         expect(createMediaUploadIntent).toHaveBeenCalledTimes(1);
-        fireEvent.press(
+        await fireEvent.press(
           screen.getByRole('button', { name: 'Retry retained draft' }),
         );
         await waitFor(() =>
@@ -1565,7 +1589,7 @@ describe('mobile event-room timeline accessibility', () => {
           stage: 'unknown',
           retryStage: 'create-intent',
         });
-        rendered.unmount();
+        await rendered.unmount();
       }
       expect(selectedSources).toEqual(['camera', 'library']);
     } finally {
@@ -1584,14 +1608,14 @@ describe('mobile event-room timeline accessibility', () => {
     }
   });
 
-  test('never strands a selected photo without a way to post it', () => {
+  test('never strands a selected photo without a way to post it', async () => {
     // The regression this pins: capture posts in one action, but when that
     // post does not run the draft sits at `ready`. `selected` disables both
     // capture buttons, so with no post control the operator held a photo that
     // nothing on screen could send, and reopening the sheet restored the same
     // dead end.
     const submit = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-    render(
+    await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1629,14 +1653,14 @@ describe('mobile event-room timeline accessibility', () => {
     // So a control that can actually post it has to be present.
     const post = screen.getByRole('button', { name: 'Post photo' });
     expect(post.props.accessibilityState).toEqual({ disabled: false });
-    fireEvent.press(post);
+    await fireEvent.press(post);
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
-  test('offers no post control in the ordinary one-action flow', () => {
+  test('offers no post control in the ordinary one-action flow', async () => {
     // The recovery control must not reappear as a second confirmation: with
     // nothing selected there is nothing to post.
-    render(
+    await render(
       <PhotoComposerDialog
         newPostsAllowed
         onDismiss={() => undefined}
@@ -1671,7 +1695,7 @@ describe('mobile event-room timeline accessibility', () => {
     ).toEqual({ disabled: false });
   });
 
-  test('offers no photo description fields to edit or lock', () => {
+  test('offers no photo description fields to edit or lock', async () => {
     // This replaces a test that proved canonical descriptions became read-only
     // once network work started. There is nothing to lock any more: the sheet
     // has no description inputs, because requiring alternative text before the
@@ -1681,7 +1705,7 @@ describe('mobile event-room timeline accessibility', () => {
     for (const stage of ['failed', 'unknown'] as const) {
       const setAltText = jest.fn();
       const setCaption = jest.fn();
-      const rendered = render(
+      const rendered = await render(
         <PhotoComposerDialog
           newPostsAllowed
           onDismiss={() => undefined}
@@ -1719,13 +1743,13 @@ describe('mobile event-room timeline accessibility', () => {
       // retry rather than an internal stage name.
       expect(screen.getByText('This photo did not send.')).toBeTruthy();
       expect(screen.queryByText(`Stage: ${stage}`)).toBeNull();
-      rendered.unmount();
+      await rendered.unmount();
     }
   });
 
-  test('keeps closed-event photo recovery reachable without exposing upload or post', () => {
+  test('keeps closed-event photo recovery reachable without exposing upload or post', async () => {
     const retry = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-    render(
+    await render(
       <PhotoComposerDialog
         newPostsAllowed={false}
         onDismiss={() => undefined}
@@ -1758,17 +1782,17 @@ describe('mobile event-room timeline accessibility', () => {
     expect(screen.queryByText('Take Photo')).toBeNull();
     expect(screen.queryByText('Choose Existing Photo')).toBeNull();
     expect(screen.queryByText('Upload and post photo')).toBeNull();
-    fireEvent.press(screen.getByText('Reconcile with timeline'));
+    await fireEvent.press(screen.getByText('Reconcile with timeline'));
     expect(retry).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText('Discard retained photo draft')).toBeTruthy();
   });
 });
 
 describe('mobile event-room lifecycle confirmations', () => {
-  test('shows the real all-clear recipients and channel reach before confirmation', () => {
+  test('shows the real all-clear recipients and channel reach before confirmation', async () => {
     const preview = lifecyclePreview('real');
     const onConfirm = jest.fn();
-    render(
+    await render(
       <ConfirmationHarness
         action="all-clear"
         mode="real"
@@ -1801,12 +1825,12 @@ describe('mobile event-room lifecycle confirmations', () => {
     // on the web room. There is no phrase to type.
     expect(screen.queryByTestId('lifecycle-confirmation-input')).toBeNull();
     expectConfirmationDisabled(false);
-    fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
+    await fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
-  test('keeps drill wording unmistakable in both the banner and notification preview', () => {
-    render(
+  test('keeps drill wording unmistakable in both the banner and notification preview', async () => {
+    await render(
       <ConfirmationHarness
         action="all-clear"
         mode="drill"
@@ -1834,8 +1858,8 @@ describe('mobile event-room lifecycle confirmations', () => {
     ).toBeNull();
   });
 
-  test('keeps test events distinct from drills in the room banner and lifecycle consequence', () => {
-    render(
+  test('keeps test events distinct from drills in the room banner and lifecycle consequence', async () => {
+    await render(
       <ConfirmationHarness
         action="all-clear"
         mode="drill"
@@ -1855,8 +1879,8 @@ describe('mobile event-room lifecycle confirmations', () => {
     expect(screen.queryByText('DRILL — TRAINING ONLY')).toBeNull();
   });
 
-  test('explains a blocked action without exposing raw server reason codes', () => {
-    render(
+  test('explains a blocked action without exposing raw server reason codes', async () => {
+    await render(
       <ConfirmationHarness
         action="all-clear"
         mode="real"
@@ -1874,9 +1898,9 @@ describe('mobile event-room lifecycle confirmations', () => {
     expectConfirmationDisabled(true);
   });
 
-  test('states that finishing the close notifies nobody else', () => {
+  test('states that finishing the close notifies nobody else', async () => {
     const onConfirm = jest.fn();
-    render(
+    await render(
       <ConfirmationHarness
         action="close"
         mode="real"
@@ -1892,16 +1916,16 @@ describe('mobile event-room lifecycle confirmations', () => {
     ).toBeTruthy();
     expect(screen.queryByTestId('lifecycle-confirmation-input')).toBeNull();
     expectConfirmationDisabled(false);
-    fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
+    await fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
-  test('disables confirmation as soon as an all-clear preview expires', () => {
+  test('disables confirmation as soon as an all-clear preview expires', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date(createdAt));
     try {
       const onConfirm = jest.fn();
-      render(
+      await render(
         <ConfirmationHarness
           action="all-clear"
           mode="real"
@@ -1911,7 +1935,7 @@ describe('mobile event-room lifecycle confirmations', () => {
       );
       expectConfirmationDisabled(false);
 
-      act(() => {
+      await act(() => {
         jest.advanceTimersByTime(4 * 60 * 1_000 + 1);
       });
 
@@ -1921,7 +1945,7 @@ describe('mobile event-room lifecycle confirmations', () => {
           'This check is out of date. Refresh it before ending the event.',
         ),
       ).toBeTruthy();
-      fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
+      await fireEvent.press(screen.getByTestId('lifecycle-confirm-button'));
       expect(onConfirm).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();

@@ -166,8 +166,8 @@ describe('authenticated release diagnostic', () => {
     };
   });
 
-  test('shows verified embedded-only identity as accessible read-only evidence', () => {
-    render(<ReleaseDiagnosticScreen />);
+  test('shows verified embedded-only identity as accessible read-only evidence', async () => {
+    await render(<ReleaseDiagnosticScreen />);
 
     expect(
       screen.getByRole('header', { name: 'Release diagnostics' }),
@@ -323,7 +323,7 @@ describe('authenticated release diagnostic', () => {
     }
   });
 
-  test('scrubs invalid values from the rendered unknown state', () => {
+  test('scrubs invalid values from the rendered unknown state', async () => {
     Object.assign(mockUpdateConstants, {
       isEnabled: true,
       isEmergencyLaunch: true,
@@ -336,7 +336,7 @@ describe('authenticated release diagnostic', () => {
     });
     mockExpoConfig = null;
 
-    render(<ReleaseDiagnosticScreen />);
+    await render(<ReleaseDiagnosticScreen />);
 
     expect(
       screen.getByLabelText(

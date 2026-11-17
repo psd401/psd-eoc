@@ -62,7 +62,7 @@ describe('mobile SMS consent screen', () => {
   test('shows every disclosure term before anyone can agree', async () => {
     respondWith({ status: 'none' });
 
-    render(<SmsConsentScreen />);
+    await render(<SmsConsentScreen />);
 
     // A carrier review is shown this screen and asks what the person read, so
     // each required line has to be on it rather than behind a link.
@@ -74,7 +74,7 @@ describe('mobile SMS consent screen', () => {
   test('leaves the agreement control off until the person turns it on', async () => {
     respondWith({ status: 'none' });
 
-    render(<SmsConsentScreen />);
+    await render(<SmsConsentScreen />);
 
     const agree = await screen.findByTestId(SMS_CONSENT_TEST_IDS.agreeSwitch);
     expect(agree.props.value).toBe(false);
@@ -82,11 +82,11 @@ describe('mobile SMS consent screen', () => {
 
   test('refuses to submit an untouched agreement control', async () => {
     respondWith({ status: 'none' });
-    render(<SmsConsentScreen />);
+    await render(<SmsConsentScreen />);
     const input = await screen.findByTestId(SMS_CONSENT_TEST_IDS.numberInput);
 
-    fireEvent.changeText(input, '(253) 555-0123');
-    fireEvent.press(screen.getByTestId(SMS_CONSENT_TEST_IDS.submit));
+    await fireEvent.changeText(input, '(253) 555-0123');
+    await fireEvent.press(screen.getByTestId(SMS_CONSENT_TEST_IDS.submit));
 
     await waitFor(() => {
       expect(screen.getByTestId(SMS_CONSENT_TEST_IDS.notice)).toBeTruthy();
@@ -101,16 +101,16 @@ describe('mobile SMS consent screen', () => {
 
   test('records the normalized number once the box is on', async () => {
     respondWith({ status: 'none' });
-    render(<SmsConsentScreen />);
+    await render(<SmsConsentScreen />);
     const input = await screen.findByTestId(SMS_CONSENT_TEST_IDS.numberInput);
 
-    fireEvent.changeText(input, '(253) 555-0123');
-    fireEvent(
+    await fireEvent.changeText(input, '(253) 555-0123');
+    await fireEvent(
       screen.getByTestId(SMS_CONSENT_TEST_IDS.agreeSwitch),
       'valueChange',
       true,
     );
-    fireEvent.press(screen.getByTestId(SMS_CONSENT_TEST_IDS.submit));
+    await fireEvent.press(screen.getByTestId(SMS_CONSENT_TEST_IDS.submit));
 
     await waitFor(() => {
       const mutations = mockRequestAuthenticated.mock.calls.filter(
@@ -133,7 +133,7 @@ describe('mobile SMS consent screen', () => {
       consentedAt: '2026-09-04T00:00:00.000Z',
     });
 
-    render(<SmsConsentScreen />);
+    await render(<SmsConsentScreen />);
 
     const summary = await screen.findByTestId(SMS_CONSENT_TEST_IDS.summary);
     const summaryText = String(summary.props.children);
@@ -149,7 +149,7 @@ describe('mobile SMS consent screen', () => {
   test('offers no withdrawal when there is nothing to withdraw', async () => {
     respondWith({ status: 'none' });
 
-    render(<SmsConsentScreen />);
+    await render(<SmsConsentScreen />);
 
     await screen.findByTestId(SMS_CONSENT_TEST_IDS.submit);
     expect(screen.queryByTestId(SMS_CONSENT_TEST_IDS.withdraw)).toBeNull();

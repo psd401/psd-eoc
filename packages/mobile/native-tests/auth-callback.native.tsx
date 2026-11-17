@@ -44,7 +44,10 @@ beforeEach(() => {
   mockHasCachedShell = false;
   mockSignInError = null;
   mockSignInRedirectUncaptured = false;
-  mockCompleteGoogleSignIn.mockClear();
+  // mockClear keeps an implementation a previous test installed; reset it so
+  // each test starts from a resume that settles without enrolling the device.
+  mockCompleteGoogleSignIn.mockReset();
+  mockCompleteGoogleSignIn.mockImplementation(async () => {});
   mockReplace.mockClear();
 });
 
@@ -53,7 +56,7 @@ describe('android OIDC callback route', () => {
     // The process was restarted by the intent, so no promptAsync is listening.
     mockParams = { code: CODE, state: STATE };
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(mockCompleteGoogleSignIn).toHaveBeenCalledTimes(1);
@@ -66,7 +69,7 @@ describe('android OIDC callback route', () => {
     // Never settles, which is exactly the window this screen exists to cover.
     mockCompleteGoogleSignIn.mockImplementation(() => new Promise(() => {}));
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
     await act(async () => {});
 
     expect(screen.getByText('Completing sign-in')).toBeTruthy();
@@ -79,7 +82,7 @@ describe('android OIDC callback route', () => {
       mockHasCachedShell = true;
     });
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith('/');
@@ -91,7 +94,7 @@ describe('android OIDC callback route', () => {
     mockIsSigningIn = true;
     mockParams = { code: CODE, state: STATE };
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await act(async () => {});
     expect(mockCompleteGoogleSignIn).not.toHaveBeenCalled();
@@ -105,7 +108,7 @@ describe('android OIDC callback route', () => {
     mockIsSigningIn = true;
     mockParams = { code: CODE, state: STATE };
 
-    const view = render(<AuthCallbackScreen />);
+    const view = await render(<AuthCallbackScreen />);
     await act(async () => {});
     expect(mockCompleteGoogleSignIn).not.toHaveBeenCalled();
 
@@ -113,7 +116,7 @@ describe('android OIDC callback route', () => {
     mockSignInRedirectUncaptured = true;
     mockSignInError =
       'Google sign-in was cancelled. No device session was created.';
-    view.rerender(<AuthCallbackScreen />);
+    await view.rerender(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(mockCompleteGoogleSignIn).toHaveBeenCalledTimes(1);
@@ -128,13 +131,13 @@ describe('android OIDC callback route', () => {
     mockIsSigningIn = true;
     mockParams = { code: CODE, state: STATE };
 
-    const view = render(<AuthCallbackScreen />);
+    const view = await render(<AuthCallbackScreen />);
     await act(async () => {});
 
     mockIsSigningIn = false;
     mockSignInRedirectUncaptured = false;
     mockSignInError = 'Your district account is not in a designated group.';
-    view.rerender(<AuthCallbackScreen />);
+    await view.rerender(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(
@@ -148,12 +151,12 @@ describe('android OIDC callback route', () => {
     mockIsSigningIn = true;
     mockParams = { code: CODE, state: STATE };
 
-    const view = render(<AuthCallbackScreen />);
+    const view = await render(<AuthCallbackScreen />);
     await act(async () => {});
 
     mockIsSigningIn = false;
     mockHasCachedShell = true;
-    view.rerender(<AuthCallbackScreen />);
+    await view.rerender(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith('/');
@@ -164,7 +167,7 @@ describe('android OIDC callback route', () => {
   test('shows a sign-in error for a callback with no authorization code', async () => {
     mockParams = { state: STATE };
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(screen.getByText('Sign-in did not complete')).toBeTruthy();
@@ -178,7 +181,7 @@ describe('android OIDC callback route', () => {
   test('shows a sign-in error for a callback with no state', async () => {
     mockParams = { code: CODE };
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(screen.getByText('Sign-in did not complete')).toBeTruthy();
@@ -189,7 +192,7 @@ describe('android OIDC callback route', () => {
   test('refuses a repeated query parameter rather than guessing a value', async () => {
     mockParams = { code: [CODE, 'second-code'], state: STATE };
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(screen.getByText('Sign-in did not complete')).toBeTruthy();
@@ -200,7 +203,7 @@ describe('android OIDC callback route', () => {
   test('reports a provider refusal without attempting an exchange', async () => {
     mockParams = { error: 'access_denied', state: STATE };
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(
@@ -216,7 +219,7 @@ describe('android OIDC callback route', () => {
       mockSignInError = 'Your district account is not in a designated group.';
     });
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(
@@ -229,23 +232,25 @@ describe('android OIDC callback route', () => {
   test('offers a way back to sign-in that never dead-ends', async () => {
     mockParams = {};
 
-    render(<AuthCallbackScreen />);
+    await render(<AuthCallbackScreen />);
 
     await waitFor(() => {
       expect(screen.getByText('Sign-in did not complete')).toBeTruthy();
     });
-    fireEvent.press(screen.getByRole('button', { name: 'Return to sign-in' }));
+    await fireEvent.press(
+      screen.getByRole('button', { name: 'Return to sign-in' }),
+    );
     expect(mockReplace).toHaveBeenCalledWith('/');
   });
 
   test('resumes only once even when the screen re-renders', async () => {
     mockParams = { code: CODE, state: STATE };
 
-    const view = render(<AuthCallbackScreen />);
+    const view = await render(<AuthCallbackScreen />);
     await waitFor(() => {
       expect(mockCompleteGoogleSignIn).toHaveBeenCalledTimes(1);
     });
-    view.rerender(<AuthCallbackScreen />);
+    await view.rerender(<AuthCallbackScreen />);
     await act(async () => {});
 
     expect(mockCompleteGoogleSignIn).toHaveBeenCalledTimes(1);
