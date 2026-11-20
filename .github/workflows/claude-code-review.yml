@@ -56,4 +56,4 @@ jobs:
     name: claude-review
     permissions: {}
     if: github.repository == 'psd401/psd-eoc' && github.actor == 'dependabot[bot]'
-    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
+    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@d32b85744c06b4e15b41cf2111877939638a3d3e # v1.7.0
