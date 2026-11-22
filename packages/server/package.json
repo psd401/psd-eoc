@@ -23,7 +23,7 @@
     "@aws-sdk/s3-request-presigner": "3.1169.0",
     "@psd-eoc/contracts": "workspace:*",
     "drizzle-orm": "0.45.4",
-    "fontkit": "2.0.4",
+    "fontkit": "3.0.0",
     "jose": "6.2.17",
     "libphonenumber-js": "1.13.16",
     "maplibre-gl": "6.18.0",
