@@ -3,7 +3,10 @@ name: Mobile E2E
 on:
   # Manual and label-gated only. The iOS job runs on macOS, which bills at
   # roughly ten times the Linux rate on a private repository, so this suite
-  # runs when somebody asks for it rather than on a schedule.
+  # runs when somebody asks for it rather than on a schedule. The ci.yml
+  # caller also skips it when its `changes` job finds no code or workflow
+  # file in the pull request, so a label left on a docs-only PR (**/*.md)
+  # spends no macOS minutes.
   workflow_call:
   workflow_dispatch:
 
