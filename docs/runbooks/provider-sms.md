@@ -10,12 +10,15 @@ number allocation never authorize sending; see
 
 **Source-defined conditional monitoring alarms:**
 
-- `psd-eoc-sms-worker-health` fires after two consecutive 20-minute periods
-  without the enabled worker's sanitized heartbeat;
-- `psd-eoc-sms-outbox-to-provider-p95` fires when completed SMS handoff p95
-  reaches 15 seconds for two consecutive periods; and
+- `psd-eoc-sms-worker-health` fires after two consecutive 15-minute periods
+  without the enabled worker's sanitized heartbeat; and
 - `psd-eoc-sms-worker-message-failures` fires when the worker reports a bounded
   work, receipt, or opt-out processing failure.
+
+Handoff latency is charted on the operations dashboard but not alarmed. The
+worker logs one duration per dispatch batch, measured to the last recipient, so
+it grows with the roster and the toll-free send rate rather than signalling a
+fault.
 
 The filters and alarms are created only when the SMS worker is enabled. Their
 source definitions do not prove they are deployed or authorize provider I/O.

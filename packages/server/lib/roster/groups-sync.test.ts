@@ -12,10 +12,13 @@ import {
   type RosterSyncResult,
 } from '@psd-eoc/contracts';
 
+import { z } from 'zod';
+
 import { resetStaffRosterEmailForTests } from '../config/staff-email';
 import {
   createScheduledRosterSyncAuthorizer,
   createSyncRosterHandler,
+  describeRosterBuildRejection,
   diffRosterGroupCounts,
   rosterSourceConfigurationRevisionDigest,
   RosterSyncError,
@@ -23,6 +26,7 @@ import {
   type CompleteRosterSyncPersistenceRequest,
   type LoadedRosterSourceConfiguration,
   type RejectedRosterSyncPersistenceRequest,
+  type RosterBuildRejectionDetail,
   type RosterGroupMember,
   type RosterLocalContact,
   type RosterSyncAlert,
@@ -1142,6 +1146,103 @@ describe('rejected roster synchronization', () => {
     expect(collector.alerts[0]?.errorCodes).toEqual([
       'SYNTHETIC_MEMBER_ROUTABLE',
     ]);
+  });
+
+  test('names the failing contact field of a rejected build without its value', async () => {
+    // From 2026-10-17 the scheduled publish failed every two hours as a bare
+    // ROSTER_BUILD_FAILED. The rejection now says which field failed.
+    const previousDomain = process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+    process.env.GOOGLE_OIDC_HOSTED_DOMAIN = 'example.invalid';
+    resetStaffRosterEmailForTests();
+    try {
+      const store = new MemoryRosterSyncStore(
+        loadedConfiguration([NORTH_SOURCE]),
+      );
+      const rejectedPhone = '555-0100-not-e164';
+      store.localContacts = [
+        {
+          googleSubject: 'synthetic-subject-valid',
+          staffEmail: 'valid-contact@example.invalid',
+          displayName: 'Synthetic Valid Contact',
+          pushEndpoints: [],
+          smsEndpoints: [],
+        },
+        {
+          googleSubject: 'synthetic-subject-rejected',
+          staffEmail: 'rejected-contact@example.invalid',
+          displayName: 'Synthetic Rejected Contact',
+          pushEndpoints: [],
+          smsEndpoints: [
+            {
+              id: '00000000-0000-4000-8000-000000000460',
+              phoneNumber: rejectedPhone,
+            },
+          ],
+        },
+      ] as RosterLocalContact[];
+      const reported: RosterBuildRejectionDetail[] = [];
+      const collector = alertCollector();
+      const result = await syncRoster(
+        SYNC_INPUT,
+        context('roster-sync-rejected-contact-0001'),
+        {
+          ...dependencies(
+            store,
+            { [NORTH_SOURCE.id]: [NORTH_MEMBER] },
+            collector.sink,
+          ),
+          reportBuildRejection: (detail) => reported.push(detail),
+        },
+      );
+      expect(result.outcome).toBe('failed');
+      expect(result.groupFailures[0]?.errorCode).toBe('ROSTER_BUILD_FAILED');
+      expect(store.publishCalls).toBe(0);
+      expect(reported).toEqual([
+        {
+          event: 'roster-build-rejected',
+          errorName: 'ZodError',
+          issues: [
+            {
+              code: 'invalid_format',
+              path: [1, 'smsEndpoints', 0, 'phoneNumber'],
+              format: 'regex',
+              origin: 'string',
+            },
+          ],
+        },
+      ]);
+      const serialized = JSON.stringify(reported);
+      expect(serialized).not.toContain(rejectedPhone);
+      expect(serialized).not.toContain('rejected-contact');
+    } finally {
+      if (previousDomain === undefined) {
+        delete process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+      } else {
+        process.env.GOOGLE_OIDC_HOSTED_DOMAIN = previousDomain;
+      }
+      resetStaffRosterEmailForTests();
+    }
+  });
+
+  test('masks a rejection path key that is not a plain identifier', () => {
+    const error = new z.ZodError([
+      {
+        code: 'custom',
+        path: ['contacts', 'person@example.invalid', 2],
+        message: 'person@example.invalid was refused',
+        input: 'person@example.invalid',
+      },
+    ]);
+    const detail = describeRosterBuildRejection(error);
+    expect(detail.issues).toEqual([
+      { code: 'custom', path: ['contacts', '?', 2] },
+    ]);
+    expect(JSON.stringify(detail)).not.toContain('person@');
+    expect(describeRosterBuildRejection('not an error')).toEqual({
+      event: 'roster-build-rejected',
+      errorName: 'unknown',
+      issues: [],
+    });
   });
 });
 

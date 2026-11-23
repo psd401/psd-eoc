@@ -3188,7 +3188,6 @@ describe('alarm topic delivery', () => {
     ).toEqual(
       [
         'psd-eoc-push-outbox-to-provider-incomplete',
-        'psd-eoc-push-outbox-to-provider-p95',
         'psd-eoc-push-receipt-poll-failures',
         'psd-eoc-push-stuck-production-outbox',
         'psd-eoc-push-worker-health',
@@ -3211,7 +3210,6 @@ describe('alarm topic delivery', () => {
         .sort(),
     ).toEqual(
       [
-        'psd-eoc-sms-outbox-to-provider-p95',
         'psd-eoc-sms-worker-health',
         'psd-eoc-sms-worker-message-failures',
       ].sort(),
