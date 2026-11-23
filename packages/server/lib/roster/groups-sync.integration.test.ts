@@ -1286,6 +1286,75 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     ]);
   });
 
+  test('lists a contact’s push devices most recently seen first', async () => {
+    // The roster build keeps the front of this list when a recipient holds
+    // more endpoints than a snapshot allows, so the order decides which
+    // installs survive. Registration ids run opposite to last-seen time here,
+    // so an id sort would put the stalest device first.
+    const database = databaseConnection().db;
+    const userId = randomUUID();
+    const googleSubject = `synthetic-last-seen-${userId}`;
+    const staffEmail = `synthetic-last-seen-${userId}@example.invalid`;
+    const devices = [
+      { seen: '2026-01-01T00:00:00.000Z', registrationId: 'ffffffff' },
+      { seen: '2026-06-01T00:00:00.000Z', registrationId: '88888888' },
+      { seen: '2026-11-01T00:00:00.000Z', registrationId: '11111111' },
+    ].map((device) => ({
+      ...device,
+      deviceId: randomUUID(),
+      registrationId: `${device.registrationId}-0000-4000-8000-${userId.slice(-12)}`,
+    }));
+    await ensureStaffConfiguration(database);
+    await database.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into users (
+          id, google_subject, email, display_name, facility_scope_kind, created_at
+        ) values (
+          ${userId}::uuid,
+          ${googleSubject},
+          ${staffEmail},
+          'Synthetic Last Seen Staff',
+          'district'::facility_scope_kind,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+      for (const device of devices) {
+        await transaction.execute(sql`
+          insert into device_enrollments (
+            id, user_id, platform, unlock_method, installation_id,
+            enrolled_at, last_seen_at, revoked_at
+          ) values (
+            ${device.deviceId}::uuid,
+            ${userId}::uuid,
+            'ios'::device_platform,
+            'biometric'::device_unlock_method,
+            ${`synthetic-last-seen-${device.deviceId}`},
+            ${device.seen}::timestamptz,
+            ${device.seen}::timestamptz,
+            null
+          )
+        `);
+        await transaction.execute(sql`
+          insert into device_push_token_registrations (
+            id, device_enrollment_id, platform, token, registered_at
+          ) values (
+            ${device.registrationId}::uuid,
+            ${device.deviceId}::uuid,
+            'ios'::device_platform,
+            ${`synthetic-unroutable:${device.deviceId}`},
+            ${device.seen}::timestamptz
+          )
+        `);
+      }
+    });
+
+    const store = createDrizzleRosterSyncStore(database, TEST_PUSH_CUTOVER);
+    const [contact] = await store.loadLocalContacts([staffEmail]);
+    expect(contact?.pushEndpoints.map((endpoint) => endpoint.id)).toEqual(
+      [...devices].reverse().map((device) => device.registrationId),
+    );
+  });
+
   test('serializes concurrent unregistration and enrollment revocation after revalidation', async () => {
     const currentContext = databaseTestContext();
     const database = databaseConnection().db;

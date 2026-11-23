@@ -311,6 +311,12 @@ export function staffRosterEmailSchemaForDomain(
 export type StaffRosterEmail = z.infer<typeof StaffRosterEmailSchema>;
 
 /**
+ * The most endpoints one recipient may hold across every channel. A roster
+ * build fits each recipient under it rather than refusing the whole snapshot.
+ */
+export const MAX_RECIPIENT_ENDPOINTS = 10;
+
+/**
  * Owns a minimized immutable recipient snapshot with group provenance and
  * zero or more endpoint snapshots. Missing valid endpoints remain
  * representable for stale-roster reporting.
@@ -327,7 +333,7 @@ export const RecipientSchema = z
       .min(1)
       .max(50)
       .readonly(),
-    endpoints: z.array(EndpointSchema).max(10).readonly(),
+    endpoints: z.array(EndpointSchema).max(MAX_RECIPIENT_ENDPOINTS).readonly(),
   })
   .strict()
   .superRefine((recipient, context) => {

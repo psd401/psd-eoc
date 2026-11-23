@@ -13,6 +13,7 @@ import {
   DeviceEnrollmentPageSchema,
   DeviceEnrollmentSchema,
   EndpointStatusSchema,
+  MAX_RECIPIENT_ENDPOINTS,
   EndpointStatusRecordSchema,
   PushTokenRegistrationReceiptSchema,
   PushTokenUnregistrationReceiptSchema,
@@ -631,9 +632,6 @@ const EMPTY_LIVE_PUSH_RESOLUTION: LivePushResolution = Object.freeze({
   unclaimed: new Map<string, readonly LivePushRegistration[]>(),
 });
 
-/** Matches the per-recipient endpoint ceiling the roster contract enforces. */
-const MAX_ENDPOINTS_PER_RECIPIENT = 10;
-
 /**
  * Fits a recipient's endpoints under the contract's ceiling without letting a
  * dead placeholder cost a live device its place.
@@ -662,7 +660,7 @@ function orderedWithinCap(
   }
   return [...nonPush, ...livePush, ...fannedOut, ...deadPush].slice(
     0,
-    MAX_ENDPOINTS_PER_RECIPIENT,
+    MAX_RECIPIENT_ENDPOINTS,
   );
 }
 

@@ -5,6 +5,7 @@ import {
   EndpointSchema,
   GroupSourceSchema,
   IdempotencyKeySchema,
+  MAX_RECIPIENT_ENDPOINTS,
   RecipientSchema,
   registerCapabilityHandler,
   RosterGroupSourceRefSchema,
@@ -131,6 +132,7 @@ export interface RosterLocalContact {
   readonly googleSubject: string;
   readonly staffEmail: string;
   readonly displayName: string;
+  /** Most recently seen device first; a roster ceiling keeps the front. */
   readonly pushEndpoints: readonly RosterLocalPushEndpoint[];
   readonly smsEndpoints: readonly RosterLocalSmsEndpoint[];
 }
@@ -817,6 +819,15 @@ function buildRecipients(
           'Local identity evidence conflicted with the roster source.',
         );
       }
+      // One recipient's stale installs must never refuse the whole roster.
+      // Email and SMS always fit; push takes the remaining room in the order
+      // the contact lists it, most recently seen device first, so an install
+      // nobody has opened in months is what a ceiling costs.
+      const smsEndpoints = local?.smsEndpoints ?? [];
+      const pushEndpoints = (local?.pushEndpoints ?? []).slice(
+        0,
+        Math.max(0, MAX_RECIPIENT_ENDPOINTS - 1 - smsEndpoints.length),
+      );
       const endpoints = [
         EndpointSchema.parse({
           id: trustedUuid(uuid),
@@ -825,7 +836,7 @@ function buildRecipients(
           capturedAt,
           email: member.email,
         }),
-        ...(local?.pushEndpoints ?? []).map((endpoint) =>
+        ...pushEndpoints.map((endpoint) =>
           EndpointSchema.parse({
             id: endpoint.id,
             channel: 'push',
@@ -837,7 +848,7 @@ function buildRecipients(
             token: endpoint.token,
           }),
         ),
-        ...(local?.smsEndpoints ?? []).map((endpoint) =>
+        ...smsEndpoints.map((endpoint) =>
           EndpointSchema.parse({
             id: endpoint.id,
             channel: 'sms',
@@ -2024,6 +2035,7 @@ export function createDrizzleRosterSyncStore(
         await transaction.execute(
           sql`set transaction isolation level repeatable read, read only`,
         );
+        const deviceLastSeen = new Map<string, number>();
         const contactMap = new Map<
           string,
           {
@@ -2092,6 +2104,7 @@ export function createDrizzleRosterSyncStore(
               id: devicePushTokenRegistrations.id,
               deviceEnrollmentId:
                 devicePushTokenRegistrations.deviceEnrollmentId,
+              deviceLastSeenAt: deviceEnrollments.lastSeenAt,
               googleSubject: users.googleSubject,
               platform: devicePushTokenRegistrations.platform,
               provider: devicePushTokenRegistrations.provider,
@@ -2186,6 +2199,7 @@ export function createDrizzleRosterSyncStore(
                   'A device had ambiguous active push-provider registrations.',
                 );
               }
+              deviceLastSeen.set(row.id, row.deviceLastSeenAt.getTime());
               contact.pushEndpoints.push({
                 id: row.id,
                 platform,
@@ -2239,8 +2253,11 @@ export function createDrizzleRosterSyncStore(
               Object.freeze({
                 ...contact,
                 pushEndpoints: Object.freeze(
-                  contact.pushEndpoints.sort((left, right) =>
-                    left.id.localeCompare(right.id),
+                  contact.pushEndpoints.sort(
+                    (left, right) =>
+                      (deviceLastSeen.get(right.id) ?? 0) -
+                        (deviceLastSeen.get(left.id) ?? 0) ||
+                      left.id.localeCompare(right.id),
                   ),
                 ),
                 smsEndpoints: Object.freeze(contact.smsEndpoints),
