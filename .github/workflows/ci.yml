@@ -4,8 +4,8 @@ on:
   pull_request:
     branches: [main]
     types: [labeled, opened, reopened, synchronize]
-  push:
-    branches: [main]
+  # pull_request only: checks don't re-run after the merge (psd-dev-standards
+  # standards/06 §4, Runner minutes).
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   # Decides which of the expensive jobs need to run. A workflow-only or
   # docs-only change should not pay for the full test suite or a mobile
-  # prebuild. On push to main everything runs.
+  # prebuild. Any event other than pull_request runs everything.
   changes:
     name: Detect changed areas
     runs-on: ubuntu-latest
@@ -43,7 +43,7 @@ jobs:
               echo "mobile=true"
               echo "workflows=true"
             } >> "$GITHUB_OUTPUT"
-            echo "Push to main: running everything." >> "$GITHUB_STEP_SUMMARY"
+            echo "Not a pull request: running everything." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           base=$(jq -er '.pull_request.base.sha' "$GITHUB_EVENT_PATH")
@@ -349,9 +349,13 @@ jobs:
           grep -A1 -F '<key>UIUserInterfaceStyle</key>' ios/PSDEOC/Info.plist | grep -Fq '<string>Light</string>'
           grep -RFq --include='*.entitlements' '<key>aps-environment</key>' ios
 
+  # The iOS half runs on macOS, so a docs-only change skips it even when
+  # labelled (standards/06 §4: macOS jobs skip docs-only changes). Workflow
+  # changes still run it, so a change to mobile-e2e.yml can be tested.
   native-e2e:
     name: Opt-in native E2E
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'mobile-e2e') || contains(github.event.pull_request.labels.*.name, 'direct-push-cutover'))
+    needs: changes
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.code == 'true' || needs.changes.outputs.workflows == 'true') && (contains(github.event.pull_request.labels.*.name, 'mobile-e2e') || contains(github.event.pull_request.labels.*.name, 'direct-push-cutover'))
     uses: ./.github/workflows/mobile-e2e.yml
     permissions:
       contents: read
