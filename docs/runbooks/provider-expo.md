@@ -9,13 +9,15 @@ authorizes connecting or testing a provider.
 
 **Conditional monitoring alarms:**
 
-- `psd-eoc-push-outbox-to-provider-p95` fires when completed push handoff p95
-  reaches 5 seconds; and
 - `psd-eoc-push-outbox-to-provider-incomplete` fires when at least one push
   work item fails before a completed handoff is recorded; and
 - `psd-eoc-push-stuck-production-outbox` fires when the enabled worker's
   count-only sample finds a staff outbox row unpublished and nonterminal for
   one minute, or when that sample stops reporting.
+
+Handoff latency is charted on the operations dashboard but not alarmed. The
+worker logs one duration per dispatch batch, measured to the last recipient, so
+it grows with the roster rather than signalling a fault.
 
 The stack creates these alarms only with the protected worker enablement
 condition, so no alarm can outlive its log publisher. Source definitions and a

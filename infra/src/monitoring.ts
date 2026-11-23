@@ -189,21 +189,16 @@ function configureSmsWorkerMonitoring(
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     },
-    {
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      datapointsToAlarm: 2,
-      evaluationPeriods: 2,
-      id: 'SmsProviderLatencyAlarm',
-      metric: customMetric('SmsOutboxToProviderLatency', {
-        statistic: 'p95',
-        unit: cloudwatch.Unit.MILLISECONDS,
-      }),
-      name: 'psd-eoc-sms-outbox-to-provider-p95',
-      summary: 'SMS outbox-to-provider p95 exceeded the 15-second SLO.',
-      threshold: 15_000,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    },
+    // There is deliberately no SMS latency alarm. `SmsOutboxToProviderLatency`
+    // is logged once per dispatch batch and measures the time until the batch's
+    // last recipient was handed to the provider, so its "p95" is one batch's
+    // total. That total grows with the roster (toll-free origination is rate
+    // limited), so a fixed 15-second threshold fired and recovered on nearly
+    // every real event: 30-day median 17 s across 64 sends to 11-25 people.
+    // Two sends minutes apart satisfied "two of two datapoints" because
+    // CloudWatch skips the empty minutes between them. The metric stays for
+    // the dashboard; stuck or failed delivery pages through the queue-age,
+    // dead-letter, worker-health, and failure alarms.
     {
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
@@ -327,20 +322,11 @@ function configurePushWorkerMonitoring(
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     },
-    {
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      id: 'PushProviderLatencyAlarm',
-      metric: customMetric('OutboxToProviderLatency', {
-        statistic: 'p95',
-        unit: cloudwatch.Unit.MILLISECONDS,
-      }),
-      name: 'psd-eoc-push-outbox-to-provider-p95',
-      runbookAnchor: 'runbook-outbox-to-provider-latency',
-      summary: 'Push outbox-to-provider p95 exceeded the five-second SLO.',
-      threshold: 5_000,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    },
+    // No push latency alarm, for the reason the SMS worker gives: the logged
+    // duration is one value per dispatch batch, measured to the batch's last
+    // recipient, so a fixed five-second threshold paged on most real events
+    // (30-day median 6.2 s across 64 sends). Undelivered push still pages
+    // through the incomplete, stuck-outbox, and worker-health alarms.
     {
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,

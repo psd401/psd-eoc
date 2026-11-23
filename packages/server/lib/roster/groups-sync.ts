@@ -270,6 +270,89 @@ export interface RosterSyncDependencies {
   readonly now?: () => Date;
   readonly uuid?: () => string;
   readonly fetchConcurrency?: number;
+  /**
+   * Receives a value-free description of a roster build that failed for a
+   * reason other than a named `RosterSyncError`. Defaults to a structured
+   * log line.
+   */
+  readonly reportBuildRejection?: (detail: RosterBuildRejectionDetail) => void;
+}
+
+/** Field paths and schema facts only: never the rejected value. */
+export interface RosterBuildRejectionDetail {
+  readonly event: 'roster-build-rejected';
+  readonly errorName: string;
+  readonly issues: readonly Readonly<{
+    code: string;
+    path: readonly (string | number)[];
+    expected?: string;
+    format?: string;
+    origin?: string;
+    minimum?: number;
+    maximum?: number;
+  }>[];
+}
+
+const MAX_REPORTED_ISSUES = 10;
+const SAFE_PATH_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
+
+/**
+ * Describes why a roster build threw, without any rejected value.
+ *
+ * A rejected build used to surface only as `ROSTER_BUILD_FAILED`. From
+ * 2026-10-17 the scheduled publish failed every two hours that way and the
+ * log could not say which contact field was at fault. Zod issue codes, schema
+ * keys, array indices, and the schema's own limits identify the field; the
+ * issue `message` and `input` are dropped because either can carry the value,
+ * and a path key that is not a plain identifier (a record key could be an
+ * address) is replaced with `?`.
+ */
+export function describeRosterBuildRejection(
+  error: unknown,
+): RosterBuildRejectionDetail {
+  const issues =
+    error instanceof z.ZodError
+      ? error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => {
+          const facts = issue as unknown as Readonly<Record<string, unknown>>;
+          const text = (key: string): Record<string, string> =>
+            typeof facts[key] === 'string' ? { [key]: facts[key] } : {};
+          const number = (key: string): Record<string, number> => {
+            const value = facts[key];
+            if (typeof value === 'number') return { [key]: value };
+            if (typeof value === 'bigint') return { [key]: Number(value) };
+            return {};
+          };
+          return Object.freeze({
+            code: issue.code,
+            path: Object.freeze(
+              issue.path.map((segment) =>
+                typeof segment === 'number'
+                  ? segment
+                  : typeof segment === 'string' && SAFE_PATH_KEY.test(segment)
+                    ? segment
+                    : '?',
+              ),
+            ),
+            ...text('expected'),
+            ...text('format'),
+            ...text('origin'),
+            ...number('minimum'),
+            ...number('maximum'),
+          });
+        })
+      : [];
+  return Object.freeze({
+    event: 'roster-build-rejected',
+    errorName:
+      error instanceof Error && SAFE_PATH_KEY.test(error.name)
+        ? error.name
+        : 'unknown',
+    issues: Object.freeze(issues),
+  });
+}
+
+function writeRosterBuildRejection(detail: RosterBuildRejectionDetail): void {
+  console.error(JSON.stringify(detail));
 }
 
 function stableJson(value: unknown): string {
@@ -609,6 +692,45 @@ interface AccumulatedMember {
   readonly groupSourceRefs: Map<string, RosterGroupSourceRef>;
 }
 
+function localContactSchema() {
+  return z
+    .object({
+      googleSubject: z.string().trim().min(1).max(255),
+      staffEmail: staffRosterEmail(),
+      displayName: z.string().trim().min(1).max(160),
+      pushEndpoints: z.array(
+        z
+          .object({
+            id: UuidSchema,
+            platform: z.enum(['ios', 'android']),
+            provider: z.enum(['expo', 'apns', 'fcm']),
+            serviceEnvironment: z.enum(['development', 'production']),
+            token: z.string().trim().min(16).max(4_096),
+          })
+          .transform((endpoint) => Object.freeze(endpoint)),
+      ),
+      // Validated here as untrusted contact input, exactly like a push token.
+      smsEndpoints: z.array(
+        z
+          .object({
+            id: UuidSchema,
+            phoneNumber: z
+              .string()
+              .trim()
+              .regex(/^\+[1-9]\d{7,14}$/u),
+          })
+          .transform((endpoint) => Object.freeze(endpoint)),
+      ),
+    })
+    .transform((contact) =>
+      Object.freeze({
+        ...contact,
+        pushEndpoints: Object.freeze(contact.pushEndpoints),
+        smsEndpoints: Object.freeze(contact.smsEndpoints),
+      }),
+    );
+}
+
 function buildRecipients(
   groups: readonly FetchedGroup[],
   localContacts: readonly RosterLocalContact[],
@@ -657,49 +779,12 @@ function buildRecipients(
 
   const contacts = new Map<string, RosterLocalContact>();
   const contactSubjects = new Set<string>();
-  for (const rawContact of localContacts) {
-    const googleSubject = z
-      .string()
-      .trim()
-      .min(1)
-      .max(255)
-      .parse(rawContact.googleSubject);
-    const contact = Object.freeze({
-      googleSubject,
-      staffEmail: staffRosterEmail().parse(rawContact.staffEmail),
-      displayName: z
-        .string()
-        .trim()
-        .min(1)
-        .max(160)
-        .parse(rawContact.displayName),
-      pushEndpoints: Object.freeze(
-        rawContact.pushEndpoints.map((endpoint) =>
-          Object.freeze({
-            id: UuidSchema.parse(endpoint.id),
-            platform: z.enum(['ios', 'android']).parse(endpoint.platform),
-            provider: z.enum(['expo', 'apns', 'fcm']).parse(endpoint.provider),
-            serviceEnvironment: z
-              .enum(['development', 'production'])
-              .parse(endpoint.serviceEnvironment),
-            token: z.string().trim().min(16).max(4_096).parse(endpoint.token),
-          }),
-        ),
-      ),
-      // Validated here as untrusted contact input, exactly like a push token.
-      smsEndpoints: Object.freeze(
-        rawContact.smsEndpoints.map((endpoint) =>
-          Object.freeze({
-            id: UuidSchema.parse(endpoint.id),
-            phoneNumber: z
-              .string()
-              .trim()
-              .regex(/^\+[1-9]\d{7,14}$/u)
-              .parse(endpoint.phoneNumber),
-          }),
-        ),
-      ),
-    });
+  // One schema over the whole list, rather than a parse per field, so a
+  // rejection names the contact index and field that failed. Those paths are
+  // what `describeRosterBuildRejection` logs; a bare per-field parse fails
+  // with an empty path and the scheduled publish could only say
+  // ROSTER_BUILD_FAILED.
+  for (const contact of z.array(localContactSchema()).parse(localContacts)) {
     if (
       contacts.has(contact.staffEmail) ||
       contactSubjects.has(contact.googleSubject)
@@ -1078,6 +1163,11 @@ export async function syncRoster(
       } catch (error) {
         const rejectedAt = trustedTimestamp(now);
         const rejectionCode = errorCode(error, 'ROSTER_BUILD_FAILED');
+        if (!(error instanceof RosterSyncError)) {
+          (dependencies.reportBuildRejection ?? writeRosterBuildRejection)(
+            describeRosterBuildRejection(error),
+          );
+        }
         persistedResult = await dependencies.store.recordRejected({
           reservationId: reservation.id,
           loadedConfiguration: loaded,
