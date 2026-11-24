@@ -1224,6 +1224,124 @@ describe('rejected roster synchronization', () => {
     }
   });
 
+  test('fits a recipient with stale installs under the endpoint ceiling', async () => {
+    // From 2026-10-17 one staff member's twelve-plus unretired installs made
+    // every scheduled publish fail with `too_big` at `endpoints`. One
+    // recipient's stale installs now cost only their oldest devices.
+    const previousDomain = process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+    process.env.GOOGLE_OIDC_HOSTED_DOMAIN = 'example.invalid';
+    resetStaffRosterEmailForTests();
+    try {
+      const manualSource = (
+        id: string,
+        purpose: 'building' | 'others',
+        facilityId: string | null,
+      ): GroupSource =>
+        GroupSourceSchema.parse({
+          id,
+          kind: 'manual',
+          purpose,
+          facilityId,
+          grantedRole: null,
+          displayName: `Manual ${purpose}`,
+          active: true,
+          membersCapturedAt: null,
+          googleGroupId: null,
+          email: null,
+          fixtureKey: null,
+          createdAt: HISTORICAL_TIME,
+        });
+      const northManual = manualSource(
+        '00000000-0000-4000-8000-000000000470',
+        'building',
+        IDS.facilityNorth,
+      );
+      const southManual = manualSource(
+        '00000000-0000-4000-8000-000000000471',
+        'building',
+        IDS.facilitySouth,
+      );
+      const othersManual = manualSource(
+        '00000000-0000-4000-8000-000000000472',
+        'others',
+        null,
+      );
+      const store = new MemoryRosterSyncStore(
+        loadedConfiguration(
+          [northManual, southManual, othersManual],
+          REVISION_DIGEST,
+          undefined,
+          'staff',
+        ),
+      );
+      const email = 'stale-installs@example.invalid';
+      // Twelve devices, most recently seen first, as the loader orders them.
+      const pushIds = Array.from(
+        { length: 12 },
+        (_, index) =>
+          `00000000-0000-4000-8000-0000000005${String(index).padStart(2, '0')}`,
+      );
+      store.localContacts = [
+        {
+          googleSubject: 'synthetic-subject-stale-installs',
+          staffEmail: email,
+          displayName: 'Synthetic Stale Installs',
+          pushEndpoints: pushIds.map((id) => ({
+            id,
+            platform: 'android',
+            provider: 'fcm',
+            serviceEnvironment: 'production',
+            token: `synthetic-unroutable:${id}`,
+          })),
+          smsEndpoints: [
+            {
+              id: '00000000-0000-4000-8000-000000000473',
+              phoneNumber: '+12025550173',
+            },
+          ],
+        },
+      ] as RosterLocalContact[];
+      const result = await syncRoster(
+        SYNC_INPUT,
+        context('roster-sync-stale-installs-0001'),
+        dependencies(
+          store,
+          {
+            [northManual.id]: [
+              member(email, 'Synthetic Stale Installs', email),
+            ],
+            [southManual.id]: [SOUTH_MEMBER],
+            [othersManual.id]: [],
+          },
+          alertCollector().sink,
+        ),
+      );
+      expect(result.outcome).toBe('complete');
+      const recipient = store.snapshots[0]?.recipients.find(
+        (candidate) => candidate.staffEmail === email,
+      );
+      expect(recipient?.endpoints).toHaveLength(10);
+      expect(recipient?.endpoints.map((endpoint) => endpoint.channel)).toEqual([
+        'email',
+        ...Array<'push'>(8).fill('push'),
+        'sms',
+      ]);
+      // The eight most recently seen devices are kept; the oldest four go.
+      expect(
+        recipient?.endpoints
+          .filter((endpoint) => endpoint.channel === 'push')
+          .map((endpoint) => endpoint.id),
+      ).toEqual(pushIds.slice(0, 8));
+    } finally {
+      if (previousDomain === undefined) {
+        delete process.env.GOOGLE_OIDC_HOSTED_DOMAIN;
+      } else {
+        process.env.GOOGLE_OIDC_HOSTED_DOMAIN = previousDomain;
+      }
+      resetStaffRosterEmailForTests();
+    }
+  });
+
   test('masks a rejection path key that is not a plain identifier', () => {
     const error = new z.ZodError([
       {
