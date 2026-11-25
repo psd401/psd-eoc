@@ -52,6 +52,7 @@ COPY workers/shared/attempt-execution-client.ts workers/shared/attempt-execution
 COPY workers/shared/batch-message.ts workers/shared/batch-message.ts
 COPY workers/shared/delivery-state-client.ts workers/shared/delivery-state-client.ts
 COPY workers/shared/failure-detail.ts workers/shared/failure-detail.ts
+COPY workers/shared/pacing.ts workers/shared/pacing.ts
 COPY workers/shared/processor.ts workers/shared/processor.ts
 COPY workers/shared/retry.ts workers/shared/retry.ts
 COPY workers/shared/terminal-failure.ts workers/shared/terminal-failure.ts

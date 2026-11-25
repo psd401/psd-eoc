@@ -19,6 +19,7 @@ import {
 import { AttemptExecutionClient } from '../shared/attempt-execution-client';
 import { workerAttemptFingerprint } from '../shared/attempt';
 import { DeliveryStateWritebackClient } from '../shared/delivery-state-client';
+import { forEachConcurrently } from '../shared/pacing';
 import type { WorkerAttemptProcessResult } from '../shared/processor';
 import { isTerminalFailure, retireMessage } from '../shared/terminal-failure';
 import { AwsEumSmsRuntime } from './runtime';
@@ -44,6 +45,13 @@ const UNMATCHED_RECEIPT_RETRY_SECONDS = Object.freeze([15, 30, 60, 120]);
 const UNMATCHED_RECEIPT_RECEIVES = UNMATCHED_RECEIPT_RETRY_SECONDS.length + 1;
 const VISIBILITY_TIMEOUT_SECONDS = 120;
 const MAX_RECONCILIATION_SEGMENTS = 10;
+/**
+ * Recipients of one batch in flight at once. Each send spends about a second
+ * on ledger round trips and the provider call; the client's pacer, not this
+ * number, keeps the provider rate. One at a time, a 27-person batch took 29
+ * seconds.
+ */
+export const SMS_SEND_CONCURRENCY = 4;
 /**
  * How often the worker says it is alive.
  *
@@ -691,18 +699,22 @@ async function processBody(
           event: 'attempts',
         });
       }
-      for (const workItem of page.items) {
-        const outcome = await processWorkItem(
-          workItem,
-          runtime,
-          state,
-          sqs,
-          configuration,
-          now,
-        );
-        count += 1;
-        defer ||= outcome === 'defer';
-      }
+      await forEachConcurrently(
+        page.items,
+        SMS_SEND_CONCURRENCY,
+        async (workItem) => {
+          const outcome = await processWorkItem(
+            workItem,
+            runtime,
+            state,
+            sqs,
+            configuration,
+            now,
+          );
+          count += 1;
+          defer ||= outcome === 'defer';
+        },
+      );
       if (page.nextCursor === null) break;
       cursor = page.nextCursor;
     }

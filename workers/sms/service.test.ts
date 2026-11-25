@@ -5,9 +5,13 @@ import {
   ReceiveMessageCommand,
 } from '@aws-sdk/client-sqs';
 
+import { DispatchBatchSchema } from '@psd-eoc/contracts';
+
+import { staffDrillBatch } from '../shared/test-fixtures';
 import {
   readSmsServiceConfiguration,
   runSmsService,
+  SMS_SEND_CONCURRENCY,
   type SmsServiceDependencies,
 } from './service';
 import type { SmsRuntimeClient } from './state-client';
@@ -517,6 +521,80 @@ describe('SMS long-poll service', () => {
     expect(
       commands.some((command) => command instanceof DeleteMessageCommand),
     ).toBe(false);
+  });
+
+  test('sends to several recipients of one batch at once, bounded by the concurrency limit', async () => {
+    const source = staffDrillBatch();
+    const batch = DispatchBatchSchema.parse({
+      ...source,
+      channel: 'sms',
+      renderedMessage: {
+        eventKind: source.eventKind,
+        templateMode: source.templateMode,
+        purpose: source.purpose,
+        classificationMarker: 'DRILL',
+        channel: 'sms',
+        body: '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic drill only. [DRILL]',
+      },
+      integrationId: 'aws-eum-sms',
+    });
+    const logs: unknown[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    await runSmsService({
+      environment: ENABLED_ENVIRONMENT,
+      now: () => NOW,
+      shouldContinue: pollsPerQueue({ work: 1, receipt: 0 }),
+      log: (value) => logs.push(value),
+      runtime: {
+        processDeliveryEvent: () => Promise.reject(new Error('unused')),
+        async processQueueAttempt() {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          inFlight -= 1;
+          return {
+            attemptResult: { kind: 'completed' },
+            optOutRecord: null,
+          } as never;
+        },
+        reconcileOptOuts: () => Promise.reject(new Error('unused')),
+      },
+      state: {
+        resolveBatch: () =>
+          Promise.resolve({
+            kind: 'resolved',
+            items: Array.from({ length: 10 }, () => ({})),
+            nextCursor: null,
+          } as never),
+      } as unknown as SmsRuntimeClient,
+      sqs: {
+        send(command) {
+          return command instanceof ReceiveMessageCommand
+            ? Promise.resolve({
+                Messages: [
+                  {
+                    Body: JSON.stringify(batch),
+                    ReceiptHandle: 'synthetic-batch-receipt-handle',
+                    Attributes: {
+                      SentTimestamp: String(NOW - 1_000),
+                      ApproximateReceiveCount: '1',
+                    },
+                  },
+                ],
+              })
+            : Promise.resolve({});
+        },
+      },
+    });
+
+    expect(maxInFlight).toBe(SMS_SEND_CONCURRENCY);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: 'sms-worker-message-completed',
+        count: 10,
+      }),
+    );
   });
 
   test('acknowledges a terminal DLQ attempt without visibility deferral', async () => {

@@ -14,7 +14,11 @@ import {
   TIMES,
 } from '../shared/test-fixtures';
 import type { ProviderSendOutcome } from '../shared/processor';
-import { EmailQueueRuntime, EmailQueueRuntimeError } from './queue-runtime';
+import {
+  EMAIL_BATCH_SEND_CONCURRENCY,
+  EmailQueueRuntime,
+  EmailQueueRuntimeError,
+} from './queue-runtime';
 
 function workItem(): EmailWorkerAttemptWorkItem {
   const source = staffDrillBatch();
@@ -134,6 +138,49 @@ describe('email queue runtime', () => {
     });
     expect(calls).toHaveLength(2);
     expect(JSON.stringify(calls)).toContain('verified-sqs-source');
+  });
+
+  test('sends to several recipients of one batch at once, bounded by the concurrency limit', async () => {
+    const item = workItem();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const runtime = new EmailQueueRuntime({
+      queueArn: 'arn:aws:sqs:us-east-1:000000000000:email',
+      state: {
+        resolveBatch: () =>
+          Promise.resolve({
+            items: Array.from({ length: 10 }, () => item),
+            nextCursor: null,
+            suppressedCount: 0,
+          }),
+        resolveRetry: () => Promise.resolve({ kind: 'expired' }),
+      },
+      worker: {
+        async processQueueAttempt() {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          inFlight -= 1;
+          return {
+            kind: 'completed',
+            replayed: false,
+            outcome: providerOutcome('provider-accepted'),
+            attemptedEvidence: outcomeEvidence('provider-accepted'),
+            outcomeEvidence: outcomeEvidence('provider-accepted'),
+          };
+        },
+      },
+      queue: { publishAttemptReference: () => Promise.resolve() },
+    });
+
+    await expect(
+      runtime.processQueueMessage(
+        JSON.stringify(item.batch),
+        TIMES.created,
+        IDS.request,
+      ),
+    ).resolves.toMatchObject({ kind: 'completed', acceptedCount: 10 });
+    expect(maxInFlight).toBe(EMAIL_BATCH_SEND_CONCURRENCY);
   });
 
   test('publishes only an opaque source-attempt retry reference', async () => {

@@ -23,7 +23,7 @@ openwiki:
     - workers/push/worker.ts
     - workers/push/direct-worker.ts
     - workers/push/receipt-lifecycle.ts
-  symbols: [WorkerAttemptProcessor, AttemptIdempotentProviderAdapter, AttemptExecutionStore, parseWorkerBatchMessage, parseWorkerAttemptWorkItem, DeliveryStateWritebackClient, DEFAULT_RETRY_POLICY, SesEmailRuntime, AwsEumSmsRuntime, ExpoPushRuntime, PushProviderRouter, DirectPushWorker, runEmailService, EMAIL_WORKER_CONCURRENCY]
+  symbols: [WorkerAttemptProcessor, AttemptIdempotentProviderAdapter, AttemptExecutionStore, parseWorkerBatchMessage, parseWorkerAttemptWorkItem, DeliveryStateWritebackClient, DEFAULT_RETRY_POLICY, SesEmailRuntime, AwsEumSmsRuntime, ExpoPushRuntime, PushProviderRouter, DirectPushWorker, runEmailService, EMAIL_WORKER_CONCURRENCY, EMAIL_BATCH_SEND_CONCURRENCY, SMS_SEND_CONCURRENCY, createSendPacer, forEachConcurrently]
   test_paths:
     - workers/shared/processor.test.ts
     - workers/shared/retry.test.ts
@@ -91,6 +91,12 @@ Provider activation is dark-launched and gated by protected CDK parameters, docu
 
 `runEmailService` in `workers/email/service.ts` runs `EMAIL_WORKER_CONCURRENCY` (4) independent poll loops inside one task. Each loop calls `pollOnce` (one SQS receive, then one batch or retry processed with a visibility heartbeat) until `shouldContinue` returns false. The loops are concurrent because one serial loop let the queue fall minutes behind during the 2026-10-15 ShakeOut drill. A loop that throws stops its siblings, and the service rejects only after every loop has returned, so the ECS task restarts whole rather than running partly. Batch currency for each email item is checked on the server, not in the worker (see [send-time currency](../domain/notification-pipeline.md#send-time-currency)).
 
+### Recipients in flight and provider pacing
+
+Within one batch, the email runtime (`queue-runtime.ts`) sends to `EMAIL_BATCH_SEND_CONCURRENCY` (4) recipients at once and the SMS service (`sms/service.ts`) to `SMS_SEND_CONCURRENCY` (4), through `forEachConcurrently` in `workers/shared/pacing.ts`. One at a time, each recipient took about a second of ledger round trips and the provider call, so a 27-person text batch took 29 s and a 70-person email batch a minute. After one recipient throws, no further recipient of that page starts, the running ones finish, and the first error reaches the caller as a sequential loop's would.
+
+The SDK clients never retry (`maxAttempts: 1`), so a throttled call becomes a ledger retry minutes later. Each provider client therefore paces its sends with one `createSendPacer` per process: `AWS_EUM_SENDS_PER_SECOND` (3, a toll-free number's default rate) in `sms/aws-eum-client.ts`, and `SES_SENDS_PER_SECOND` (10, under SES's 14 per second for the account) in `email/aws-client.ts`. Opt-out reads are not paced. The pacer, not the concurrency, holds the provider rate, and it counts only this process: a second task of the same worker would double the rate.
+
 ## Invariants to preserve
 
 - Redelivery recovers the same `attempt.id`; a crash after a provider side effect must resolve to the original logical send via provider idempotency or a durable send ledger. An adapter without that capability stays blocked.
@@ -98,6 +104,7 @@ Provider activation is dark-launched and gated by protected CDK parameters, docu
 - Use the exact rendered message from the batch; never re-render or strip `[INCIDENT]`/`[DRILL]` markers. Adapter channel and integration ID must exactly match the batch. A channel's enabled flag is rechecked immediately before provider I/O.
 - Never log a token, address or phone number; never persist raw provider responses.
 - Email poll loops run side by side: separate queue messages never share an attempt, and each attempt is claimed under a lease. A receive failure in one loop fails the whole email task.
+- Every SMS and SES send passes the client's pacer before it reaches the provider; recipients of one batch run side by side for the same reason batches do (each attempt is its own lease).
 
 ## Change guidance
 
@@ -105,4 +112,5 @@ Provider activation is dark-launched and gated by protected CDK parameters, docu
 - Changing batch or evidence shape: contracts first (`notification.ts`, `email-runtime.ts`, `sms-runtime.ts`, `push-runtime.ts`), then server stores in `packages/server/lib/notify/*-runtime-store.ts` and internal routes under `app/api/internal/`, then workers.
 - A provider-live validation is an external, human-run integration (see `docs/runbooks/provider-*.md`); automated tests must stay synthetic. Never point a write-capable flow at a live provider without the product owner's explicit instruction in-session.
 - Email polling changes: `workers/email/service.test.ts`, describe `email service loop`. Test "works on several queued batches at once" asserts that `EMAIL_WORKER_CONCURRENCY` batches are in flight together and fails after 2 s if they are not; test "stops every loop and fails when one receive fails" asserts the sibling loops stop and the rejection reaches the caller.
+- Send concurrency or pacing changes: `workers/shared/pacing.test.ts`; the "sends to several recipients of one batch at once" tests in `workers/sms/service.test.ts` and `workers/email/queue-runtime.test.ts`; and the pacing tests in `workers/sms/aws-eum-client.test.ts` and `workers/email/aws-client.test.ts`.
 - Narrow checks: `bun test workers/<channel>`; DB-backed worker tests (`*.integration.test.ts`) need the synthetic DB ([verification](../testing/verification-and-testing.md)). `bun run --cwd workers typecheck`.

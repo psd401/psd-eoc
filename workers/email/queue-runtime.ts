@@ -5,9 +5,17 @@ import {
 } from '@psd-eoc/contracts';
 
 import { parseWorkerBatchMessage } from '../shared/batch-message';
+import { forEachConcurrently } from '../shared/pacing';
 import type { WorkerAttemptProcessResult } from '../shared/processor';
 import type { SesEmailRuntime } from './runtime';
 import type { EmailRuntimeClient } from './state-client';
+
+/**
+ * Recipients of one batch in flight at once. The worker also runs several
+ * batches side by side; the SES client's pacer, not this number, keeps the
+ * account's sending rate. One at a time, a 70-person batch took a minute.
+ */
+export const EMAIL_BATCH_SEND_CONCURRENCY = 4;
 
 export interface EmailRetryPublisher {
   publishAttemptReference(
@@ -279,11 +287,15 @@ export class EmailQueueRuntime {
         enqueuedAt,
         cursor,
       );
-      for (const item of page.items) {
-        const result = await this.#resultForAttempt(item, requestId);
-        acceptedCount += result.accepted;
-        incompleteCount += result.incomplete;
-      }
+      await forEachConcurrently(
+        page.items,
+        EMAIL_BATCH_SEND_CONCURRENCY,
+        async (item) => {
+          const result = await this.#resultForAttempt(item, requestId);
+          acceptedCount += result.accepted;
+          incompleteCount += result.incomplete;
+        },
+      );
       suppressedCount += page.suppressedCount;
       if (page.nextCursor === null) break;
       cursor = page.nextCursor;

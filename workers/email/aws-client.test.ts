@@ -108,3 +108,29 @@ describe('AWS SES v2 client boundary', () => {
     );
   });
 });
+
+describe('SES send pacing', () => {
+  test('waits for the pacer before an email reaches SES', async () => {
+    const commands: unknown[] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new AwsSesV2Client(
+      {
+        send(command: unknown) {
+          commands.push(command);
+          return Promise.resolve({ MessageId: 'synthetic-provider-id' });
+        },
+      } as unknown as SESv2Client,
+      () => gate,
+    );
+
+    const sent = client.sendEmail(INPUT);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(commands).toHaveLength(0);
+    release();
+    await sent;
+    expect(commands).toHaveLength(1);
+  });
+});
