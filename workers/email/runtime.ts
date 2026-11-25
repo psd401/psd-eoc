@@ -1,10 +1,13 @@
 import {
+  createSendPacer,
   WorkerAttemptProcessor,
   type AttemptEvidenceWriter,
   type AttemptExecutionStore,
   type ProviderSendAuthorizer,
+  type SendPacer,
   type WorkerAttemptProcessResult,
 } from '../shared';
+import { SES_SENDS_PER_SECOND } from './aws-client';
 import { awsPartitionSupportsRegion } from './aws-arn';
 import type { EmailBranding } from './email-message';
 import {
@@ -38,6 +41,8 @@ export type SesEmailRuntimeMode =
       executionStore: AttemptExecutionStore;
       evidenceWriter: AttemptEvidenceWriter;
       authorizeProviderSend: ProviderSendAuthorizer;
+      /** Provider rate slot; defaults to `SES_SENDS_PER_SECOND` per runtime. */
+      paceProviderSend?: SendPacer;
     }>;
 
 export interface SesEmailRuntimeOptions {
@@ -159,6 +164,8 @@ export class SesEmailRuntime {
             executionStore: mode.executionStore,
             evidenceWriter: mode.evidenceWriter,
             authorizeProviderSend: mode.authorizeProviderSend,
+            paceProviderSend:
+              mode.paceProviderSend ?? createSendPacer(SES_SENDS_PER_SECOND),
           });
   }
 

@@ -5,7 +5,6 @@ import {
   type PinpointSMSVoiceV2ClientConfig,
 } from '@aws-sdk/client-pinpoint-sms-voice-v2';
 
-import { createSendPacer, type SendPacer } from '../shared/pacing';
 import type {
   AwsEumSendTextMessageRequest,
   AwsEumSmsClient,
@@ -48,7 +47,6 @@ export interface AwsEumSingleAttemptClient
  */
 export function createAwsEumSingleAttemptClient(
   configuration: AwsEumSingleAttemptClientConfig,
-  pace: SendPacer = createSendPacer(AWS_EUM_SENDS_PER_SECOND),
 ): AwsEumSingleAttemptClient {
   if (
     configuration === null ||
@@ -71,7 +69,6 @@ export function createAwsEumSingleAttemptClient(
     async sendTextMessage(
       request: AwsEumSendTextMessageRequest,
     ): Promise<unknown> {
-      await pace();
       return client.send(new SendTextMessageCommand(request));
     },
     describeOptedOutNumbers(

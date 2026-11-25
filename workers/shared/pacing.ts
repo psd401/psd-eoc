@@ -57,20 +57,20 @@ export async function forEachConcurrently<T>(
     throw new RangeError('Concurrency must be a positive integer.');
   }
   let next = 0;
-  let failure: { error: unknown } | null = null;
+  const state: { failure: { error: unknown } | null } = { failure: null };
   const lane = async () => {
-    while (failure === null && next < items.length) {
+    while (state.failure === null && next < items.length) {
       const item = items[next] as T;
       next += 1;
       try {
         await task(item);
       } catch (error) {
-        failure ??= { error };
+        state.failure ??= { error };
       }
     }
   };
   await Promise.all(
     Array.from({ length: Math.min(limit, items.length) }, lane),
   );
-  if (failure !== null) throw (failure as { error: unknown }).error;
+  if (state.failure !== null) throw state.failure.error;
 }

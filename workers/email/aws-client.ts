@@ -1,6 +1,5 @@
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
 
-import { createSendPacer, type SendPacer } from '../shared/pacing';
 import { ProviderDispatchError } from '../shared/retry';
 import type { SesV2Client, SesV2SendEmailInput } from './ses-adapter';
 
@@ -48,18 +47,12 @@ export const SES_SENDS_PER_SECOND = 10;
 /** SES SDK boundary with SDK retries disabled so the durable ledger owns them. */
 export class AwsSesV2Client implements SesV2Client {
   readonly #client: SESv2Client;
-  readonly #pace: SendPacer;
 
-  public constructor(
-    client = new SESv2Client({ maxAttempts: 1 }),
-    pace: SendPacer = createSendPacer(SES_SENDS_PER_SECOND),
-  ) {
+  public constructor(client = new SESv2Client({ maxAttempts: 1 })) {
     this.#client = client;
-    this.#pace = pace;
   }
 
   public async sendEmail(input: SesV2SendEmailInput): Promise<unknown> {
-    await this.#pace();
     try {
       return await this.#client.send(
         new SendEmailCommand({

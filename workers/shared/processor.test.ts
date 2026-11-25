@@ -271,6 +271,7 @@ function runtime(
   options: Readonly<{
     maxAttempts?: number;
     authorizeSend?: () => boolean | Promise<boolean>;
+    paceSend?: () => Promise<void>;
   }> = {},
 ) {
   return {
@@ -291,6 +292,9 @@ function runtime(
       ...(options.authorizeSend === undefined
         ? {}
         : { authorizeProviderSend: options.authorizeSend }),
+      ...(options.paceSend === undefined
+        ? {}
+        : { paceProviderSend: options.paceSend }),
     }),
   };
 }
@@ -368,6 +372,53 @@ describe('attempt-ID idempotent processing', () => {
     expect(writer.evidence.map(({ state }) => state)).toEqual(['attempted']);
     expect(store.releaseCalls).toBe(1);
     expect(store.executions).toHaveLength(0);
+  });
+
+  test('waits for the provider rate slot before the final authorization, never between it and the send', async () => {
+    const adapter = new MockAdapter();
+    let eligible = true;
+    let policyChecks = 0;
+    let checksWhenPaced = null as number | null;
+    const slot = deferred<void>();
+    const app = runtime(adapter, new MemoryExecutionStore(), undefined, {
+      authorizeSend: () => {
+        policyChecks += 1;
+        return eligible;
+      },
+      paceSend: () => {
+        checksWhenPaced = policyChecks;
+        return slot.promise;
+      },
+    });
+
+    const processing = app.processor.process(workItem());
+    while (checksWhenPaced === null) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(checksWhenPaced).toBe(1);
+    eligible = false;
+    slot.resolve();
+
+    await expect(processing).rejects.toEqual(
+      expect.objectContaining({ code: 'PROVIDER_SEND_DISABLED' }),
+    );
+    expect(policyChecks).toBe(2);
+    expect(adapter.requests).toHaveLength(0);
+    expect(app.store.releaseCalls).toBe(1);
+  });
+
+  test('a failed rate wait releases the claim and sends nothing', async () => {
+    const adapter = new MockAdapter();
+    const app = runtime(adapter, new MemoryExecutionStore(), undefined, {
+      authorizeSend: () => true,
+      paceSend: () => Promise.reject(new Error('synthetic pacer failure')),
+    });
+
+    await expect(app.processor.process(workItem())).rejects.toEqual(
+      expect.objectContaining({ code: 'PROVIDER_SEND_DISABLED' }),
+    );
+    expect(adapter.requests).toHaveLength(0);
+    expect(app.store.releaseCalls).toBe(1);
   });
 
   test('completed provider truth replays without consulting current send policy', async () => {
