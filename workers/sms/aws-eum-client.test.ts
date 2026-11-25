@@ -125,3 +125,28 @@ describe('AWS EUM SDK single-wire construction', () => {
     }
   });
 });
+
+describe('AWS EUM send pacing', () => {
+  test('waits for the pacer before a text message crosses the wire', async () => {
+    const transport = ambiguousTransport();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = createAwsEumSingleAttemptClient(
+      {
+        region: 'us-west-2',
+        credentials: SYNTHETIC_CREDENTIALS,
+        requestHandler: transport,
+      },
+      () => gate,
+    );
+
+    const sent = client.sendTextMessage(SEND_REQUEST);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(transport.requests).toBe(0);
+    release();
+    await expect(sent).rejects.toMatchObject({ name: 'TimeoutError' });
+    expect(transport.requests).toBe(1);
+  });
+});

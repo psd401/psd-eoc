@@ -1,5 +1,6 @@
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
 
+import { createSendPacer, type SendPacer } from '../shared/pacing';
 import { ProviderDispatchError } from '../shared/retry';
 import type { SesV2Client, SesV2SendEmailInput } from './ses-adapter';
 
@@ -36,15 +37,29 @@ function errorMetadata(value: unknown): Readonly<{
   };
 }
 
+/**
+ * Emails this worker starts per second. SES production access starts at 14
+ * per second for the whole account; this leaves room for the account's other
+ * senders, and the SDK never retries, so a throttled send waits for a ledger
+ * retry.
+ */
+export const SES_SENDS_PER_SECOND = 10;
+
 /** SES SDK boundary with SDK retries disabled so the durable ledger owns them. */
 export class AwsSesV2Client implements SesV2Client {
   readonly #client: SESv2Client;
+  readonly #pace: SendPacer;
 
-  public constructor(client = new SESv2Client({ maxAttempts: 1 })) {
+  public constructor(
+    client = new SESv2Client({ maxAttempts: 1 }),
+    pace: SendPacer = createSendPacer(SES_SENDS_PER_SECOND),
+  ) {
     this.#client = client;
+    this.#pace = pace;
   }
 
   public async sendEmail(input: SesV2SendEmailInput): Promise<unknown> {
+    await this.#pace();
     try {
       return await this.#client.send(
         new SendEmailCommand({

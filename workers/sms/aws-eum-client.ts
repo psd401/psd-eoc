@@ -5,6 +5,7 @@ import {
   type PinpointSMSVoiceV2ClientConfig,
 } from '@aws-sdk/client-pinpoint-sms-voice-v2';
 
+import { createSendPacer, type SendPacer } from '../shared/pacing';
 import type {
   AwsEumSendTextMessageRequest,
   AwsEumSmsClient,
@@ -28,6 +29,13 @@ export type AwsEumSingleAttemptClientConfig = Omit<
     retryStrategy?: never;
   }>;
 
+/**
+ * Text messages this worker starts per second. A toll-free origination number
+ * sends 3 messages per second by default; the SDK never retries, so a send
+ * over the rate is throttled into a ledger retry minutes later.
+ */
+export const AWS_EUM_SENDS_PER_SECOND = 3;
+
 /** Write-once send boundary plus bounded read-only opt-out reconciliation. */
 export interface AwsEumSingleAttemptClient
   extends AwsEumSmsClient, AwsEumOptOutTransport {}
@@ -40,6 +48,7 @@ export interface AwsEumSingleAttemptClient
  */
 export function createAwsEumSingleAttemptClient(
   configuration: AwsEumSingleAttemptClientConfig,
+  pace: SendPacer = createSendPacer(AWS_EUM_SENDS_PER_SECOND),
 ): AwsEumSingleAttemptClient {
   if (
     configuration === null ||
@@ -59,7 +68,10 @@ export function createAwsEumSingleAttemptClient(
 
   return Object.freeze({
     deliverySemantics: 'single-wire-attempt' as const,
-    sendTextMessage(request: AwsEumSendTextMessageRequest): Promise<unknown> {
+    async sendTextMessage(
+      request: AwsEumSendTextMessageRequest,
+    ): Promise<unknown> {
+      await pace();
       return client.send(new SendTextMessageCommand(request));
     },
     describeOptedOutNumbers(
