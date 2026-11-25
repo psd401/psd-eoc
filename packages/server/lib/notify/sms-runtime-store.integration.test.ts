@@ -1225,6 +1225,27 @@ describeWithDatabase('PostgreSQL SMS runtime store', () => {
     ).resolves.toBeNull();
   });
 
+  test('looks a receipt up by its provider message id through an index, not a whole-table read', async () => {
+    const plan = await databaseConnection().db.transaction(async (tx) => {
+      // The fixture's table is small enough that the planner would read it
+      // whole either way; refusing sequential scans asks whether an index
+      // can answer the receipt lookup at all.
+      await tx.execute(sql`set local enable_seqscan = off`);
+      return tx.execute(sql`
+        explain select attempt_id from delivery_evidence
+        where subject_kind = 'attempt'
+          and provider = 'aws-eum-sms'
+          and provider_reference = 'synthetic-message-id'
+      `);
+    });
+    const lines = (plan as unknown as readonly Record<string, string>[]).map(
+      (row) => Object.values(row).join(' '),
+    );
+    expect(lines.join('\n')).toContain(
+      'delivery_evidence_provider_reference_idx',
+    );
+  });
+
   test('rejects stale batch identity and enqueue time while expiring the exact retained batch', async () => {
     currentTime = Date.parse(CREATED_AT) + 1_000;
     const bundle = installedSmallBundle();
