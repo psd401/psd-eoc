@@ -10,9 +10,11 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
+  createSendPacer,
   WorkerAttemptProcessor,
   type AttemptEvidenceWriter,
   type AttemptExecutionStore,
+  type SendPacer,
   type WorkerAttemptProcessResult,
 } from '../shared';
 import {
@@ -21,6 +23,7 @@ import {
   type AwsEumSmsProviderAuthorizer,
 } from './aws-eum-adapter';
 import {
+  AWS_EUM_SENDS_PER_SECOND,
   createAwsEumSingleAttemptClient,
   type AwsEumSingleAttemptClient,
   type AwsEumSingleAttemptClientConfig,
@@ -124,6 +127,8 @@ export interface AwsEumSmsRuntimeOptions {
   readonly authorizeOptInInvocation: SmsOptInInvocationAuthorizer;
   readonly deliveryConfiguration: AwsEumSmsDeliveryEventConfiguration;
   readonly authorizeEventBridgeInvocation: AwsEumSmsEventBridgeAuthorizer;
+  /** Provider rate slot; defaults to `AWS_EUM_SENDS_PER_SECOND` per runtime. */
+  readonly paceProviderSend?: SendPacer;
 }
 
 export type AwsEumSmsRuntimeErrorCode =
@@ -329,6 +334,9 @@ export class AwsEumSmsRuntime {
         ? {
             authorizeProviderSend: async (workItem) =>
               (await mode.authorizeProviderSend(workItem)).authorized,
+            paceProviderSend:
+              options.paceProviderSend ??
+              createSendPacer(AWS_EUM_SENDS_PER_SECOND),
           }
         : {}),
     });

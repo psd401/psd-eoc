@@ -61,7 +61,7 @@ describe('forEachConcurrently', () => {
     ]);
   });
 
-  test('starts nothing after a failure, lets running items finish, and rethrows the first error', async () => {
+  test('starts nothing after a failure, waits for running items, and rethrows the first error', async () => {
     const started: number[] = [];
     const finished: number[] = [];
     const failure = new Error('first');
@@ -70,12 +70,11 @@ describe('forEachConcurrently', () => {
         started.push(item);
         if (item === 1) throw failure;
         await new Promise((resolve) => setTimeout(resolve, 1));
-        if (item === 2) throw new Error('second');
         finished.push(item);
       }),
     ).rejects.toBe(failure);
     expect(started).toEqual([1, 2]);
-    expect(finished).toEqual([]);
+    expect(finished).toEqual([2]);
   });
 
   test('refuses a limit below one', async () => {

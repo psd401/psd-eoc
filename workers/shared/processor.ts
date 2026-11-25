@@ -173,6 +173,12 @@ export interface WorkerAttemptProcessorOptions {
   /** Fresh enablement and endpoint truth checked after the claim, before I/O. */
   readonly authorizeProviderSend?: ProviderSendAuthorizer;
   /**
+   * Waits for a provider rate slot. It runs before the final authorization,
+   * never between that check and the send, so a paced send is authorized
+   * when it actually leaves.
+   */
+  readonly paceProviderSend?: () => Promise<void>;
+  /**
    * False keeps the provider dark: retained truth still replays read-only, but
    * no new attempt is claimed and no provider I/O can start.
    */
@@ -422,6 +428,7 @@ export class WorkerAttemptProcessor {
   readonly #leaseMilliseconds: number;
   readonly #random: () => number;
   readonly #authorizeSend: ProviderSendAuthorizer | undefined;
+  readonly #paceSend: (() => Promise<void>) | undefined;
   readonly #sendEnabled: boolean;
 
   public constructor(options: WorkerAttemptProcessorOptions) {
@@ -435,6 +442,7 @@ export class WorkerAttemptProcessor {
     this.#leaseMilliseconds = parseLease(options.leaseMilliseconds);
     this.#random = options.random ?? Math.random;
     this.#authorizeSend = options.authorizeProviderSend;
+    this.#paceSend = options.paceProviderSend;
     this.#sendEnabled = options.providerSendEnabled !== false;
   }
 
@@ -600,7 +608,15 @@ export class WorkerAttemptProcessor {
     // already known to be ineligible. This final check closes the asynchronous
     // evidence-write window, and is deliberately the last awaited operation
     // before adapter.send: its locked transaction is the provider handoff's
-    // linearization point. No later awaited work may reopen that gap.
+    // linearization point. No later awaited work may reopen that gap, so the
+    // provider rate wait comes first.
+    if (this.#paceSend !== undefined) {
+      try {
+        await this.#paceSend();
+      } catch {
+        await this.#releaseProviderSendDenied(lease);
+      }
+    }
     if (!(await this.#providerSendIsAuthorized(workItem))) {
       await this.#releaseProviderSendDenied(lease);
     }
