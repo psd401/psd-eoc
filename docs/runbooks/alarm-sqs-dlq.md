@@ -8,9 +8,15 @@
 - `psd-eoc-sms-dlq-depth`.
 
 Current deployment and alarm read-back state lives only in the
-[operational readiness register](../INTEGRATIONS.md). Each source-defined alarm
-fires when at least one message is visible in its retained DLQ; missing data is
-non-breaching. A source-defined name is not deployment evidence.
+[operational readiness register](../INTEGRATIONS.md). Each source-defined alarm,
+and `psd-eoc-email-callback-dlq-depth`, fires when its retained DLQ holds at
+least one message, visible or in flight; missing data is non-breaching.
+Counting in-flight messages keeps the alarm on while someone views a message:
+viewing one in the console receives it, and an alarm on visible messages alone
+went OK for that minute and ALARM again the next. The alarm returns to OK only
+when the message leaves the queue, including when SQS expires it after
+fourteen days, so an OK after fourteen days of ALARM means the evidence is gone,
+not that it was handled. A source-defined name is not deployment evidence.
 
 Any DLQ message is retained evidence of work that could not complete safely.
 It is not a redrive to-do list. Automatic or bulk replay is forbidden.
