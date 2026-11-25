@@ -567,6 +567,34 @@ interface ExactPercentileMetrics {
   readonly p99: cloudwatch.Metric;
 }
 
+/**
+ * Messages held by a dead-letter queue, whether or not someone is reading one.
+ *
+ * Visible messages alone fall to zero while an operator views a message in
+ * the console or a redrive receives it, so the alarm reported OK for that
+ * minute and ALARM again the next: psd-eoc-email-callback-dlq-depth flapped
+ * on 2026-11-05, 11-07 and 11-13 over one message that nobody handled and
+ * SQS expired after its 14-day retention on 11-15. Counting messages in
+ * flight as well keeps the alarm on until the message actually leaves.
+ */
+function deadLetterQueueDepth(queue: sqs.IQueue): cloudwatch.IMetric {
+  return new cloudwatch.MathExpression({
+    expression: 'FILL(visible, 0) + FILL(inFlight, 0)',
+    label: 'Dead-letter messages held',
+    period: ONE_MINUTE,
+    usingMetrics: {
+      visible: queue.metricApproximateNumberOfMessagesVisible({
+        period: ONE_MINUTE,
+        statistic: 'Maximum',
+      }),
+      inFlight: queue.metricApproximateNumberOfMessagesNotVisible({
+        period: ONE_MINUTE,
+        statistic: 'Maximum',
+      }),
+    },
+  });
+}
+
 function alarmDescription(
   summary: string,
   runbookAnchor: string,
@@ -1676,10 +1704,7 @@ function configureAlarms(
       tier: 'infrastructure',
       evaluationPeriods: 1,
       id: `${idPrefix}DeadLetterQueueDepthAlarm`,
-      metric: pair.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
-        period: ONE_MINUTE,
-        statistic: 'Maximum',
-      }),
+      metric: deadLetterQueueDepth(pair.deadLetterQueue),
       name: `psd-eoc-${name}-dlq-depth`,
       runbookAnchor: 'runbook-queue-age-and-dead-letter-queues',
       summary: `The retained ${name} dead-letter queue contains one or more messages.`,
@@ -1692,10 +1717,7 @@ function configureAlarms(
     tier: 'infrastructure',
     evaluationPeriods: 1,
     id: 'EmailCallbackDeadLetterQueueDepthAlarm',
-    metric:
-      props.emailCallbackDeadLetterQueue.metricApproximateNumberOfMessagesVisible(
-        { period: ONE_MINUTE, statistic: 'Maximum' },
-      ),
+    metric: deadLetterQueueDepth(props.emailCallbackDeadLetterQueue),
     name: 'psd-eoc-email-callback-dlq-depth',
     runbookAnchor: 'runbook-queue-age-and-dead-letter-queues',
     summary:

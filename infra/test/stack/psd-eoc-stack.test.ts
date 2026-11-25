@@ -2055,6 +2055,27 @@ describe('App Runner runtime safety boundary', () => {
     expect(alarmNames).toContain('psd-eoc-sms-receipt-dlq-depth');
   });
 
+  it('keeps every dead-letter alarm on while a held message is being read', () => {
+    const deadLetterAlarms = resourceEntries('AWS::CloudWatch::Alarm').filter(
+      ([, resource]) =>
+        String(properties(resource).AlarmName).endsWith('-dlq-depth'),
+    );
+    expect(deadLetterAlarms.length).toBeGreaterThanOrEqual(5);
+    for (const [, resource] of deadLetterAlarms) {
+      const metrics = asArray(properties(resource).Metrics).map(asRecord);
+      const names = metrics.flatMap((entry) =>
+        entry.MetricStat === undefined
+          ? []
+          : [asRecord(asRecord(entry.MetricStat).Metric).MetricName],
+      );
+      expect(names).toContain('ApproximateNumberOfMessagesVisible');
+      expect(names).toContain('ApproximateNumberOfMessagesNotVisible');
+      expect(
+        metrics.find((entry) => entry.ReturnData !== false)?.Expression,
+      ).toBe('FILL(visible, 0) + FILL(inFlight, 0)');
+    }
+  });
+
   it('gives the runtime only application, health, and alarm-read permissions', () => {
     const runtimeRole = roleLogicalIdForServicePrincipal(
       'tasks.apprunner.amazonaws.com',
