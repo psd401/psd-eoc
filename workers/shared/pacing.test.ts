@@ -77,6 +77,17 @@ describe('forEachConcurrently', () => {
     expect(finished).toEqual([2]);
   });
 
+  test('keeps the first error when several running items fail', async () => {
+    const first = new Error('first');
+    await expect(
+      forEachConcurrently([1, 2, 3], 2, async (item) => {
+        if (item === 1) throw first;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        throw new Error('second');
+      }),
+    ).rejects.toBe(first);
+  });
+
   test('refuses a limit below one', async () => {
     await expect(forEachConcurrently([1], 0, async () => {})).rejects.toThrow(
       RangeError,

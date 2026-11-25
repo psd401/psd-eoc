@@ -35,7 +35,12 @@ export type AwsEumSingleAttemptClientConfig = Omit<
  */
 export const AWS_EUM_SENDS_PER_SECOND = 3;
 
-/** Write-once send boundary plus bounded read-only opt-out reconciliation. */
+/**
+ * Write-once send boundary plus bounded read-only opt-out reconciliation.
+ * It does not pace sends: `AwsEumSmsRuntime` paces them through its
+ * `WorkerAttemptProcessor`. A caller that sends through this client directly
+ * must pace at `AWS_EUM_SENDS_PER_SECOND` itself.
+ */
 export interface AwsEumSingleAttemptClient
   extends AwsEumSmsClient, AwsEumOptOutTransport {}
 

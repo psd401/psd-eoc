@@ -378,7 +378,7 @@ describe('attempt-ID idempotent processing', () => {
     const adapter = new MockAdapter();
     let eligible = true;
     let policyChecks = 0;
-    let checksWhenPaced = null as number | null;
+    const paced = deferred<number>();
     const slot = deferred<void>();
     const app = runtime(adapter, new MemoryExecutionStore(), undefined, {
       authorizeSend: () => {
@@ -386,16 +386,13 @@ describe('attempt-ID idempotent processing', () => {
         return eligible;
       },
       paceSend: () => {
-        checksWhenPaced = policyChecks;
+        paced.resolve(policyChecks);
         return slot.promise;
       },
     });
 
     const processing = app.processor.process(workItem());
-    while (checksWhenPaced === null) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(checksWhenPaced).toBe(1);
+    expect(await paced.promise).toBe(1);
     eligible = false;
     slot.resolve();
 

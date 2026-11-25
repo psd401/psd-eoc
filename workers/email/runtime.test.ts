@@ -24,6 +24,7 @@ import {
   SesEmailRuntimeError,
   type SesEmailRuntimeMode,
 } from './runtime';
+import { SES_SENDS_PER_SECOND } from './aws-client';
 import {
   SES_V2_PROVIDER,
   type DurableSesSendLedger,
@@ -324,6 +325,38 @@ describe('SES email live-pilot runtime', () => {
     expect(composed.executionStore.releases).toBe(1);
     expect(composed.sendLedger.claims).toBe(0);
     expect(providerInputs).toHaveLength(0);
+  });
+
+  test('an enabled runtime paces its emails by default', async () => {
+    const providerInputs: SesV2SendEmailInput[] = [];
+    const composed = enabledMode(providerInputs, () => true);
+    const sentAt: number[] = [];
+    const enabled = composed.mode;
+    if (enabled.state !== 'enabled') throw new Error('Mode must be enabled.');
+    const client = enabled.client;
+    const runtime = new SesEmailRuntime({
+      ...RUNTIME_CONFIGURATION,
+      authorizeQueueInvocation: () => true,
+      mode: {
+        ...enabled,
+        client: {
+          sendEmail(input) {
+            sentAt.push(performance.now());
+            return client.sendEmail(input);
+          },
+        },
+      },
+    });
+
+    for (let send = 0; send < 3; send += 1) {
+      await runtime.processQueueAttempt(emailWorkItem(), INVOCATION);
+    }
+
+    expect(providerInputs).toHaveLength(3);
+    const gaps = sentAt.slice(1).map((at, index) => at - (sentAt[index] ?? at));
+    for (const gap of gaps) {
+      expect(gap).toBeGreaterThanOrEqual(1_000 / SES_SENDS_PER_SECOND - 25);
+    }
   });
 
   test('fully authorized composition preserves DRILL copy and records provider acceptance', async () => {
