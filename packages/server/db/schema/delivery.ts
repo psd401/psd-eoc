@@ -1187,6 +1187,11 @@ export const deliveryEvidence = pgTable(
       table.intentId,
       table.attemptId,
     ),
+    // A provider receipt names only the provider's message id. Without this
+    // index each SMS receipt read the whole append-only table (#717).
+    index('delivery_evidence_provider_reference_idx')
+      .on(table.provider, table.providerReference)
+      .where(sql`${table.providerReference} is not null`),
     check('delivery_evidence_sequence_positive', sql`${table.sequence} > 0`),
     check(
       'delivery_evidence_provider_time',
