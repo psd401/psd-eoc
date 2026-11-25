@@ -37,6 +37,7 @@ import {
   type SmsRuntimeMode,
   type SmsScheduledInvocation,
 } from './runtime';
+import { AWS_EUM_SENDS_PER_SECOND } from './aws-eum-client';
 
 const ACCOUNT_ID = '000000000000';
 const REGION = 'us-west-2';
@@ -609,6 +610,39 @@ describe('AWS EUM SMS production runtime boundary', () => {
       expect(value.capabilities.requests).toHaveLength(0);
       expectNoProviderIo(value);
       expect(value.sendLedger.lookupCalls).toBe(1);
+    }
+  });
+
+  test('an enabled runtime paces its text messages by default', async () => {
+    const value = harness({
+      mode: {
+        state: 'enabled',
+        authorizeProviderSend: () => ({
+          authorized: true,
+          timeToLiveSeconds: 300,
+        }),
+      },
+      providerResponses: [
+        { MessageId: 'synthetic-message-1' },
+        { MessageId: 'synthetic-message-2' },
+        { MessageId: 'synthetic-message-3' },
+      ],
+    });
+    const sentAt: number[] = [];
+    const handle = value.transport.handle.bind(value.transport);
+    value.transport.handle = (request: unknown) => {
+      sentAt.push(performance.now());
+      return handle(request);
+    };
+
+    for (let send = 0; send < 3; send += 1) {
+      await value.runtime.processQueueAttempt(smsWorkItem(), QUEUE_INVOCATION);
+    }
+
+    expect(value.transport.requests).toBe(3);
+    const gaps = sentAt.slice(1).map((at, index) => at - (sentAt[index] ?? at));
+    for (const gap of gaps) {
+      expect(gap).toBeGreaterThanOrEqual(1_000 / AWS_EUM_SENDS_PER_SECOND - 25);
     }
   });
 

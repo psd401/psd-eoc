@@ -44,7 +44,12 @@ function errorMetadata(value: unknown): Readonly<{
  */
 export const SES_SENDS_PER_SECOND = 10;
 
-/** SES SDK boundary with SDK retries disabled so the durable ledger owns them. */
+/**
+ * SES SDK boundary with SDK retries disabled so the durable ledger owns them.
+ * It does not pace sends: `SesEmailRuntime` paces them through its
+ * `WorkerAttemptProcessor`. A caller that sends through this client directly
+ * must pace at `SES_SENDS_PER_SECOND` itself.
+ */
 export class AwsSesV2Client implements SesV2Client {
   readonly #client: SESv2Client;
 

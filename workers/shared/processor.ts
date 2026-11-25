@@ -606,10 +606,11 @@ export class WorkerAttemptProcessor {
     });
     // The initial check avoids creating attempted evidence for an endpoint
     // already known to be ineligible. This final check closes the asynchronous
-    // evidence-write window, and is deliberately the last awaited operation
-    // before adapter.send: its locked transaction is the provider handoff's
-    // linearization point. No later awaited work may reopen that gap, so the
-    // provider rate wait comes first.
+    // evidence-write window, and is deliberately the processor's last awaited
+    // operation before adapter.send: its locked transaction is the provider
+    // handoff's linearization point. No later awaited work in the processor may
+    // reopen that gap, so the provider rate wait comes first. (An adapter may
+    // still await its own ledger and authorization inside send.)
     if (this.#paceSend !== undefined) {
       try {
         await this.#paceSend();
