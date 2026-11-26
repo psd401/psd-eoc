@@ -4,7 +4,7 @@
 # required checks pass. Every other PR waits for a person.
 # Set merge_method to a method this repo allows: merge, squash or rebase.
 name: Dependabot auto-merge
-"on": pull_request
+'on': pull_request
 permissions: {}
 jobs:
   auto-merge:
